@@ -83,3 +83,20 @@
 	- ProgramcininElKitabi.md
 	- WORK_QUEUE.md
 	- yapilanlar.md
+
+## 2026-04-08 (Cok Ajanli Teknik Faz)
+
+### Win64 Toolchain
+- Proje-ici yazilabilir FreeBASIC win64 klasoru olusturuldu: `tools/FreeBASIC-1.10.1-win64`.
+- Otomatik kurulum scripti eklendi: `tools/setup_win64_toolchain.bat`.
+- `build_64.bat` lokal toolchain'e baglandi.
+- `build_matrix.bat` dogrulandi: 32-bit + 64-bit green.
+
+### Parser AST Kapsami
+- `src/parser/parser.fbs` IF/ELSE/END IF, SELECT CASE/CASE ELSE/END SELECT, FOR/NEXT, DO/LOOP node uretir hale getirildi.
+- `src/parser/lexer.fbs` icine FOR akisinda gerekli `TO`, `STEP` keywordleri eklendi.
+
+### Manifest AST Dogrulama
+- `tests/manifest.csv` icine kontrol-akis AST testleri eklendi.
+- `tests/run_manifest.bas` AST node varlik kontrolleriyle genisletildi.
+- Son test cikisi: Run 10, Pass 10, Fail 0.

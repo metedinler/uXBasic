@@ -10,7 +10,7 @@ Sub PrintBanner()
 End Sub
 
 Dim As String sourceText
-sourceText = "PRINT 1 + 2 : IF a = 1 THEN b += 2 ELSE b =- 1"
+sourceText = "PRINT 1 + 2 : IF a = 1 THEN b += 2 ELSE b =- 1 END IF"
 
 PrintBanner()
 

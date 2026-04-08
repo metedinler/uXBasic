@@ -22,6 +22,7 @@ uXbasic, ubasic031 kod tabaninin Windows 11 odakli ve FreeBASIC temelli yeniden 
 - Smoke test derleme: `build.bat tests\run_manifest.bas`
 - Smoke test calistirma: `tests\run_manifest.exe`
 - 32-bit derleme: `build_32.bat src\main.bas`
+- Win64 toolchain kurulum: `tools\setup_win64_toolchain.bat`
 - 64-bit derleme: `build_64.bat src\main.bas`
 - Matrix derleme: `build_matrix.bat src\main.bas`
 

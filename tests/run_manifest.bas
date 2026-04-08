@@ -67,6 +67,14 @@ Private Function HasToken(ByRef st As LexerState, ByRef kindName As String, ByRe
     Return 0
 End Function
 
+Private Function HasAstKind(ByRef ps As ParseState, ByRef nodeKind As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = UCase(nodeKind) Then Return 1
+    Next i
+    Return 0
+End Function
+
 Private Function UnescapeBackslashQuote(ByRef textIn As String) As String
     Dim outText As String
     Dim i As Integer
@@ -126,6 +134,22 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
     Case "UNIT_OK"
         resultOk = parseOk And HasToken(st, "KEYWORD", "TIMER") And HasToken(st, "STRING", "ms")
         If resultOk = 0 Then detail = "missing TIMER or unit literal"
+
+    Case "AST_IF"
+        resultOk = parseOk And HasAstKind(ps, "IF_STMT")
+        If resultOk = 0 Then detail = "missing IF_STMT AST node"
+
+    Case "AST_SELECT"
+        resultOk = parseOk And HasAstKind(ps, "SELECT_STMT") And HasAstKind(ps, "CASE_BLOCK")
+        If resultOk = 0 Then detail = "missing SELECT/CASE AST nodes"
+
+    Case "AST_FOR"
+        resultOk = parseOk And HasAstKind(ps, "FOR_STMT")
+        If resultOk = 0 Then detail = "missing FOR_STMT AST node"
+
+    Case "AST_LOOP"
+        resultOk = parseOk And HasAstKind(ps, "DO_STMT")
+        If resultOk = 0 Then detail = "missing DO_STMT AST node"
 
     Case Else
         resultOk = parseOk

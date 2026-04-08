@@ -31,19 +31,19 @@
 - Cikti: `tests/run_manifest.bas` (manifest tabanli smoke runner)
 
 ## Sira 6 - Gercek AST Uretimi
-- Durum: basladi
+- Durum: tamamlandi
 - Gorev: parseri gercek AST node havuzu uretecek sekilde calistirmak
 - Sorumlu: Agent-Parser
 - Cikti: `src/parser/ast.fbs`, `src/parser/parser.fbs`
 
 ## Sira 7 - Dinamik Token Yonetimi
-- Durum: basladi
+- Durum: tamamlandi
 - Gorev: token listesinde kapasite-bazli dinamik buyume modeli
 - Sorumlu: Agent-LexerCore
 - Cikti: `src/parser/token_kinds.fbs`
 
 ## Sira 8 - Windows 11 x64 Refaktor Hazirligi
-- Durum: planlandi
+- Durum: basladi
 - Gorev: ABI farklari, build matrix ve test matrix tanimlarini kod tabanina dagitmak
 - Sorumlu: Agent-Backend64
 - Cikti: plan ekleri + build/test scriptleri
@@ -55,7 +55,19 @@
 - Cikti: `ProgramcininElKitabi.md`
 
 ## Sira 10 - Win64 Toolchain Tamamlama
-- Durum: basladi
+- Durum: tamamlandi
 - Gorev: win64 kutuphane iceren FreeBASIC toolchain'i yazilabilir proje klasorune entegre etmek
 - Sorumlu: Agent-Toolchain
 - Cikti: green `build_64.bat` + green `build_matrix.bat`
+
+## Sira 11 - Kontrol Akisi AST Kapsami
+- Durum: tamamlandi
+- Gorev: IF/ELSE, SELECT/CASE, FOR/NEXT, DO/LOOP parser AST kapsami
+- Sorumlu: Agent-ParserFlow
+- Cikti: `src/parser/parser.fbs`, `tests/manifest.csv`, `tests/run_manifest.bas`
+
+## Sira 12 - Win64 CI/Kurulum Sertlestirme
+- Durum: planlandi
+- Gorev: lokal toolchain setup scriptini CI adimlariyla birlestirmek
+- Sorumlu: Agent-ReleaseInfra
+- Cikti: CI matrix ve setup dokumani guncellemeleri
