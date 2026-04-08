@@ -116,3 +116,13 @@
 	- tests/run_manifest.bas
 	- tools/setup_win64_toolchain.bat
 	- yapilanlar.md
+
+## 2026-04-08 (CI Sertlestirme)
+
+### CI Workflow
+- `.github/workflows/win64-ci.yml` eklendi.
+- Is akisinda: checkout, proje-ici win64 toolchain setup, `build.bat` ile ana derleme, manifest test derleme/calismasi, artefakt upload adimlari tanimlandi.
+
+### Plan/Kuyruk
+- `.plan.md` icine EK-13 append-only eklendi (CI sonucu release kapisi olarak tanimlandi).
+- `WORK_QUEUE.md` Sira 12 tamamlandi, Sira 13 release otomasyon sertlestirme olarak acildi.

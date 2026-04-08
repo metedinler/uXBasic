@@ -67,7 +67,13 @@
 - Cikti: `src/parser/parser.fbs`, `tests/manifest.csv`, `tests/run_manifest.bas`
 
 ## Sira 12 - Win64 CI/Kurulum Sertlestirme
-- Durum: planlandi
+- Durum: tamamlandi
 - Gorev: lokal toolchain setup scriptini CI adimlariyla birlestirmek
 - Sorumlu: Agent-ReleaseInfra
-- Cikti: CI matrix ve setup dokumani guncellemeleri
+- Cikti: `.github/workflows/win64-ci.yml` + matrix kapisi
+
+## Sira 13 - Release Otomasyon Sertlestirme
+- Durum: basladi
+- Gorev: mini release checklistini CI ciktilariyla senkron tutmak
+- Sorumlu: Agent-ReleaseInfra
+- Cikti: release notlari ve paketleme rutini (sonraki commit)
