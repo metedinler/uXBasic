@@ -2,7 +2,7 @@
 
 ## Core Rules
 - QB 7.1 style syntax, strict declarations.
-- No type suffix identifiers.
+- Type suffix identifiers are supported for legacy compatibility (`$`, `%`, `&`, `!`, `#`).
 - Predeclare `SUB/FUNCTION` with `DECLARE`.
 - Includes in header region.
 - Arrays are 0-based by default.

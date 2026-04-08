@@ -541,18 +541,18 @@
 	- `INKEY`
 	- `src/parser/lexer/lexer_keyword_table.fbs`
 - Intrinsic call arguman dogrulama genisletildi:
-	- `INKEY(1..2)`, `INKEY_LEGACY(0)`
+	- `INKEY(1..2)`, `GETKEY(0)`, `INKEY$(0)`
 	- `src/parser/parser/parser_shared.fbs`
 
 ### Test Guncellemeleri
 - Manifest satirlari eklendi:
-	- `TST-INKEY-001`, `TST-INKEY-002`, `TST-INKEY-FAIL-001`, `TST-INKEY-LEGACY-001`, `TST-INKEY-LEGACY-FAIL-001`
+	- `TST-INKEY-001`, `TST-INKEY-002`, `TST-INKEY-FAIL-001`, `TST-GETKEY-001`, `TST-GETKEY-FAIL-001`, `TST-INKEYDOLLAR-001`, `TST-INKEYDOLLAR-FAIL-001`
 - Runner expected etiketleri eklendi:
-	- `INKEY_OK`, `INKEY_LEGACY_OK`
+	- `INKEY_OK`, `GETKEY_OK`, `INKEY_DOLLAR_OK`
 
 ### Matris Guncellemesi
 - `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
-	- `INKEY`, `INKEY_LEGACY`
+	- `INKEY`, `GETKEY`, `INKEY$`
 
 ## 2026-04-09 (EK-36 Sira 8 Math Intrinsic Fonksiyon Dalgasi)
 
@@ -594,6 +594,35 @@
 ### Dogrulama
 - `build.bat src\\main.bas` sonucu: build ok.
 - `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 92 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`
+
+## 2026-04-09 (EK-38 Sira 8 Suffix Intrinsic Uyumluluk Dalgasi)
+
+### Kod Degisikligi
+- Lexer suffix tanima eklendi:
+	- `$`, `%`, `&`, `!`, `#`
+	- `src/parser/lexer/lexer_readers.fbs`
+- Intrinsic keyword/aliaslar eklendi:
+	- `GETKEY`, `INKEY$`, `MID$`, `STR$`, `UCASE$`, `LCASE$`, `CHR$`, `STRING$`
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+- Intrinsic call arguman dogrulama genisletildi:
+	- `src/parser/parser/parser_shared.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-MID-DOLLAR-001`, `TST-STR-DOLLAR-001`, `TST-UCASE-DOLLAR-001`, `TST-LCASE-DOLLAR-001`, `TST-CHR-DOLLAR-001`, `TST-STRING-DOLLAR-001`, `TST-MID-DOLLAR-FAIL-001`, `TST-STRING-DOLLAR-FAIL-001`
+- Runner expected etiketleri eklendi:
+	- `MID_DOLLAR_OK`, `STR_DOLLAR_OK`, `UCASE_DOLLAR_OK`, `LCASE_DOLLAR_OK`, `CHR_DOLLAR_OK`, `STRING_DOLLAR_OK`
+
+### Matris Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
+	- `GETKEY`, `INKEY$`, `MID$`, `STR$`, `UCASE$`, `LCASE$`, `CHR$`, `STRING$`
+
+### Dogrulama
+- `build.bat src\\main.bas` sonucu: build ok.
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 102 / Fail 0`.
 - `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
 	- `PASS CMP-LIB-INCLUDE-WIN11`
 	- `PASS CMP-IMP-WIN11`

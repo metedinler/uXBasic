@@ -247,7 +247,7 @@
 
 ## Sira 8.M - INKEY Intrinsic Fonksiyon Dalgasi
 - Durum: tamamlandi
-- Gorev: `INKEY` ve `INKEY_LEGACY` imzalarini parser+expr-validation seviyesinde compiler kapsamina almak
+- Gorev: `INKEY`, `GETKEY` ve `INKEY$` imzalarini parser+expr-validation seviyesinde compiler kapsamina almak
 - Sorumlu: Agent-Backend64
 - Cikti:
 	- `src/parser/lexer/lexer_keyword_table.fbs`
@@ -272,3 +272,15 @@
 - Cikti:
 	- `tests/manifest.csv`
 	- `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.P - Suffix Intrinsic Uyumluluk Dalgasi (8 Komut)
+- Durum: tamamlandi
+- Gorev: Suffix uyumluluk komutlarini parser+expr-validation seviyesinde kapsama almak (`GETKEY`, `INKEY$`, `MID$`, `STR$`, `UCASE$`, `LCASE$`, `CHR$`, `STRING$`)
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/lexer/lexer_readers.fbs`
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+	- `src/parser/parser/parser_shared.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `tests/plan/command_compatibility_win11.csv`
+	- `spec/LANGUAGE_CONTRACT.md`

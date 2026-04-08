@@ -355,9 +355,37 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasCallExprValue(ps, "INKEY")
         If resultOk = 0 Then detail = "missing INKEY call expression"
 
-    Case "INKEY_LEGACY_OK"
-        resultOk = parseOk And HasCallExprValue(ps, "INKEY_LEGACY")
-        If resultOk = 0 Then detail = "missing INKEY_LEGACY call expression"
+    Case "GETKEY_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "GETKEY")
+        If resultOk = 0 Then detail = "missing GETKEY call expression"
+
+    Case "INKEY_DOLLAR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "INKEY$")
+        If resultOk = 0 Then detail = "missing INKEY$ call expression"
+
+    Case "MID_DOLLAR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "MID$")
+        If resultOk = 0 Then detail = "missing MID$ call expression"
+
+    Case "STR_DOLLAR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "STR$")
+        If resultOk = 0 Then detail = "missing STR$ call expression"
+
+    Case "UCASE_DOLLAR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "UCASE$")
+        If resultOk = 0 Then detail = "missing UCASE$ call expression"
+
+    Case "LCASE_DOLLAR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "LCASE$")
+        If resultOk = 0 Then detail = "missing LCASE$ call expression"
+
+    Case "CHR_DOLLAR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "CHR$")
+        If resultOk = 0 Then detail = "missing CHR$ call expression"
+
+    Case "STRING_DOLLAR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "STRING$")
+        If resultOk = 0 Then detail = "missing STRING$ call expression"
 
     Case "DEFTYPE_OK"
         resultOk = parseOk And HasAstKind(ps, "DEFTYPE_STMT")

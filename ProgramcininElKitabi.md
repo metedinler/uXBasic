@@ -240,7 +240,7 @@ Windows 11 odakli, FreeBASIC temelli yeni yapi secimi yalnizca moda bir teknoloj
 - CPUFLAGS | Bayrak degeri | CPUFLAGS
 - PUSH | Yigina koy | PUSH expr
 - INKEY | Tus oku (yeni) | INKEY(flags[, BYREF state])
-- INKEY_LEGACY | Tus oku (legacy) | INKEY_LEGACY()
+- GETKEY | Tus oku (legacy-uyumlu) | GETKEY()
 
 ### 9) Satir Ici Assembler
 
