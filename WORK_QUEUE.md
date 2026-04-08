@@ -73,7 +73,7 @@
 - Cikti: `.github/workflows/win64-ci.yml` + matrix kapisi
 
 ## Sira 13 - Release Otomasyon Sertlestirme
-- Durum: basladi
+- Durum: tamamlandi
 - Gorev: mini release checklistini CI ciktilariyla senkron tutmak
 - Sorumlu: Agent-ReleaseInfra
-- Cikti: release notlari ve paketleme rutini (sonraki commit)
+- Cikti: `release/ci_outputs.map`, `release/RELEASE_CHECKLIST.md`, `tools/release_mini.bat`

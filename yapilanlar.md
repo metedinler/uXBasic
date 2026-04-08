@@ -126,3 +126,15 @@
 ### Plan/Kuyruk
 - `.plan.md` icine EK-13 append-only eklendi (CI sonucu release kapisi olarak tanimlandi).
 - `WORK_QUEUE.md` Sira 12 tamamlandi, Sira 13 release otomasyon sertlestirme olarak acildi.
+
+## 2026-04-08 (Release Otomasyon Sertlestirme)
+
+### Cok Ajanli Cikti Uygulamasi
+- DevOps ve Git workflow odakli alt-ajan cikarimlari birlestirildi.
+- CI-release dosya esleme katmani eklendi: `release/ci_outputs.map`.
+- Release checklist eklendi: `release/RELEASE_CHECKLIST.md`.
+- Paketleme/yayin scripti eklendi: `tools/release_mini.bat`.
+
+### Plan Kapsami Durumu
+- `WORK_QUEUE.md` Sira 13 tamamlandi.
+- `.plan.md` icine EK-14 append-only eklendi.

@@ -26,6 +26,12 @@ uXbasic, ubasic031 kod tabaninin Windows 11 odakli ve FreeBASIC temelli yeniden 
 - 64-bit derleme: `build_64.bat src\main.bas`
 - Matrix derleme: `build_matrix.bat src\main.bas`
 
+## Mini release otomasyonu (Sira 13)
+- Cikti esleme dosyasi: `release/ci_outputs.map`
+- Checklist: `release/RELEASE_CHECKLIST.md`
+- Paketleme: `tools/release_mini.bat v0.1.X-mini`
+- Paketleme + yayin: `tools/release_mini.bat v0.1.X-mini --publish`
+
 ## Durum Ozeti
 - Parser artik gercek AST node havuzu uretir.
 - Token listesi kapasite bazli dinamik buyume modeli kullanir.
