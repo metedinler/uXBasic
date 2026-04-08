@@ -13,7 +13,7 @@ set "MAP=%ROOT%\release\ci_outputs.map"
 set "STAGE=%ROOT%\dist\%TAG%"
 set "ZIP=%ROOT%\dist\uxbasic-%TAG%-win32-win64.zip"
 
-echo %TAG% | findstr /r "^v0\.1\.[0-9][0-9]*-mini$" >nul
+powershell -NoProfile -Command "$t='%TAG%'; if ($t -match '^v0\.1\.[0-9]+-mini$') { exit 0 } else { exit 1 }" >nul
 if errorlevel 1 (
   echo Invalid tag format. Expected: v0.1.X-mini
   exit /b 1
