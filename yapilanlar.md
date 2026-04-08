@@ -138,3 +138,14 @@
 ### Plan Kapsami Durumu
 - `WORK_QUEUE.md` Sira 13 tamamlandi.
 - `.plan.md` icine EK-14 append-only eklendi.
+
+## 2026-04-08 (Syntax Gecis Kurallari - Sira 3)
+
+### Kod Degisikligi
+- `src/parser/parser.fbs` icine legacy inline adlarini reddeden kontrol eklendi (`_ASM`, `ASM_SUB`, `ASM_FUNCTION`).
+- `src/parser/parser.fbs` icine `_` komut kapatma kontrolu eklendi; atama/incdec kullanimlari korunarak yalanci pozitifler onlendi.
+
+### Test Guncellemeleri
+- `tests/manifest.csv` icine iki negatif (`parse_fail`) ve bir pozitif (`parse_ok`) gecis testi eklendi.
+- `tests/run_manifest.bas` `PARSE_FAIL` etiketiyle beklenti dogrulamasini destekler hale getirildi.
+- Smoke ozeti: `Pass 13 / Fail 0`.

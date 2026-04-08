@@ -13,10 +13,10 @@
 - Cikti: `src/legacy/get_commands_port.fbs`
 
 ## Sira 3 - Syntax Geçis Kurallari
-- Durum: planlandi
+- Durum: tamamlandi
 - Gorev: INLINE modeline gecis ve `_` komutlarin kapatilmasi
 - Sorumlu: Agent-Syntax
-- Cikti: parser semantik kontrolu (sonraki commit)
+- Cikti: parser semantik kontrolu + manifest negatif testleri
 
 ## Sira 4 - Timer Genisletmesi
 - Durum: planlandi

@@ -115,6 +115,10 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk
         If parseOk = 0 Then detail = ps.lastError
 
+    Case "PARSE_FAIL"
+        resultOk = (parseOk = 0)
+        If resultOk = 0 Then detail = "expected parse failure"
+
     Case "AST_POW"
         resultOk = parseOk And HasToken(st, "OP", "**")
         If resultOk = 0 Then detail = "missing ** operator token"
@@ -212,7 +216,7 @@ Private Sub Main()
         End If
 
         If UCase(Trim(row.result)) <> "PENDING" Then Continue Do
-        If runCount >= 10 Then Exit Do
+        If runCount >= 13 Then Exit Do
 
         runCount += 1
         Dim detail As String

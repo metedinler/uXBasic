@@ -53,6 +53,27 @@ Private Function MatchKeyword(ByRef ps As ParseState, ByRef kw As String) As Int
     Return 0
 End Function
 
+Private Function IsAssignOrIncDecOp(ByRef tk As Token) As Integer
+    If tk.kind <> "OP" Then Return 0
+    Select Case tk.lexeme
+    Case "=", "+=", "-=", "*=", "/=", "\\=", "=+", "=-", "++", "--"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function IsLegacyInlineName(ByRef nameText As String) As Integer
+    Dim u As String
+    u = UCase(nameText)
+    Return u = "_ASM" Or u = "ASM_SUB" Or u = "ASM_FUNCTION"
+End Function
+
+Private Function IsDisabledUnderscoreCommand(ByRef identText As String, ByRef nextTok As Token) As Integer
+    If Left(identText, 1) <> "_" Then Return 0
+    If IsAssignOrIncDecOp(nextTok) Then Return 0
+    Return 1
+End Function
+
 Private Function IsEndIfStart(ByRef ps As ParseState) As Integer
     Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "IF")
 End Function
@@ -104,6 +125,20 @@ Private Function ParsePrimary(ByRef ps As ParseState) As Integer
     End If
 
     If tk.kind = "IDENT" Or tk.kind = "KEYWORD" Then
+        If tk.kind = "IDENT" Then
+            If IsLegacyInlineName(tk.lexeme) Then
+                ps.lastError = "legacy inline forms are disabled; use INLINE(...)"
+                Return -1
+            End If
+
+            Dim nextTok As Token
+            nextTok = LookToken(ps, 1)
+            If IsDisabledUnderscoreCommand(tk.lexeme, nextTok) And nextTok.kind = "OP" And nextTok.lexeme = "(" Then
+                ps.lastError = "underscore commands are disabled"
+                Return -1
+            End If
+        End If
+
         AdvanceTok ps
 
         If MatchOp(ps, "(") Then
@@ -610,6 +645,16 @@ Function ParseSimpleStatement(ByRef ps As ParseState) As Integer
         identTok = tk
         Dim n1 As Token
         n1 = LookToken(ps, 1)
+
+        If IsLegacyInlineName(identTok.lexeme) Then
+            ps.lastError = "legacy inline forms are disabled; use INLINE(...)"
+            Return -1
+        End If
+
+        If IsDisabledUnderscoreCommand(identTok.lexeme, n1) Then
+            ps.lastError = "underscore commands are disabled"
+            Return -1
+        End If
 
         If n1.kind = "OP" And (n1.lexeme = "=" Or n1.lexeme = "+=" Or n1.lexeme = "-=" Or n1.lexeme = "*=" Or n1.lexeme = "/=" Or n1.lexeme = "\\=" Or n1.lexeme = "=+" Or n1.lexeme = "=-") Then
             AdvanceTok ps
