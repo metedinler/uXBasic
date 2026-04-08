@@ -1,0 +1,393 @@
+Type ExecVar
+    nameText As String
+    value As Integer
+End Type
+
+Type ExecState
+    vars(Any) As ExecVar
+    count As Integer
+End Type
+
+Private Sub ExecStateInit(ByRef es As ExecState)
+    es.count = 0
+End Sub
+
+Private Function ExecFindVar(ByRef es As ExecState, ByRef nameText As String) As Integer
+    Dim u As String
+    u = UCase(nameText)
+
+    Dim i As Integer
+    For i = 0 To es.count - 1
+        If UCase(es.vars(i).nameText) = u Then Return i
+    Next i
+
+    Return -1
+End Function
+
+Private Function ExecGetVar(ByRef es As ExecState, ByRef nameText As String) As Integer
+    Dim idx As Integer
+    idx = ExecFindVar(es, nameText)
+    If idx = -1 Then Return 0
+    Return es.vars(idx).value
+End Function
+
+Private Sub ExecSetVar(ByRef es As ExecState, ByRef nameText As String, ByVal value As Integer)
+    Dim idx As Integer
+    idx = ExecFindVar(es, nameText)
+
+    If idx = -1 Then
+        If es.count = 0 Then
+            ReDim es.vars(0)
+        Else
+            ReDim Preserve es.vars(es.count)
+        End If
+        idx = es.count
+        es.vars(idx).nameText = nameText
+        es.count += 1
+    End If
+
+    es.vars(idx).value = value
+End Sub
+
+Private Function ExecChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    Dim i As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then
+        errText = "exec: invalid node index"
+        Return 0
+    End If
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    Select Case UCase(n.kind)
+    Case "NUMBER"
+        Return ValInt(n.value)
+
+    Case "IDENT"
+        Return ExecGetVar(es, n.value)
+
+    Case "UNARY"
+        Dim rv As Integer
+        rv = ExecEvalNode(ps, es, n.right, errText)
+        If errText <> "" Then Return 0
+
+        Select Case n.op
+        Case "+"
+            Return rv
+        Case "-"
+            Return -rv
+        Case Else
+            errText = "exec: unsupported unary op " & n.op
+            Return 0
+        End Select
+
+    Case "BINARY"
+        Dim lv As Integer
+        Dim rv2 As Integer
+        lv = ExecEvalNode(ps, es, n.left, errText)
+        If errText <> "" Then Return 0
+        rv2 = ExecEvalNode(ps, es, n.right, errText)
+        If errText <> "" Then Return 0
+
+        Select Case n.op
+        Case "+"
+            Return lv + rv2
+        Case "-"
+            Return lv - rv2
+        Case "*"
+            Return lv * rv2
+        Case "/", "\\"
+            If rv2 = 0 Then
+                errText = "exec: division by zero"
+                Return 0
+            End If
+            Return lv \ rv2
+        Case "%"
+            If rv2 = 0 Then
+                errText = "exec: modulo by zero"
+                Return 0
+            End If
+            Return lv Mod rv2
+        Case Else
+            errText = "exec: unsupported binary op " & n.op
+            Return 0
+        End Select
+
+    Case "CALL_EXPR"
+        Dim callName As String
+        callName = UCase(n.value)
+
+        Select Case callName
+        Case "PEEKB"
+            Dim a0 As Integer
+            a0 = ExecChildAt(ps, nodeIdx, 0)
+            If a0 = -1 Then
+                errText = "exec: PEEKB arg missing"
+                Return 0
+            End If
+            Dim addr As Integer
+            addr = ExecEvalNode(ps, es, a0, errText)
+            If errText <> "" Then Return 0
+            Return VMemPeekB(CUInt(addr))
+
+        Case "PEEKW"
+            Dim w0 As Integer
+            w0 = ExecChildAt(ps, nodeIdx, 0)
+            If w0 = -1 Then
+                errText = "exec: PEEKW arg missing"
+                Return 0
+            End If
+            Dim addrW As Integer
+            addrW = ExecEvalNode(ps, es, w0, errText)
+            If errText <> "" Then Return 0
+            Return VMemPeekW(CUInt(addrW))
+
+        Case "PEEKD"
+            Dim d0 As Integer
+            d0 = ExecChildAt(ps, nodeIdx, 0)
+            If d0 = -1 Then
+                errText = "exec: PEEKD arg missing"
+                Return 0
+            End If
+            Dim addrD As Integer
+            addrD = ExecEvalNode(ps, es, d0, errText)
+            If errText <> "" Then Return 0
+            Return VMemPeekD(CUInt(addrD))
+
+        Case Else
+            errText = "exec: unsupported call " & callName
+            Return 0
+        End Select
+
+    Case Else
+        errText = "exec: unsupported node kind " & n.kind
+        Return 0
+    End Select
+End Function
+
+Private Function ExecRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim st As ASTNode
+    st = ps.ast.nodes(stmtIdx)
+
+    Select Case UCase(st.kind)
+    Case "ASSIGN_STMT"
+        Dim lhs As Integer
+        lhs = st.left
+        If lhs = -1 Then
+            errText = "exec: assign lhs missing"
+            Return 0
+        End If
+
+        If UCase(ps.ast.nodes(lhs).kind) <> "IDENT" Then
+            errText = "exec: assign lhs must be ident"
+            Return 0
+        End If
+
+        Dim rhsVal As Integer
+        rhsVal = ExecEvalNode(ps, es, st.right, errText)
+        If errText <> "" Then Return 0
+
+        ExecSetVar es, ps.ast.nodes(lhs).value, rhsVal
+        Return 1
+
+    Case "INCDEC_STMT"
+        Dim lhs2 As Integer
+        lhs2 = st.left
+        If lhs2 = -1 Or UCase(ps.ast.nodes(lhs2).kind) <> "IDENT" Then
+            errText = "exec: inc/dec target must be ident"
+            Return 0
+        End If
+
+        Dim curVal As Integer
+        curVal = ExecGetVar(es, ps.ast.nodes(lhs2).value)
+
+        If st.op = "++" Then
+            ExecSetVar es, ps.ast.nodes(lhs2).value, curVal + 1
+        ElseIf st.op = "--" Then
+            ExecSetVar es, ps.ast.nodes(lhs2).value, curVal - 1
+        Else
+            errText = "exec: unknown inc/dec op"
+            Return 0
+        End If
+
+        Return 1
+
+    Case "POKEB_STMT"
+        Dim pb0 As Integer
+        Dim pb1 As Integer
+        pb0 = ExecChildAt(ps, stmtIdx, 0)
+        pb1 = ExecChildAt(ps, stmtIdx, 1)
+        If pb0 = -1 Or pb1 = -1 Then
+            errText = "exec: POKEB args missing"
+            Return 0
+        End If
+        Dim pbAddr As Integer
+        Dim pbVal As Integer
+        pbAddr = ExecEvalNode(ps, es, pb0, errText)
+        If errText <> "" Then Return 0
+        pbVal = ExecEvalNode(ps, es, pb1, errText)
+        If errText <> "" Then Return 0
+        If VMemPokeB(CUInt(pbAddr), pbVal) = 0 Then
+            errText = "exec: POKEB out of range"
+            Return 0
+        End If
+        Return 1
+
+    Case "POKEW_STMT"
+        Dim pw0 As Integer
+        Dim pw1 As Integer
+        pw0 = ExecChildAt(ps, stmtIdx, 0)
+        pw1 = ExecChildAt(ps, stmtIdx, 1)
+        If pw0 = -1 Or pw1 = -1 Then
+            errText = "exec: POKEW args missing"
+            Return 0
+        End If
+        Dim pwAddr As Integer
+        Dim pwVal As Integer
+        pwAddr = ExecEvalNode(ps, es, pw0, errText)
+        If errText <> "" Then Return 0
+        pwVal = ExecEvalNode(ps, es, pw1, errText)
+        If errText <> "" Then Return 0
+        If VMemPokeW(CUInt(pwAddr), pwVal) = 0 Then
+            errText = "exec: POKEW out of range"
+            Return 0
+        End If
+        Return 1
+
+    Case "POKED_STMT"
+        Dim pd0 As Integer
+        Dim pd1 As Integer
+        pd0 = ExecChildAt(ps, stmtIdx, 0)
+        pd1 = ExecChildAt(ps, stmtIdx, 1)
+        If pd0 = -1 Or pd1 = -1 Then
+            errText = "exec: POKED args missing"
+            Return 0
+        End If
+        Dim pdAddr As Integer
+        Dim pdVal As Integer
+        pdAddr = ExecEvalNode(ps, es, pd0, errText)
+        If errText <> "" Then Return 0
+        pdVal = ExecEvalNode(ps, es, pd1, errText)
+        If errText <> "" Then Return 0
+        If VMemPokeD(CUInt(pdAddr), pdVal) = 0 Then
+            errText = "exec: POKED out of range"
+            Return 0
+        End If
+        Return 1
+
+    Case "MEMCOPYB_STMT"
+        Dim mc0 As Integer
+        Dim mc1 As Integer
+        Dim mc2 As Integer
+        mc0 = ExecChildAt(ps, stmtIdx, 0)
+        mc1 = ExecChildAt(ps, stmtIdx, 1)
+        mc2 = ExecChildAt(ps, stmtIdx, 2)
+        If mc0 = -1 Or mc1 = -1 Or mc2 = -1 Then
+            errText = "exec: MEMCOPYB args missing"
+            Return 0
+        End If
+
+        Dim srcAddr As Integer
+        Dim dstAddr As Integer
+        Dim copyLen As Integer
+        srcAddr = ExecEvalNode(ps, es, mc0, errText)
+        If errText <> "" Then Return 0
+        dstAddr = ExecEvalNode(ps, es, mc1, errText)
+        If errText <> "" Then Return 0
+        copyLen = ExecEvalNode(ps, es, mc2, errText)
+        If errText <> "" Then Return 0
+
+        If copyLen < 0 Then
+            errText = "exec: MEMCOPYB negative length"
+            Return 0
+        End If
+
+        If VMemCopyB(CUInt(srcAddr), CUInt(dstAddr), CUInt(copyLen)) = 0 Then
+            errText = "exec: MEMCOPYB out of range"
+            Return 0
+        End If
+        Return 1
+
+    Case "MEMFILLB_STMT"
+        Dim mf0 As Integer
+        Dim mf1 As Integer
+        Dim mf2 As Integer
+        mf0 = ExecChildAt(ps, stmtIdx, 0)
+        mf1 = ExecChildAt(ps, stmtIdx, 1)
+        mf2 = ExecChildAt(ps, stmtIdx, 2)
+        If mf0 = -1 Or mf1 = -1 Or mf2 = -1 Then
+            errText = "exec: MEMFILLB args missing"
+            Return 0
+        End If
+
+        Dim fillAddr As Integer
+        Dim fillVal As Integer
+        Dim fillLen As Integer
+        fillAddr = ExecEvalNode(ps, es, mf0, errText)
+        If errText <> "" Then Return 0
+        fillVal = ExecEvalNode(ps, es, mf1, errText)
+        If errText <> "" Then Return 0
+        fillLen = ExecEvalNode(ps, es, mf2, errText)
+        If errText <> "" Then Return 0
+
+        If fillLen < 0 Then
+            errText = "exec: MEMFILLB negative length"
+            Return 0
+        End If
+
+        If VMemFillB(CUInt(fillAddr), fillVal, CUInt(fillLen)) = 0 Then
+            errText = "exec: MEMFILLB out of range"
+            Return 0
+        End If
+        Return 1
+
+    Case "EXPR_STMT"
+        If st.left <> -1 Then
+            Dim v As Integer
+            v = ExecEvalNode(ps, es, st.left, errText)
+            If errText <> "" Then Return 0
+        End If
+        Return 1
+
+    Case Else
+        errText = "exec: unsupported statement kind " & st.kind
+        Return 0
+    End Select
+End Function
+
+Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim es As ExecState
+    ExecStateInit es
+
+    If ps.rootNode = -1 Then
+        errText = "exec: no AST root"
+        Return 0
+    End If
+
+    VMemInit
+
+    Dim st As Integer
+    st = ps.ast.nodes(ps.rootNode).firstChild
+
+    Do While st <> -1
+        If ExecRunStmt(ps, es, st, errText) = 0 Then
+            Return 0
+        End If
+        st = ps.ast.nodes(st).nextSibling
+    Loop
+
+    Return 1
+End Function

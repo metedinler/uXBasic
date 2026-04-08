@@ -5,6 +5,7 @@
 #include "build/interop_manifest.fbs"
 #include "runtime/timer.fbs"
 #include "runtime/memory_vm.fbs"
+#include "runtime/memory_exec.fbs"
 #include "legacy/get_commands_port.fbs"
 
 Sub PrintBanner()
@@ -66,6 +67,15 @@ End If
 Print "Parse ok."
 Print "AST nodes:"; ps.ast.count
 ASTDump ps.ast, ps.rootNode
+
+If LCase(Command(2)) = "--execmem" Then
+    Dim execErr As String
+    If ExecRunMemoryProgram(ps, execErr) = 0 Then
+        Print "Memory exec failed:"; execErr
+        End 5
+    End If
+    Print "Memory exec ok."
+End If
 
 If sourcePath <> "" Then
     Dim manifest As InteropManifest

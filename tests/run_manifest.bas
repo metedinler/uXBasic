@@ -508,7 +508,7 @@ Private Sub Main()
         End If
 
         If UCase(Trim(row.result)) <> "PENDING" Then Continue Do
-        If runCount >= 120 Then Exit Do
+        If runCount >= 180 Then Exit Do
 
         runCount += 1
         Dim detail As String
