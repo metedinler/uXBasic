@@ -1,0 +1,139 @@
+Function ParseSimpleStatement(ByRef ps As ParseState) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "PRINT" Then
+        AdvanceTok ps
+        Return ParsePrintStmt(ps, tk)
+    End If
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "INLINE" Then
+        AdvanceTok ps
+        Return ParseInlineStmt(ps, tk)
+    End If
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "IF" Then
+        AdvanceTok ps
+        Return ParseIfStmt(ps, tk)
+    End If
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "SELECT" Then
+        AdvanceTok ps
+        Return ParseSelectStmt(ps, tk)
+    End If
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "FOR" Then
+        AdvanceTok ps
+        Return ParseForStmt(ps, tk)
+    End If
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "DO" Then
+        AdvanceTok ps
+        Return ParseDoStmt(ps, tk)
+    End If
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "DIM" Then
+        AdvanceTok ps
+        Return ParseDimStmt(ps, tk)
+    End If
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "INCLUDE" Then
+        AdvanceTok ps
+        Return ParseIncludeStmt(ps, tk)
+    End If
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "IMPORT" Then
+        AdvanceTok ps
+        Return ParseImportStmt(ps, tk)
+    End If
+
+    If tk.kind = "IDENT" Then
+        Dim identTok As Token
+        identTok = tk
+        Dim n1 As Token
+        n1 = LookToken(ps, 1)
+
+        If IsLegacyInlineName(identTok.lexeme) Then
+            ps.lastError = "legacy inline forms are disabled; use INLINE(...)"
+            Return -1
+        End If
+
+        If IsDisabledUnderscoreCommand(identTok.lexeme, n1) Then
+            ps.lastError = "underscore commands are disabled"
+            Return -1
+        End If
+
+        If n1.kind = "OP" And (n1.lexeme = "=" Or n1.lexeme = "+=" Or n1.lexeme = "-=" Or n1.lexeme = "*=" Or n1.lexeme = "/=" Or n1.lexeme = "\\=" Or n1.lexeme = "=+" Or n1.lexeme = "=-") Then
+            AdvanceTok ps
+            AdvanceTok ps
+            Dim rhs As Integer
+            rhs = ParseExpression(ps)
+            If rhs = -1 Then Return -1
+
+            Dim lhs As Integer
+            lhs = MakeNodeFromToken(ps, "IDENT", identTok.lexeme, "", identTok)
+
+            Dim assignNode As Integer
+            assignNode = MakeNodeFromToken(ps, "ASSIGN_STMT", "", n1.lexeme, n1)
+            ps.ast.nodes(assignNode).left = lhs
+            ps.ast.nodes(assignNode).right = rhs
+            Return assignNode
+        End If
+
+        If n1.kind = "OP" And (n1.lexeme = "++" Or n1.lexeme = "--") Then
+            AdvanceTok ps
+            AdvanceTok ps
+
+            Dim lhs2 As Integer
+            lhs2 = MakeNodeFromToken(ps, "IDENT", identTok.lexeme, "", identTok)
+
+            Dim incNode As Integer
+            incNode = MakeNodeFromToken(ps, "INCDEC_STMT", "", n1.lexeme, n1)
+            ps.ast.nodes(incNode).left = lhs2
+            Return incNode
+        End If
+    End If
+
+    Dim exprNode As Integer
+    exprNode = ParseExpression(ps)
+    If exprNode = -1 Then
+        ps.lastError = "statement parse failed"
+        Return -1
+    End If
+
+    Dim stNode As Integer
+    stNode = ASTNewNode(ps.ast, "EXPR_STMT", "", "", tk.lineNo, tk.colNo)
+    ps.ast.nodes(stNode).left = exprNode
+    Return stNode
+End Function
+
+Sub ParserInit(ByRef ps As ParseState, ByRef lx As LexerState)
+    ps.lx = lx
+    ps.cursorIndex = 0
+    ps.lastError = ""
+    ASTPoolInit ps.ast
+    ps.rootNode = -1
+End Sub
+
+Function ParseProgram(ByRef ps As ParseState) As Integer
+    If ps.lx.tokens.count = 0 Then
+        ps.lastError = "empty token stream"
+        Return 0
+    End If
+
+    Dim rootTok As Token
+    rootTok = CurToken(ps)
+    ps.rootNode = ASTNewNode(ps.ast, "PROGRAM", "", "", rootTok.lineNo, rootTok.colNo)
+
+    SkipSeparators ps
+
+    Do While CurToken(ps).kind <> "EOF"
+        Dim stmt As Integer
+        stmt = ParseSimpleStatement(ps)
+        If stmt = -1 Then Return 0
+        ASTAddChild ps.ast, ps.rootNode, stmt
+        SkipSeparators ps
+    Loop
+
+    Return 1
+End Function

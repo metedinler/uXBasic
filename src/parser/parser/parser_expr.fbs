@@ -1,0 +1,203 @@
+Private Function ParseExpression(ByRef ps As ParseState) As Integer
+    Return ParseRelation(ps)
+End Function
+
+Private Function ParsePrimary(ByRef ps As ParseState) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+
+    If tk.kind = "NUMBER" Then
+        AdvanceTok ps
+        Return MakeNodeFromToken(ps, "NUMBER", tk.lexeme, "", tk)
+    End If
+
+    If tk.kind = "STRING" Then
+        AdvanceTok ps
+        Return MakeNodeFromToken(ps, "STRING", tk.lexeme, "", tk)
+    End If
+
+    If tk.kind = "IDENT" Or tk.kind = "KEYWORD" Then
+        If tk.kind = "IDENT" Then
+            If IsLegacyInlineName(tk.lexeme) Then
+                ps.lastError = "legacy inline forms are disabled; use INLINE(...)"
+                Return -1
+            End If
+
+            Dim nextTok As Token
+            nextTok = LookToken(ps, 1)
+            If IsDisabledUnderscoreCommand(tk.lexeme, nextTok) And nextTok.kind = "OP" And nextTok.lexeme = "(" Then
+                ps.lastError = "underscore commands are disabled"
+                Return -1
+            End If
+        End If
+
+        AdvanceTok ps
+
+        If MatchOp(ps, "(") Then
+            Dim callNode As Integer
+            callNode = MakeNodeFromToken(ps, "CALL_EXPR", tk.lexeme, "", tk)
+
+            If MatchOp(ps, ")") = 0 Then
+                Do
+                    Dim argExpr As Integer
+                    argExpr = ParseExpression(ps)
+                    If argExpr = -1 Then Return -1
+                    ASTAddChild ps.ast, callNode, argExpr
+                    If MatchOp(ps, ",") = 0 Then Exit Do
+                Loop
+
+                If MatchOp(ps, ")") = 0 Then
+                    ps.lastError = "missing ) in call"
+                    Return -1
+                End If
+            End If
+
+            If UCase(tk.lexeme) = "TIMER" Then
+                If ValidateTimerCall(ps, callNode) = 0 Then Return -1
+            End If
+
+            Return callNode
+        End If
+
+        If tk.kind = "KEYWORD" Then
+            Return MakeNodeFromToken(ps, "KEYWORD_REF", tk.lexeme, "", tk)
+        End If
+
+        Return MakeNodeFromToken(ps, "IDENT", tk.lexeme, "", tk)
+    End If
+
+    If MatchOp(ps, "(") Then
+        Dim inner As Integer
+        inner = ParseExpression(ps)
+        If inner = -1 Then Return -1
+        If MatchOp(ps, ")") = 0 Then
+            ps.lastError = "missing )"
+            Return -1
+        End If
+        Return inner
+    End If
+
+    ps.lastError = "expression expected"
+    Return -1
+End Function
+
+Private Function ParseUnary(ByRef ps As ParseState) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+
+    If (tk.kind = "OP" And (tk.lexeme = "+" Or tk.lexeme = "-" Or tk.lexeme = "@")) Or _
+       (tk.kind = "KEYWORD" And UCase(tk.lexeme) = "NOT") Then
+        AdvanceTok ps
+        Dim rightExpr As Integer
+        rightExpr = ParseUnary(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        n = MakeNodeFromToken(ps, "UNARY", "", tk.lexeme, tk)
+        ps.ast.nodes(n).right = rightExpr
+        Return n
+    End If
+
+    Return ParsePrimary(ps)
+End Function
+
+Private Function ParsePower(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParseUnary(ps)
+    If leftExpr = -1 Then Return -1
+
+    If MatchOp(ps, "**") Then
+        Dim opTok As Token
+        opTok = LookToken(ps, -1)
+
+        Dim rightExpr As Integer
+        rightExpr = ParsePower(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        n = MakeNodeFromToken(ps, "BINARY", "", opTok.lexeme, opTok)
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        Return n
+    End If
+
+    Return leftExpr
+End Function
+
+Private Function ParseTerm(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParsePower(ps)
+    If leftExpr = -1 Then Return -1
+
+    Do
+        Dim tk As Token
+        tk = CurToken(ps)
+        If tk.kind <> "OP" Then Exit Do
+        If tk.lexeme <> "*" And tk.lexeme <> "/" And tk.lexeme <> "\\" And tk.lexeme <> "%" Then Exit Do
+
+        AdvanceTok ps
+        Dim rightExpr As Integer
+        rightExpr = ParsePower(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        n = MakeNodeFromToken(ps, "BINARY", "", tk.lexeme, tk)
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        leftExpr = n
+    Loop
+
+    Return leftExpr
+End Function
+
+Private Function ParseAdd(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParseTerm(ps)
+    If leftExpr = -1 Then Return -1
+
+    Do
+        Dim tk As Token
+        tk = CurToken(ps)
+        If tk.kind <> "OP" Then Exit Do
+        If tk.lexeme <> "+" And tk.lexeme <> "-" Then Exit Do
+
+        AdvanceTok ps
+        Dim rightExpr As Integer
+        rightExpr = ParseTerm(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        n = MakeNodeFromToken(ps, "BINARY", "", tk.lexeme, tk)
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        leftExpr = n
+    Loop
+
+    Return leftExpr
+End Function
+
+Function ParseRelation(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParseAdd(ps)
+    If leftExpr = -1 Then Return -1
+
+    Do
+        Dim tk As Token
+        tk = CurToken(ps)
+        If tk.kind <> "OP" Then Exit Do
+        If tk.lexeme <> "=" And tk.lexeme <> "<>" And tk.lexeme <> "<" And tk.lexeme <> ">" And tk.lexeme <> "<=" And tk.lexeme <> ">=" Then Exit Do
+
+        AdvanceTok ps
+        Dim rightExpr As Integer
+        rightExpr = ParseAdd(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        n = MakeNodeFromToken(ps, "BINARY", "", tk.lexeme, tk)
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        leftExpr = n
+    Loop
+
+    Return leftExpr
+End Function

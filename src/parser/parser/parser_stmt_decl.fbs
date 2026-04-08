@@ -1,0 +1,215 @@
+Private Function EndsWithCI(ByRef textValue As String, ByRef suffixValue As String) As Integer
+    If Len(textValue) < Len(suffixValue) Then Return 0
+    Return LCase(Right(textValue, Len(suffixValue))) = LCase(suffixValue)
+End Function
+
+Private Function HasUnsafePathChars(ByRef pathText As String) As Integer
+    Dim i As Integer
+    For i = 1 To Len(pathText)
+        Dim ch As String
+        ch = Mid(pathText, i, 1)
+
+        If Asc(ch) < 32 Then Return 1
+
+        Select Case ch
+        Case "|", "&", ";", "`", "<", ">"
+            Return 1
+        End Select
+    Next i
+    Return 0
+End Function
+
+Private Function IsValidIncludePath(ByRef pathText As String) As Integer
+    If pathText = "" Then Return 0
+    If HasUnsafePathChars(pathText) Then Return 0
+    If EndsWithCI(pathText, ".bas") = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function IsValidImportPath(ByRef langText As String, ByRef pathText As String) As Integer
+    If pathText = "" Then Return 0
+    If HasUnsafePathChars(pathText) Then Return 0
+
+    Select Case UCase(langText)
+    Case "C"
+        Return EndsWithCI(pathText, ".c")
+    Case "CPP"
+        Return EndsWithCI(pathText, ".cpp") Or EndsWithCI(pathText, ".cc") Or EndsWithCI(pathText, ".cxx")
+    Case "ASM"
+        Return EndsWithCI(pathText, ".asm") Or EndsWithCI(pathText, ".s")
+    End Select
+
+    Return 0
+End Function
+
+Function ParseDimBound(ByRef ps As ParseState) As Integer
+    Dim lowerExpr As Integer
+    lowerExpr = ParseExpression(ps)
+    If lowerExpr = -1 Then Return -1
+
+    If MatchKeyword(ps, "TO") Then
+        Dim toTok As Token
+        toTok = LookToken(ps, -1)
+
+        Dim upperExpr As Integer
+        upperExpr = ParseExpression(ps)
+        If upperExpr = -1 Then
+            ps.lastError = "DIM: upper bound expected after TO"
+            Return -1
+        End If
+
+        Dim rangeNode As Integer
+        rangeNode = MakeNodeFromToken(ps, "RANGE_EXPR", "", "TO", toTok)
+        ps.ast.nodes(rangeNode).left = lowerExpr
+        ps.ast.nodes(rangeNode).right = upperExpr
+        Return rangeNode
+    End If
+
+    Return lowerExpr
+End Function
+
+Function ParseDimDeclarator(ByRef ps As ParseState) As Integer
+    Dim identTok As Token
+    identTok = CurToken(ps)
+    If identTok.kind <> "IDENT" Then
+        ps.lastError = "DIM: identifier expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim declNode As Integer
+    declNode = MakeNodeFromToken(ps, "DIM_DECL", identTok.lexeme, "", identTok)
+
+    If MatchOp(ps, "(") Then
+        Dim boundsNode As Integer
+        boundsNode = ASTNewNode(ps.ast, "DIM_BOUNDS", "", "", identTok.lineNo, identTok.colNo)
+
+        Do
+            Dim boundExpr As Integer
+            boundExpr = ParseDimBound(ps)
+            If boundExpr = -1 Then Return -1
+            ASTAddChild ps.ast, boundsNode, boundExpr
+
+            If MatchOp(ps, ",") = 0 Then Exit Do
+        Loop
+
+        If MatchOp(ps, ")") = 0 Then
+            ps.lastError = "DIM: missing ) in array bounds"
+            Return -1
+        End If
+
+        ASTAddChild ps.ast, declNode, boundsNode
+    End If
+
+    If MatchKeyword(ps, "AS") = 0 Then
+        ps.lastError = "DIM: AS expected"
+        Return -1
+    End If
+
+    Dim typeTok As Token
+    typeTok = CurToken(ps)
+    If IsTypeToken(typeTok) = 0 Then
+        ps.lastError = "DIM: type expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim typeNode As Integer
+    typeNode = MakeNodeFromToken(ps, "TYPE_REF", typeTok.lexeme, "", typeTok)
+    ASTAddChild ps.ast, declNode, typeNode
+
+    If MatchOp(ps, "=") Then
+        Dim initExpr As Integer
+        initExpr = ParseExpression(ps)
+        If initExpr = -1 Then
+            ps.lastError = "DIM: invalid initializer"
+            Return -1
+        End If
+
+        Dim initNode As Integer
+        initNode = ASTNewNode(ps.ast, "INIT_EXPR", "", "", typeTok.lineNo, typeTok.colNo)
+        ps.ast.nodes(initNode).left = initExpr
+        ASTAddChild ps.ast, declNode, initNode
+    End If
+
+    Return declNode
+End Function
+
+Function ParseDimStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim dimNode As Integer
+    dimNode = MakeNodeFromToken(ps, "DIM_STMT", "", "", firstTok)
+
+    Do
+        Dim declNode As Integer
+        declNode = ParseDimDeclarator(ps)
+        If declNode = -1 Then Return -1
+        ASTAddChild ps.ast, dimNode, declNode
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    Return dimNode
+End Function
+
+Function ParseIncludeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim includeNode As Integer
+    includeNode = MakeNodeFromToken(ps, "INCLUDE_STMT", "", "", firstTok)
+
+    Dim pathTok As Token
+    pathTok = CurToken(ps)
+    If pathTok.kind <> "STRING" Then
+        ps.lastError = "INCLUDE: path string expected"
+        Return -1
+    End If
+
+    If IsValidIncludePath(pathTok.lexeme) = 0 Then
+        ps.lastError = "INCLUDE: unsafe or unsupported path"
+        Return -1
+    End If
+
+    Dim pathNode As Integer
+    pathNode = MakeNodeFromToken(ps, "STRING", pathTok.lexeme, "", pathTok)
+    ASTAddChild ps.ast, includeNode, pathNode
+    AdvanceTok ps
+
+    Return includeNode
+End Function
+
+Function ParseImportStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim langTok As Token
+    langTok = CurToken(ps)
+    If langTok.kind <> "IDENT" And langTok.kind <> "KEYWORD" Then
+        ps.lastError = "IMPORT: language expected (C|CPP|ASM)"
+        Return -1
+    End If
+
+    Dim langText As String
+    langText = UCase(langTok.lexeme)
+    If langText <> "C" And langText <> "CPP" And langText <> "ASM" Then
+        ps.lastError = "IMPORT: unsupported language (use C, CPP or ASM)"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim fileTok As Token
+    fileTok = CurToken(ps)
+    If fileTok.kind <> "STRING" Then
+        ps.lastError = "IMPORT: file path string expected"
+        Return -1
+    End If
+
+    If IsValidImportPath(langText, fileTok.lexeme) = 0 Then
+        ps.lastError = "IMPORT: unsafe path or invalid extension for language"
+        Return -1
+    End If
+
+    Dim importNode As Integer
+    importNode = MakeNodeFromToken(ps, "IMPORT_STMT", "", langText, firstTok)
+
+    Dim fileNode As Integer
+    fileNode = MakeNodeFromToken(ps, "STRING", fileTok.lexeme, "", fileTok)
+    ASTAddChild ps.ast, importNode, fileNode
+    AdvanceTok ps
+
+    Return importNode
+End Function

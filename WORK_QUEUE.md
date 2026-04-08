@@ -89,3 +89,23 @@
 - Gorev: INCLUDE resolver + IMPORT build manifest/link entegrasyonu (Win11-x64)
 - Sorumlu: Agent-BuildInterop
 - Cikti: parser sonrasi dosya-cozumleyici + build baglayici katman + `CMP-*` uyumluluk artefaktlari
+
+## Sira 15.A - EK-22 Moduler Parser/Lexer Refaktor (Faz-2A)
+- Durum: tamamlandi
+- Gorev: parser ve lexer monolitik yapisini konu bazli modullere ayirmak
+- Sorumlu: Agent-ParserMod
+- Cikti:
+	- `src/parser/lexer.fbs` orchestrator + `src/parser/lexer/*`
+	- `src/parser/parser.fbs` orchestrator + `src/parser/parser/*`
+
+## Sira 15.B - EK-22 Parser Guvenlik Kapisi (Path Hijyen)
+- Durum: tamamlandi
+- Gorev: `INCLUDE`/`IMPORT` path girdilerinde unsafe karakter ve uzanti denetimi
+- Sorumlu: Agent-SecureParse
+- Cikti: `src/parser/parser/parser_stmt_decl.fbs`
+
+## Sira 16 - EK-19 Resolver/Link Faz-2B
+- Durum: basladi
+- Gorev: parser-sonrasi INCLUDE resolver ve IMPORT build manifest/link entegrasyonu
+- Sorumlu: Agent-BuildInterop
+- Cikti: include-once resolver + build manifest baglayici + `CMP-*` uyumluluk artefaktlari

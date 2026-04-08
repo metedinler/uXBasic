@@ -1,0 +1,267 @@
+Function ParseIfStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim ifNode As Integer
+    ifNode = MakeNodeFromToken(ps, "IF_STMT", "", "", firstTok)
+
+    Dim condExpr As Integer
+    condExpr = ParseExpression(ps)
+    If condExpr = -1 Then Return -1
+    ASTAddChild ps.ast, ifNode, condExpr
+
+    If MatchKeyword(ps, "THEN") = 0 Then
+        ps.lastError = "missing THEN"
+        Return -1
+    End If
+
+    SkipSeparators ps
+
+    Do While CurToken(ps).kind <> "EOF"
+        If IsKw(ps, "ELSEIF") Or IsKw(ps, "ELSE") Or IsEndIfStart(ps) Then Exit Do
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then Return -1
+        ASTAddChild ps.ast, ifNode, st
+        SkipSeparators ps
+    Loop
+
+    Do While IsKw(ps, "ELSEIF")
+        Dim partTok As Token
+        partTok = CurToken(ps)
+        AdvanceTok ps
+
+        Dim elseIfNode As Integer
+        elseIfNode = MakeNodeFromToken(ps, "ELSEIF_PART", "", "", partTok)
+
+        Dim elseIfCond As Integer
+        elseIfCond = ParseExpression(ps)
+        If elseIfCond = -1 Then Return -1
+        ASTAddChild ps.ast, elseIfNode, elseIfCond
+
+        If MatchKeyword(ps, "THEN") = 0 Then
+            ps.lastError = "missing THEN in ELSEIF"
+            Return -1
+        End If
+
+        SkipSeparators ps
+        Do While CurToken(ps).kind <> "EOF"
+            If IsKw(ps, "ELSEIF") Or IsKw(ps, "ELSE") Or IsEndIfStart(ps) Then Exit Do
+            Dim st2 As Integer
+            st2 = ParseSimpleStatement(ps)
+            If st2 = -1 Then Return -1
+            ASTAddChild ps.ast, elseIfNode, st2
+            SkipSeparators ps
+        Loop
+
+        ASTAddChild ps.ast, ifNode, elseIfNode
+    Loop
+
+    If IsKw(ps, "ELSE") Then
+        Dim elseTok As Token
+        elseTok = CurToken(ps)
+        AdvanceTok ps
+
+        Dim elseNode As Integer
+        elseNode = MakeNodeFromToken(ps, "ELSE_PART", "", "", elseTok)
+
+        SkipSeparators ps
+        Do While CurToken(ps).kind <> "EOF"
+            If IsEndIfStart(ps) Then Exit Do
+            Dim st3 As Integer
+            st3 = ParseSimpleStatement(ps)
+            If st3 = -1 Then Return -1
+            ASTAddChild ps.ast, elseNode, st3
+            SkipSeparators ps
+        Loop
+
+        ASTAddChild ps.ast, ifNode, elseNode
+    End If
+
+    If IsEndIfStart(ps) = 0 Then
+        ps.lastError = "missing END IF"
+        Return -1
+    End If
+    AdvanceTok ps
+    AdvanceTok ps
+
+    Return ifNode
+End Function
+
+Function ParseSelectStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim selNode As Integer
+    selNode = MakeNodeFromToken(ps, "SELECT_STMT", "", "", firstTok)
+
+    If MatchKeyword(ps, "CASE") = 0 Then
+        ps.lastError = "missing CASE after SELECT"
+        Return -1
+    End If
+
+    Dim selector As Integer
+    selector = ParseExpression(ps)
+    If selector = -1 Then Return -1
+    ASTAddChild ps.ast, selNode, selector
+
+    SkipSeparators ps
+
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndSelectStart(ps) Then
+            AdvanceTok ps
+            AdvanceTok ps
+            Return selNode
+        End If
+
+        If MatchKeyword(ps, "CASE") = 0 Then
+            ps.lastError = "missing CASE block"
+            Return -1
+        End If
+
+        Dim caseTok As Token
+        caseTok = LookToken(ps, -1)
+
+        Dim caseNode As Integer
+        If MatchKeyword(ps, "ELSE") Then
+            caseNode = MakeNodeFromToken(ps, "CASE_ELSE", "", "", caseTok)
+        Else
+            caseNode = MakeNodeFromToken(ps, "CASE_BLOCK", "", "", caseTok)
+
+            Do
+                Dim caseExpr As Integer
+                caseExpr = ParseExpression(ps)
+                If caseExpr = -1 Then Return -1
+                ASTAddChild ps.ast, caseNode, caseExpr
+                If MatchOp(ps, ",") = 0 Then Exit Do
+            Loop
+        End If
+
+        SkipSeparators ps
+
+        Do While CurToken(ps).kind <> "EOF"
+            If IsKw(ps, "CASE") Or IsEndSelectStart(ps) Then Exit Do
+            Dim st As Integer
+            st = ParseSimpleStatement(ps)
+            If st = -1 Then Return -1
+            ASTAddChild ps.ast, caseNode, st
+            SkipSeparators ps
+        Loop
+
+        ASTAddChild ps.ast, selNode, caseNode
+    Loop
+
+    ps.lastError = "missing END SELECT"
+    Return -1
+End Function
+
+Function ParseForStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "FOR variable expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    If MatchOp(ps, "=") = 0 Then
+        ps.lastError = "missing = in FOR"
+        Return -1
+    End If
+
+    Dim startExpr As Integer
+    startExpr = ParseExpression(ps)
+    If startExpr = -1 Then Return -1
+
+    If MatchKeyword(ps, "TO") = 0 Then
+        ps.lastError = "missing TO in FOR"
+        Return -1
+    End If
+
+    Dim endExpr As Integer
+    endExpr = ParseExpression(ps)
+    If endExpr = -1 Then Return -1
+
+    Dim stepExpr As Integer
+    If MatchKeyword(ps, "STEP") Then
+        stepExpr = ParseExpression(ps)
+        If stepExpr = -1 Then Return -1
+    Else
+        stepExpr = MakeSyntheticNumber(ps, "1")
+    End If
+
+    Dim forNode As Integer
+    forNode = MakeNodeFromToken(ps, "FOR_STMT", nameTok.lexeme, "", firstTok)
+    ASTAddChild ps.ast, forNode, startExpr
+    ASTAddChild ps.ast, forNode, endExpr
+    ASTAddChild ps.ast, forNode, stepExpr
+
+    SkipSeparators ps
+
+    Do While CurToken(ps).kind <> "EOF"
+        If IsKw(ps, "NEXT") Then Exit Do
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then Return -1
+        ASTAddChild ps.ast, forNode, st
+        SkipSeparators ps
+    Loop
+
+    If MatchKeyword(ps, "NEXT") = 0 Then
+        ps.lastError = "missing NEXT"
+        Return -1
+    End If
+
+    If CurToken(ps).kind = "IDENT" Then AdvanceTok ps
+
+    Return forNode
+End Function
+
+Function ParseDoStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim doMode As String
+    doMode = "DO"
+
+    Dim condStart As Integer
+    condStart = -1
+
+    If MatchKeyword(ps, "WHILE") Then
+        doMode = "DO_WHILE"
+        condStart = ParseExpression(ps)
+        If condStart = -1 Then Return -1
+    ElseIf MatchKeyword(ps, "UNTIL") Then
+        doMode = "DO_UNTIL"
+        condStart = ParseExpression(ps)
+        If condStart = -1 Then Return -1
+    End If
+
+    Dim doNode As Integer
+    doNode = MakeNodeFromToken(ps, "DO_STMT", "", doMode, firstTok)
+    If condStart <> -1 Then ASTAddChild ps.ast, doNode, condStart
+
+    SkipSeparators ps
+
+    Do While CurToken(ps).kind <> "EOF"
+        If IsKw(ps, "LOOP") Then Exit Do
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then Return -1
+        ASTAddChild ps.ast, doNode, st
+        SkipSeparators ps
+    Loop
+
+    If MatchKeyword(ps, "LOOP") = 0 Then
+        ps.lastError = "missing LOOP"
+        Return -1
+    End If
+
+    If MatchKeyword(ps, "WHILE") Then
+        doMode = "LOOP_WHILE"
+        Dim condTail1 As Integer
+        condTail1 = ParseExpression(ps)
+        If condTail1 = -1 Then Return -1
+        ASTAddChild ps.ast, doNode, condTail1
+    ElseIf MatchKeyword(ps, "UNTIL") Then
+        doMode = "LOOP_UNTIL"
+        Dim condTail2 As Integer
+        condTail2 = ParseExpression(ps)
+        If condTail2 = -1 Then Return -1
+        ASTAddChild ps.ast, doNode, condTail2
+    End If
+
+    ps.ast.nodes(doNode).op = doMode
+    Return doNode
+End Function

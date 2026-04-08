@@ -183,3 +183,32 @@
 - Ortamdaki global `fbc` komutunda harici kurulum kaynakli cagrim sorunu goruldu (`qb64-dev.exe` yonlenmesi).
 - Proje-ici derleyici ile dogrulama yapildi: `tools/FreeBASIC-1.10.1-win64/fbc.exe`.
 - Smoke sonucu: `Pass 24 / Fail 0`.
+
+## 2026-04-08 (EK-22 Modulerlesme + Guvenlik Sertlestirme)
+
+### Kod Degisikligi
+- Lexer monolitik dosyasi konu bazli modullere ayrildi:
+	- `src/parser/lexer/lexer_core.fbs`
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+	- `src/parser/lexer/lexer_readers.fbs`
+	- `src/parser/lexer/lexer_driver.fbs`
+- Parser monolitik dosyasi konu bazli modullere ayrildi:
+	- `src/parser/parser/parser_shared.fbs`
+	- `src/parser/parser/parser_expr.fbs`
+	- `src/parser/parser/parser_stmt_basic.fbs`
+	- `src/parser/parser/parser_stmt_decl.fbs`
+	- `src/parser/parser/parser_stmt_flow.fbs`
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+- Orchestrator modeline gecis:
+	- `src/parser/lexer.fbs` alt lexer modullerini include eder hale getirildi.
+	- `src/parser/parser.fbs` alt parser modullerini include eder hale getirildi.
+
+### Guvenlik Sertlestirme
+- `INCLUDE`/`IMPORT` path parser denetimi aktif edildi.
+- Unsafe karakter engeli eklendi (`|`, `&`, `;`, `` ` ``, `<`, `>`, kontrol karakterleri).
+- Dil bazli uzanti denetimi eklendi (`.bas`, `.c`, `.cpp/.cc/.cxx`, `.asm/.s`).
+
+### Dogrulama
+- `build.bat src\\main.bas` sonucu: build ok.
+- `tests\\run_manifest.exe` sonucu: `Fail: 0`.
+- `src/parser` hata taramasi: hata yok.
