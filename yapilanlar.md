@@ -422,3 +422,61 @@
 - `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
 	- `PASS CMP-LIB-INCLUDE-WIN11`
 	- `PASS CMP-IMP-WIN11`
+
+## 2026-04-09 (EK-31 Sira 8 Core Intrinsic Fonksiyon Dalgasi)
+
+### Kod Degisikligi
+- Intrinsic keywordleri eklendi:
+	- `LEN`, `MID`, `STR`, `VAL`, `ABS`, `INT`, `UCASE`, `LCASE`, `ASC`, `CHR`
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+- Call arguman dogrulama yardimcilari eklendi:
+	- `src/parser/parser/parser_shared.fbs`
+- Expression seviyesinde intrinsic call validation eklendi:
+	- `src/parser/parser/parser_expr.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-LEN-001`, `TST-MID-001`, `TST-STR-001`, `TST-VAL-001`, `TST-ABS-001`, `TST-INT-001`, `TST-UCASE-001`, `TST-LCASE-001`, `TST-ASC-001`, `TST-CHR-001`, `TST-MID-FAIL-001`
+- Runner expected etiketleri eklendi:
+	- `LEN_OK`, `MID_OK`, `STR_OK`, `VAL_OK`, `ABS_OK`, `INT_OK`, `UCASE_OK`, `LCASE_OK`, `ASC_OK`, `CHR_OK`
+
+### Matris Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
+	- `LEN`, `MID`, `STR`, `VAL`, `ABS`, `INT`, `UCASE`, `LCASE`, `ASC`, `CHR`
+
+### Dogrulama
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 63 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`
+
+## 2026-04-09 (EK-32 Sira 8 Varsayilan Tip Komut Dalgasi)
+
+### Kod Degisikligi
+- Varsayilan tip keywordleri eklendi:
+	- `DEFINT`, `DEFLNG`, `DEFSNG`, `DEFDBL`, `DEFEXT`, `DEFSTR`, `DEFBYT`
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+- Varsayilan tip parserlari eklendi:
+	- `ParseDefTypeStmt`, `ParseSetStringSizeStmt`
+	- `src/parser/parser/parser_stmt_decl.fbs`
+- Dispatch dallari eklendi:
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+- Parser declaration listesi guncellendi:
+	- `src/parser/parser.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-DEFINT-001`, `TST-DEFLNG-001`, `TST-SETSTRINGSIZE-001`, `TST-SETSTRINGSIZE-FAIL-001`
+- Runner expected etiketleri eklendi:
+	- `DEFTYPE_OK`, `SETSTRINGSIZE_OK`
+
+### Matris ve Kontrat Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
+	- `DEFINT`, `DEFLNG`, `DEFSNG`, `DEFDBL`, `DEFEXT`, `DEFSTR`, `DEFBYT`, `SETSTRINGSIZE`
+- `spec/LANGUAGE_CONTRACT.md` varsayilan tip grammar basligi ile guncellendi.
+
+### Dogrulama
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 67 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`

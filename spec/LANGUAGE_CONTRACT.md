@@ -44,3 +44,13 @@
 - `INPUT target[, target ...]`
 - `INPUT promptExpr; target[, target ...]`
 - `INPUT #channelExpr, target[, target ...]`
+
+## Default Type Declarations
+- `DEFINT rangeList`
+- `DEFLNG rangeList`
+- `DEFSNG rangeList`
+- `DEFDBL rangeList`
+- `DEFEXT rangeList`
+- `DEFSTR rangeList`
+- `DEFBYT rangeList`
+- `SETSTRINGSIZE expr`

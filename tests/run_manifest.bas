@@ -263,6 +263,54 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasAstKind(ps, "INPUT_FILE_STMT")
         If resultOk = 0 Then detail = "missing INPUT_FILE_STMT AST node"
 
+    Case "LEN_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "LEN")
+        If resultOk = 0 Then detail = "missing LEN call expression"
+
+    Case "MID_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "MID")
+        If resultOk = 0 Then detail = "missing MID call expression"
+
+    Case "STR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "STR")
+        If resultOk = 0 Then detail = "missing STR call expression"
+
+    Case "VAL_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "VAL")
+        If resultOk = 0 Then detail = "missing VAL call expression"
+
+    Case "ABS_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "ABS")
+        If resultOk = 0 Then detail = "missing ABS call expression"
+
+    Case "INT_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "INT")
+        If resultOk = 0 Then detail = "missing INT call expression"
+
+    Case "UCASE_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "UCASE")
+        If resultOk = 0 Then detail = "missing UCASE call expression"
+
+    Case "LCASE_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "LCASE")
+        If resultOk = 0 Then detail = "missing LCASE call expression"
+
+    Case "ASC_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "ASC")
+        If resultOk = 0 Then detail = "missing ASC call expression"
+
+    Case "CHR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "CHR")
+        If resultOk = 0 Then detail = "missing CHR call expression"
+
+    Case "DEFTYPE_OK"
+        resultOk = parseOk And HasAstKind(ps, "DEFTYPE_STMT")
+        If resultOk = 0 Then detail = "missing DEFTYPE_STMT AST node"
+
+    Case "SETSTRINGSIZE_OK"
+        resultOk = parseOk And HasAstKind(ps, "SETSTRINGSIZE_STMT")
+        If resultOk = 0 Then detail = "missing SETSTRINGSIZE_STMT AST node"
+
     Case Else
         resultOk = parseOk
         If parseOk = 0 Then

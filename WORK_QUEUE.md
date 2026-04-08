@@ -131,6 +131,30 @@
 	- `spec/LANGUAGE_CONTRACT.md`
 	- `tests/plan/command_compatibility_win11.csv`
 
+## Sira 8.I - Core Intrinsic Fonksiyon Dalgasi
+- Durum: tamamlandi
+- Gorev: String ve matematik cekirdek fonksiyonlarini parser+expr-validation seviyesinde tek tek compiler kapsamina almak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+	- `src/parser/parser/parser_shared.fbs`
+	- `src/parser/parser/parser_expr.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.J - Varsayilan Tip Komut Dalgasi (DEF*/SETSTRINGSIZE)
+- Durum: tamamlandi
+- Gorev: Varsayilan tip ve string boyut komutlarini parser+AST seviyesinde tek tek compiler kapsamina almak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+	- `src/parser/parser/parser_stmt_decl.fbs`
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+	- `src/parser/parser.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `spec/LANGUAGE_CONTRACT.md`
+	- `tests/plan/command_compatibility_win11.csv`
+
 ## Sira 9 - Programci El Kitabi
 - Durum: tamamlandi
 - Gorev: tum planlanan komut/fonksiyon, kurallar ve syntax dokumani
