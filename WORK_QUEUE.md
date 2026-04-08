@@ -19,10 +19,10 @@
 - Cikti: parser semantik kontrolu + manifest negatif testleri
 
 ## Sira 4 - Timer Genisletmesi
-- Durum: planlandi
+- Durum: tamamlandi
 - Gorev: `TIMER(unit)` ve `TIMER(start,end,unit)` parser/runtime iskeleti
 - Sorumlu: Agent-Runtime
-- Cikti: parser + runtime taslagi (sonraki commit)
+- Cikti: parser TIMER imza dogrulama + `src/runtime/timer.fbs` + manifest testleri
 
 ## Sira 5 - Dogrulama
 - Durum: tamamlandi

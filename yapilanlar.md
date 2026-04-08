@@ -149,3 +149,15 @@
 - `tests/manifest.csv` icine iki negatif (`parse_fail`) ve bir pozitif (`parse_ok`) gecis testi eklendi.
 - `tests/run_manifest.bas` `PARSE_FAIL` etiketiyle beklenti dogrulamasini destekler hale getirildi.
 - Smoke ozeti: `Pass 13 / Fail 0`.
+
+## 2026-04-08 (Timer Genisletmesi - Sira 4)
+
+### Kod Degisikligi
+- `src/parser/parser.fbs` icine `TIMER` imza/birim dogrulamasi eklendi (`0`, `1`, `3` arguman).
+- `src/runtime/timer.fbs` ile runtime iskeleti eklendi (`TimerNow`, `TimerRange` ve birim donusumleri).
+- `src/main.bas` runtime include ile timer iskeletini derleme akisina dahil etti.
+
+### Test Guncellemeleri
+- `tests/manifest.csv` icine timer-range pozitif ve bad-unit negatif testleri eklendi.
+- `tests/run_manifest.bas` smoke limiti 15 satir olacak sekilde guncellendi.
+- Smoke ozeti: `Pass 15 / Fail 0`.

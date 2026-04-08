@@ -2,6 +2,7 @@
 #include "parser/lexer.fbs"
 #include "parser/ast.fbs"
 #include "parser/parser.fbs"
+#include "runtime/timer.fbs"
 #include "legacy/get_commands_port.fbs"
 
 Sub PrintBanner()
@@ -40,5 +41,6 @@ Dim As Integer n
 n = LegacyGetCommands(sourceText, 0, selected)
 Print "Legacy split count:"; n
 Print "Legacy part[0]:"; selected
+Print "Timer(ms) sample:"; TimerNow("ms")
 
 End 0
