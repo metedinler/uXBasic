@@ -533,3 +533,23 @@
 - `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
 	- `PASS CMP-LIB-INCLUDE-WIN11`
 	- `PASS CMP-IMP-WIN11`
+
+## 2026-04-09 (EK-35 Sira 8 INKEY Intrinsic Fonksiyon Dalgasi)
+
+### Kod Degisikligi
+- Intrinsic keyword eklendi:
+	- `INKEY`
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+- Intrinsic call arguman dogrulama genisletildi:
+	- `INKEY(1..2)`, `INKEY_LEGACY(0)`
+	- `src/parser/parser/parser_shared.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-INKEY-001`, `TST-INKEY-002`, `TST-INKEY-FAIL-001`, `TST-INKEY-LEGACY-001`, `TST-INKEY-LEGACY-FAIL-001`
+- Runner expected etiketleri eklendi:
+	- `INKEY_OK`, `INKEY_LEGACY_OK`
+
+### Matris Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
+	- `INKEY`, `INKEY_LEGACY`

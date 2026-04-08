@@ -339,6 +339,14 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasCallExprValue(ps, "TAN")
         If resultOk = 0 Then detail = "missing TAN call expression"
 
+    Case "INKEY_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "INKEY")
+        If resultOk = 0 Then detail = "missing INKEY call expression"
+
+    Case "INKEY_LEGACY_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "INKEY_LEGACY")
+        If resultOk = 0 Then detail = "missing INKEY_LEGACY call expression"
+
     Case "DEFTYPE_OK"
         resultOk = parseOk And HasAstKind(ps, "DEFTYPE_STMT")
         If resultOk = 0 Then detail = "missing DEFTYPE_STMT AST node"

@@ -244,3 +244,13 @@
 	- `tests/plan/cmp_interop_win11.csv`
 	- `dist/cmp_interop/import_build_manifest.csv` (testte uretilir)
 	- `dist/cmp_interop/import_link_args.rsp` (testte uretilir)
+
+## Sira 8.M - INKEY Intrinsic Fonksiyon Dalgasi
+- Durum: tamamlandi
+- Gorev: `INKEY` ve `INKEY_LEGACY` imzalarini parser+expr-validation seviyesinde compiler kapsamina almak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+	- `src/parser/parser/parser_shared.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `tests/plan/command_compatibility_win11.csv`
