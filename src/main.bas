@@ -4,6 +4,7 @@
 #include "parser/parser.fbs"
 #include "build/interop_manifest.fbs"
 #include "runtime/timer.fbs"
+#include "runtime/memory_vm.fbs"
 #include "legacy/get_commands_port.fbs"
 
 Sub PrintBanner()

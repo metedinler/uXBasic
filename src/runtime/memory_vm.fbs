@@ -1,0 +1,167 @@
+Type VMemState
+    data(Any) As UByte
+    sizeBytes As UInteger
+    textBase As UInteger
+    textCols As Integer
+    textRows As Integer
+    active As Integer
+End Type
+
+Dim Shared g_vmem As VMemState
+
+Private Function VMemInRange(ByVal addr As UInteger, ByVal byteCount As UInteger) As Integer
+    If g_vmem.active = 0 Then Return 0
+    If byteCount = 0 Then Return 0
+    If addr >= g_vmem.sizeBytes Then Return 0
+    If addr + byteCount > g_vmem.sizeBytes Then Return 0
+    Return 1
+End Function
+
+Private Sub VMemBlitTextCell(ByVal addr As UInteger)
+    If g_vmem.active = 0 Then Exit Sub
+
+    If addr < g_vmem.textBase Then Exit Sub
+
+    Dim textBytes As UInteger
+    textBytes = CUInt(g_vmem.textCols * g_vmem.textRows * 2)
+    If addr >= g_vmem.textBase + textBytes Then Exit Sub
+
+    Dim rel As UInteger
+    rel = addr - g_vmem.textBase
+
+    Dim cellIdx As UInteger
+    cellIdx = rel \ 2
+
+    Dim row As Integer
+    Dim col As Integer
+    row = CInt(cellIdx \ g_vmem.textCols) + 1
+    col = CInt(cellIdx Mod g_vmem.textCols) + 1
+
+    Dim charAddr As UInteger
+    charAddr = g_vmem.textBase + cellIdx * 2
+
+    If VMemInRange(charAddr, 2) = 0 Then Exit Sub
+
+    Dim ch As UByte
+    Dim attr As UByte
+    ch = g_vmem.data(charAddr)
+    attr = g_vmem.data(charAddr + 1)
+
+    Dim fg As Integer
+    Dim bg As Integer
+    fg = (attr And &h0F)
+    bg = ((attr Shr 4) And &h0F)
+
+    Locate row, col
+    Color fg, bg
+    Print Chr(ch);
+End Sub
+
+Sub VMemInit(ByVal sizeBytes As UInteger = 1048576, ByVal textBase As UInteger = &hB8000, ByVal textCols As Integer = 80, ByVal textRows As Integer = 25)
+    If sizeBytes < 65536 Then sizeBytes = 65536
+
+    ReDim g_vmem.data(sizeBytes - 1)
+    g_vmem.sizeBytes = sizeBytes
+    g_vmem.textBase = textBase
+    g_vmem.textCols = textCols
+    g_vmem.textRows = textRows
+    g_vmem.active = 1
+End Sub
+
+Function VMemPeekB(ByVal addr As UInteger) As Integer
+    If VMemInRange(addr, 1) = 0 Then Return -1
+    Return g_vmem.data(addr)
+End Function
+
+Function VMemPeekW(ByVal addr As UInteger) As Integer
+    If VMemInRange(addr, 2) = 0 Then Return -1
+    Return g_vmem.data(addr) Or (g_vmem.data(addr + 1) Shl 8)
+End Function
+
+Function VMemPeekD(ByVal addr As UInteger) As Integer
+    If VMemInRange(addr, 4) = 0 Then Return -1
+    Dim v As UInteger
+    v = g_vmem.data(addr)
+    v Or= (CUInt(g_vmem.data(addr + 1)) Shl 8)
+    v Or= (CUInt(g_vmem.data(addr + 2)) Shl 16)
+    v Or= (CUInt(g_vmem.data(addr + 3)) Shl 24)
+    Return CInt(v)
+End Function
+
+Function VMemPokeB(ByVal addr As UInteger, ByVal value As Integer) As Integer
+    If VMemInRange(addr, 1) = 0 Then Return 0
+    g_vmem.data(addr) = CByte(value And &hFF)
+    VMemBlitTextCell(addr)
+    Return 1
+End Function
+
+Function VMemPokeW(ByVal addr As UInteger, ByVal value As Integer) As Integer
+    If VMemInRange(addr, 2) = 0 Then Return 0
+    g_vmem.data(addr) = CByte(value And &hFF)
+    g_vmem.data(addr + 1) = CByte((value Shr 8) And &hFF)
+    VMemBlitTextCell(addr)
+    VMemBlitTextCell(addr + 1)
+    Return 1
+End Function
+
+Function VMemPokeD(ByVal addr As UInteger, ByVal value As Integer) As Integer
+    If VMemInRange(addr, 4) = 0 Then Return 0
+    g_vmem.data(addr) = CByte(value And &hFF)
+    g_vmem.data(addr + 1) = CByte((value Shr 8) And &hFF)
+    g_vmem.data(addr + 2) = CByte((value Shr 16) And &hFF)
+    g_vmem.data(addr + 3) = CByte((value Shr 24) And &hFF)
+    VMemBlitTextCell(addr)
+    VMemBlitTextCell(addr + 1)
+    VMemBlitTextCell(addr + 2)
+    VMemBlitTextCell(addr + 3)
+    Return 1
+End Function
+
+Function VMemCopyB(ByVal src As UInteger, ByVal dst As UInteger, ByVal n As UInteger) As Integer
+    If n = 0 Then Return 1
+    If VMemInRange(src, n) = 0 Then Return 0
+    If VMemInRange(dst, n) = 0 Then Return 0
+
+    Dim i As UInteger
+    If dst > src And dst < src + n Then
+        For i = n To 1 Step -1
+            g_vmem.data(dst + i - 1) = g_vmem.data(src + i - 1)
+            VMemBlitTextCell(dst + i - 1)
+        Next i
+    Else
+        For i = 0 To n - 1
+            g_vmem.data(dst + i) = g_vmem.data(src + i)
+            VMemBlitTextCell(dst + i)
+        Next i
+    End If
+
+    Return 1
+End Function
+
+Function VMemFillB(ByVal addr As UInteger, ByVal value As Integer, ByVal n As UInteger) As Integer
+    If n = 0 Then Return 1
+    If VMemInRange(addr, n) = 0 Then Return 0
+
+    Dim b As UByte
+    b = CByte(value And &hFF)
+
+    Dim i As UInteger
+    For i = 0 To n - 1
+        g_vmem.data(addr + i) = b
+        VMemBlitTextCell(addr + i)
+    Next i
+
+    Return 1
+End Function
+
+Sub VMemBlitTextWindow()
+    If g_vmem.active = 0 Then Exit Sub
+
+    Dim cellCount As Integer
+    cellCount = g_vmem.textCols * g_vmem.textRows
+
+    Dim i As Integer
+    For i = 0 To cellCount - 1
+        VMemBlitTextCell(g_vmem.textBase + CUInt(i) * 2)
+    Next i
+End Sub
