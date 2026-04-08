@@ -20,3 +20,8 @@
 - `TIMER()`
 - `TIMER(unit)` where unit in `ns, us, ms, s, min, h, day, year`
 - `TIMER(startTick, endTick, unit)`
+
+## Include/Import
+- `INCLUDE "file.bas"`
+- `IMPORT(<LANG>, "file")`
+- Supported `<LANG>` values: `C`, `CPP`, `ASM`

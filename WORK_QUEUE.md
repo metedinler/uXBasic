@@ -46,7 +46,19 @@
 - Durum: basladi
 - Gorev: ABI farklari, build matrix ve test matrix tanimlarini kod tabanina dagitmak
 - Sorumlu: Agent-Backend64
-- Cikti: plan ekleri + build/test scriptleri
+- Cikti: plan ekleri + build/test scriptleri + `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.A - Komut Kapsama Matrisi (Win11)
+- Durum: basladi
+- Gorev: Komutlari tek tek compiler isleme durumuna gore izlemek ve dalga dalga kapatmak
+- Sorumlu: Agent-Backend64
+- Cikti: `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.B - IMPORT Syntax Normalizasyonu
+- Durum: tamamlandi
+- Gorev: `IMPORT(<LANG>, "file")` formunu parsera zorunlu syntax olarak islemek
+- Sorumlu: Agent-ParserCompat
+- Cikti: `src/parser/parser/parser_stmt_decl.fbs`, `tests/manifest.csv`, `spec/LANGUAGE_CONTRACT.md`
 
 ## Sira 9 - Programci El Kitabi
 - Durum: tamamlandi

@@ -212,3 +212,24 @@
 - `build.bat src\\main.bas` sonucu: build ok.
 - `tests\\run_manifest.exe` sonucu: `Fail: 0`.
 - `src/parser` hata taramasi: hata yok.
+
+## 2026-04-08 (EK-23 IMPORT Syntax + Sira 8 Komut Matrisi)
+
+### Kod Degisikligi
+- `IMPORT` parser syntax'i normalize edildi:
+	- Yeni zorunlu format: `IMPORT(<LANG>, "file")`
+	- Uygulama: `src/parser/parser/parser_stmt_decl.fbs`
+- Manifest `IMPORT` test girdileri yeni syntax'a tasindi:
+	- `tests/manifest.csv`
+- Dil sozlesmesi guncellendi:
+	- `spec/LANGUAGE_CONTRACT.md`
+
+### Sira 8 Ilerleme (Komutlari Tek Tek Compiler'a Alma)
+- Komut kapsama izleme matrisi acildi:
+	- `tests/plan/command_compatibility_win11.csv`
+- Kuyruk guncellendi:
+	- `WORK_QUEUE.md` icine `Sira 8.A` (matris izleme) ve `Sira 8.B` (IMPORT normalizasyonu) eklendi.
+
+### Dogrulama
+- `build.bat src\\main.bas` sonucu: build ok.
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 24 / Fail 0`.
