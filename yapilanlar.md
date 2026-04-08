@@ -75,3 +75,11 @@
 - `ProgramcininElKitabi.md` olusturuldu.
 - Dosyada: 5 paragraflik giris, 3 paragraflik 5000+ kelime tarihsel hikaye, tum planlanan komut/fonksiyon ve syntax/kurallar yer aldi.
 - Plan append-only olarak guncellendi: EK-11 (cok ajanli dokumantasyon fazi).
+
+### ed79991
+- Mesaj: docs: add programmer handbook and append win64 toolchain multi-agent plan updates
+- Dosyalar:
+	- .plan.md
+	- ProgramcininElKitabi.md
+	- WORK_QUEUE.md
+	- yapilanlar.md
