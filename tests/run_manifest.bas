@@ -311,6 +311,10 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasAstKind(ps, "SETSTRINGSIZE_STMT")
         If resultOk = 0 Then detail = "missing SETSTRINGSIZE_STMT AST node"
 
+    Case "END_OK"
+        resultOk = parseOk And HasAstKind(ps, "END_STMT")
+        If resultOk = 0 Then detail = "missing END_STMT AST node"
+
     Case Else
         resultOk = parseOk
         If parseOk = 0 Then

@@ -155,6 +155,18 @@
 	- `spec/LANGUAGE_CONTRACT.md`
 	- `tests/plan/command_compatibility_win11.csv`
 
+## Sira 8.K - Program Sonlandirma Komut Dalgasi (END)
+- Durum: tamamlandi
+- Gorev: Program sonlandirma komutunu parser+AST seviyesinde compiler kapsamina almak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/parser/parser_stmt_flow.fbs`
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+	- `src/parser/parser.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `spec/LANGUAGE_CONTRACT.md`
+	- `tests/plan/command_compatibility_win11.csv`
+
 ## Sira 9 - Programci El Kitabi
 - Durum: tamamlandi
 - Gorev: tum planlanan komut/fonksiyon, kurallar ve syntax dokumani

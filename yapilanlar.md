@@ -480,3 +480,31 @@
 - `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
 	- `PASS CMP-LIB-INCLUDE-WIN11`
 	- `PASS CMP-IMP-WIN11`
+
+## 2026-04-09 (EK-33 Sira 8 Program Sonlandirma Komut Dalgasi)
+
+### Kod Degisikligi
+- END parseri eklendi:
+	- `ParseEndStmt`
+	- `src/parser/parser/parser_stmt_flow.fbs`
+- Dispatch dallari eklendi:
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+- Parser declaration listesi guncellendi:
+	- `src/parser/parser.fbs`
+
+### Test Guncellemeleri
+- Manifest satiri eklendi:
+	- `TST-END-001`
+- Runner expected etiketi eklendi:
+	- `END_OK`
+
+### Matris ve Kontrat Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komut `implemented` oldu:
+	- `END`
+- `spec/LANGUAGE_CONTRACT.md` program sonlandirma basligi ile guncellendi.
+
+### Dogrulama
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 68 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`

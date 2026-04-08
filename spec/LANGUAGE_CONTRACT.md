@@ -54,3 +54,6 @@
 - `DEFSTR rangeList`
 - `DEFBYT rangeList`
 - `SETSTRINGSIZE expr`
+
+## Program Termination
+- `END`
