@@ -14,6 +14,11 @@ Declare Function ParseIfStmt(ByRef ps As ParseState, ByRef firstTok As Token) As
 Declare Function ParseSelectStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
 Declare Function ParseForStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
 Declare Function ParseDoStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+Declare Function ParseDimStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+Declare Function ParseIncludeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+Declare Function ParseImportStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+Declare Function ParseDimDeclarator(ByRef ps As ParseState) As Integer
+Declare Function ParseDimBound(ByRef ps As ParseState) As Integer
 
 Private Function CurToken(ByRef ps As ParseState) As Token
     Return TokenListAt(ps.lx.tokens, ps.cursorIndex)
@@ -84,6 +89,10 @@ Private Function IsValidTimerUnit(ByRef unitText As String) As Integer
     End Select
 
     Return 0
+End Function
+
+Private Function IsTypeToken(ByRef tk As Token) As Integer
+    Return tk.kind = "KEYWORD" Or tk.kind = "IDENT"
 End Function
 
 Private Function ASTChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
@@ -421,6 +430,168 @@ Private Function ParseInlineStmt(ByRef ps As ParseState, ByRef firstTok As Token
     Return stmtIdx
 End Function
 
+Function ParseDimBound(ByRef ps As ParseState) As Integer
+    Dim lowerExpr As Integer
+    lowerExpr = ParseExpression(ps)
+    If lowerExpr = -1 Then Return -1
+
+    If MatchKeyword(ps, "TO") Then
+        Dim toTok As Token
+        toTok = LookToken(ps, -1)
+
+        Dim upperExpr As Integer
+        upperExpr = ParseExpression(ps)
+        If upperExpr = -1 Then
+            ps.lastError = "DIM: upper bound expected after TO"
+            Return -1
+        End If
+
+        Dim rangeNode As Integer
+        rangeNode = MakeNodeFromToken(ps, "RANGE_EXPR", "", "TO", toTok)
+        ps.ast.nodes(rangeNode).left = lowerExpr
+        ps.ast.nodes(rangeNode).right = upperExpr
+        Return rangeNode
+    End If
+
+    Return lowerExpr
+End Function
+
+Function ParseDimDeclarator(ByRef ps As ParseState) As Integer
+    Dim identTok As Token
+    identTok = CurToken(ps)
+    If identTok.kind <> "IDENT" Then
+        ps.lastError = "DIM: identifier expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim declNode As Integer
+    declNode = MakeNodeFromToken(ps, "DIM_DECL", identTok.lexeme, "", identTok)
+
+    If MatchOp(ps, "(") Then
+        Dim boundsNode As Integer
+        boundsNode = ASTNewNode(ps.ast, "DIM_BOUNDS", "", "", identTok.lineNo, identTok.colNo)
+
+        Do
+            Dim boundExpr As Integer
+            boundExpr = ParseDimBound(ps)
+            If boundExpr = -1 Then Return -1
+            ASTAddChild ps.ast, boundsNode, boundExpr
+
+            If MatchOp(ps, ",") = 0 Then Exit Do
+        Loop
+
+        If MatchOp(ps, ")") = 0 Then
+            ps.lastError = "DIM: missing ) in array bounds"
+            Return -1
+        End If
+
+        ASTAddChild ps.ast, declNode, boundsNode
+    End If
+
+    If MatchKeyword(ps, "AS") = 0 Then
+        ps.lastError = "DIM: AS expected"
+        Return -1
+    End If
+
+    Dim typeTok As Token
+    typeTok = CurToken(ps)
+    If IsTypeToken(typeTok) = 0 Then
+        ps.lastError = "DIM: type expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim typeNode As Integer
+    typeNode = MakeNodeFromToken(ps, "TYPE_REF", typeTok.lexeme, "", typeTok)
+    ASTAddChild ps.ast, declNode, typeNode
+
+    If MatchOp(ps, "=") Then
+        Dim initExpr As Integer
+        initExpr = ParseExpression(ps)
+        If initExpr = -1 Then
+            ps.lastError = "DIM: invalid initializer"
+            Return -1
+        End If
+
+        Dim initNode As Integer
+        initNode = ASTNewNode(ps.ast, "INIT_EXPR", "", "", typeTok.lineNo, typeTok.colNo)
+        ps.ast.nodes(initNode).left = initExpr
+        ASTAddChild ps.ast, declNode, initNode
+    End If
+
+    Return declNode
+End Function
+
+Function ParseDimStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim dimNode As Integer
+    dimNode = MakeNodeFromToken(ps, "DIM_STMT", "", "", firstTok)
+
+    Do
+        Dim declNode As Integer
+        declNode = ParseDimDeclarator(ps)
+        If declNode = -1 Then Return -1
+        ASTAddChild ps.ast, dimNode, declNode
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    Return dimNode
+End Function
+
+Function ParseIncludeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim includeNode As Integer
+    includeNode = MakeNodeFromToken(ps, "INCLUDE_STMT", "", "", firstTok)
+
+    Dim pathTok As Token
+    pathTok = CurToken(ps)
+    If pathTok.kind <> "STRING" Then
+        ps.lastError = "INCLUDE: path string expected"
+        Return -1
+    End If
+
+    Dim pathNode As Integer
+    pathNode = MakeNodeFromToken(ps, "STRING", pathTok.lexeme, "", pathTok)
+    ASTAddChild ps.ast, includeNode, pathNode
+    AdvanceTok ps
+
+    Return includeNode
+End Function
+
+Function ParseImportStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim langTok As Token
+    langTok = CurToken(ps)
+    If langTok.kind <> "IDENT" And langTok.kind <> "KEYWORD" Then
+        ps.lastError = "IMPORT: language expected (C|CPP|ASM)"
+        Return -1
+    End If
+
+    Dim langText As String
+    langText = UCase(langTok.lexeme)
+    If langText <> "C" And langText <> "CPP" And langText <> "ASM" Then
+        ps.lastError = "IMPORT: unsupported language (use C, CPP or ASM)"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim fileTok As Token
+    fileTok = CurToken(ps)
+    If fileTok.kind <> "STRING" Then
+        ps.lastError = "IMPORT: file path string expected"
+        Return -1
+    End If
+
+    Dim importNode As Integer
+    importNode = MakeNodeFromToken(ps, "IMPORT_STMT", "", langText, firstTok)
+
+    Dim fileNode As Integer
+    fileNode = MakeNodeFromToken(ps, "STRING", fileTok.lexeme, "", fileTok)
+    ASTAddChild ps.ast, importNode, fileNode
+    AdvanceTok ps
+
+    Return importNode
+End Function
+
 Function ParseIfStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
     Dim ifNode As Integer
     ifNode = MakeNodeFromToken(ps, "IF_STMT", "", "", firstTok)
@@ -721,6 +892,21 @@ Function ParseSimpleStatement(ByRef ps As ParseState) As Integer
     If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "DO" Then
         AdvanceTok ps
         Return ParseDoStmt(ps, tk)
+    End If
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "DIM" Then
+        AdvanceTok ps
+        Return ParseDimStmt(ps, tk)
+    End If
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "INCLUDE" Then
+        AdvanceTok ps
+        Return ParseIncludeStmt(ps, tk)
+    End If
+
+    If tk.kind = "KEYWORD" And UCase(tk.lexeme) = "IMPORT" Then
+        AdvanceTok ps
+        Return ParseImportStmt(ps, tk)
     End If
 
     If tk.kind = "IDENT" Then

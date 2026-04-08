@@ -161,3 +161,25 @@
 - `tests/manifest.csv` icine timer-range pozitif ve bad-unit negatif testleri eklendi.
 - `tests/run_manifest.bas` smoke limiti 15 satir olacak sekilde guncellendi.
 - Smoke ozeti: `Pass 15 / Fail 0`.
+
+## 2026-04-08 (EK-19 Parser/Test Fazi - Cok Ajanli)
+
+### Cok Ajanli Paralel Cikti
+- Explore alt-ajanlariyla parser ekleme noktasi ve manifest test tasarimi paralel cikartildi.
+- Ciktilar birlestirilerek minimal degisiklikli uygulama plani olusturuldu.
+
+### Kod Degisikligi
+- `src/parser/lexer.fbs`: `INCLUDE` ve `IMPORT` keyword listesine eklendi.
+- `src/parser/parser.fbs`:
+	- `DIM ... AS <tip> = <expr>` parse destegi (`DIM_STMT`, `DIM_DECL`, `INIT_EXPR`).
+	- `INCLUDE "..."` parse destegi (`INCLUDE_STMT`).
+	- `IMPORT C|CPP|ASM "..."` parse destegi (`IMPORT_STMT`).
+- `tests/manifest.csv`: DIM/INCLUDE/IMPORT pozitif-negatif testleri eklendi.
+- `tests/run_manifest.bas`:
+	- yeni expected etiketleri eklendi (`DIM_INIT_OK`, `INCLUDE_OK`, `IMPORT_OK`).
+	- smoke limiti 30'a cikarildi.
+
+### Dogrulama
+- Ortamdaki global `fbc` komutunda harici kurulum kaynakli cagrim sorunu goruldu (`qb64-dev.exe` yonlenmesi).
+- Proje-ici derleyici ile dogrulama yapildi: `tools/FreeBASIC-1.10.1-win64/fbc.exe`.
+- Smoke sonucu: `Pass 24 / Fail 0`.

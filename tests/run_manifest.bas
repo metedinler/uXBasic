@@ -155,6 +155,18 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasAstKind(ps, "DO_STMT")
         If resultOk = 0 Then detail = "missing DO_STMT AST node"
 
+    Case "DIM_INIT_OK"
+        resultOk = parseOk And HasAstKind(ps, "DIM_STMT") And HasAstKind(ps, "INIT_EXPR")
+        If resultOk = 0 Then detail = "missing DIM_STMT/INIT_EXPR AST node"
+
+    Case "INCLUDE_OK"
+        resultOk = parseOk And HasAstKind(ps, "INCLUDE_STMT")
+        If resultOk = 0 Then detail = "missing INCLUDE_STMT AST node"
+
+    Case "IMPORT_OK"
+        resultOk = parseOk And HasAstKind(ps, "IMPORT_STMT")
+        If resultOk = 0 Then detail = "missing IMPORT_STMT AST node"
+
     Case Else
         resultOk = parseOk
         If parseOk = 0 Then
@@ -216,7 +228,7 @@ Private Sub Main()
         End If
 
         If UCase(Trim(row.result)) <> "PENDING" Then Continue Do
-        If runCount >= 15 Then Exit Do
+        If runCount >= 30 Then Exit Do
 
         runCount += 1
         Dim detail As String

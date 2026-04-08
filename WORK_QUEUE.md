@@ -77,3 +77,15 @@
 - Gorev: mini release checklistini CI ciktilariyla senkron tutmak
 - Sorumlu: Agent-ReleaseInfra
 - Cikti: `release/ci_outputs.map`, `release/RELEASE_CHECKLIST.md`, `tools/release_mini.bat`
+
+## Sira 14 - EK-19 Parser ve Manifest Fazi
+- Durum: tamamlandi
+- Gorev: `DIM init`, `INCLUDE`, `IMPORT (C/CPP/ASM)` parser grammar ve smoke test kapsami
+- Sorumlu: Agent-ParserCompat
+- Cikti: `src/parser/lexer.fbs`, `src/parser/parser.fbs`, `tests/manifest.csv`, `tests/run_manifest.bas`
+
+## Sira 15 - EK-19 Resolver ve Build Entegrasyonu
+- Durum: basladi
+- Gorev: INCLUDE resolver + IMPORT build manifest/link entegrasyonu (Win11-x64)
+- Sorumlu: Agent-BuildInterop
+- Cikti: parser sonrasi dosya-cozumleyici + build baglayici katman + `CMP-*` uyumluluk artefaktlari
