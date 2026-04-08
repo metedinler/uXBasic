@@ -508,3 +508,28 @@
 - `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
 	- `PASS CMP-LIB-INCLUDE-WIN11`
 	- `PASS CMP-IMP-WIN11`
+
+## 2026-04-09 (EK-34 Sira 8 String/Trig Intrinsic Fonksiyon Dalgasi)
+
+### Kod Degisikligi
+- Intrinsic keywordleri eklendi:
+	- `LTRIM`, `RTRIM`, `STRING`, `SPACE`, `SGN`, `SQRT`, `SIN`, `COS`, `TAN`
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+- Intrinsic call arguman dogrulama genisletildi:
+	- `src/parser/parser/parser_shared.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-LTRIM-001`, `TST-RTRIM-001`, `TST-STRING-001`, `TST-SPACE-001`, `TST-SGN-001`, `TST-SQRT-001`, `TST-SIN-001`, `TST-COS-001`, `TST-TAN-001`, `TST-STRING-FAIL-001`
+- Runner expected etiketleri eklendi:
+	- `LTRIM_OK`, `RTRIM_OK`, `STRING_OK`, `SPACE_OK`, `SGN_OK`, `SQRT_OK`, `SIN_OK`, `COS_OK`, `TAN_OK`
+
+### Matris Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
+	- `LTRIM`, `RTRIM`, `STRING`, `SPACE`, `SGN`, `SQRT`, `SIN`, `COS`, `TAN`
+
+### Dogrulama
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 78 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`

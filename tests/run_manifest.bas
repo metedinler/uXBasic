@@ -303,6 +303,42 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasCallExprValue(ps, "CHR")
         If resultOk = 0 Then detail = "missing CHR call expression"
 
+    Case "LTRIM_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "LTRIM")
+        If resultOk = 0 Then detail = "missing LTRIM call expression"
+
+    Case "RTRIM_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "RTRIM")
+        If resultOk = 0 Then detail = "missing RTRIM call expression"
+
+    Case "STRING_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "STRING")
+        If resultOk = 0 Then detail = "missing STRING call expression"
+
+    Case "SPACE_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "SPACE")
+        If resultOk = 0 Then detail = "missing SPACE call expression"
+
+    Case "SGN_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "SGN")
+        If resultOk = 0 Then detail = "missing SGN call expression"
+
+    Case "SQRT_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "SQRT")
+        If resultOk = 0 Then detail = "missing SQRT call expression"
+
+    Case "SIN_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "SIN")
+        If resultOk = 0 Then detail = "missing SIN call expression"
+
+    Case "COS_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "COS")
+        If resultOk = 0 Then detail = "missing COS call expression"
+
+    Case "TAN_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "TAN")
+        If resultOk = 0 Then detail = "missing TAN call expression"
+
     Case "DEFTYPE_OK"
         resultOk = parseOk And HasAstKind(ps, "DEFTYPE_STMT")
         If resultOk = 0 Then detail = "missing DEFTYPE_STMT AST node"

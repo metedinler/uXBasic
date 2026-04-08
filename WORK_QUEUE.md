@@ -167,6 +167,16 @@
 	- `spec/LANGUAGE_CONTRACT.md`
 	- `tests/plan/command_compatibility_win11.csv`
 
+## Sira 8.L - String/Trig Intrinsic Fonksiyon Dalgasi
+- Durum: tamamlandi
+- Gorev: Ek string ve trigonometrik intrinsic fonksiyonlari parser+expr-validation seviyesinde compiler kapsamina almak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+	- `src/parser/parser/parser_shared.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `tests/plan/command_compatibility_win11.csv`
+
 ## Sira 9 - Programci El Kitabi
 - Durum: tamamlandi
 - Gorev: tum planlanan komut/fonksiyon, kurallar ve syntax dokumani
