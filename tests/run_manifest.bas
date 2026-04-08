@@ -447,6 +447,38 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasCallExprValue(ps, "PEEKD")
         If resultOk = 0 Then detail = "missing PEEKD call expression"
 
+    Case "CINT_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "CINT")
+        If resultOk = 0 Then detail = "missing CINT call expression"
+
+    Case "CLNG_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "CLNG")
+        If resultOk = 0 Then detail = "missing CLNG call expression"
+
+    Case "CDBL_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "CDBL")
+        If resultOk = 0 Then detail = "missing CDBL call expression"
+
+    Case "CSNG_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "CSNG")
+        If resultOk = 0 Then detail = "missing CSNG call expression"
+
+    Case "FIX_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "FIX")
+        If resultOk = 0 Then detail = "missing FIX call expression"
+
+    Case "SQR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "SQR")
+        If resultOk = 0 Then detail = "missing SQR call expression"
+
+    Case "RND_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "RND")
+        If resultOk = 0 Then detail = "missing RND call expression"
+
+    Case "RANDOMIZE_OK"
+        resultOk = parseOk And HasAstKind(ps, "RANDOMIZE_STMT")
+        If resultOk = 0 Then detail = "missing RANDOMIZE_STMT AST node"
+
     Case Else
         resultOk = parseOk
         If parseOk = 0 Then

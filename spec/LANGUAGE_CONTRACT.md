@@ -2,7 +2,8 @@
 
 ## Core Rules
 - QB 7.1 style syntax, strict declarations.
-- Type suffix identifiers are supported for legacy compatibility (`$`, `%`, `&`, `!`, `#`).
+- No variable/type suffix identifiers in declarations (e.g. `x$`, `n%`, `v!`).
+- Legacy intrinsic alias names are supported: `GETKEY`, `INKEY$`, `MID$`, `STR$`, `UCASE$`, `LCASE$`, `CHR$`, `STRING$`.
 - Predeclare `SUB/FUNCTION` with `DECLARE`.
 - Includes in header region.
 - Arrays are 0-based by default.
@@ -57,3 +58,21 @@
 
 ## Program Termination
 - `END`
+
+## Numeric/Cast Intrinsics (Current)
+- `CINT(expr)`
+- `CLNG(expr)`
+- `CDBL(expr)`
+- `CSNG(expr)`
+- `FIX(expr)`
+- `SQR(expr)`
+- `RND()` or `RND(expr)`
+- `RANDOMIZE [seedExpr]` statement
+
+## Memory Command Subset (Current)
+- Intrinsics: `PEEKB(addr)`, `PEEKW(addr)`, `PEEKD(addr)`
+- Statements: `POKEB addr,val`, `POKEW addr,val`, `POKED addr,val`, `MEMCOPYB src,dst,n`, `MEMFILLB addr,val,n`, `INC ident`, `DEC ident`
+- Runtime is implemented through `memory_vm` and optional AST execution path `--execmem`.
+
+## Win11 Port I/O Scope
+- Port I/O commands (`INP*`, `OUT*`) are not in Win11 profile scope.
