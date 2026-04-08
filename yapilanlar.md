@@ -100,3 +100,19 @@
 - `tests/manifest.csv` icine kontrol-akis AST testleri eklendi.
 - `tests/run_manifest.bas` AST node varlik kontrolleriyle genisletildi.
 - Son test cikisi: Run 10, Pass 10, Fail 0.
+
+### b8523e7
+- Mesaj: feat: local win64 toolchain setup and control-flow AST parser coverage
+- Dosyalar:
+	- .gitignore
+	- .plan.md
+	- README.md
+	- WORK_QUEUE.md
+	- build_64.bat
+	- src/main.bas
+	- src/parser/lexer.fbs
+	- src/parser/parser.fbs
+	- tests/manifest.csv
+	- tests/run_manifest.bas
+	- tools/setup_win64_toolchain.bat
+	- yapilanlar.md
