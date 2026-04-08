@@ -24,4 +24,26 @@
 - `tests\\run_manifest.exe` ile smoke test gecisi alindi.
 
 ## Commit Kaydi
-- Bu bolum commit atildikca hash + dosya listesi ile guncellenecek.
+
+### f130059
+- Mesaj: feat: bootstrap uXbasic with dynamic token buffer, real AST parser, and Win11 x64 roadmap
+- Dosyalar:
+	- .gitignore
+	- .plan.md
+	- README.md
+	- UBASIC031_RAPOR.md
+	- WORK_QUEUE.md
+	- build.bat
+	- build_32.bat
+	- build_64.bat
+	- build_matrix.bat
+	- spec/LANGUAGE_CONTRACT.md
+	- src/legacy/get_commands_port.fbs
+	- src/main.bas
+	- src/parser/ast.fbs
+	- src/parser/lexer.fbs
+	- src/parser/parser.fbs
+	- src/parser/token_kinds.fbs
+	- tests/manifest.csv
+	- tests/run_manifest.bas
+	- yapilanlar.md
