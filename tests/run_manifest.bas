@@ -339,6 +339,18 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasCallExprValue(ps, "TAN")
         If resultOk = 0 Then detail = "missing TAN call expression"
 
+    Case "ATN_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "ATN")
+        If resultOk = 0 Then detail = "missing ATN call expression"
+
+    Case "EXP_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "EXP")
+        If resultOk = 0 Then detail = "missing EXP call expression"
+
+    Case "LOG_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "LOG")
+        If resultOk = 0 Then detail = "missing LOG call expression"
+
     Case "INKEY_OK"
         resultOk = parseOk And HasCallExprValue(ps, "INKEY")
         If resultOk = 0 Then detail = "missing INKEY call expression"
@@ -420,7 +432,7 @@ Private Sub Main()
         End If
 
         If UCase(Trim(row.result)) <> "PENDING" Then Continue Do
-        If runCount >= 80 Then Exit Do
+        If runCount >= 120 Then Exit Do
 
         runCount += 1
         Dim detail As String

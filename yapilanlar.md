@@ -553,3 +553,30 @@
 ### Matris Guncellemesi
 - `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
 	- `INKEY`, `INKEY_LEGACY`
+
+## 2026-04-09 (EK-36 Sira 8 Math Intrinsic Fonksiyon Dalgasi)
+
+### Kod Degisikligi
+- Intrinsic keywordleri eklendi:
+	- `ATN`, `EXP`, `LOG`
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+- Intrinsic call arguman dogrulama genisletildi:
+	- `ATN(1)`, `EXP(1)`, `LOG(1)`
+	- `src/parser/parser/parser_shared.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-ATN-001`, `TST-EXP-001`, `TST-LOG-001`, `TST-ATN-FAIL-001`
+- Runner expected etiketleri eklendi:
+	- `ATN_OK`, `EXP_OK`, `LOG_OK`
+
+### Matris Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
+	- `ATN`, `EXP`, `LOG`
+
+### Dogrulama
+- `build.bat src\\main.bas` sonucu: build ok.
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 87 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`
