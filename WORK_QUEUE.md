@@ -264,3 +264,11 @@
 	- `src/parser/parser/parser_shared.fbs`
 	- `tests/manifest.csv`, `tests/run_manifest.bas`
 	- `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.O - DEF* Test Kapsami Tamamlama
+- Durum: tamamlandi
+- Gorev: `DEFSNG/DEFDBL/DEFEXT/DEFSTR/DEFBYT` komutlari icin manifest testleri ve matrix test_ref alanlarini tamamlamak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `tests/manifest.csv`
+	- `tests/plan/command_compatibility_win11.csv`

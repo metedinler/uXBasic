@@ -580,3 +580,20 @@
 - `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
 	- `PASS CMP-LIB-INCLUDE-WIN11`
 	- `PASS CMP-IMP-WIN11`
+
+## 2026-04-09 (EK-37 Sira 8 DEF* Test Kapsami Tamamlama)
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-DEFSNG-001`, `TST-DEFDBL-001`, `TST-DEFEXT-001`, `TST-DEFSTR-001`, `TST-DEFBYT-001`
+
+### Matris Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlarin `test_ref` alani gercek test id ile guncellendi:
+	- `DEFSNG`, `DEFDBL`, `DEFEXT`, `DEFSTR`, `DEFBYT`
+
+### Dogrulama
+- `build.bat src\\main.bas` sonucu: build ok.
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 92 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`
