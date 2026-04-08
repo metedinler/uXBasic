@@ -75,6 +75,14 @@ Private Function HasAstKind(ByRef ps As ParseState, ByRef nodeKind As String) As
     Return 0
 End Function
 
+Private Function HasAstKindWithOp(ByRef ps As ParseState, ByRef nodeKind As String, ByRef opText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = UCase(nodeKind) And ps.ast.nodes(i).op = opText Then Return 1
+    Next i
+    Return 0
+End Function
+
 Private Function HasCallExprValue(ByRef ps As ParseState, ByRef callName As String) As Integer
     Dim i As Integer
     For i = 0 To ps.ast.count - 1
@@ -398,6 +406,50 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
     Case "END_OK"
         resultOk = parseOk And HasAstKind(ps, "END_STMT")
         If resultOk = 0 Then detail = "missing END_STMT AST node"
+
+    Case "INC_OK"
+        resultOk = parseOk And HasAstKindWithOp(ps, "INCDEC_STMT", "++")
+        If resultOk = 0 Then detail = "missing INCDEC_STMT ++ node"
+
+    Case "DEC_OK"
+        resultOk = parseOk And HasAstKindWithOp(ps, "INCDEC_STMT", "--")
+        If resultOk = 0 Then detail = "missing INCDEC_STMT -- node"
+
+    Case "POKEB_OK"
+        resultOk = parseOk And HasAstKind(ps, "POKEB_STMT")
+        If resultOk = 0 Then detail = "missing POKEB_STMT AST node"
+
+    Case "MEMCOPYB_OK"
+        resultOk = parseOk And HasAstKind(ps, "MEMCOPYB_STMT")
+        If resultOk = 0 Then detail = "missing MEMCOPYB_STMT AST node"
+
+    Case "MEMFILLB_OK"
+        resultOk = parseOk And HasAstKind(ps, "MEMFILLB_STMT")
+        If resultOk = 0 Then detail = "missing MEMFILLB_STMT AST node"
+
+    Case "VARPTR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "VARPTR")
+        If resultOk = 0 Then detail = "missing VARPTR call expression"
+
+    Case "SADD_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "SADD")
+        If resultOk = 0 Then detail = "missing SADD call expression"
+
+    Case "CODEPTR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "CODEPTR")
+        If resultOk = 0 Then detail = "missing CODEPTR call expression"
+
+    Case "LPTR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "LPTR")
+        If resultOk = 0 Then detail = "missing LPTR call expression"
+
+    Case "PEEKB_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "PEEKB")
+        If resultOk = 0 Then detail = "missing PEEKB call expression"
+
+    Case "CPUFLAGS_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "CPUFLAGS")
+        If resultOk = 0 Then detail = "missing CPUFLAGS call expression"
 
     Case Else
         resultOk = parseOk

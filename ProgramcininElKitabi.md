@@ -66,7 +66,7 @@ Windows 11 odakli, FreeBASIC temelli yeni yapi secimi yalnizca moda bir teknoloj
 ## uXBasic Calisma Kurallari
 
 - Yazim tarzi QB 7.1 benzeri olacak, ancak strict syntax kurallari gecerlidir.
-- Sonek tip belirtecleri ($, %, &, !, #, @) strict modda kabul edilmez.
+- Sonek tip belirtecleri (`$`, `%`, `&`, `!`, `#`) legacy uyumluluk icin kabul edilir; `@` yalnizca operator olarak kullanilir.
 - SUB ve FUNCTION tanimlari once DECLARE ile bildirilmelidir.
 - Include satirlari dosyanin header bolgesinde tutulmalidir.
 - Dizi tabani varsayilan olarak 0'dan baslar.
@@ -1008,8 +1008,8 @@ Bu kategori, kodu tekrar kullanilabilir birimlere ayirir ve buyuk projelerde bak
 Komut	                        Açıklama	                    Örnek
 SUB ... END SUB	                Alt iş tanımı	                SUB Foo() ... END SUB
 FUNCTION ... END FUNCTION	    Fonksiyon tanımı	            FUNCTION Bar() AS LONG ... END FUNCTION
-ASM_SUB	                        Assembly alt iş	                ASM_SUB Foo() ... END ASM_SUB
-ASM_FUNCTION	                Assembly fonksyon	            ASM_FUNCTION Bar() AS LONG ... END ASM_FUNCTION
+ASM_SUB	                        Assembly alt iş	                ASM_SUB Foo() ... END ASM_SUB (KALDIRILDI)
+ASM_FUNCTION	                Assembly fonksyon	            ASM_FUNCTION Bar() AS LONG ... END ASM_FUNCTION (KALDIRILDI)
 DECLARE	                        Ön tanım	                    DECLARE SUB Foo()
 INLINE	                        Satır içi kod	                INLINE(ASM, "mov eax, 1")
 ```
@@ -1510,3 +1510,142 @@ Mimari secim "tek adimda buyuk yeniden yazim" yerine kontrollu buyume ilkesidir.
 Yeni komut eklerken sirayla su akisi izlemek en guvenli yoldur: once lexer keyword/operator tanimi, sonra parser node/semantik kontrolu, sonra manifest test satiri, en son runtime gerekiyorsa ilgili modul. Bu siralama "hangi degisken ne ise yariyor" sorusunu da net tutar: token degiskenleri metin cozumler, parse degiskenleri anlami kurar, runtime degiskenleri calisma zamani degerlerini tasir.
 
 Bu nedenle moduller arasi sorumluluk sinirlarini bozmak yerine her degisiklikte tek katmana odaklanmak gerekir. Ornegin bir komutun yalnizca soz dizimi eklenecekse `lexer/parser/tests` yeterlidir; sistem davranisi da gerektiriyorsa ancak o zaman `src/runtime/*` katmanina inilir.
+
+## Win11 Low-Level Gercekcilik Notu
+
+- Win11 user-mode'da asagidaki aileler kernel/surucu olmadan dogrudan donanim etkisi uretemez: `INP/OUT*`, `INT/INT16/SETVECT`, klasik anlamiyla ham `POKE*`.
+- Bu nedenle bu komutlar parser seviyesinde taninabilir olsa da runtime etkisi ancak uygun sistem katmani eklendiginde gercek olur.
+- Mevcut guvenli parser kapsami: `INC`, `DEC`, `POKEB`, `MEMCOPYB`, `MEMFILLB`, `VARPTR`, `SADD`, `CODEPTR`, `LPTR`, `PEEKB`, `CPUFLAGS`.
+
+## EK-18: uXBasic Mimari Tasarimi, Artefakt Akişi, Moduller ve Tip/Eleman Dökümü (Append-Only)
+
+### EK-18.1 Mimari Tasarim (Yuksek Seviye)
+uXBasic cekirdegi asamali derleyici modelini izler: kaynak metin -> token listesi -> soyut sozdizim agaci (AST) -> dogrulama/test -> hedef artefakt. Bu yapida lexer metni dil birimlerine ayirir, parser bu birimlerden anlamsal agac kurar, test harness bu agacin beklenen davranisa uydugunu dogrular.
+
+Mimari secim "tek adimda buyuk yeniden yazim" yerine kontrollu buyume ilkesidir. Her ozellikte once parser semantigi ve test kapisi acilir, sonra runtime/bagimli moduller eklenir; boylece Windows 11 uzerinde tekrar uretilebilir derleme ve surumleme korunur.
+
+### EK-18.2 Artefakt Akişi (Build/Test/Release Sirasi)
+1. Girdi kaynaklari: `src/*.bas`, `src/parser/*.fbs`, `src/runtime/*.fbs`, `tests/*.bas`, `tests/manifest.csv`.
+2. Derleme artefaktlari: `src/main.exe`, `src/main_32.exe`, `src/main_64.exe`, `tests/run_manifest.exe`.
+3. CI artefakti: `uxbasic-win-build-artifacts` (32/64 ana exe + manifest runner).
+4. Release stage: `dist/<tag>/` altina map'e gore adlandirilmis exe'ler + `BUILD_INFO.txt` + `SHA256SUMS.txt`.
+5. Release paketi: `dist/uxbasic-<tag>-win32-win64.zip` ve opsiyonel GitHub release yuklemesi.
+
+### EK-18.3 Modul Haritasi (Kod Akis Sirasi)
+1. `src/parser/token_kinds.fbs`: Token ve token havuzu veri yapilari.
+2. `src/parser/lexer.fbs`: Kaynak metinden token uretimi.
+3. `src/parser/ast.fbs`: AST node havuzu ve cocuk baglama yapisi.
+4. `src/parser/parser.fbs`: Token akisindan AST uretimi + semantik denetimler.
+5. `src/runtime/timer.fbs`: TIMER birim donusum runtime iskeleti.
+6. `src/legacy/get_commands_port.fbs`: Miras satir-bolme davranis portu.
+7. `src/main.bas`: Bootstrap/demonstrasyon girisi.
+8. `tests/run_manifest.bas`: Manifest tabanli smoke dogrulama kosucu.
+9. `build*.bat`, `.github/workflows/win64-ci.yml`, `tools/release_mini.bat`: build/CI/release otomasyon katmani.
+
+### EK-18.4 Tipler ve Elemanlar (Degisken Amaclariyla)
+
+#### 1) `src/parser/token_kinds.fbs`
+- `Type Token`
+    - `kind`: token sinifi (`KEYWORD`, `IDENT`, `OP`, `NUMBER`, `STRING`, `EOL`, `EOF`, `UNKNOWN`).
+    - `lexeme`: kaynakta gorulen ham/normalize metin.
+    - `lineNo`, `colNo`: hata konum raporlama bilgisi.
+- `Type TokenList`
+    - `items(Any) As Token`: dinamik token dizisi.
+    - `count`: aktif token sayisi.
+    - `capacity`: ayrilmis kapasite.
+
+#### 2) `src/parser/lexer.fbs`
+- `Type LexerState`
+    - `sourceText`: taranacak tum kaynak metin.
+    - `cursor`: anlik karakter konumu.
+    - `lineNo`, `colNo`: konum takibi.
+    - `tokens`: uretilen token havuzu.
+- Amaç: karakter seviyesinden dil birimlerine gecis yapmak ve parser icin temiz token akisi uretmek.
+
+#### 3) `src/parser/ast.fbs`
+- `Type ASTNode`
+    - `kind`: node tipi (`PROGRAM`, `BINARY`, `IF_STMT` vb.).
+    - `value`: isim/sabit gibi deger alani.
+    - `op`: operator veya node varyanti bilgisi.
+    - `lineNo`, `colNo`: kaynak konumu.
+    - `left`, `right`: ikili ifade baglantilari.
+    - `firstChild`, `nextSibling`: blok/coklu cocuk baglantilari.
+- `Type ASTPool`
+    - `nodes(Any)`: tum node deposu.
+    - `count`: aktif node sayisi.
+    - `capacity`: ayrilan node kapasitesi.
+
+#### 4) `src/parser/parser.fbs`
+- `Type ParseState`
+    - `lx`: lexer sonucu token akisi.
+    - `cursorIndex`: token indeks isaretcisi.
+    - `lastError`: son parse hata mesaji.
+    - `ast`: uretilecek AST havuzu.
+    - `rootNode`: program kok node indeksi.
+- Kritik yardimci mantiklar:
+    - `IsLegacyInlineName`: `_ASM/ASM_SUB/ASM_FUNCTION` reddi.
+    - `IsDisabledUnderscoreCommand`: `_` komut kapatma, atama/incdec istisnasi.
+    - `ValidateTimerCall`: `TIMER` arguman sayisi ve birim kontrolu.
+
+#### 5) `src/runtime/timer.fbs`
+- `TimerNormalizeUnit(unitText)`: birim adini normalize eder (`ns/us/ms/s/min/h/day/year`).
+- `TimerConvertSeconds(secondsValue, unitText)`: saniye degerini hedef birime cevirir.
+- `TimerNow(unitText="s")`: anlik zaman degerini birimde doner.
+- `TimerRange(startTick, endTick, unitText="s")`: iki tik arasi farki birimde doner.
+
+#### 6) `src/legacy/get_commands_port.fbs`
+- `LegacyGetCommands(line1, num, selectedText)`: miras satir bolme davranisini port eder.
+- Amaci: tirnak/yorum/THEN/ELSE ayrimlarini koruyarak alt-komut parcasi secmek.
+
+#### 7) `tests/run_manifest.bas`
+- `Type ManifestRow`
+    - `testId`, `feature`, `phaseName`: test kimligi ve faz bilgisi.
+    - `sourceInput`: parse edilecek kaynak satiri.
+    - `expected`: beklenen sonuc etiketi (`parse_ok`, `parse_fail`, `ast_if` vb.).
+    - `result`: satir durum alani.
+- Amaci: manifestteki test girdilerini otomatik calistirip smoke ozeti uretmek.
+
+### EK-18.5 Bir Gelistirici Icin Hizli Genisletme Rehberi
+Yeni komut eklerken sirayla su akisi izlemek en guvenli yoldur: once lexer keyword/operator tanimi, sonra parser node/semantik kontrolu, sonra manifest test satiri, en son runtime gerekiyorsa ilgili modul. Bu siralama "hangi degisken ne ise yariyor" sorusunu da net tutar: token degiskenleri metin cozumler, parse degiskenleri anlami kurar, runtime degiskenleri calisma zamani degerlerini tasir.
+
+Bu nedenle moduller arasi sorumluluk sinirlarini bozmak yerine her degisiklikte tek katmana odaklanmak gerekir. Ornegin bir komutun yalnizca soz dizimi eklenecekse `lexer/parser/tests` yeterlidir; sistem davranisi da gerektiriyorsa ancak o zaman `src/runtime/*` katmanina inilir.
+
+Basic Dilinin Calistirilabilir Ogeler listesi
+
+# Tip tablosu (type_table) — core.py içinde tanımlanabilir veya interpreter.py'ye taşınabilir
+
+"STRING"            : str,          : metin alanlarini kapsar
+"INTEGER"           : int,          : tam sayıları kapsar
+"LONG"              : int,          : uzun tam sayıları kapsar
+"SINGLE"            : float,        : tek hassasiyetli kayan nokta sayıları kapsar
+"DOUBLE"            : float,        : çift hassasiyetli kayan nokta sayıları kapsar
+"BYTE"              : int,          : bayt değerlerini kapsar
+"SHORT"             : int,          : kısa tam sayıları kapsar
+"CHAR"              : str,          : karakterleri kapsar
+"LIST"              : list,         : liste veri yapısını kapsar
+"DICT"              : dict,         : sözlük veri yapısını kapsar
+"SET"               : set,          : küme veri yapısını kapsar
+"TUPLE"             : tuple,        : demet veri yapısını kapsar
+"POINTER"           : Pointer,      : işaretçi veri yapısını kapsar
+"VOID"              : None,         : boş değerleri kapsar
+"BITFIELD"          : int           : bit alanlarını kapsar
+"NONE"              : None,         : None değerini kapsar
+"ANY"               : object,       : herhangi bir türü kapsar
+"OBJECT"            : object,       : herhangi bir veri yapisi ve degiskeni nesne olarak kabul eder, kapsar
+"NAN"               : float('nan'), : sayısal olmayan değerleri kapsar
+
+Veri Yapilari tablosu
+
+"ARRAY"             : list,         : diziler, çok boyutlu listeler
+"BARRAY"            : list,         : bayt dizileri, 8, 16, 32, 64 bitlik diziler ve string kabul eden diziler.
+"LIST"              : list,         : listeler, sıralı koleksiyonlar
+"DICT"              : dict,         : sözlükler, anahtar-değer çiftleri
+"SET"               : set,          : kümeler, benzersiz öğeler koleksiyonu
+"TUPLE"             : tuple,        : demetler, değiştirilemez sıralı koleksiyonlar
+"YAPI"              : dict,         : yapılar, anahtar-değer çiftleri (STRUCT ile eşanlamlı)
+"CLASS"             : type,         : sınıflar, nesne şablonları (statik olarak tanımlanır)
+"CLAZZ"             : type,         : sınıflar, nesne şablonları (dinamik olarak tanımlanır)
+"TYPE"              : type,         : türler, veri tipleri, basic tarzi kullanici veri yapisi, icerisine sub ile function ile metot tanimlanabilir, ancak bir class icerisinde canlanirlar) 
+"STRUCT"            : dict,         : yapılar, anahtar-değer çiftleri
+"UNION"             : dict,         : birlikler, alternatif veri yapıları
+"ENUM"              : dict,         : numaralandırmalar, sabit değerler 

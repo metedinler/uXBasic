@@ -57,3 +57,11 @@
 
 ## Program Termination
 - `END`
+
+## Win11 Low-Level Boundary Notes
+- Win11 user-mode ortaminda port I/O (`INP/OUT*`), interrupt (`INT/INT16/SETVECT`) ve dogrudan fiziksel bellek etkisi veren islemler kernel/surucu katmani olmadan gercek runtime etkisiyle calistirilamaz.
+- Bu komut aileleri parser kapsamina alinabilir; ancak kernel katmani eklenmeden runtime etkisi iddia edilmez.
+
+## Low-Level Safe Subset (Current Parser Coverage)
+- Statement parser coverage: `INC var`, `DEC var`, `POKEB addr, val`, `MEMCOPYB src, dst, n`, `MEMFILLB addr, val, n`
+- Intrinsic call coverage: `VARPTR(v)`, `SADD(text)`, `CODEPTR(sub)`, `LPTR(label)`, `PEEKB(addr)`, `CPUFLAGS()`
