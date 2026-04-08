@@ -1,0 +1,222 @@
+#include once "../src/parser/token_kinds.fbs"
+#include once "../src/parser/lexer.fbs"
+#include once "../src/parser/parser.fbs"
+
+Type ManifestRow
+    testId As String
+    feature As String
+    phaseName As String
+    sourceInput As String
+    expected As String
+    result As String
+End Type
+
+Private Sub PushField(fields() As String, ByRef count As Integer, ByRef value As String)
+    If count = 0 Then
+        ReDim fields(0)
+    Else
+        ReDim Preserve fields(count)
+    End If
+    fields(count) = value
+    count += 1
+End Sub
+
+Private Function ParseCsvLine(ByRef lineText As String, fields() As String) As Integer
+    Dim count As Integer
+    Dim current As String
+    Dim inQuotes As Integer
+    Dim i As Integer
+
+    count = 0
+    current = ""
+    inQuotes = 0
+
+    For i = 1 To Len(lineText)
+        Dim ch As String
+        ch = Mid(lineText, i, 1)
+
+        If ch = Chr(34) Then
+            If inQuotes = 1 And i > 1 And Mid(lineText, i - 1, 1) = Chr(92) Then
+                current &= ch
+            ElseIf inQuotes = 1 And i < Len(lineText) And Mid(lineText, i + 1, 1) = Chr(34) Then
+                current &= Chr(34)
+                i += 1
+            Else
+                inQuotes = 1 - inQuotes
+            End If
+        ElseIf ch = "," And inQuotes = 0 Then
+            PushField fields(), count, current
+            current = ""
+        Else
+            current &= ch
+        End If
+    Next i
+
+    PushField fields(), count, current
+    Return count
+End Function
+
+Private Function HasToken(ByRef st As LexerState, ByRef kindName As String, ByRef lexemeText As String) As Integer
+    Dim i As Integer
+    For i = 0 To st.tokens.count - 1
+        If UCase(st.tokens.items(i).kind) = UCase(kindName) Then
+            If lexemeText = "" Then Return 1
+            If st.tokens.items(i).lexeme = lexemeText Then Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+Private Function UnescapeBackslashQuote(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+
+        If ch = Chr(92) And i < Len(textIn) And Mid(textIn, i + 1, 1) = Chr(34) Then
+            outText &= Chr(34)
+            i += 1
+        Else
+            outText &= ch
+        End If
+    Next i
+
+    Return outText
+End Function
+
+Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) As Integer
+    Dim st As LexerState
+    LexerInit st, row.sourceInput
+
+    Dim ps As ParseState
+    ParserInit ps, st
+
+    Dim parseOk As Integer
+    parseOk = ParseProgram(ps)
+
+    Dim expectedUpper As String
+    expectedUpper = UCase(row.expected)
+
+    Dim resultOk As Integer
+    resultOk = 0
+
+    Select Case expectedUpper
+    Case "PARSE_OK"
+        resultOk = parseOk
+        If parseOk = 0 Then detail = ps.lastError
+
+    Case "AST_POW"
+        resultOk = parseOk And HasToken(st, "OP", "**")
+        If resultOk = 0 Then detail = "missing ** operator token"
+
+    Case "AST_PTR"
+        resultOk = parseOk And HasToken(st, "OP", "@")
+        If resultOk = 0 Then detail = "missing @ operator token"
+
+    Case "AST_INC"
+        resultOk = parseOk And HasToken(st, "OP", "++")
+        If resultOk = 0 Then detail = "missing ++ operator token"
+
+    Case "INLINE_OK"
+        resultOk = parseOk And HasToken(st, "KEYWORD", "INLINE") And HasToken(st, "KEYWORD", "END")
+        If resultOk = 0 Then detail = "missing INLINE/END token pattern"
+
+    Case "UNIT_OK"
+        resultOk = parseOk And HasToken(st, "KEYWORD", "TIMER") And HasToken(st, "STRING", "ms")
+        If resultOk = 0 Then detail = "missing TIMER or unit literal"
+
+    Case Else
+        resultOk = parseOk
+        If parseOk = 0 Then
+            detail = "unknown expected tag + parse failed: " & ps.lastError
+        Else
+            detail = "unknown expected tag treated as parse_ok"
+        End If
+    End Select
+
+    EvaluateRow = resultOk
+End Function
+
+Private Function RowFromFields(fields() As String, ByVal fieldCount As Integer, ByRef row As ManifestRow) As Integer
+    If fieldCount < 6 Then Return 0
+
+    row.testId = fields(0)
+    row.feature = fields(1)
+    row.phaseName = fields(2)
+    row.sourceInput = UnescapeBackslashQuote(fields(3))
+    row.expected = fields(4)
+    row.result = fields(5)
+    Return 1
+End Function
+
+Private Sub Main()
+    Dim manifestPath As String
+    manifestPath = "tests/manifest.csv"
+
+    Dim f As Integer
+    f = FreeFile
+    Open manifestPath For Input As #f
+
+    If Err <> 0 Then
+        Print "Cannot open manifest:"; manifestPath
+        End 2
+    End If
+
+    Dim lineText As String
+    Dim lineNo As Integer
+    Dim runCount As Integer
+    Dim passCount As Integer
+    Dim failCount As Integer
+
+    Do While Not Eof(f)
+        Line Input #f, lineText
+        lineNo += 1
+
+        If lineNo = 1 Then Continue Do
+        If Trim(lineText) = "" Then Continue Do
+
+        Dim fields(Any) As String
+        Dim fieldCount As Integer
+        fieldCount = ParseCsvLine(lineText, fields())
+
+        Dim row As ManifestRow
+        If RowFromFields(fields(), fieldCount, row) = 0 Then
+            Print "SKIP line"; lineNo; "invalid csv field count:"; fieldCount
+            Continue Do
+        End If
+
+        If UCase(Trim(row.result)) <> "PENDING" Then Continue Do
+        If runCount >= 10 Then Exit Do
+
+        runCount += 1
+        Dim detail As String
+        Dim ok As Integer
+        ok = EvaluateRow(row, detail)
+
+        If ok Then
+            passCount += 1
+            Print "PASS "; row.testId; " | "; row.feature
+        Else
+            failCount += 1
+            Print "FAIL "; row.testId; " | "; row.feature; " | "; detail
+        End If
+    Loop
+
+    Close #f
+
+    Print ""
+    Print "Manifest smoke summary"
+    Print "Run :"; runCount
+    Print "Pass:"; passCount
+    Print "Fail:"; failCount
+
+    If failCount > 0 Then
+        End 1
+    End If
+
+    End 0
+End Sub
+
+Main
