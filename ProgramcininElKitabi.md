@@ -416,6 +416,8 @@ END SUB
 
 ### Bölüm 4: uXBasic Söz Dizimi ve Denetim Akışı
 
+Windows 11 uzerinde bu komutlar once lexer/parser tarafinda token ve AST olarak dogrulanir; dogrulama gecerse derleme akisi ilerler. IF/SELECT/FOR/DO gibi komutlarin calismasi oncelikle dil kurali denetimine baglidir, isletim sistemi seviyesinde sihirli bir fark yoktur.
+
 #### 4.1 Koşullu Yürütme (IF)
 
 ```bas
@@ -502,6 +504,8 @@ yardımcı:
 
 ### Bölüm 5: Operatör Önceliği ve Matematiksel İşlemler
 
+Windows 11'de operatorler parserin oncelik agacina gore degerlendirilir; bu degerlendirme CPU'dan bagimsiz dil seviyesinde yapilir. Build 32/64 olsa da parser oncelik sirasi sabit kaldigi icin ayni kaynak ayni parse sonucunu uretmelidir.
+
 ##### 5.1 Operatör Tablosu (Yüksekten Düşüğe)
 
 ```
@@ -536,6 +540,8 @@ y *= 2                   ' y = y * 2
 ```
 
 ### Bölüm 6: Tip Sistemi Ayrıntıları
+
+Tip secimi, Windows 11'de bellek kullanimini ve olasi tasma/range etkilerini belirler; ozellikle 32/64 farkinda tamsayi-genislik kararlari kritik olur. Su anki cekirdekte tip semantigi kisitli oldugundan belgede gecen tum tiplerin runtime garantisi verilmemelidir.
 
 ####6.1 Tip Dönüşümleri (Type Coercion)
 
@@ -583,6 +589,8 @@ y = INT(x)         ' Tamam: x'in tamsayı kısmı alındı
 ```
 
 ### Bölüm 7: Giriş/Çıkış ve Ekran İşlemleri
+
+PRINT ve benzeri metin odakli akislar Windows 11 terminalinde konsol cikisi olarak ilerler; satir sonu ve kodlama davranisi terminale baglidir. Ekran kontrol komutlarinin tumu henuz modern runtime'da birebir uygulanmadigi icin bu bolum pratikte hedef davranis olarak okunmalidir.
 
 #### 7.1 Ekrana Yazma (PRINT)
 
@@ -642,6 +650,8 @@ LOOP WHILE ch$ = ""           ' Tuş basılana kadar bekle
 
 ### Bölüm 8: Dosya İşlemleri
 
+Windows 11 tarafinda dosya erisimi NTFS izin modeli ve yol kurallarina tabidir; derleyici scriptleri goreli yol kullandigi icin calisma klasoru kritik onemdedir. OPEN/GET/PUT/SEEK anlatimi dil sozlesmesidir; runtime tam uygulama kapsami adim adim genisletilmektedir.
+
 #### 8.1 Dosya Açma ve Kapama
 
 ```bas
@@ -690,6 +700,8 @@ CLOSE #1
 ```
 
 ### Bölüm 9: Alt İşler (SUB) ve Fonksiyonlar (FUNCTION)
+
+SUB/FUNCTION kaliplari parserda isim/cagri yapisi olarak temsil edilir ve AST uzerinden kontrol edilir. Windows 11'de bu davranis platformdan cok derleyici semantigine baglidir; ABI farki etkisi daha cok x64 backend asamasinda ortaya cikar.
 
 #### 9.1 Alt İş Tanımı
 
@@ -760,6 +772,8 @@ PRINT Bar()
 
 ### Bölüm 10: String (yazı) İşlemleri
 
+String komutlari Windows 11'de kodlama ve konsol yazim farklari nedeniyle gorunur sonuc uretebilir; ozellikle Turkce karakterlerde terminal/font etkisi vardir. Parser tarafi fonksiyon cagrisini tanir, ancak tum string fonksiyonlarinin runtime uyumlulugu asama asama tamamlanir.
+
 #### 10.1 String Fonksiyonları
 
 ```bas
@@ -817,6 +831,8 @@ END IF
 
 ### Bölüm 11: Matematiksel Fonksiyonlar
 
+Matematik ifadeleri once AST seviyesinde kurulur, sonra hedef derleyici tarafinda hesaplanir veya runtime cagrilarina doner. 32/64 hedefte kayan nokta tutarliligi genelde yuksek olsa da sinir deger testleri matrixte mutlaka dogrulanmalidir.
+
 #### 11.1 Temel Math
 
 ```bas
@@ -866,6 +882,8 @@ PRINT SIN(DereceRad(90))     ' 1.0
 ```
 
 ### Bölüm 12: Bellek ve Doğrudan Erişim
+
+Windows 11 korumali bellek modeli nedeniyle dogrudan adresleme komutlari dikkatli ele alinmalidir; bellek ihlalleri uygulamayi sonlandirabilir. Bu bolumdeki komutlarin cogu modern cekirdekte ileri hedef niteligindedir; guvenli kapsama adim adim alinmalidir.
 
 #### 12.1 Adresleme
 
@@ -923,6 +941,8 @@ MEMFILLD adres, sayı, değer          ' Dword doldur
 ```
 
 ### Bölüm 13: Tüm uXBasic Komutları ve Fonksiyonları
+
+Bu bolum bir ana sozluk gibidir ve komut adlarinin niyetini toplu verir; Windows 11'de fiili calisma parser/runtime destek seviyesine baglidir. Kullanimda uygulandi/planli/miras etiketlemesi yapilirsa ekip icin belirsizlik ciddi sekilde azalir.
 
 #### Kategori 1: Derleme Yönetimi (%%komutlar)
 
@@ -1275,6 +1295,8 @@ Test Et: Yazı yazdıktan sonra çeşitli girdilerle test et
 
 ### Bölüm 16: İleri Konular ve Optimizasyon
 
+INLINE blogu Windows 11'de kontrollu gecis mekanizmasi olarak kullanilir; parser INLINE ... END INLINE kalibini tanir ve legacy inline adlarini reddeder. Bu sayede eski asm kisa yol kullanimlari tek modelde toplanir ve derleyici davranisi daha ongorulebilir olur.
+
 #### 16.1 Satır İçi Assembly (INLINE)
 
 uXBasic'in en güçlü özelliklerinden biri, doğrudan x86 assembly kodu yazabilmektir:
@@ -1369,67 +1391,13 @@ Bu markdown dosyası, istenilen tüm bölümleri içermektedir:
 5. ✅ **Komutlar ve Fonksiyonlar**: Tam kategorik liste (derleme, değişken, denetim, alt iş, I/O, dosya, string, math, bellek, port, zaman)
 6. ✅ **Pratik örnekler** ve hızlı referans
 
-Çıktıyı direkt markdown dosyası şeklinde sundum, kod yazma olmaksızın.
-
----
-
-## EK-17: Durum Dogruluk Analizi (2026-04-08, Append-Only)
-
-### EK-17.1 Plan ve Kod Tabanina Gore Dogru Olanlar
-- Lexer/operator genisletmesi dogrudur: `++`, `--`, `+=`, `-=`, `*=`, `/=`, `\\=`, `=+`, `=-`, `**`, `@`, `<<`, `>>`, karsilastirma operatorleri ve temel noktalama akisi parser ile uyumludur.
-- Gercek AST havuzu dogrudur: parser artik `PROGRAM`, `PRINT_STMT`, `ASSIGN_STMT`, `INCDEC_STMT`, `INLINE_STMT`, `IF_STMT`, `SELECT_STMT`, `FOR_STMT`, `DO_STMT` gibi node'lari uretir.
-- Syntax gecis kurali dogrudur: legacy inline adlari (`_ASM`, `ASM_SUB`, `ASM_FUNCTION`) parser seviyesinde kapatildi; yeni model `INLINE ... END INLINE` olarak devam eder.
-- TIMER genisletmesi dogrudur: `TIMER()`, `TIMER(unit)`, `TIMER(start,end,unit)` imza denetimi parserda vardir; runtime iskeleti `src/runtime/timer.fbs` icine eklenmistir.
-- Build/CI/release akisi dogrudur: 32/64 matrix derleme, `win64-ci.yml`, `release_mini.bat`, `RELEASE_CHECKLIST.md` ve `ci_outputs.map` ile senkron paketleme yapisi mevcuttur.
-
-### EK-17.2 Tespit Edilen Tutarsizliklar ve Eksikler
-- Belgede bazı bolumlerde `_ASM`, `ASM_SUB`, `ASM_FUNCTION` sanki aktifmis gibi anlatiliyor; bu ifade güncel parser davranisiyla celisiyor. Guncel durum: bu formlar parse hatasi uretir.
-- Belgede `INKEY$`, `MID$`, `STR$`, `UCASE$`, `LCASE$` gibi sonekli adlar yogun geciyor; mevcut lexer/parser prototipinde sonekli adlar resmi olarak destekli degildir. Guncel test kapsami bu adlari garanti etmez.
-- Belgede DOS/port/kesme komutlari (INP/OUT/INT/SETVECT) kapsamli anlatilsa da mevcut uXBasic kod tabani bunlari henuz parser/runtime olarak uygulamis degildir; bunlarin cogu tarihsel/miras hedef tanimidir.
-- Belgede tekrarlayan paragraflar, tekrarli basliklar ve karisik eski-yeni anlatimlar var; teknik dogrulugu zorlastiriyor. (Silinmeden korunmus, append-only notu dusulmustur.)
-- Plana gore Sira 8 (Windows 11 x64 refaktor hazirligi) halen acik oldugu icin ABI odakli backend ayrimi belgede hedef olarak yazilmali; tamamlandi dili kullanilmamali.
-
-### EK-17.3 Oncelikli Yapilacaklar (Planla Uyumlu)
-- Sira 8 kapsaminda ABI farklarinin parser/semantik/codegen katmanina dagitimi netlestirilmeli (x86_32 ve x86_64 yol ayrimi).
-- Test matrix kapsamı smoke seviyesinden cikartilip negatif ve regresyon senaryolariyla genisletilmeli.
-- Belgede yer alan fakat uygulamasi olmayan komutlar icin "planli/miras" etiketi standartlastirilmali.
+.
 
 ## EK-18: Windows 11 Calisma Notlari (Bolum ve Kategori Bazli, Append-Only)
 
 ### EK-18.1 Komut Aciklayan Ana Bolumler Icin Kisa Notlar
 
-#### Bolum 4 (Soz Dizimi ve Denetim Akisi) - Windows 11 Calisma Davranisi
-Windows 11 uzerinde bu komutlar once lexer/parser tarafinda token ve AST olarak dogrulanir; dogrulama gecerse derleme akisi ilerler. Yani IF/SELECT/FOR/DO gibi komutlarin calismasi oncelikle dil kurali denetimine baglidir, isletim sistemi seviyesinde sihirli bir fark yoktur.
-
-#### Bolum 5 (Operator Onceligi) - Windows 11 Calisma Davranisi
-Windows 11'de operatorler parserin oncelik agacina gore degerlendirilir; bu degerlendirme CPU'dan bagimsiz dil seviyesinde yapilir. Build 32/64 olsa da parser oncelik sirasi sabit kaldigi icin ayni kaynak ayni parse sonucunu uretmelidir.
-
-#### Bolum 6 (Tip Sistemi) - Windows 11 Calisma Davranisi
-Tip secimi, Windows 11'de bellek kullanimini ve olasi tasma/range etkilerini belirler; ozellikle 32/64 farkinda tamsayi-genislik kararları kritik olur. Su anki cekirdekte tip semantigi kisitli oldugundan belgede gecen tum tiplerin runtime garantisi verilmemelidir.
-
-#### Bolum 7 (Giris/Cikis ve Ekran) - Windows 11 Calisma Davranisi
-PRINT ve benzeri metin odakli akislar Windows 11 terminalinde konsol cikisi olarak ilerler; satir sonu ve kodlama davranisi terminale baglidir. Ekran kontrol komutlarinin tumu henuz modern runtime'da birebir uygulanmadigi icin bu bolum pratikte "hedef davranis" olarak okunmalidir.
-
-#### Bolum 8 (Dosya Islemleri) - Windows 11 Calisma Davranisi
-Windows 11 tarafinda dosya erisimi NTFS izin modeli ve yol kurallarina tabidir; derleyici scriptleri goreli yol kullandigi icin calisma klasoru kritik onemdedir. OPEN/GET/PUT/SEEK anlatimi dil sozlesmesidir; runtime tam uygulama kapsami adim adim genisletilmektedir.
-
-#### Bolum 9 (SUB/FUNCTION) - Windows 11 Calisma Davranisi
-SUB/FUNCTION kaliplari parserda isim/cagri yapisi olarak temsil edilir ve AST uzerinden kontrol edilir. Windows 11'de bu davranis platformdan cok derleyici semantigine baglidir; ABI farki etkisi daha cok Sira 8 kapsamindaki backend asamasinda ortaya cikar.
-
-#### Bolum 10 (String Islemleri) - Windows 11 Calisma Davranisi
-String komutlari Windows 11'de kodlama (encoding) ve konsol yazim farklari nedeniyle gorunur sonuc uretebilir; ozellikle Turkce karakterlerde terminal/font etkisi vardir. Parser tarafi fonksiyon cagrisini tanir, ancak tum string fonksiyonlarinin runtime uyumlulugu asama asama tamamlanir.
-
-#### Bolum 11 (Matematik Fonksiyonlari) - Windows 11 Calisma Davranisi
-Matematik ifadeleri once AST seviyesinde kurulur, sonra hedef derleyici tarafinda hesaplanir veya runtime cagrilarina doner. 32/64 hedefte kayan nokta tutarliligi genelde yuksek olsa da sinir deger testleri matrixte mutlaka dogrulanmalidir.
-
-#### Bolum 12 (Bellek ve Dogrudan Erisim) - Windows 11 Calisma Davranisi
-Windows 11 korumali bellek modeli nedeniyle dogrudan adresleme komutlari dikkatli ele alinmalidir; bellek ihlalleri uygulamayi sonlandirabilir. Bu bolumdeki komutlarin cogu modern cekirdekte "ileri hedef" niteligindedir; guvenli kapsama adim adim alinmalidir.
-
-#### Bolum 13 (Tum Komut/Fonksiyonlar) - Windows 11 Calisma Davranisi
-Bu bolum bir ana sozluk gibidir ve komut adlarinin niyetini toplu verir; Windows 11'de fiili calisma, parser/runtime destek seviyesine baglidir. Kullanimda "uygulandi", "planli", "miras" etiketlemesi yapilirsa ekip icin belirsizlik ciddi sekilde azalir.
-
-#### Bolum 16 (Ileri Konular ve INLINE) - Windows 11 Calisma Davranisi
-INLINE blogu Windows 11'de kontrollu gecis mekanizmasi olarak kullanilir; parser `INLINE ... END INLINE` kalibini tanir ve legacy inline adlarini reddeder. Bu sayede eski asm-kisa yol kullanimlari tek modelde toplanir ve derleyici davranisi daha ongorulebilir olur.
+Bu alt bolumdeki notlar tekrar olmamasi icin ana metindeki ilgili bolumlere tasinmistir: Bolum 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 ve 16.
 
 ### EK-18.2 Kategori Bazli Kisa Notlar (Komut Gorevleri + Windows 11)
 
