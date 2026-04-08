@@ -47,3 +47,18 @@
 	- tests/manifest.csv
 	- tests/run_manifest.bas
 	- yapilanlar.md
+
+### 19da56a
+- Mesaj: docs: add commit inventory to yapilanlar
+- Dosyalar:
+	- yapilanlar.md
+
+### Release
+- Tag: v0.1.0-mini
+- Link: https://github.com/metedinler/uXBasic/releases/tag/v0.1.0-mini
+- Eklenen artefaktlar:
+	- uXbasic_main.exe
+	- uXbasic_main_32.exe
+	- uXbasic_manifest_smoke.exe
+	- uXbasic-v0.1.0-mini-win32.zip
+- Not: 64-bit derleme adimi ortamda `win64 gcc` eksikligi nedeniyle bloklandi; plan EK-9'a oncelikli madde olarak yerlestirildi.
