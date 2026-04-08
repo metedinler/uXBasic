@@ -62,3 +62,16 @@
 	- uXbasic_manifest_smoke.exe
 	- uXbasic-v0.1.0-mini-win32.zip
 - Not: 64-bit derleme adimi ortamda `win64 gcc` eksikligi nedeniyle bloklandi; plan EK-9'a oncelikli madde olarak yerlestirildi.
+
+## 2026-04-08 (Ek Calisma)
+
+### Win64 GCC Kontrol Sonucu
+- Sistemde GCC/MinGW bulundu (`x86_64-w64-mingw32-gcc` dahil).
+- FreeBASIC kurulumunda yalnizca `lib/win32` oldugu dogrulandi; `lib/win64` yok.
+- Program Files altinda yazma izni olmadigi icin global kurulum duzeyi dogrudan duzeltilemedi.
+- Plan append-only olarak guncellendi: EK-10 (win64 toolchain gercek durum ve eylem plani).
+
+### Dokumantasyon
+- `ProgramcininElKitabi.md` olusturuldu.
+- Dosyada: 5 paragraflik giris, 3 paragraflik 5000+ kelime tarihsel hikaye, tum planlanan komut/fonksiyon ve syntax/kurallar yer aldi.
+- Plan append-only olarak guncellendi: EK-11 (cok ajanli dokumantasyon fazi).

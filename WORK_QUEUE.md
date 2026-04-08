@@ -47,3 +47,15 @@
 - Gorev: ABI farklari, build matrix ve test matrix tanimlarini kod tabanina dagitmak
 - Sorumlu: Agent-Backend64
 - Cikti: plan ekleri + build/test scriptleri
+
+## Sira 9 - Programci El Kitabi
+- Durum: tamamlandi
+- Gorev: tum planlanan komut/fonksiyon, kurallar ve syntax dokumani
+- Sorumlu: Agent-Docs
+- Cikti: `ProgramcininElKitabi.md`
+
+## Sira 10 - Win64 Toolchain Tamamlama
+- Durum: basladi
+- Gorev: win64 kutuphane iceren FreeBASIC toolchain'i yazilabilir proje klasorune entegre etmek
+- Sorumlu: Agent-Toolchain
+- Cikti: green `build_64.bat` + green `build_matrix.bat`
