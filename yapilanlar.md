@@ -233,3 +233,192 @@
 ### Dogrulama
 - `build.bat src\\main.bas` sonucu: build ok.
 - `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 24 / Fail 0`.
+
+## 2026-04-08 (EK-24 Sira 8 File I/O Komut Dalgasi)
+
+### Kod Degisikligi
+- Parser I/O komut modulu eklendi:
+	- `src/parser/parser/parser_stmt_io.fbs`
+- Dispatch'e yeni komut dallari eklendi:
+	- `OPEN`, `CLOSE`, `GET`, `PUT`, `SEEK`
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+- Parser orchestrator include listesi guncellendi:
+	- `src/parser/parser.fbs`
+- Lexer operator setine `#` eklendi (BASIC file-handle uyumu):
+	- `src/parser/lexer/lexer_readers.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-OPEN-001`, `TST-CLOSE-001`, `TST-GET-001`, `TST-PUT-001`, `TST-SEEK-001`
+- Runner expected etiketleri eklendi:
+	- `OPEN_OK`, `CLOSE_OK`, `GET_OK`, `PUT_OK`, `SEEK_OK`
+
+### Dogrulama
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 29 / Fail 0`.
+- Komut kapsama matrisi guncellendi:
+	- `tests/plan/command_compatibility_win11.csv`
+
+## 2026-04-08 (EK-25 Sira 16 Resolver/Link Faz-2B)
+
+### Kod Degisikligi
+- Parser-sonrasi include/import cozumleyici ve build baglayici modulu eklendi:
+	- `src/build/interop_manifest.fbs`
+- Ana calistiriciya kaynak-dosya parametresi ve interop emit akisi eklendi:
+	- `src/main.bas`
+- CMP harness testi eklendi:
+	- `tests/run_cmp_interop.bas`
+- Resolver/link fixture seti eklendi:
+	- `tests/fixtures/interop/*`
+
+### Plan/Matris Guncellemeleri
+- `tests/plan/cmp_interop_win11.csv` eklendi.
+- `tests/plan/command_compatibility_win11.csv` icinde INCLUDE/IMPORT satirlari `parser+resolver` ve `parser+build-manifest` katmanina cekildi.
+
+### Dogrulama
+- `build.bat src\\main.bas` sonucu: build ok.
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 29 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`
+
+### Uretilen Artefaktlar
+- `dist/cmp_interop/import_build_manifest.csv`
+- `dist/cmp_interop/import_link_args.rsp`
+- `dist/cmp_interop/import_link_plan_win11.txt`
+
+## 2026-04-08 (EK-26 Sira 8 I/O UI Komut Dalgasi)
+
+### Kod Degisikligi
+- Lexer keyword tablosuna `LOF`, `EOF` eklendi:
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+- `LOF(n)`/`EOF(n)` icin tek arguman call dogrulamasi eklendi:
+	- `src/parser/parser/parser_shared.fbs`
+	- `src/parser/parser/parser_expr.fbs`
+- Ekran komut parserlari eklendi:
+	- `LOCATE`, `COLOR`, `CLS`
+	- `src/parser/parser/parser_stmt_io.fbs`
+- Dispatch dallari eklendi:
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-LOF-001`, `TST-EOF-001`, `TST-LOCATE-001`, `TST-COLOR-001`, `TST-CLS-001`
+- Runner expected etiketleri eklendi:
+	- `LOF_OK`, `EOF_OK`, `LOCATE_OK`, `COLOR_OK`, `CLS_OK`
+- Smoke run limiti 80'e cekildi:
+	- `tests/run_manifest.bas`
+
+### Matris Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
+	- `LOF`, `EOF`, `LOCATE`, `COLOR`, `CLS`
+
+## 2026-04-08 (EK-27 Sira 8 Flow Komut Dalgasi)
+
+### Kod Degisikligi
+- Flow komut parserlari eklendi:
+	- `GOTO`, `GOSUB`, `RETURN`, `EXIT`
+	- `src/parser/parser/parser_stmt_flow.fbs`
+- Dispatch dallari eklendi:
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+- Parser declaration listesi guncellendi:
+	- `src/parser/parser.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-GOTO-001`, `TST-GOSUB-001`, `TST-RETURN-001`, `TST-EXIT-001`, `TST-EXIT-FAIL-001`
+- Runner expected etiketleri eklendi:
+	- `GOTO_OK`, `GOSUB_OK`, `RETURN_OK`, `EXIT_OK`
+
+### Matris Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
+	- `GOTO`, `GOSUB`, `RETURN`, `EXIT`
+
+### Dogrulama
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 39 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`
+
+## 2026-04-08 (EK-28 Sira 8 Procedure Komut Dalgasi)
+
+### Kod Degisikligi
+- Procedure parserlari eklendi:
+	- `DECLARE`, `SUB`, `FUNCTION`
+	- `src/parser/parser/parser_stmt_decl.fbs`
+- Dispatch dallari eklendi:
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+- Parser declaration listesi guncellendi:
+	- `src/parser/parser.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-DECLARE-SUB-001`, `TST-DECLARE-FUNC-001`, `TST-SUB-001`, `TST-FUNCTION-001`, `TST-DECLARE-FAIL-001`
+- Runner expected etiketleri eklendi:
+	- `DECLARE_OK`, `SUB_OK`, `FUNCTION_OK`
+
+### Matris ve Kontrat Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
+	- `DECLARE`, `SUB`, `FUNCTION`
+- `spec/LANGUAGE_CONTRACT.md` prosedur grammar basligi ile guncellendi.
+
+### Dogrulama
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 44 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`
+
+## 2026-04-08 (EK-29 Sira 8 Tanim Komut Dalgasi)
+
+### Kod Degisikligi
+- Tanim parserlari eklendi:
+	- `CONST`, `REDIM`, `TYPE`
+	- `src/parser/parser/parser_stmt_decl.fbs`
+- Dispatch dallari eklendi:
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+- Parser declaration listesi guncellendi:
+	- `src/parser/parser.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-CONST-001`, `TST-REDIM-001`, `TST-TYPE-001`, `TST-TYPE-FAIL-001`
+- Runner expected etiketleri eklendi:
+	- `CONST_OK`, `REDIM_OK`, `TYPE_OK`
+
+### Matris ve Kontrat Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
+	- `CONST`, `REDIM`, `TYPE`
+- `spec/LANGUAGE_CONTRACT.md` type/constant grammar basligi ile guncellendi.
+
+### Dogrulama
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 48 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`
+
+## 2026-04-08 (EK-30 Sira 8 Input Komut Dalgasi)
+
+### Kod Degisikligi
+- Input parserlari eklendi:
+	- `INPUT`, `INPUT#`
+	- `src/parser/parser/parser_stmt_io.fbs`
+- Dispatch dallari eklendi:
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+- Parser declaration listesi guncellendi:
+	- `src/parser/parser.fbs`
+
+### Test Guncellemeleri
+- Manifest satirlari eklendi:
+	- `TST-INPUT-001`, `TST-INPUT-PROMPT-001`, `TST-INPUTF-001`, `TST-INPUTF-FAIL-001`
+- Runner expected etiketleri eklendi:
+	- `INPUT_OK`, `INPUT_FILE_OK`
+
+### Matris ve Kontrat Guncellemesi
+- `tests/plan/command_compatibility_win11.csv` icinde su komutlar `implemented` oldu:
+	- `INPUT`, `INPUT#`
+- `spec/LANGUAGE_CONTRACT.md` input grammar basligi ile guncellendi.
+
+### Dogrulama
+- `build.bat tests\\run_manifest.bas` + `tests\\run_manifest.exe` sonucu: `Pass 52 / Fail 0`.
+- `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
+	- `PASS CMP-LIB-INCLUDE-WIN11`
+	- `PASS CMP-IMP-WIN11`

@@ -60,6 +60,77 @@
 - Sorumlu: Agent-ParserCompat
 - Cikti: `src/parser/parser/parser_stmt_decl.fbs`, `tests/manifest.csv`, `spec/LANGUAGE_CONTRACT.md`
 
+## Sira 8.C - File I/O Komut Dalgasi (OPEN/CLOSE/GET/PUT/SEEK)
+- Durum: tamamlandi
+- Gorev: Dosya komutlarini parser+AST seviyesinde tek tek compiler kapsamina almak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/parser/parser_stmt_io.fbs`
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+	- `src/parser/parser.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.D - I/O UI Fonksiyon/Komut Dalgasi (LOF/EOF/LOCATE/COLOR/CLS)
+- Durum: tamamlandi
+- Gorev: Dosya bilgi fonksiyonlari ve ekran komutlarini parser+AST seviyesinde tek tek compiler kapsamina almak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/lexer/lexer_keyword_table.fbs`
+	- `src/parser/parser/parser_expr.fbs`
+	- `src/parser/parser/parser_shared.fbs`
+	- `src/parser/parser/parser_stmt_io.fbs`
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.E - Flow Komut Dalgasi (GOTO/GOSUB/RETURN/EXIT)
+- Durum: tamamlandi
+- Gorev: Legacy akis komutlarini parser+AST seviyesinde tek tek compiler kapsamina almak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/parser/parser_stmt_flow.fbs`
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+	- `src/parser/parser.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.F - Procedure Komut Dalgasi (DECLARE/SUB/FUNCTION)
+- Durum: tamamlandi
+- Gorev: Prosedur bildirim ve blok komutlarini parser+AST seviyesinde tek tek compiler kapsamina almak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/parser/parser_stmt_decl.fbs`
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+	- `src/parser/parser.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `spec/LANGUAGE_CONTRACT.md`
+	- `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.G - Tanim Komut Dalgasi (CONST/REDIM/TYPE)
+- Durum: tamamlandi
+- Gorev: Sabit, yeniden boyutlandirma ve custom type komutlarini parser+AST seviyesinde tek tek compiler kapsamina almak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/parser/parser_stmt_decl.fbs`
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+	- `src/parser/parser.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `spec/LANGUAGE_CONTRACT.md`
+	- `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.H - Input Komut Dalgasi (INPUT/INPUT#)
+- Durum: tamamlandi
+- Gorev: Konsol ve dosya tabanli input komutlarini parser+AST seviyesinde tek tek compiler kapsamina almak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/parser/parser_stmt_io.fbs`
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+	- `src/parser/parser.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `spec/LANGUAGE_CONTRACT.md`
+	- `tests/plan/command_compatibility_win11.csv`
+
 ## Sira 9 - Programci El Kitabi
 - Durum: tamamlandi
 - Gorev: tum planlanan komut/fonksiyon, kurallar ve syntax dokumani
@@ -117,7 +188,13 @@
 - Cikti: `src/parser/parser/parser_stmt_decl.fbs`
 
 ## Sira 16 - EK-19 Resolver/Link Faz-2B
-- Durum: basladi
+- Durum: tamamlandi
 - Gorev: parser-sonrasi INCLUDE resolver ve IMPORT build manifest/link entegrasyonu
 - Sorumlu: Agent-BuildInterop
-- Cikti: include-once resolver + build manifest baglayici + `CMP-*` uyumluluk artefaktlari
+- Cikti:
+	- `src/build/interop_manifest.fbs`
+	- `tests/run_cmp_interop.bas`
+	- `tests/fixtures/interop/*`
+	- `tests/plan/cmp_interop_win11.csv`
+	- `dist/cmp_interop/import_build_manifest.csv` (testte uretilir)
+	- `dist/cmp_interop/import_link_args.rsp` (testte uretilir)

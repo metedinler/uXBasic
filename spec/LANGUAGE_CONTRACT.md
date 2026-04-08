@@ -25,3 +25,22 @@
 - `INCLUDE "file.bas"`
 - `IMPORT(<LANG>, "file")`
 - Supported `<LANG>` values: `C`, `CPP`, `ASM`
+- `INCLUDE` is resolved post-parse with include-once semantics.
+- `INCLUDE` and `IMPORT` paths must stay within source root.
+- `IMPORT` entries are emitted to build manifest/link artifacts for Win11 flow.
+
+## Procedure Declarations
+- `DECLARE SUB Name([param [AS TYPE], ...])`
+- `DECLARE FUNCTION Name([param [AS TYPE], ...]) AS TYPE`
+- `SUB Name([param [AS TYPE], ...]) ... END SUB`
+- `FUNCTION Name([param [AS TYPE], ...]) AS TYPE ... END FUNCTION`
+
+## Type and Constant Declarations
+- `CONST Name = expr[, Name = expr ...]`
+- `REDIM Name(bounds) AS TYPE[, Name(bounds) AS TYPE ...]`
+- `TYPE Name ... END TYPE` with fields as `fieldName AS TYPE`
+
+## Input Statements
+- `INPUT target[, target ...]`
+- `INPUT promptExpr; target[, target ...]`
+- `INPUT #channelExpr, target[, target ...]`

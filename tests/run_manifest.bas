@@ -75,6 +75,14 @@ Private Function HasAstKind(ByRef ps As ParseState, ByRef nodeKind As String) As
     Return 0
 End Function
 
+Private Function HasCallExprValue(ByRef ps As ParseState, ByRef callName As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CALL_EXPR" And UCase(ps.ast.nodes(i).value) = UCase(callName) Then Return 1
+    Next i
+    Return 0
+End Function
+
 Private Function UnescapeBackslashQuote(ByRef textIn As String) As String
     Dim outText As String
     Dim i As Integer
@@ -167,6 +175,94 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasAstKind(ps, "IMPORT_STMT")
         If resultOk = 0 Then detail = "missing IMPORT_STMT AST node"
 
+    Case "OPEN_OK"
+        resultOk = parseOk And HasAstKind(ps, "OPEN_STMT")
+        If resultOk = 0 Then detail = "missing OPEN_STMT AST node"
+
+    Case "CLOSE_OK"
+        resultOk = parseOk And HasAstKind(ps, "CLOSE_STMT")
+        If resultOk = 0 Then detail = "missing CLOSE_STMT AST node"
+
+    Case "GET_OK"
+        resultOk = parseOk And HasAstKind(ps, "GET_STMT")
+        If resultOk = 0 Then detail = "missing GET_STMT AST node"
+
+    Case "PUT_OK"
+        resultOk = parseOk And HasAstKind(ps, "PUT_STMT")
+        If resultOk = 0 Then detail = "missing PUT_STMT AST node"
+
+    Case "SEEK_OK"
+        resultOk = parseOk And HasAstKind(ps, "SEEK_STMT")
+        If resultOk = 0 Then detail = "missing SEEK_STMT AST node"
+
+    Case "LOF_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "LOF")
+        If resultOk = 0 Then detail = "missing LOF call expression"
+
+    Case "EOF_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "EOF")
+        If resultOk = 0 Then detail = "missing EOF call expression"
+
+    Case "LOCATE_OK"
+        resultOk = parseOk And HasAstKind(ps, "LOCATE_STMT")
+        If resultOk = 0 Then detail = "missing LOCATE_STMT AST node"
+
+    Case "COLOR_OK"
+        resultOk = parseOk And HasAstKind(ps, "COLOR_STMT")
+        If resultOk = 0 Then detail = "missing COLOR_STMT AST node"
+
+    Case "CLS_OK"
+        resultOk = parseOk And HasAstKind(ps, "CLS_STMT")
+        If resultOk = 0 Then detail = "missing CLS_STMT AST node"
+
+    Case "GOTO_OK"
+        resultOk = parseOk And HasAstKind(ps, "GOTO_STMT")
+        If resultOk = 0 Then detail = "missing GOTO_STMT AST node"
+
+    Case "GOSUB_OK"
+        resultOk = parseOk And HasAstKind(ps, "GOSUB_STMT")
+        If resultOk = 0 Then detail = "missing GOSUB_STMT AST node"
+
+    Case "RETURN_OK"
+        resultOk = parseOk And HasAstKind(ps, "RETURN_STMT")
+        If resultOk = 0 Then detail = "missing RETURN_STMT AST node"
+
+    Case "EXIT_OK"
+        resultOk = parseOk And HasAstKind(ps, "EXIT_STMT")
+        If resultOk = 0 Then detail = "missing EXIT_STMT AST node"
+
+    Case "DECLARE_OK"
+        resultOk = parseOk And (HasAstKind(ps, "DECLARE_SUB_STMT") Or HasAstKind(ps, "DECLARE_FUNCTION_STMT"))
+        If resultOk = 0 Then detail = "missing DECLARE_* AST node"
+
+    Case "SUB_OK"
+        resultOk = parseOk And HasAstKind(ps, "SUB_STMT")
+        If resultOk = 0 Then detail = "missing SUB_STMT AST node"
+
+    Case "FUNCTION_OK"
+        resultOk = parseOk And HasAstKind(ps, "FUNCTION_STMT")
+        If resultOk = 0 Then detail = "missing FUNCTION_STMT AST node"
+
+    Case "CONST_OK"
+        resultOk = parseOk And HasAstKind(ps, "CONST_STMT") And HasAstKind(ps, "CONST_DECL")
+        If resultOk = 0 Then detail = "missing CONST_STMT/CONST_DECL AST node"
+
+    Case "REDIM_OK"
+        resultOk = parseOk And HasAstKind(ps, "REDIM_STMT")
+        If resultOk = 0 Then detail = "missing REDIM_STMT AST node"
+
+    Case "TYPE_OK"
+        resultOk = parseOk And HasAstKind(ps, "TYPE_STMT") And HasAstKind(ps, "TYPE_FIELD")
+        If resultOk = 0 Then detail = "missing TYPE_STMT/TYPE_FIELD AST node"
+
+    Case "INPUT_OK"
+        resultOk = parseOk And HasAstKind(ps, "INPUT_STMT")
+        If resultOk = 0 Then detail = "missing INPUT_STMT AST node"
+
+    Case "INPUT_FILE_OK"
+        resultOk = parseOk And HasAstKind(ps, "INPUT_FILE_STMT")
+        If resultOk = 0 Then detail = "missing INPUT_FILE_STMT AST node"
+
     Case Else
         resultOk = parseOk
         If parseOk = 0 Then
@@ -228,7 +324,7 @@ Private Sub Main()
         End If
 
         If UCase(Trim(row.result)) <> "PENDING" Then Continue Do
-        If runCount >= 30 Then Exit Do
+        If runCount >= 80 Then Exit Do
 
         runCount += 1
         Dim detail As String

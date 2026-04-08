@@ -1,0 +1,583 @@
+Type InteropIncludeEntry
+    sourceFile As String
+    includePath As String
+End Type
+
+Type InteropImportEntry
+    sourceFile As String
+    language As String
+    importPath As String
+End Type
+
+Type InteropManifest
+    includes(Any) As InteropIncludeEntry
+    includeCount As Integer
+    includeCapacity As Integer
+
+    imports(Any) As InteropImportEntry
+    importCount As Integer
+    importCapacity As Integer
+End Type
+
+Type InteropStringSet
+    items(Any) As String
+    count As Integer
+    capacity As Integer
+End Type
+
+Private Sub InteropSetInit(ByRef st As InteropStringSet)
+    st.capacity = 8
+    ReDim st.items(st.capacity - 1)
+    st.count = 0
+End Sub
+
+Private Sub InteropSetEnsure(ByRef st As InteropStringSet, ByVal minSize As Integer)
+    If st.capacity >= minSize Then Exit Sub
+
+    Dim newCap As Integer
+    newCap = st.capacity
+    If newCap < 1 Then newCap = 1
+
+    Do While newCap < minSize
+        newCap *= 2
+    Loop
+
+    ReDim Preserve st.items(newCap - 1)
+    st.capacity = newCap
+End Sub
+
+Private Function InteropSetContainsCI(ByRef st As InteropStringSet, ByRef valueText As String) As Integer
+    Dim i As Integer
+    For i = 0 To st.count - 1
+        If LCase(st.items(i)) = LCase(valueText) Then Return 1
+    Next i
+    Return 0
+End Function
+
+Private Sub InteropSetAddCI(ByRef st As InteropStringSet, ByRef valueText As String)
+    If InteropSetContainsCI(st, valueText) Then Exit Sub
+    InteropSetEnsure st, st.count + 1
+    st.items(st.count) = valueText
+    st.count += 1
+End Sub
+
+Sub InteropManifestInit(ByRef m As InteropManifest)
+    m.includeCapacity = 8
+    m.includeCount = 0
+    ReDim m.includes(m.includeCapacity - 1)
+
+    m.importCapacity = 8
+    m.importCount = 0
+    ReDim m.imports(m.importCapacity - 1)
+End Sub
+
+Private Sub InteropManifestEnsureIncludes(ByRef m As InteropManifest, ByVal minSize As Integer)
+    If m.includeCapacity >= minSize Then Exit Sub
+
+    Dim newCap As Integer
+    newCap = m.includeCapacity
+    If newCap < 1 Then newCap = 1
+
+    Do While newCap < minSize
+        newCap *= 2
+    Loop
+
+    ReDim Preserve m.includes(newCap - 1)
+    m.includeCapacity = newCap
+End Sub
+
+Private Sub InteropManifestEnsureImports(ByRef m As InteropManifest, ByVal minSize As Integer)
+    If m.importCapacity >= minSize Then Exit Sub
+
+    Dim newCap As Integer
+    newCap = m.importCapacity
+    If newCap < 1 Then newCap = 1
+
+    Do While newCap < minSize
+        newCap *= 2
+    Loop
+
+    ReDim Preserve m.imports(newCap - 1)
+    m.importCapacity = newCap
+End Sub
+
+Private Sub InteropManifestAddInclude(ByRef m As InteropManifest, ByRef sourceFile As String, ByRef includePath As String)
+    InteropManifestEnsureIncludes m, m.includeCount + 1
+    m.includes(m.includeCount).sourceFile = sourceFile
+    m.includes(m.includeCount).includePath = includePath
+    m.includeCount += 1
+End Sub
+
+Private Sub InteropManifestAddImport(ByRef m As InteropManifest, ByRef sourceFile As String, ByRef language As String, ByRef importPath As String)
+    InteropManifestEnsureImports m, m.importCount + 1
+    m.imports(m.importCount).sourceFile = sourceFile
+    m.imports(m.importCount).language = language
+    m.imports(m.importCount).importPath = importPath
+    m.importCount += 1
+End Sub
+
+Private Function PathSlashToBackslash(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        If ch = "/" Then
+            outText &= "\"
+        Else
+            outText &= ch
+        End If
+    Next i
+
+    Return outText
+End Function
+
+Private Function PathIsAbsolute(ByRef pathText As String) As Integer
+    If Len(pathText) >= 2 And Mid(pathText, 2, 1) = ":" Then Return 1
+    If Left(pathText, 1) = "\" Then Return 1
+    Return 0
+End Function
+
+Private Sub PathPartsPush(parts() As String, ByRef partCount As Integer, ByRef valueText As String)
+    If partCount = 0 Then
+        ReDim parts(0)
+    Else
+        ReDim Preserve parts(partCount)
+    End If
+    parts(partCount) = valueText
+    partCount += 1
+End Sub
+
+Private Function PathNormalize(ByRef pathIn As String) As String
+    Dim p As String
+    p = PathSlashToBackslash(pathIn)
+
+    Dim prefix As String
+    Dim rest As String
+    Dim absoluteFlag As Integer
+
+    If Len(p) >= 2 And Mid(p, 2, 1) = ":" Then
+        prefix = UCase(Left(p, 2))
+        rest = Mid(p, 3)
+        If Left(rest, 1) = "\" Then
+            absoluteFlag = 1
+            rest = Mid(rest, 2)
+        End If
+    ElseIf Left(p, 1) = "\" Then
+        prefix = "\"
+        absoluteFlag = 1
+        rest = Mid(p, 2)
+    Else
+        prefix = ""
+        absoluteFlag = 0
+        rest = p
+    End If
+
+    Dim parts(Any) As String
+    Dim partCount As Integer
+    partCount = 0
+
+    Dim cursorPos As Integer
+    cursorPos = 1
+    Do While cursorPos <= Len(rest)
+        Dim nextSlash As Integer
+        nextSlash = InStr(cursorPos, rest, "\")
+
+        Dim segment As String
+        If nextSlash = 0 Then
+            segment = Mid(rest, cursorPos)
+            cursorPos = Len(rest) + 1
+        Else
+            segment = Mid(rest, cursorPos, nextSlash - cursorPos)
+            cursorPos = nextSlash + 1
+        End If
+
+        If segment = "" Or segment = "." Then
+            ' Skip empty and current-dir segments.
+        ElseIf segment = ".." Then
+            If partCount > 0 And parts(partCount - 1) <> ".." Then
+                partCount -= 1
+            ElseIf absoluteFlag = 0 Then
+                PathPartsPush parts(), partCount, segment
+            End If
+        Else
+            PathPartsPush parts(), partCount, segment
+        End If
+    Loop
+
+    Dim body As String
+    Dim i As Integer
+    For i = 0 To partCount - 1
+        If i > 0 Then body &= "\"
+        body &= parts(i)
+    Next i
+
+    If prefix = "\" Then
+        If body = "" Then Return "\"
+        Return "\" & body
+    End If
+
+    If Len(prefix) = 2 And Mid(prefix, 2, 1) = ":" Then
+        If absoluteFlag Then
+            If body = "" Then Return prefix & "\"
+            Return prefix & "\" & body
+        Else
+            If body = "" Then Return prefix
+            Return prefix & body
+        End If
+    End If
+
+    If absoluteFlag Then
+        If body = "" Then Return "\"
+        Return "\" & body
+    End If
+
+    Return body
+End Function
+
+Private Function PathDirName(ByRef pathIn As String) As String
+    Dim p As String
+    p = PathNormalize(pathIn)
+
+    Dim i As Integer
+    For i = Len(p) To 1 Step -1
+        If Mid(p, i, 1) = "\" Then
+            If i = 1 Then Return "\"
+            Return Left(p, i - 1)
+        End If
+    Next i
+
+    Return "."
+End Function
+
+Private Function PathResolveFromSource(ByRef sourceFile As String, ByRef relativePath As String) As String
+    Dim relNorm As String
+    relNorm = PathNormalize(relativePath)
+
+    If PathIsAbsolute(relNorm) Then Return relNorm
+
+    Dim baseDir As String
+    baseDir = PathDirName(sourceFile)
+
+    Return PathNormalize(baseDir & "\" & relNorm)
+End Function
+
+Private Function PathStartsWithDir(ByRef filePath As String, ByRef rootDir As String) As Integer
+    Dim fileNorm As String
+    Dim rootNorm As String
+
+    fileNorm = LCase(PathNormalize(filePath))
+    rootNorm = LCase(PathNormalize(rootDir))
+
+    If Right(rootNorm, 1) <> "\" Then rootNorm &= "\"
+
+    If fileNorm = Left(rootNorm, Len(rootNorm) - 1) Then Return 1
+    If Left(fileNorm, Len(rootNorm)) = rootNorm Then Return 1
+
+    Return 0
+End Function
+
+Private Function FileExistsPath(ByRef pathText As String) As Integer
+    Return Dir(pathText) <> ""
+End Function
+
+Private Function ReadAllTextFile(ByRef filePath As String, ByRef textOut As String) As Integer
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Input As #f
+    If Err <> 0 Then Return 0
+
+    textOut = ""
+    Do While Not Eof(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        textOut &= lineText
+        If Not Eof(f) Then textOut &= Chr(10)
+    Loop
+
+    Close #f
+    Return 1
+End Function
+
+Private Function CollectInteropRecursive(ByRef sourceFile As String, ByRef rootDir As String, ByRef manifest As InteropManifest, ByRef parsedFiles As InteropStringSet, ByRef includeOnce As InteropStringSet, ByRef importOnce As InteropStringSet, ByRef errText As String) As Integer
+    Dim normalizedSource As String
+    normalizedSource = PathNormalize(sourceFile)
+
+    If InteropSetContainsCI(parsedFiles, normalizedSource) Then Return 1
+    InteropSetAddCI parsedFiles, normalizedSource
+
+    Dim sourceText As String
+    If ReadAllTextFile(normalizedSource, sourceText) = 0 Then
+        errText = "resolver: cannot read source file: " & normalizedSource
+        Return 0
+    End If
+
+    Dim lx As LexerState
+    LexerInit lx, sourceText
+
+    Dim ps As ParseState
+    ParserInit ps, lx
+
+    If ParseProgram(ps) = 0 Then
+        errText = "resolver: parse failed in " & normalizedSource & " => " & ps.lastError
+        Return 0
+    End If
+
+    Dim stmt As Integer
+    stmt = ps.ast.nodes(ps.rootNode).firstChild
+
+    Do While stmt <> -1
+        Dim nodeKind As String
+        nodeKind = UCase(ps.ast.nodes(stmt).kind)
+
+        If nodeKind = "INCLUDE_STMT" Then
+            Dim pathNode As Integer
+            pathNode = ps.ast.nodes(stmt).firstChild
+            If pathNode = -1 Then
+                errText = "resolver: INCLUDE missing path node"
+                Return 0
+            End If
+
+            Dim includePath As String
+            includePath = PathResolveFromSource(normalizedSource, ps.ast.nodes(pathNode).value)
+
+            If PathStartsWithDir(includePath, rootDir) = 0 Then
+                errText = "resolver: INCLUDE escapes root: " & includePath
+                Return 0
+            End If
+
+            If FileExistsPath(includePath) = 0 Then
+                errText = "resolver: INCLUDE file not found: " & includePath
+                Return 0
+            End If
+
+            If InteropSetContainsCI(includeOnce, includePath) = 0 Then
+                InteropSetAddCI includeOnce, includePath
+                InteropManifestAddInclude manifest, normalizedSource, includePath
+            End If
+
+            If CollectInteropRecursive(includePath, rootDir, manifest, parsedFiles, includeOnce, importOnce, errText) = 0 Then
+                Return 0
+            End If
+        ElseIf nodeKind = "IMPORT_STMT" Then
+            Dim importPathNode As Integer
+            importPathNode = ps.ast.nodes(stmt).firstChild
+            If importPathNode = -1 Then
+                errText = "resolver: IMPORT missing path node"
+                Return 0
+            End If
+
+            Dim lang As String
+            lang = UCase(ps.ast.nodes(stmt).op)
+
+            Dim importPath As String
+            importPath = PathResolveFromSource(normalizedSource, ps.ast.nodes(importPathNode).value)
+
+            If PathStartsWithDir(importPath, rootDir) = 0 Then
+                errText = "resolver: IMPORT escapes root: " & importPath
+                Return 0
+            End If
+
+            If FileExistsPath(importPath) = 0 Then
+                errText = "resolver: IMPORT file not found: " & importPath
+                Return 0
+            End If
+
+            Dim importKey As String
+            importKey = lang & "|" & importPath
+
+            If InteropSetContainsCI(importOnce, importKey) = 0 Then
+                InteropSetAddCI importOnce, importKey
+                InteropManifestAddImport manifest, normalizedSource, lang, importPath
+            End If
+        End If
+
+        stmt = ps.ast.nodes(stmt).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Function ResolveInteropManifestForSource(ByRef sourceFile As String, ByRef manifest As InteropManifest, ByRef errText As String) As Integer
+    InteropManifestInit manifest
+
+    Dim normalizedSource As String
+    normalizedSource = PathNormalize(sourceFile)
+
+    If FileExistsPath(normalizedSource) = 0 Then
+        errText = "resolver: source file not found: " & normalizedSource
+        Return 0
+    End If
+
+    Dim rootDir As String
+    rootDir = PathDirName(normalizedSource)
+
+    Dim parsedFiles As InteropStringSet
+    Dim includeOnce As InteropStringSet
+    Dim importOnce As InteropStringSet
+
+    InteropSetInit parsedFiles
+    InteropSetInit includeOnce
+    InteropSetInit importOnce
+
+    Return CollectInteropRecursive(normalizedSource, rootDir, manifest, parsedFiles, includeOnce, importOnce, errText)
+End Function
+
+Private Function CsvEscape(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+
+    outText = Chr(34)
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        If ch = Chr(34) Then
+            outText &= Chr(34)
+            outText &= Chr(34)
+        Else
+            outText &= ch
+        End If
+    Next i
+    outText &= Chr(34)
+
+    Return outText
+End Function
+
+Private Function SafeBaseName(ByRef pathText As String) As String
+    Dim p As String
+    p = PathNormalize(pathText)
+
+    Dim baseName As String
+    baseName = p
+
+    Dim i As Integer
+    For i = Len(p) To 1 Step -1
+        If Mid(p, i, 1) = "\" Then
+            baseName = Mid(p, i + 1)
+            Exit For
+        End If
+    Next i
+
+    Dim dotPos As Integer
+    dotPos = InStrRev(baseName, ".")
+    If dotPos > 1 Then baseName = Left(baseName, dotPos - 1)
+
+    Dim outText As String
+    For i = 1 To Len(baseName)
+        Dim ch As String
+        ch = Mid(baseName, i, 1)
+        Dim c As Integer
+        c = Asc(ch)
+        If (c >= 48 And c <= 57) Or (c >= 65 And c <= 90) Or (c >= 97 And c <= 122) Or ch = "_" Then
+            outText &= ch
+        Else
+            outText &= "_"
+        End If
+    Next i
+
+    If outText = "" Then outText = "import_unit"
+    Return outText
+End Function
+
+Private Function BuildObjectPath(ByRef outputDir As String, ByVal indexNo As Integer, ByRef importPath As String) As String
+    Dim namePart As String
+    namePart = SafeBaseName(importPath)
+    Return PathNormalize(outputDir & "\import_objs\" & LCase(Hex(indexNo, 4)) & "_" & namePart & ".o")
+End Function
+
+Private Function BuildCompileCommand(ByRef lang As String, ByRef importPath As String, ByRef objectPath As String) As String
+    Select Case UCase(lang)
+    Case "C"
+        Return "gcc -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+    Case "CPP"
+        Return "g++ -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+    Case "ASM"
+        Return "nasm -f win64 " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+    End Select
+
+    Return ""
+End Function
+
+Private Sub EnsureOutputDirs(ByRef outputDir As String)
+    MkDir "dist"
+    MkDir outputDir
+    MkDir PathNormalize(outputDir & "\import_objs")
+End Sub
+
+Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir As String, ByRef errText As String) As Integer
+    EnsureOutputDirs outputDir
+
+    Dim manifestPath As String
+    manifestPath = PathNormalize(outputDir & "\import_build_manifest.csv")
+
+    Dim linkRspPath As String
+    linkRspPath = PathNormalize(outputDir & "\import_link_args.rsp")
+
+    Dim linkPlanPath As String
+    linkPlanPath = PathNormalize(outputDir & "\import_link_plan_win11.txt")
+
+    Dim mf As Integer
+    Dim rf As Integer
+    Dim pf As Integer
+
+    mf = FreeFile
+    Open manifestPath For Output As #mf
+    If Err <> 0 Then
+        errText = "interop emit: cannot write " & manifestPath
+        Return 0
+    End If
+
+    rf = FreeFile
+    Open linkRspPath For Output As #rf
+    If Err <> 0 Then
+        Close #mf
+        errText = "interop emit: cannot write " & linkRspPath
+        Return 0
+    End If
+
+    pf = FreeFile
+    Open linkPlanPath For Output As #pf
+    If Err <> 0 Then
+        Close #rf
+        Close #mf
+        errText = "interop emit: cannot write " & linkPlanPath
+        Return 0
+    End If
+
+    Print #mf, "kind,language,source_file,resolved_path,object_path,compile_cmd,link_arg"
+
+    Dim i As Integer
+    For i = 0 To manifest.includeCount - 1
+        Print #mf, "INCLUDE,," & CsvEscape(manifest.includes(i).sourceFile) & "," & CsvEscape(manifest.includes(i).includePath) & ",,,"
+    Next i
+
+    Print #pf, "# Import compile steps"
+    Dim importCount As Integer
+    importCount = 0
+
+    For i = 0 To manifest.importCount - 1
+        importCount += 1
+
+        Dim objPath As String
+        objPath = BuildObjectPath(outputDir, importCount, manifest.imports(i).importPath)
+
+        Dim compileCmd As String
+        compileCmd = BuildCompileCommand(manifest.imports(i).language, manifest.imports(i).importPath, objPath)
+
+        Print #mf, "IMPORT," & CsvEscape(manifest.imports(i).language) & "," & CsvEscape(manifest.imports(i).sourceFile) & "," & CsvEscape(manifest.imports(i).importPath) & "," & CsvEscape(objPath) & "," & CsvEscape(compileCmd) & "," & CsvEscape(objPath)
+        Print #rf, objPath
+        Print #pf, compileCmd
+    Next i
+
+    Print #pf, ""
+    Print #pf, "# Link response file"
+    Print #pf, linkRspPath
+
+    Close #pf
+    Close #rf
+    Close #mf
+
+    Return 1
+End Function

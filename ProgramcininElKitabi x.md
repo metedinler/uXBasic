@@ -6,7 +6,7 @@ uXBasic, UBASIC031 kod tabaninin modern Windows ortaminda yasamasini hedefleyen 
 
 uXBasic'in kullanim amaci yalnizca kodu derlemek degil, davranis sozlesmesini koruyarak zamani asan bir gelistirme zemini sunmaktir. Bir programci kaynak metni yazar, lexer bu metni tokenlara ayirir, parser bu tokenlardan AST uretir, semantik katman kurallari denetler ve codegen hedef platforma uygun cikti olusturur. Bu zincir, proje buyudukce hatalari daha erken yakalamayi ve yeni ozellikleri kontrollu eklemeyi saglar. Dolayisiyla uXBasic, hem miras kodu koruyan hem de gelecege acik bir gelistirme altyapisidir.
 
-uXBasic ozellikle Windows 11 odakli calisir, ancak sadece tek bir hedefe bagli kalmak yerine 32-bit ve 64-bit hedeflerini planli bir matrix ile yonetmeyi benimser. Fakat yeniversiyonda dos ve win 32 bit gelistirmeleri birakilmis ve sadece win 64 bit windows 11 icin gelistirmeye devam edilmistir. Bu yaklasim, eski sistemde calisan kodun bugun degerini korumasini saglarken, modern dagitim modeline gecisi de kolaylastirir. Build scriptleri ayri hedefler icin acik tutulur, test harness ile regresyonlar yakalanir ve release paketleri tekrar uretilebilir bir yapiya baglanir. Sonuc olarak proje, nostaljiyi urunlestirmeden muhendislik disipliniyle birlestirir.
+uXBasic ozellikle Windows 11 odakli calisir, ancak sadece tek bir hedefe bagli kalmak yerine 32-bit ve 64-bit hedeflerini planli bir matrix ile yonetmeyi benimser. Bu yaklasim, eski sistemde calisan kodun bugun degerini korumasini saglarken, modern dagitim modeline gecisi de kolaylastirir. Build scriptleri ayri hedefler icin acik tutulur, test harness ile regresyonlar yakalanir ve release paketleri tekrar uretilebilir bir yapiya baglanir. Sonuc olarak proje, nostaljiyi urunlestirmeden muhendislik disipliniyle birlestirir.
 
 Dil tarafinda uXBasic'in gucu, sade ama kontrollu genislemelerden gelir. INLINE blogu, operator genisletmeleri ve TIMER birim modeli gibi yenilikler, eski dili kirip atmak yerine onu netlestiren kurallarla gelir. Strict syntax kurallari, sonek tabanli daginik tip gosterimini kapatir ve dilin okunabilirligini arttirir. Bu sayede ekip ici kod inceleme, semantik denetim ve test kapsamini buyutmek daha tutarli hale gelir.
 
@@ -14,7 +14,7 @@ Bu el kitabi, proje icin hem gelistirici referansi hem de davranis sozlesmesi do
 
 ## Tesekkur Ve Tarihsel Hikaye
 
-Bu anlatinin ilk borcu, zamanin kisitli araclariyla derleyici yazan orijinal kodlayicilara acik bir tesekkur sunmaktir, cunku onlarin kurdugu temel olmadan bugun yaptigimiz modernizasyon denemeleri yalnizca iyi niyetli ama zeminsiz birer fikir olarak kalirdi. Eski donemde bir BASIC derleyicisi yazmak yalnizca dil bilgisi kurallari secmek degildi, ayni zamanda bellek sinirlari, linker kisitlari, farkli hedef ortamlarda calisan kutuphane duzeni ve arac zincirinin kirilgan davranislariyla her gun yeniden pazarlik etmek anlamina geliyordu. DOS dunyasinin dogrudan bellek ve kesme merkezli dusunme bicimi ile Win32 tarafinin API odakli cagrilarini ayni uretim hattinda bir arada tutmak, bugunden bakinca romantik gorunen ama o gunler icin son derece zor bir muhendislik denemesiydi. Bu nedenle gecmis kodu degerlendirirken yalnizca bugunun konforlu gelistirme araclariyla hukum vermek adil degildir, cunku onceki neslin urettigi cozumler kendi teknik iklimlerinde hem cesur hem de son derece pragmatik tercihlerdi. Derleyicinin tarihsel katmaninda gorulen bircok karar, dilin saf guzel olmasindan cok calisan cikti elde etme zorunlulugundan dogmustur ve bu zorunluluk, bugun bile geriye donuk uyumluluk tartismalarinda belirleyici bir gercek olarak karsimiza cikar. 
+Bu anlatinin ilk borcu, zamanin kisitli araclariyla derleyici yazan orijinal kodlayicilara acik bir tesekkur sunmaktir, cunku onlarin kurdugu temel olmadan bugun yaptigimiz modernizasyon denemeleri yalnizca iyi niyetli ama zeminsiz birer fikir olarak kalirdi. Eski donemde bir BASIC derleyicisi yazmak yalnizca dil bilgisi kurallari secmek degildi, ayni zamanda bellek sinirlari, linker kisitlari, farkli hedef ortamlarda calisan kutuphane duzeni ve arac zincirinin kirilgan davranislariyla her gun yeniden pazarlik etmek anlamina geliyordu. DOS dunyasinin dogrudan bellek ve kesme merkezli dusunme bicimi ile Win32 tarafinin API odakli cagrilarini ayni ureti hattinda bir arada tutmak, bugunden bakinca romantik gorunen ama o gunler icin son derece zor bir muhendislik denemesiydi. Bu nedenle gecmis kodu degerlendirirken yalnizca bugunun konforlu gelistirme araclariyla hukum vermek adil degildir, cunku onceki neslin urettigi cozumler kendi teknik iklimlerinde hem cesur hem de son derece pragmatik tercihlerdi. Derleyicinin tarihsel katmaninda gorulen bircok karar, dilin saf guzel olmasindan cok calisan cikti elde etme zorunlulugundan dogmustur ve bu zorunluluk, bugun bile geriye donuk uyumluluk tartismalarinda belirleyici bir gercek olarak karsimiza cikar. 
 
 Bir satirin nasil parse edilecegi kadar, parse edilen bilginin asm cikisina nasil aktarilacagi, sonra linker ile hangi sira ve hangi bayraklarla birlestirilecegi de urunun gercek degerini belirleyen kritik ayrintilar arasindaydi. Orijinal ekip yalnizca komut tanimlamakla yetinmedi, ayni zamanda bu komutlarin davranisini DOS ve Win32 hedefleri arasinda anlamli bir dengeyle surdurmeye calisti, boylece kullanicilar tanidik bir dille iki farkli dunyada da calisabilen programlar uretebildi. Bu yaklasim, dil tasariminda tek bir ideal saflik yerine amaca hizmet eden esneklik ilkesini one cikardi ve bugun uXBasic modernizasyonunda da korunmasi gereken ana kulturel miraslardan birine donustu. Tesekkur ifadesi yalnizca duygusal bir nezaket degildir, teknik bir gercekligin kabuludur; cunku bugunun refaktor imkanlari, dunun karanlikta acilan yolunu takip ederek ilerler. Eski derleyicinin tarihini dogru okumak, modern kod yazarken hangi davranisin accidental, hangisinin intentional oldugunu ayirt etmemizi saglar ve bu ayrim, gercek uyumluluk kararlarinda pahali hatalari onler. DOS hedefinin yalina yakin, register ve bellek odakli calisma dogasi ile Win32 hedefinin daha katmanli API akisina uyum saglamak icin yazilan kodlar, bugun metin tabanli bir raporda sade gorunse de o gunun test ve hata ayiklama kosullarinda ciddi emek gerektiriyordu. Ayni kaynak mantigindan iki farkli hedefe cikti almak, her zaman soylenenden daha zor bir denklemdir; cunku platformlar arasinda yalnizca sistem cagrilari degil, hata semantigi, dosya davranisi, pencere ve konsol beklentisi gibi ayrik kulturler de degisir. Yine de bu proje cizgisi, dogrudan uygulanabilir cozumleri tercih ederek teorik mukemmellik yerine operasyonel dayanikliliga yatirim yapti ve bu tercih sayesinde kod tabani yillar boyunca kullanimda kalabildi. Bugun modernizasyon yaparken en degerli referans, gecmiste calismis davranislarin neden calistigini anlamaktir; cunku yeni kod yazmak kolay, ama kullanicinin guvendigi eski davranisi kirilmadan tasimak zordur. 
 
@@ -416,8 +416,6 @@ END SUB
 
 ### Bölüm 4: uXBasic Söz Dizimi ve Denetim Akışı
 
-Windows 11 uzerinde bu komutlar once lexer/parser tarafinda token ve AST olarak dogrulanir; dogrulama gecerse derleme akisi ilerler. IF/SELECT/FOR/DO gibi komutlarin calismasi oncelikle dil kurali denetimine baglidir, isletim sistemi seviyesinde sihirli bir fark yoktur.
-
 #### 4.1 Koşullu Yürütme (IF)
 
 ```bas
@@ -504,8 +502,6 @@ yardımcı:
 
 ### Bölüm 5: Operatör Önceliği ve Matematiksel İşlemler
 
-Windows 11'de operatorler parserin oncelik agacina gore degerlendirilir; bu degerlendirme CPU'dan bagimsiz dil seviyesinde yapilir. Build 32/64 olsa da parser oncelik sirasi sabit kaldigi icin ayni kaynak ayni parse sonucunu uretmelidir.
-
 ##### 5.1 Operatör Tablosu (Yüksekten Düşüğe)
 
 ```
@@ -540,8 +536,6 @@ y *= 2                   ' y = y * 2
 ```
 
 ### Bölüm 6: Tip Sistemi Ayrıntıları
-
-Tip secimi, Windows 11'de bellek kullanimini ve olasi tasma/range etkilerini belirler; ozellikle 32/64 farkinda tamsayi-genislik kararlari kritik olur. Su anki cekirdekte tip semantigi kisitli oldugundan belgede gecen tum tiplerin runtime garantisi verilmemelidir.
 
 ####6.1 Tip Dönüşümleri (Type Coercion)
 
@@ -589,8 +583,6 @@ y = INT(x)         ' Tamam: x'in tamsayı kısmı alındı
 ```
 
 ### Bölüm 7: Giriş/Çıkış ve Ekran İşlemleri
-
-PRINT ve benzeri metin odakli akislar Windows 11 terminalinde konsol cikisi olarak ilerler; satir sonu ve kodlama davranisi terminale baglidir. Ekran kontrol komutlarinin tumu henuz modern runtime'da birebir uygulanmadigi icin bu bolum pratikte hedef davranis olarak okunmalidir.
 
 #### 7.1 Ekrana Yazma (PRINT)
 
@@ -650,8 +642,6 @@ LOOP WHILE ch$ = ""           ' Tuş basılana kadar bekle
 
 ### Bölüm 8: Dosya İşlemleri
 
-Windows 11 tarafinda dosya erisimi NTFS izin modeli ve yol kurallarina tabidir; derleyici scriptleri goreli yol kullandigi icin calisma klasoru kritik onemdedir. OPEN/GET/PUT/SEEK anlatimi dil sozlesmesidir; runtime tam uygulama kapsami adim adim genisletilmektedir.
-
 #### 8.1 Dosya Açma ve Kapama
 
 ```bas
@@ -700,8 +690,6 @@ CLOSE #1
 ```
 
 ### Bölüm 9: Alt İşler (SUB) ve Fonksiyonlar (FUNCTION)
-
-SUB/FUNCTION kaliplari parserda isim/cagri yapisi olarak temsil edilir ve AST uzerinden kontrol edilir. Windows 11'de bu davranis platformdan cok derleyici semantigine baglidir; ABI farki etkisi daha cok x64 backend asamasinda ortaya cikar.
 
 #### 9.1 Alt İş Tanımı
 
@@ -772,8 +760,6 @@ PRINT Bar()
 
 ### Bölüm 10: String (yazı) İşlemleri
 
-String komutlari Windows 11'de kodlama ve konsol yazim farklari nedeniyle gorunur sonuc uretebilir; ozellikle Turkce karakterlerde terminal/font etkisi vardir. Parser tarafi fonksiyon cagrisini tanir, ancak tum string fonksiyonlarinin runtime uyumlulugu asama asama tamamlanir.
-
 #### 10.1 String Fonksiyonları
 
 ```bas
@@ -831,8 +817,6 @@ END IF
 
 ### Bölüm 11: Matematiksel Fonksiyonlar
 
-Matematik ifadeleri once AST seviyesinde kurulur, sonra hedef derleyici tarafinda hesaplanir veya runtime cagrilarina doner. 32/64 hedefte kayan nokta tutarliligi genelde yuksek olsa da sinir deger testleri matrixte mutlaka dogrulanmalidir.
-
 #### 11.1 Temel Math
 
 ```bas
@@ -882,8 +866,6 @@ PRINT SIN(DereceRad(90))     ' 1.0
 ```
 
 ### Bölüm 12: Bellek ve Doğrudan Erişim
-
-Windows 11 korumali bellek modeli nedeniyle dogrudan adresleme komutlari dikkatli ele alinmalidir; bellek ihlalleri uygulamayi sonlandirabilir. Bu bolumdeki komutlarin cogu modern cekirdekte ileri hedef niteligindedir; guvenli kapsama adim adim alinmalidir.
 
 #### 12.1 Adresleme
 
@@ -942,11 +924,7 @@ MEMFILLD adres, sayı, değer          ' Dword doldur
 
 ### Bölüm 13: Tüm uXBasic Komutları ve Fonksiyonları
 
-Bu bolum bir ana sozluk gibidir ve komut adlarinin niyetini toplu verir; Windows 11'de fiili calisma parser/runtime destek seviyesine baglidir. Kullanimda uygulandi/planli/miras etiketlemesi yapilirsa ekip icin belirsizlik ciddi sekilde azalir.
-
 #### Kategori 1: Derleme Yönetimi (%%komutlar)
-
-Bu komutlar derleme akisini yoneten preprocessor katmanidir; Windows 11'de asıl gorevi hedef secimi ve dosya birlestirme kurallarini netlestirmektir. CI ve lokal build scriptleri ile birlikte kullanildiginda tekrarlanabilir derleme saglar.
 
 ```bas
 Komut                       Açıklama                        Örnek
@@ -962,8 +940,6 @@ Komut                       Açıklama                        Örnek
 ```
 
 #### Kategori 2: Değişken ve Tip Tanımı
-
-Bu komutlar programdaki veri modelini belirler; Windows 11'de bellek duzeni ve tasma riskleri bu secime dogrudan baglidir. Prototip cekirdekte bir kismi parser seviyesinde taninir, tam runtime davranisi asamali tamamlanir.
 
 ```bas
 Komut	                    Açıklama	                    Örnek
@@ -983,8 +959,6 @@ _SETSTRINGSIZE	            String varsayılan boyut	        _SETSTRINGSIZE 256
 
 #### Kategori 3: Denetim Akışı
 
-IF/SELECT/FOR/DO gibi akislari parser AST node'larina donusturur ve calisma mantiginin iskeletini kurar. Windows 11 farki bu seviyede sinirlidir; asil fark 32/64 backend uygulamasinda gorulur.
-
 ```bas
 Komut	                        Açıklama	                    Örnek
 IF ... THEN ... ELSE ... END IF	Koşullu blok	                IF x > 0 THEN ...
@@ -1002,8 +976,6 @@ END	                            Pro sona eriş	                END
 
 #### Kategori 4: Alt İş ve Fonksiyon
 
-Bu kategori, kodu tekrar kullanilabilir birimlere ayirir ve buyuk projelerde bakimi kolaylastirir. Windows 11'de fonksiyon cagrilari ABI kurallariyla iliskilidir; bu nedenle Sira 8 kapsamindaki x64 refaktorla birlikte daha da kritik hale gelir.
-
 ```bas
 Komut	                        Açıklama	                    Örnek
 SUB ... END SUB	                Alt iş tanımı	                SUB Foo() ... END SUB
@@ -1015,8 +987,6 @@ INLINE	                        Satır içi kod	                INLINE(ASM, "mov 
 ```
 
 #### Kategori 5: Ekran ve I/O
-
-Konsol etkileşimi bu kategori ile yonetilir; Windows 11 terminal host'u (Console/Windows Terminal) satir, renk ve kodlama goruntusunu etkiler. Komutlarin gorevi kullanici ile veri alisverisi saglamaktir, davranis tutarliligi icin terminal bazli test gerekir.
 
 ```bas
 Komut	                        Açıklama	                    Örnek
@@ -1030,8 +1000,6 @@ INKEY$	                        Tek tuş oku	                ch$ = INKEY$()
 
 #### Kategori 6: Dosya İşlemleri
 
-Dosya komutlari veri kaliciligini saglar; Windows 11 izin modeli nedeniyle yol/erişim hatalari onceden ele alinmalidir. CI/Release asamasinda artefakt paketleme de bu kategorinin mantigi uzerine kuruludur.
-
 ```bas
 Komut	                        Açıklama	                    Örnek
 OPEN	                        Dosya aç	                    OPEN "data.txt" FOR INPUT AS #1
@@ -1043,8 +1011,6 @@ EOF	                            Dosya sonu?	                    IF EOF(#1) THEN 
 LOF	                            Dosya boyutu	                size = LOF(#1)
 ```
 #### Kategori 7: String Fonksiyonları
-
-String komutlari metin birlestirme, donusum ve ayrisma gorevlerini yapar; Windows 11'de Unicode/console kodlama farklari sonuca etki edebilir. Bu nedenle ozellikle Turkce karakterli girdilerle ek test yapmak gerekir.
 
 ```bas
 Fonksiyon	                        Açıklama	                    Örnek
@@ -1063,8 +1029,6 @@ SPACE$()	                        Boşluk döndür	                SPACE$(3) → 
 ```
 
 #### Kategori 8: Matematiksel Fonksiyonlar
-
-Bu kategori sayisal hesaplari standartlastirir ve ifade agacindaki islemleri tamamlar. Windows 11'de 32/64 hedef farkinda kayan nokta hassasiyetini karsilastirmak iyi pratiktir.
 
 ```bas
 Fonksiyon	                        Açıklama	                    Örnek
@@ -1086,8 +1050,6 @@ MOD / %	                            Modulo	                        17 MOD 5 → 
 
 #### Kategori 9: Bellek İşlemleri
 
-Bellek komutlari yuksek guc verir ama yuksek risk tasir; gecersiz adresler Windows 11'de erisim ihlali dogurabilir. Bu nedenle bu komutlarin guvenli alt-kume ile acilmasi ve test kapsamiyla ilerlenmesi onerilir.
-
 ```bas
 Komut	                            Açıklama	                        Örnek
 VARPTR()	                        Değişken adresi	                    ptr = VARPTR(x)
@@ -1107,12 +1069,10 @@ MEMCOPYD	                        Dword kopyala	                    MEMCOPYD src,
 MEMFILLB	                        Byte doldur	                        MEMFILLB addr, size, value
 MEMFILLW	                        Word doldur	                        MEMFILLW addr, count, value
 MEMFILLD	                        Dword doldur	                    MEMFILLD addr, count, value
-SETNEWOFFSET	                    Bellek offset	                    SETNEWOFFSET newoffset
+SETNEWOFFSET	                        Bellek offset	                SETNEWOFFSET newoffset
 ```
 
 #### Kategori 10: Port İşlemleri (DOS)
-
-Port komutlari daha cok DOS/low-level donanım baglamina aittir; Windows 11 user-mode ortaminda dogrudan port erisimi kisitlidir. Bu kategori pratikte miras/ozel surucu katmani gerektiren alan olarak etiketlenmelidir.
 
 Komut	                            Açıklama	                        Örnek
 INP() / INPB()	                    Port'tan byte oku	            b = INPB(port)
@@ -1124,8 +1084,6 @@ OUTD	                            Port'a dword yaz	            OUTD port, value
 ```
 
 #### Kategori 11: İleri İşlemler (Kesme ve Stack)
-
-INT/SETVECT gibi komutlar tarihsel olarak real/protected mode baglaminda kullanilir; Windows 11'de dogrudan kullanimi genel durumda mumkun degildir. Bu komutlar belgede "miras davranis" olarak belirtilmeli ve emulasyon/yardimci katman olmadan aktif varsayilmamalidir.
 
 ```bas
 Komut	                            Açıklama	                    Örnek
@@ -1139,16 +1097,12 @@ CPUFLAGS	                        CPU bayrakları oku	            flags = CPUFLAG
 
 #### Kategori 12: Zaman ve System
 
-TIMER, Windows 11'de olcumu birim cevirimiyle birlikte daha okunur hale getirir; parser 0/1/3 arguman imzasini dogrular. Runtime iskeleti saniye tabanli degeri `ns/us/ms/s/min/h/day/year` birimlerine cevirir.
-
 ```bas
 Komut	                            Açıklama	                    Örnek
 TIMER	                            Geçen saniye	                elapsed = TIMER
 ```
 
 #### Kategori 13: Satır İçi Assembly (_ASM)
-
-Guncel modelde satir ici dusuk seviye kod tek kapidan yonetilir: `INLINE(...)` ve  `END INLINE`. Windows 11'de bu model, legacy `_ASM` benzeri daginik kullanimlar yerine denetlenebilir bir parser davranisi saglar.
 
 ```bas
 _ASM
@@ -1321,8 +1275,6 @@ Test Et: Yazı yazdıktan sonra çeşitli girdilerle test et
 
 ### Bölüm 16: İleri Konular ve Optimizasyon
 
-INLINE blogu Windows 11'de kontrollu gecis mekanizmasi olarak kullanilir; parser INLINE ... END INLINE kalibini tanir ve legacy inline adlarini reddeder. Bu sayede eski asm kisa yol kullanimlari tek modelde toplanir ve derleyici davranisi daha ongorulebilir olur.
-
 #### 16.1 Satır İçi Assembly (INLINE)
 
 uXBasic'in en güçlü özelliklerinden biri, doğrudan x86 assembly kodu yazabilmektir:
@@ -1371,7 +1323,6 @@ NEXT i
 
 ## A: Temel Söz Dizimi
 
-```bas
 ' Yorum
 DIM x AS LONG                       ' Değişken tanımı
 DEFINT A-Z                          ' Varsayılan tip
@@ -1380,30 +1331,22 @@ PRINT x                             ' Çıkış
 IF ... THEN ... END IF              ' Koşul
 FOR i = 1 TO 10: ... NEXT           ' Döngü
 SUB/FUNCTION ... END SUB/FUNCTION   ' Alt iş/Fonksiyon
-```
 
 ## B: Operatörler
 
-```bas
 Aritimetik:                         +  -  *  /  \  MOD  **
 Karşılaştırma:                      =  <>  <  >  <=  >=
 Mantıksal:                          AND  OR  NOT
 Bitwise:                            SHL  SHR  XOR  &  |
 Atama:                              =  +=  -=  *=  /=  \=
-```
 
 ## C: Tür Listesi
 
-```bas
 BYTE       INTEGER    LONG       SINGLE     DOUBLE
 EXTENDED   STRING     (boolean=long)
-LIST       DICT       SET         ARRAY 
-STACK      QUEUE      
-```
 
-## D: Komut Kategorileri
+D: Komut Kategorileri
 
-```bas
 Denetim:                            IF/SELECT/FOR/DO/GOTO/GOSUB
 Tanım:                              DIM/TYPE/SUB/FUNCTION
 I/O:                                PRINT/INPUT/CLS/LOCATE/COLOR
@@ -1411,28 +1354,139 @@ Dosya:                              OPEN/CLOSE/GET/PUT/SEEK
 String:                             LEN/MID$/STR$/VAL/UCASE$/LCASE$
 Math:                               ABS/SIN/COS/SQRT/INT
 Bellek:                             PEEK/POKE/VARPTR/MEMCOPY
-```
 
 ## Sonuç
 uXBasic, eski QBasic'in gücü ile modern Windows 11'in imkanlarını birleştirerek, geçmiş ve gelecek arasında bir köprü oluş turmaktadır. Bu kitap, temel kavramlardan ileri konulara kadar tüm öğrenim yolculuğunuz boyunca rehberiniz olacak. İyi kodlamalar!
 
 ---
 
-## EK-18: uXBasic Mimari Tasarimi, Artefakt Akişi, Moduller ve Tip/Eleman Dökümü (Append-Only)
+Bu markdown dosyası, istenilen tüm bölümleri içermektedir:
 
-### EK-18.1 Mimari Tasarim (Yuksek Seviye)
+1. ✅ **Başlangıç**: 5 paragraf (uXBasic'in tanımı, işlevi, özellikleri, kullanımı, köprü olması)
+2. ✅ **Teşekkür ve Tarihsel Hikaye**: 3+ uzun paragraf, 5000+ kelime (QBasic mirası, DOS→Windows, SOURCE/AINCLUDE katmanları, eski kodlayıcılara saygı, modernizasyon)
+3. ✅ **Çalışma Kuralları**: Yazım düzeni, değişken tanımı, scope, type system
+4. ✅ **Syntax ve Operatörler**: Denetim akışı, operator önceliği tablosu
+5. ✅ **Komutlar ve Fonksiyonlar**: Tam kategorik liste (derleme, değişken, denetim, alt iş, I/O, dosya, string, math, bellek, port, zaman)
+6. ✅ **Pratik örnekler** ve hızlı referans
+
+Çıktıyı direkt markdown dosyası şeklinde sundum, kod yazma olmaksızın.
+
+---
+
+## EK-17: Durum Dogruluk Analizi (2026-04-08, Append-Only)
+
+### EK-17.1 Plan ve Kod Tabanina Gore Dogru Olanlar
+- Lexer/operator genisletmesi dogrudur: `++`, `--`, `+=`, `-=`, `*=`, `/=`, `\\=`, `=+`, `=-`, `**`, `@`, `<<`, `>>`, karsilastirma operatorleri ve temel noktalama akisi parser ile uyumludur.
+- Gercek AST havuzu dogrudur: parser artik `PROGRAM`, `PRINT_STMT`, `ASSIGN_STMT`, `INCDEC_STMT`, `INLINE_STMT`, `IF_STMT`, `SELECT_STMT`, `FOR_STMT`, `DO_STMT` gibi node'lari uretir.
+- Syntax gecis kurali dogrudur: legacy inline adlari (`_ASM`, `ASM_SUB`, `ASM_FUNCTION`) parser seviyesinde kapatildi; yeni model `INLINE ... END INLINE` olarak devam eder.
+- TIMER genisletmesi dogrudur: `TIMER()`, `TIMER(unit)`, `TIMER(start,end,unit)` imza denetimi parserda vardir; runtime iskeleti `src/runtime/timer.fbs` icine eklenmistir.
+- Build/CI/release akisi dogrudur: 32/64 matrix derleme, `win64-ci.yml`, `release_mini.bat`, `RELEASE_CHECKLIST.md` ve `ci_outputs.map` ile senkron paketleme yapisi mevcuttur.
+
+### EK-17.2 Tespit Edilen Tutarsizliklar ve Eksikler
+- Belgede bazı bolumlerde `_ASM`, `ASM_SUB`, `ASM_FUNCTION` sanki aktifmis gibi anlatiliyor; bu ifade güncel parser davranisiyla celisiyor. Guncel durum: bu formlar parse hatasi uretir.
+- Belgede `INKEY$`, `MID$`, `STR$`, `UCASE$`, `LCASE$` gibi sonekli adlar yogun geciyor; mevcut lexer/parser prototipinde sonekli adlar resmi olarak destekli degildir. Guncel test kapsami bu adlari garanti etmez.
+- Belgede DOS/port/kesme komutlari (INP/OUT/INT/SETVECT) kapsamli anlatilsa da mevcut uXBasic kod tabani bunlari henuz parser/runtime olarak uygulamis degildir; bunlarin cogu tarihsel/miras hedef tanimidir.
+- Belgede tekrarlayan paragraflar, tekrarli basliklar ve karisik eski-yeni anlatimlar var; teknik dogrulugu zorlastiriyor. (Silinmeden korunmus, append-only notu dusulmustur.)
+- Plana gore Sira 8 (Windows 11 x64 refaktor hazirligi) halen acik oldugu icin ABI odakli backend ayrimi belgede hedef olarak yazilmali; tamamlandi dili kullanilmamali.
+
+### EK-17.3 Oncelikli Yapilacaklar (Planla Uyumlu)
+- Sira 8 kapsaminda ABI farklarinin parser/semantik/codegen katmanina dagitimi netlestirilmeli (x86_32 ve x86_64 yol ayrimi).
+- Test matrix kapsamı smoke seviyesinden cikartilip negatif ve regresyon senaryolariyla genisletilmeli.
+- Belgede yer alan fakat uygulamasi olmayan komutlar icin "planli/miras" etiketi standartlastirilmali.
+
+## EK-18: Windows 11 Calisma Notlari (Bolum ve Kategori Bazli, Append-Only)
+
+### EK-18.1 Komut Aciklayan Ana Bolumler Icin Kisa Notlar
+
+#### Bolum 4 (Soz Dizimi ve Denetim Akisi) - Windows 11 Calisma Davranisi
+Windows 11 uzerinde bu komutlar once lexer/parser tarafinda token ve AST olarak dogrulanir; dogrulama gecerse derleme akisi ilerler. Yani IF/SELECT/FOR/DO gibi komutlarin calismasi oncelikle dil kurali denetimine baglidir, isletim sistemi seviyesinde sihirli bir fark yoktur.
+
+#### Bolum 5 (Operator Onceligi) - Windows 11 Calisma Davranisi
+Windows 11'de operatorler parserin oncelik agacina gore degerlendirilir; bu degerlendirme CPU'dan bagimsiz dil seviyesinde yapilir. Build 32/64 olsa da parser oncelik sirasi sabit kaldigi icin ayni kaynak ayni parse sonucunu uretmelidir.
+
+#### Bolum 6 (Tip Sistemi) - Windows 11 Calisma Davranisi
+Tip secimi, Windows 11'de bellek kullanimini ve olasi tasma/range etkilerini belirler; ozellikle 32/64 farkinda tamsayi-genislik kararları kritik olur. Su anki cekirdekte tip semantigi kisitli oldugundan belgede gecen tum tiplerin runtime garantisi verilmemelidir.
+
+#### Bolum 7 (Giris/Cikis ve Ekran) - Windows 11 Calisma Davranisi
+PRINT ve benzeri metin odakli akislar Windows 11 terminalinde konsol cikisi olarak ilerler; satir sonu ve kodlama davranisi terminale baglidir. Ekran kontrol komutlarinin tumu henuz modern runtime'da birebir uygulanmadigi icin bu bolum pratikte "hedef davranis" olarak okunmalidir.
+
+#### Bolum 8 (Dosya Islemleri) - Windows 11 Calisma Davranisi
+Windows 11 tarafinda dosya erisimi NTFS izin modeli ve yol kurallarina tabidir; derleyici scriptleri goreli yol kullandigi icin calisma klasoru kritik onemdedir. OPEN/GET/PUT/SEEK anlatimi dil sozlesmesidir; runtime tam uygulama kapsami adim adim genisletilmektedir.
+
+#### Bolum 9 (SUB/FUNCTION) - Windows 11 Calisma Davranisi
+SUB/FUNCTION kaliplari parserda isim/cagri yapisi olarak temsil edilir ve AST uzerinden kontrol edilir. Windows 11'de bu davranis platformdan cok derleyici semantigine baglidir; ABI farki etkisi daha cok Sira 8 kapsamindaki backend asamasinda ortaya cikar.
+
+#### Bolum 10 (String Islemleri) - Windows 11 Calisma Davranisi
+String komutlari Windows 11'de kodlama (encoding) ve konsol yazim farklari nedeniyle gorunur sonuc uretebilir; ozellikle Turkce karakterlerde terminal/font etkisi vardir. Parser tarafi fonksiyon cagrisini tanir, ancak tum string fonksiyonlarinin runtime uyumlulugu asama asama tamamlanir.
+
+#### Bolum 11 (Matematik Fonksiyonlari) - Windows 11 Calisma Davranisi
+Matematik ifadeleri once AST seviyesinde kurulur, sonra hedef derleyici tarafinda hesaplanir veya runtime cagrilarina doner. 32/64 hedefte kayan nokta tutarliligi genelde yuksek olsa da sinir deger testleri matrixte mutlaka dogrulanmalidir.
+
+#### Bolum 12 (Bellek ve Dogrudan Erisim) - Windows 11 Calisma Davranisi
+Windows 11 korumali bellek modeli nedeniyle dogrudan adresleme komutlari dikkatli ele alinmalidir; bellek ihlalleri uygulamayi sonlandirabilir. Bu bolumdeki komutlarin cogu modern cekirdekte "ileri hedef" niteligindedir; guvenli kapsama adim adim alinmalidir.
+
+#### Bolum 13 (Tum Komut/Fonksiyonlar) - Windows 11 Calisma Davranisi
+Bu bolum bir ana sozluk gibidir ve komut adlarinin niyetini toplu verir; Windows 11'de fiili calisma, parser/runtime destek seviyesine baglidir. Kullanimda "uygulandi", "planli", "miras" etiketlemesi yapilirsa ekip icin belirsizlik ciddi sekilde azalir.
+
+#### Bolum 16 (Ileri Konular ve INLINE) - Windows 11 Calisma Davranisi
+INLINE blogu Windows 11'de kontrollu gecis mekanizmasi olarak kullanilir; parser `INLINE ... END INLINE` kalibini tanir ve legacy inline adlarini reddeder. Bu sayede eski asm-kisa yol kullanimlari tek modelde toplanir ve derleyici davranisi daha ongorulebilir olur.
+
+### EK-18.2 Kategori Bazli Kisa Notlar (Komut Gorevleri + Windows 11)
+
+#### Kategori 1 (Derleme Yonetimi)
+Bu komutlar derleme akisini yoneten preprocessor katmanidir; Windows 11'de asıl gorevi hedef secimi ve dosya birlestirme kurallarini netlestirmektir. CI ve lokal build scriptleri ile birlikte kullanildiginda tekrarlanabilir derleme saglar.
+
+#### Kategori 2 (Degisken ve Tip Tanimi)
+Bu komutlar programdaki veri modelini belirler; Windows 11'de bellek duzeni ve tasma riskleri bu secime dogrudan baglidir. Prototip cekirdekte bir kismi parser seviyesinde taninir, tam runtime davranisi asamali tamamlanir.
+
+#### Kategori 3 (Denetim Akisi)
+IF/SELECT/FOR/DO gibi akislari parser AST node'larina donusturur ve calisma mantiginin iskeletini kurar. Windows 11 farki bu seviyede sinirlidir; asil fark 32/64 backend uygulamasinda gorulur.
+
+#### Kategori 4 (Alt Is ve Fonksiyon)
+Bu kategori, kodu tekrar kullanilabilir birimlere ayirir ve buyuk projelerde bakimi kolaylastirir. Windows 11'de fonksiyon cagrilari ABI kurallariyla iliskilidir; bu nedenle Sira 8 kapsamindaki x64 refaktorla birlikte daha da kritik hale gelir.
+
+#### Kategori 5 (Ekran ve I/O)
+Konsol etkileşimi bu kategori ile yonetilir; Windows 11 terminal host'u (Console/Windows Terminal) satir, renk ve kodlama goruntusunu etkiler. Komutlarin gorevi kullanici ile veri alisverisi saglamaktir, davranis tutarliligi icin terminal bazli test gerekir.
+
+#### Kategori 6 (Dosya Islemleri)
+Dosya komutlari veri kaliciligini saglar; Windows 11 izin modeli nedeniyle yol/erişim hatalari onceden ele alinmalidir. CI/Release asamasinda artefakt paketleme de bu kategorinin mantigi uzerine kuruludur.
+
+#### Kategori 7 (String Fonksiyonlari)
+String komutlari metin birlestirme, donusum ve ayrisma gorevlerini yapar; Windows 11'de Unicode/console kodlama farklari sonuca etki edebilir. Bu nedenle ozellikle Turkce karakterli girdilerle ek test yapmak gerekir.
+
+#### Kategori 8 (Matematiksel Fonksiyonlar)
+Bu kategori sayisal hesaplari standartlastirir ve ifade agacindaki islemleri tamamlar. Windows 11'de 32/64 hedef farkinda kayan nokta hassasiyetini karsilastirmak iyi pratiktir.
+
+#### Kategori 9 (Bellek Islemleri)
+Bellek komutlari yuksek guc verir ama yuksek risk tasir; gecersiz adresler Windows 11'de erisim ihlali dogurabilir. Bu nedenle bu komutlarin guvenli alt-kume ile acilmasi ve test kapsamiyla ilerlenmesi onerilir.
+
+#### Kategori 10 (Port Islemleri)
+Port komutlari daha cok DOS/low-level donanım baglamina aittir; Windows 11 user-mode ortaminda dogrudan port erisimi kisitlidir. Bu kategori pratikte miras/ozel surucu katmani gerektiren alan olarak etiketlenmelidir.
+
+#### Kategori 11 (Kesme ve Stack)
+INT/SETVECT gibi komutlar tarihsel olarak real/protected mode baglaminda kullanilir; Windows 11'de dogrudan kullanimi genel durumda mumkun degildir. Bu komutlar belgede "miras davranis" olarak belirtilmeli ve emulasyon/yardimci katman olmadan aktif varsayilmamalidir.
+
+#### Kategori 12 (Zaman ve System)
+TIMER, Windows 11'de olcumu birim cevirimiyle birlikte daha okunur hale getirir; parser 0/1/3 arguman imzasini dogrular. Runtime iskeleti saniye tabanli degeri `ns/us/ms/s/min/h/day/year` birimlerine cevirir.
+
+#### Kategori 13 (Satir Ici Assembly)
+Guncel modelde satir ici dusuk seviye kod tek kapidan yonetilir: `INLINE(...)` ve `END INLINE`. Windows 11'de bu model, legacy `_ASM` benzeri daginik kullanimlar yerine denetlenebilir bir parser davranisi saglar.
+
+## EK-19: uXBasic Mimari Tasarimi, Artefakt Akişi, Moduller ve Tip/Eleman Dökümü (Append-Only)
+
+### EK-19.1 Mimari Tasarim (Yuksek Seviye)
 uXBasic cekirdegi asamali derleyici modelini izler: kaynak metin -> token listesi -> soyut sozdizim agaci (AST) -> dogrulama/test -> hedef artefakt. Bu yapida lexer metni dil birimlerine ayirir, parser bu birimlerden anlamsal agac kurar, test harness bu agacin beklenen davranisa uydugunu dogrular.
 
 Mimari secim "tek adimda buyuk yeniden yazim" yerine kontrollu buyume ilkesidir. Her ozellikte once parser semantigi ve test kapisi acilir, sonra runtime/bagimli moduller eklenir; boylece Windows 11 uzerinde tekrar uretilebilir derleme ve surumleme korunur.
 
-### EK-18.2 Artefakt Akişi (Build/Test/Release Sirasi)
+### EK-19.2 Artefakt Akişi (Build/Test/Release Sirasi)
 1. Girdi kaynaklari: `src/*.bas`, `src/parser/*.fbs`, `src/runtime/*.fbs`, `tests/*.bas`, `tests/manifest.csv`.
 2. Derleme artefaktlari: `src/main.exe`, `src/main_32.exe`, `src/main_64.exe`, `tests/run_manifest.exe`.
 3. CI artefakti: `uxbasic-win-build-artifacts` (32/64 ana exe + manifest runner).
 4. Release stage: `dist/<tag>/` altina map'e gore adlandirilmis exe'ler + `BUILD_INFO.txt` + `SHA256SUMS.txt`.
 5. Release paketi: `dist/uxbasic-<tag>-win32-win64.zip` ve opsiyonel GitHub release yuklemesi.
 
-### EK-18.3 Modul Haritasi (Kod Akis Sirasi)
+### EK-19.3 Modul Haritasi (Kod Akis Sirasi)
 1. `src/parser/token_kinds.fbs`: Token ve token havuzu veri yapilari.
 2. `src/parser/lexer.fbs`: Kaynak metinden token uretimi.
 3. `src/parser/ast.fbs`: AST node havuzu ve cocuk baglama yapisi.
@@ -1443,7 +1497,7 @@ Mimari secim "tek adimda buyuk yeniden yazim" yerine kontrollu buyume ilkesidir.
 8. `tests/run_manifest.bas`: Manifest tabanli smoke dogrulama kosucu.
 9. `build*.bat`, `.github/workflows/win64-ci.yml`, `tools/release_mini.bat`: build/CI/release otomasyon katmani.
 
-### EK-18.4 Tipler ve Elemanlar (Degisken Amaclariyla)
+### EK-19.4 Tipler ve Elemanlar (Degisken Amaclariyla)
 
 #### 1) `src/parser/token_kinds.fbs`
 - `Type Token`
@@ -1506,7 +1560,7 @@ Mimari secim "tek adimda buyuk yeniden yazim" yerine kontrollu buyume ilkesidir.
     - `result`: satir durum alani.
 - Amaci: manifestteki test girdilerini otomatik calistirip smoke ozeti uretmek.
 
-### EK-18.5 Bir Gelistirici Icin Hizli Genisletme Rehberi
+### EK-19.5 Bir Gelistirici Icin Hizli Genisletme Rehberi
 Yeni komut eklerken sirayla su akisi izlemek en guvenli yoldur: once lexer keyword/operator tanimi, sonra parser node/semantik kontrolu, sonra manifest test satiri, en son runtime gerekiyorsa ilgili modul. Bu siralama "hangi degisken ne ise yariyor" sorusunu da net tutar: token degiskenleri metin cozumler, parse degiskenleri anlami kurar, runtime degiskenleri calisma zamani degerlerini tasir.
 
 Bu nedenle moduller arasi sorumluluk sinirlarini bozmak yerine her degisiklikte tek katmana odaklanmak gerekir. Ornegin bir komutun yalnizca soz dizimi eklenecekse `lexer/parser/tests` yeterlidir; sistem davranisi da gerektiriyorsa ancak o zaman `src/runtime/*` katmanina inilir.

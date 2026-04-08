@@ -1,0 +1,328 @@
+Function ParseOpenStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim openNode As Integer
+    openNode = MakeNodeFromToken(ps, "OPEN_STMT", "", "", firstTok)
+
+    Dim fileExpr As Integer
+    fileExpr = ParseExpression(ps)
+    If fileExpr = -1 Then
+        ps.lastError = "OPEN: file expression expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, openNode, fileExpr
+
+    If MatchKeyword(ps, "FOR") = 0 Then
+        ps.lastError = "OPEN: missing FOR"
+        Return -1
+    End If
+
+    Dim modeTok As Token
+    modeTok = CurToken(ps)
+    If modeTok.kind <> "KEYWORD" And modeTok.kind <> "IDENT" Then
+        ps.lastError = "OPEN: mode expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim modeNode As Integer
+    modeNode = MakeNodeFromToken(ps, "MODE_REF", UCase(modeTok.lexeme), "", modeTok)
+    ASTAddChild ps.ast, openNode, modeNode
+
+    If MatchKeyword(ps, "AS") = 0 Then
+        ps.lastError = "OPEN: missing AS"
+        Return -1
+    End If
+
+    If MatchOp(ps, "#") Then
+        ' Optional BASIC file-handle marker.
+    End If
+
+    Dim handleExpr As Integer
+    handleExpr = ParseExpression(ps)
+    If handleExpr = -1 Then
+        ps.lastError = "OPEN: file handle expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, openNode, handleExpr
+
+    Return openNode
+End Function
+
+Private Function ParseInputFileStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim fileNode As Integer
+    fileNode = MakeNodeFromToken(ps, "INPUT_FILE_STMT", "", "", firstTok)
+
+    If MatchOp(ps, "#") Then
+        ' Optional BASIC file-handle marker for INPUT# form.
+    End If
+
+    Dim handleExpr As Integer
+    handleExpr = ParseExpression(ps)
+    If handleExpr = -1 Then
+        ps.lastError = "INPUT#: file handle expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, fileNode, handleExpr
+
+    If MatchOp(ps, ",") = 0 Then
+        ps.lastError = "INPUT#: missing comma after file handle"
+        Return -1
+    End If
+
+    Do
+        Dim targetExpr As Integer
+        targetExpr = ParseExpression(ps)
+        If targetExpr = -1 Then
+            ps.lastError = "INPUT#: target expression expected"
+            Return -1
+        End If
+        ASTAddChild ps.ast, fileNode, targetExpr
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    Return fileNode
+End Function
+
+Function ParseInputStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    If CurToken(ps).kind = "OP" And CurToken(ps).lexeme = "#" Then
+        Return ParseInputFileStmt(ps, firstTok)
+    End If
+
+    Dim inputNode As Integer
+    inputNode = MakeNodeFromToken(ps, "INPUT_STMT", "", "", firstTok)
+
+    Dim firstExpr As Integer
+    firstExpr = ParseExpression(ps)
+    If firstExpr = -1 Then
+        ps.lastError = "INPUT: target or prompt expected"
+        Return -1
+    End If
+
+    If MatchOp(ps, ";") Or MatchOp(ps, ",") Then
+        Dim promptNode As Integer
+        promptNode = ASTNewNode(ps.ast, "PROMPT_EXPR", "", "", firstTok.lineNo, firstTok.colNo)
+        ps.ast.nodes(promptNode).left = firstExpr
+        ASTAddChild ps.ast, inputNode, promptNode
+
+        Dim targetExpr As Integer
+        targetExpr = ParseExpression(ps)
+        If targetExpr = -1 Then
+            ps.lastError = "INPUT: target expression expected after prompt"
+            Return -1
+        End If
+        ASTAddChild ps.ast, inputNode, targetExpr
+    Else
+        ASTAddChild ps.ast, inputNode, firstExpr
+    End If
+
+    Do While MatchOp(ps, ",")
+        Dim moreTarget As Integer
+        moreTarget = ParseExpression(ps)
+        If moreTarget = -1 Then
+            ps.lastError = "INPUT: target expression expected"
+            Return -1
+        End If
+        ASTAddChild ps.ast, inputNode, moreTarget
+    Loop
+
+    Return inputNode
+End Function
+
+Function ParseCloseStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim closeNode As Integer
+    closeNode = MakeNodeFromToken(ps, "CLOSE_STMT", "", "", firstTok)
+
+    Dim tk As Token
+    tk = CurToken(ps)
+    If tk.kind = "EOF" Or tk.kind = "EOL" Or (tk.kind = "OP" And tk.lexeme = ":") Then
+        Return closeNode
+    End If
+
+    Do
+        If MatchOp(ps, "#") Then
+            ' Optional BASIC file-handle marker.
+        End If
+
+        Dim handleExpr As Integer
+        handleExpr = ParseExpression(ps)
+        If handleExpr = -1 Then
+            ps.lastError = "CLOSE: file handle expected"
+            Return -1
+        End If
+
+        ASTAddChild ps.ast, closeNode, handleExpr
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    Return closeNode
+End Function
+
+Function ParseGetStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim getNode As Integer
+    getNode = MakeNodeFromToken(ps, "GET_STMT", "", "", firstTok)
+
+    If MatchOp(ps, "#") Then
+        ' Optional BASIC file-handle marker.
+    End If
+
+    Dim handleExpr As Integer
+    handleExpr = ParseExpression(ps)
+    If handleExpr = -1 Then
+        ps.lastError = "GET: file handle expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, getNode, handleExpr
+
+    If MatchOp(ps, ",") = 0 Then
+        ps.lastError = "GET: missing ,"
+        Return -1
+    End If
+
+    Dim valueExpr As Integer
+    valueExpr = ParseExpression(ps)
+    If valueExpr = -1 Then
+        ps.lastError = "GET: target expression expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, getNode, valueExpr
+
+    Return getNode
+End Function
+
+Function ParsePutStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim putNode As Integer
+    putNode = MakeNodeFromToken(ps, "PUT_STMT", "", "", firstTok)
+
+    If MatchOp(ps, "#") Then
+        ' Optional BASIC file-handle marker.
+    End If
+
+    Dim handleExpr As Integer
+    handleExpr = ParseExpression(ps)
+    If handleExpr = -1 Then
+        ps.lastError = "PUT: file handle expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, putNode, handleExpr
+
+    If MatchOp(ps, ",") = 0 Then
+        ps.lastError = "PUT: missing ,"
+        Return -1
+    End If
+
+    Dim valueExpr As Integer
+    valueExpr = ParseExpression(ps)
+    If valueExpr = -1 Then
+        ps.lastError = "PUT: source expression expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, putNode, valueExpr
+
+    Return putNode
+End Function
+
+Function ParseSeekStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim seekNode As Integer
+    seekNode = MakeNodeFromToken(ps, "SEEK_STMT", "", "", firstTok)
+
+    If MatchOp(ps, "#") Then
+        ' Optional BASIC file-handle marker.
+    End If
+
+    Dim handleExpr As Integer
+    handleExpr = ParseExpression(ps)
+    If handleExpr = -1 Then
+        ps.lastError = "SEEK: file handle expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, seekNode, handleExpr
+
+    If MatchOp(ps, ",") Then
+        Dim posExpr As Integer
+        posExpr = ParseExpression(ps)
+        If posExpr = -1 Then
+            ps.lastError = "SEEK: position expression expected"
+            Return -1
+        End If
+        ASTAddChild ps.ast, seekNode, posExpr
+    End If
+
+    Return seekNode
+End Function
+
+Private Function IsStmtTerminator(ByRef tk As Token) As Integer
+    If tk.kind = "EOF" Or tk.kind = "EOL" Then Return 1
+    If tk.kind = "OP" And tk.lexeme = ":" Then Return 1
+    Return 0
+End Function
+
+Function ParseLocateStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim locateNode As Integer
+    locateNode = MakeNodeFromToken(ps, "LOCATE_STMT", "", "", firstTok)
+
+    Dim rowExpr As Integer
+    rowExpr = ParseExpression(ps)
+    If rowExpr = -1 Then
+        ps.lastError = "LOCATE: row expression expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, locateNode, rowExpr
+
+    If MatchOp(ps, ",") = 0 Then
+        ps.lastError = "LOCATE: missing comma"
+        Return -1
+    End If
+
+    Dim colExpr As Integer
+    colExpr = ParseExpression(ps)
+    If colExpr = -1 Then
+        ps.lastError = "LOCATE: column expression expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, locateNode, colExpr
+
+    Return locateNode
+End Function
+
+Function ParseColorStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim colorNode As Integer
+    colorNode = MakeNodeFromToken(ps, "COLOR_STMT", "", "", firstTok)
+
+    Dim fgExpr As Integer
+    fgExpr = ParseExpression(ps)
+    If fgExpr = -1 Then
+        ps.lastError = "COLOR: foreground expression expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, colorNode, fgExpr
+
+    If MatchOp(ps, ",") = 0 Then
+        ps.lastError = "COLOR: missing comma"
+        Return -1
+    End If
+
+    Dim bgExpr As Integer
+    bgExpr = ParseExpression(ps)
+    If bgExpr = -1 Then
+        ps.lastError = "COLOR: background expression expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, colorNode, bgExpr
+
+    Return colorNode
+End Function
+
+Function ParseClsStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim clsNode As Integer
+    clsNode = MakeNodeFromToken(ps, "CLS_STMT", "", "", firstTok)
+
+    Dim tk As Token
+    tk = CurToken(ps)
+    If IsStmtTerminator(tk) = 0 Then
+        ps.lastError = "CLS: unexpected arguments"
+        Return -1
+    End If
+
+    Return clsNode
+End Function
