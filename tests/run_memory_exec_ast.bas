@@ -15,6 +15,20 @@ End Function
 Private Sub Main()
     Dim src As String
     src = _
+        "TYPE Pair" & Chr(10) & _
+        "lo AS I16" & Chr(10) & _
+        "hi AS I16" & Chr(10) & _
+        "END TYPE" & Chr(10) & _
+        "TYPE Packet" & Chr(10) & _
+        "tag AS I8" & Chr(10) & _
+        "pairs(0 TO 1) AS Pair" & Chr(10) & _
+        "word AS I32" & Chr(10) & _
+        "END TYPE" & Chr(10) & _
+        "base = VARPTR(root)" & Chr(10) & _
+        "POKEW base + OFFSETOF(Packet, ""pairs(1).hi""), 13398" & Chr(10) & _
+        "POKED base + OFFSETOF(Packet, ""word""), 287454020" & Chr(10) & _
+        "u = PEEKW(base + OFFSETOF(Packet, ""pairs(1).hi""))" & Chr(10) & _
+        "v = PEEKD(base + OFFSETOF(Packet, ""word""))" & Chr(10) & _
         "x = 4096" & Chr(10) & _
         "POKEB x, 65" & Chr(10) & _
         "POKEW x + 2, 4660" & Chr(10) & _
@@ -47,6 +61,8 @@ Private Sub Main()
         "POKEB x + 98, 3" & Chr(10) & _
         "MEMCOPYB x + 96, x + 97, 3" & Chr(10) & _
         "MEMFILLB x + 112, 255, 0" & Chr(10) & _
+        "POKEW x + 116, u" & Chr(10) & _
+        "POKED x + 120, v" & Chr(10) & _
         "INC a" & Chr(10) & _
         "DEC a"
 
@@ -89,6 +105,8 @@ Private Sub Main()
     ok And= AssertEq(VMemPeekB(4193), 1, "MEMCOPYB overlap byte0")
     ok And= AssertEq(VMemPeekB(4194), 2, "MEMCOPYB overlap byte1")
     ok And= AssertEq(VMemPeekB(4195), 3, "MEMCOPYB overlap byte2")
+    ok And= AssertEq(VMemPeekW(4212), 13398, "VARPTR+OFFSETOF nested i16")
+    ok And= AssertEq(VMemPeekD(4216), 287454020, "VARPTR+OFFSETOF nested i32")
 
     If ok = 0 Then End 1
 

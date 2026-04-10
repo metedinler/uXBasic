@@ -219,11 +219,61 @@ Private Function ExecBuiltinArgAsText(ByRef ps As ParseState, ByRef es As ExecSt
     Return 1
 End Function
 
+Private Function ExecBuiltinArgAsTypeName(ByRef ps As ParseState, ByVal callNodeIdx As Integer, ByRef callName As String, ByRef typeNameOut As String, ByRef errText As String) As Integer
+    Dim a0 As Integer
+    a0 = ExecChildAt(ps, callNodeIdx, 0)
+    If a0 = -1 Then
+        errText = "exec: " & callName & " type arg missing"
+        Return 0
+    End If
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(a0)
+    If UCase(n.kind) <> "IDENT" And UCase(n.kind) <> "KEYWORD_REF" Then
+        errText = "exec: " & callName & " expects type name"
+        Return 0
+    End If
+
+    typeNameOut = n.value
+    Return 1
+End Function
+
 Private Function ExecEvalBuiltinCall(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNameRaw As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
     Dim callName As String
     callName = UCase(callNameRaw)
 
     Select Case callName
+    Case "SIZEOF"
+        Dim sizeofType As String
+        If ExecBuiltinArgAsTypeName(ps, callNodeIdx, callName, sizeofType, errText) = 0 Then Return 0
+
+        Dim sizeofOut As Integer
+        Dim sizeofErr As String
+        If TypeLayoutSizeOf(ps, sizeofType, sizeofOut, sizeofErr) = 0 Then
+            errText = "exec: SIZEOF failed " & sizeofErr
+            Return 0
+        End If
+        Return sizeofOut
+
+    Case "OFFSETOF"
+        Dim offsetofType As String
+        If ExecBuiltinArgAsTypeName(ps, callNodeIdx, callName, offsetofType, errText) = 0 Then Return 0
+
+        Dim p1 As Integer
+        p1 = ExecChildAt(ps, callNodeIdx, 1)
+        If p1 = -1 Or UCase(ps.ast.nodes(p1).kind) <> "STRING" Then
+            errText = "exec: OFFSETOF expects string path"
+            Return 0
+        End If
+
+        Dim offsetofOut As Integer
+        Dim offsetofErr As String
+        If TypeLayoutOffsetOf(ps, offsetofType, ps.ast.nodes(p1).value, offsetofOut, offsetofErr) = 0 Then
+            errText = "exec: OFFSETOF failed " & offsetofErr
+            Return 0
+        End If
+        Return offsetofOut
+
     Case "LEN"
         Dim lenText As String
         If ExecBuiltinArgAsText(ps, es, callNodeIdx, callName, lenText, errText) = 0 Then Return 0
@@ -494,6 +544,9 @@ Private Function ExecRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVa
     st = ps.ast.nodes(stmtIdx)
 
     Select Case UCase(st.kind)
+    Case "TYPE_STMT", "CLASS_STMT"
+        Return 1
+
     Case "FOR_STMT"
         Dim forCount As Integer
         forCount = ExecChildCount(ps, stmtIdx)
