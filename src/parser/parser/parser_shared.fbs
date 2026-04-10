@@ -69,8 +69,88 @@ Private Function IsValidTimerUnit(ByRef unitText As String) As Integer
     Return 0
 End Function
 
-Private Function IsTypeToken(ByRef tk As Token) As Integer
-    Return tk.kind = "KEYWORD" Or tk.kind = "IDENT"
+Dim Shared gDeclaredTypeNames() As String
+Dim Shared gDeclaredTypeCount As Integer
+Dim Shared gReferencedTypeNames() As String
+Dim Shared gReferencedTypeCount As Integer
+
+Private Sub AddUniqueTypeName(typeNames() As String, ByRef typeCount As Integer, ByRef rawName As String)
+    Dim normalizedName As String
+    normalizedName = UCase(Trim(rawName))
+    If normalizedName = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To typeCount - 1
+        If typeNames(i) = normalizedName Then Exit Sub
+    Next i
+
+    If typeCount = 0 Then
+        ReDim typeNames(0)
+    Else
+        ReDim Preserve typeNames(typeCount)
+    End If
+
+    typeNames(typeCount) = normalizedName
+    typeCount += 1
+End Sub
+
+Private Function IsRegisteredTypeName(typeNames() As String, ByVal typeCount As Integer, ByRef rawName As String) As Integer
+    Dim normalizedName As String
+    normalizedName = UCase(Trim(rawName))
+    If normalizedName = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To typeCount - 1
+        If typeNames(i) = normalizedName Then Return 1
+    Next i
+
+    Return 0
+End Function
+
+Private Function IsBuiltinTypeKeyword(ByRef typeName As String) As Integer
+    Select Case UCase(typeName)
+    Case "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "F80", "BOOLEAN", "STRING", "ARRAY", "LIST", "DICT", "SET"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Sub ResetTypeValidationState()
+    gDeclaredTypeCount = 0
+    gReferencedTypeCount = 0
+End Sub
+
+Private Sub RegisterDeclaredTypeName(ByRef typeName As String)
+    AddUniqueTypeName gDeclaredTypeNames(), gDeclaredTypeCount, typeName
+End Sub
+
+Private Function ValidateTypeToken(ByRef ps As ParseState, ByRef tk As Token) As Integer
+    If tk.kind = "KEYWORD" Then
+        If IsBuiltinTypeKeyword(tk.lexeme) Then Return 1
+        ps.lastError = "invalid type name: " & tk.lexeme
+        Return 0
+    End If
+
+    If tk.kind = "IDENT" Then
+        AddUniqueTypeName gReferencedTypeNames(), gReferencedTypeCount, tk.lexeme
+        Return 1
+    End If
+
+    ps.lastError = "type expected"
+    Return 0
+End Function
+
+Private Function ValidateTypeReferences(ByRef ps As ParseState) As Integer
+    Dim i As Integer
+    For i = 0 To gReferencedTypeCount - 1
+        If IsRegisteredTypeName(gDeclaredTypeNames(), gDeclaredTypeCount, gReferencedTypeNames(i)) = 0 Then
+            ps.lastError = "unknown type: " & gReferencedTypeNames(i)
+            Return 0
+        End If
+    Next i
+
+    Return 1
 End Function
 
 Private Function ASTChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
@@ -185,22 +265,22 @@ Private Function ValidateCoreIntrinsicCall(ByRef ps As ParseState, ByVal callNod
     callName = UCase(ps.ast.nodes(callNode).value)
 
     Select Case callName
-    Case "LEN", "STR", "STR$", "VAL", "ABS", "INT", "UCASE", "UCASE$", "LCASE", "LCASE$", "ASC", "CHR", "CHR$", "LTRIM", "RTRIM", "SPACE", "SGN", "SQRT", "SIN", "COS", "TAN", "ATN", "EXP", "LOG", "CINT", "CLNG", "CDBL", "CSNG", "FIX", "SQR"
+    Case "LEN", "STR", "VAL", "ABS", "INT", "UCASE", "LCASE", "ASC", "CHR", "LTRIM", "RTRIM", "SPACE", "SGN", "SQRT", "SIN", "COS", "TAN", "ATN", "EXP", "LOG", "CINT", "CLNG", "CDBL", "CSNG", "FIX", "SQR"
         Return ValidateArgCountInRange(ps, callNode, callName, 1, 1)
     Case "RND"
         Return ValidateArgCountInRange(ps, callNode, callName, 0, 1)
-    Case "MID", "MID$"
+    Case "MID"
         Return ValidateArgCountInRange(ps, callNode, callName, 2, 3)
-    Case "STRING", "STRING$"
+    Case "STRING"
         Return ValidateArgCountInRange(ps, callNode, callName, 2, 2)
     Case "INKEY"
         Return ValidateArgCountInRange(ps, callNode, callName, 1, 2)
-    Case "GETKEY", "INKEY$"
+    Case "GETKEY"
         Return ValidateArgCountInRange(ps, callNode, callName, 0, 0)
-    Case "PEEKB", "PEEKW", "PEEKD"
+    Case "PEEKB", "PEEKW", "PEEKD", "VARPTR", "SADD", "LPTR", "CODEPTR"
         Return ValidateArgCountInRange(ps, callNode, callName, 1, 1)
     Case "INKEY_LEGACY"
-        ps.lastError = "INKEY_LEGACY removed; use GETKEY or INKEY$"
+        ps.lastError = "INKEY_LEGACY removed; use GETKEY or INKEY"
         Return 0
     End Select
 

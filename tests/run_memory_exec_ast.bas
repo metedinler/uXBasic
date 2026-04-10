@@ -21,9 +21,27 @@ Private Sub Main()
         "POKED x + 8, 305419896" & Chr(10) & _
         "MEMFILLB x + 16, 7, 4" & Chr(10) & _
         "MEMCOPYB x, x + 32, 1" & Chr(10) & _
+        "POKES x + 40, ""HI""" & Chr(10) & _
+        "MEMFILLW x + 48, 4660, 2" & Chr(10) & _
+        "MEMCOPYW x + 48, x + 56, 2" & Chr(10) & _
+        "MEMFILLD x + 64, 305419896, 1" & Chr(10) & _
+        "MEMCOPYD x + 64, x + 72, 1" & Chr(10) & _
         "a = PEEKB(x)" & Chr(10) & _
         "b = PEEKW(x + 2)" & Chr(10) & _
         "c = PEEKD(x + 8)" & Chr(10) & _
+        "p = VARPTR(a)" & Chr(10) & _
+        "s = SADD(""abc"")" & Chr(10) & _
+        "l = LPTR(label1)" & Chr(10) & _
+        "k = CODEPTR(proc1)" & Chr(10) & _
+        "SETNEWOFFSET a, 8192" & Chr(10) & _
+        "q = VARPTR(a)" & Chr(10) & _
+        "POKED x + 80, q" & Chr(10) & _
+        "r = (1 SHL 4) OR 1" & Chr(10) & _
+        "POKED x + 84, r" & Chr(10) & _
+        "m = 10 MOD 4" & Chr(10) & _
+        "POKED x + 88, m" & Chr(10) & _
+        "t = 1 ROL 3" & Chr(10) & _
+        "POKED x + 92, t" & Chr(10) & _
         "INC a" & Chr(10) & _
         "DEC a"
 
@@ -53,6 +71,16 @@ Private Sub Main()
     ok And= AssertEq(VMemPeekB(4112), 7, "MEMFILLB start")
     ok And= AssertEq(VMemPeekB(4115), 7, "MEMFILLB end")
     ok And= AssertEq(VMemPeekB(4128), 65, "MEMCOPYB")
+    ok And= AssertEq(VMemPeekB(4136), Asc("H"), "POKES first")
+    ok And= AssertEq(VMemPeekB(4137), Asc("I"), "POKES second")
+    ok And= AssertEq(VMemPeekW(4144), 4660, "MEMFILLW")
+    ok And= AssertEq(VMemPeekW(4152), 4660, "MEMCOPYW")
+    ok And= AssertEq(VMemPeekD(4160), 305419896, "MEMFILLD")
+    ok And= AssertEq(VMemPeekD(4168), 305419896, "MEMCOPYD")
+    ok And= AssertEq(VMemPeekD(4176), 8192, "SETNEWOFFSET + VARPTR")
+    ok And= AssertEq(VMemPeekD(4180), 17, "SHL/OR")
+    ok And= AssertEq(VMemPeekD(4184), 2, "MOD")
+    ok And= AssertEq(VMemPeekD(4188), 8, "ROL")
 
     If ok = 0 Then End 1
 

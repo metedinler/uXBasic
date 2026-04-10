@@ -1,15 +1,22 @@
+#include once "file_io.fbs"
+
 Type ExecVar
     nameText As String
     value As Integer
+    addr As UInteger
 End Type
 
 Type ExecState
     vars(Any) As ExecVar
     count As Integer
+    nextVarAddr As UInteger
+    fileIo As UxbFileRuntime
 End Type
 
 Private Sub ExecStateInit(ByRef es As ExecState)
     es.count = 0
+    es.nextVarAddr = &h1000
+    UxbFileInit es.fileIo
 End Sub
 
 Private Function ExecFindVar(ByRef es As ExecState, ByRef nameText As String) As Integer
@@ -31,21 +38,43 @@ Private Function ExecGetVar(ByRef es As ExecState, ByRef nameText As String) As 
     Return es.vars(idx).value
 End Function
 
-Private Sub ExecSetVar(ByRef es As ExecState, ByRef nameText As String, ByVal value As Integer)
+Private Function ExecEnsureVar(ByRef es As ExecState, ByRef nameText As String) As Integer
     Dim idx As Integer
     idx = ExecFindVar(es, nameText)
 
-    If idx = -1 Then
-        If es.count = 0 Then
-            ReDim es.vars(0)
-        Else
-            ReDim Preserve es.vars(es.count)
-        End If
-        idx = es.count
-        es.vars(idx).nameText = nameText
-        es.count += 1
+    If idx <> -1 Then Return idx
+
+    If es.count = 0 Then
+        ReDim es.vars(0)
+    Else
+        ReDim Preserve es.vars(es.count)
     End If
 
+    idx = es.count
+    es.vars(idx).nameText = nameText
+    es.vars(idx).value = 0
+    es.vars(idx).addr = es.nextVarAddr
+    es.nextVarAddr += 4
+    es.count += 1
+
+    Return idx
+End Function
+
+Private Function ExecGetVarAddr(ByRef es As ExecState, ByRef nameText As String) As UInteger
+    Dim idx As Integer
+    idx = ExecEnsureVar(es, nameText)
+    Return es.vars(idx).addr
+End Function
+
+Private Sub ExecSetVarAddr(ByRef es As ExecState, ByRef nameText As String, ByVal addr As UInteger)
+    Dim idx As Integer
+    idx = ExecEnsureVar(es, nameText)
+    es.vars(idx).addr = addr
+End Sub
+
+Private Sub ExecSetVar(ByRef es As ExecState, ByRef nameText As String, ByVal value As Integer)
+    Dim idx As Integer
+    idx = ExecEnsureVar(es, nameText)
     es.vars(idx).value = value
 End Sub
 
@@ -61,6 +90,69 @@ Private Function ExecChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, B
     Loop
 
     Return -1
+End Function
+
+Private Function ExecChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim total As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        total += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return total
+End Function
+
+Private Function ExecEvalStringLiteral(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef textOut As String, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then
+        errText = "exec: invalid string node"
+        Return 0
+    End If
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+    If UCase(n.kind) <> "STRING" Then
+        errText = "exec: string literal expected"
+        Return 0
+    End If
+
+    textOut = n.value
+    Return 1
+End Function
+
+Private Function ExecFormatFileError(ByRef io As UxbFileRuntime) As String
+    Dim errorCode As Integer
+    errorCode = UxbFileGetLastError(io)
+    Return "(" & LTrim(Str(errorCode)) & ") " & UxbFileErrorText(errorCode)
+End Function
+
+Private Function ExecHashText(ByRef textValue As String) As UInteger
+    Dim h As UInteger
+    h = CUInt(&h811C9DC5)
+
+    Dim i As Integer
+    For i = 1 To Len(textValue)
+        h = h Xor CUInt(Asc(Mid(textValue, i, 1)) And &hFF)
+        h *= CUInt(&h01000193)
+    Next i
+
+    Return h
+End Function
+
+Private Function ExecRol32(ByVal v As UInteger, ByVal s As Integer) As UInteger
+    Dim shiftBits As Integer
+    shiftBits = s And 31
+    If shiftBits = 0 Then Return v
+    Return (v Shl shiftBits) Or (v Shr (32 - shiftBits))
+End Function
+
+Private Function ExecRor32(ByVal v As UInteger, ByVal s As Integer) As UInteger
+    Dim shiftBits As Integer
+    shiftBits = s And 31
+    If shiftBits = 0 Then Return v
+    Return (v Shr shiftBits) Or (v Shl (32 - shiftBits))
 End Function
 
 Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
@@ -89,6 +181,8 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
             Return rv
         Case "-"
             Return -rv
+        Case "NOT"
+            Return Not rv
         Case Else
             errText = "exec: unsupported unary op " & n.op
             Return 0
@@ -109,18 +203,56 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
             Return lv - rv2
         Case "*"
             Return lv * rv2
+        Case "**"
+            If rv2 < 0 Then
+                errText = "exec: negative exponent not supported"
+                Return 0
+            End If
+            Dim p As Integer
+            Dim acc As Integer
+            acc = 1
+            For p = 1 To rv2
+                acc *= lv
+            Next p
+            Return acc
         Case "/", "\\"
             If rv2 = 0 Then
                 errText = "exec: division by zero"
                 Return 0
             End If
             Return lv \ rv2
-        Case "%"
+        Case "%", "MOD"
             If rv2 = 0 Then
                 errText = "exec: modulo by zero"
                 Return 0
             End If
             Return lv Mod rv2
+        Case "AND"
+            Return lv And rv2
+        Case "OR"
+            Return lv Or rv2
+        Case "XOR"
+            Return lv Xor rv2
+        Case "<<", "SHL"
+            Return CInt(CUInt(lv) Shl (rv2 And 31))
+        Case ">>", "SHR"
+            Return CInt(CUInt(lv) Shr (rv2 And 31))
+        Case "ROL"
+            Return CInt(ExecRol32(CUInt(lv), rv2))
+        Case "ROR"
+            Return CInt(ExecRor32(CUInt(lv), rv2))
+        Case "="
+            If lv = rv2 Then Return -1 Else Return 0
+        Case "<>"
+            If lv <> rv2 Then Return -1 Else Return 0
+        Case "<"
+            If lv < rv2 Then Return -1 Else Return 0
+        Case ">"
+            If lv > rv2 Then Return -1 Else Return 0
+        Case "<="
+            If lv <= rv2 Then Return -1 Else Return 0
+        Case ">="
+            If lv >= rv2 Then Return -1 Else Return 0
         Case Else
             errText = "exec: unsupported binary op " & n.op
             Return 0
@@ -167,6 +299,71 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
             If errText <> "" Then Return 0
             Return VMemPeekD(CUInt(addrD))
 
+        Case "VARPTR"
+            Dim v0 As Integer
+            v0 = ExecChildAt(ps, nodeIdx, 0)
+            If v0 = -1 Then
+                errText = "exec: VARPTR arg missing"
+                Return 0
+            End If
+
+            Dim argNode As ASTNode
+            argNode = ps.ast.nodes(v0)
+            If UCase(argNode.kind) = "IDENT" Then
+                Return CInt(ExecGetVarAddr(es, argNode.value))
+            End If
+
+            Dim vv As Integer
+            vv = ExecEvalNode(ps, es, v0, errText)
+            If errText <> "" Then Return 0
+            Return &h10000000 Or (vv And &h00FFFFFF)
+
+        Case "SADD"
+            Dim s0 As Integer
+            s0 = ExecChildAt(ps, nodeIdx, 0)
+            If s0 = -1 Then
+                errText = "exec: SADD arg missing"
+                Return 0
+            End If
+
+            Dim sNode As ASTNode
+            sNode = ps.ast.nodes(s0)
+            If UCase(sNode.kind) = "STRING" Then
+                Return CInt(&h20000000 Or (ExecHashText(sNode.value) And &h0FFFFFFF))
+            End If
+            If UCase(sNode.kind) = "IDENT" Then
+                Return CInt(&h20000000 Or (ExecHashText(sNode.value) And &h0FFFFFFF))
+            End If
+
+            Dim sv As Integer
+            sv = ExecEvalNode(ps, es, s0, errText)
+            If errText <> "" Then Return 0
+            Return &h20000000 Or (sv And &h00FFFFFF)
+
+        Case "LPTR"
+            Dim l0 As Integer
+            l0 = ExecChildAt(ps, nodeIdx, 0)
+            If l0 = -1 Then
+                errText = "exec: LPTR arg missing"
+                Return 0
+            End If
+
+            Dim lNode As ASTNode
+            lNode = ps.ast.nodes(l0)
+            Return CInt(&h30000000 Or (ExecHashText(lNode.value & ":" & lNode.kind) And &h0FFFFFFF))
+
+        Case "CODEPTR"
+            Dim c0 As Integer
+            c0 = ExecChildAt(ps, nodeIdx, 0)
+            If c0 = -1 Then
+                errText = "exec: CODEPTR arg missing"
+                Return 0
+            End If
+
+            Dim cNode As ASTNode
+            cNode = ps.ast.nodes(c0)
+            Return CInt(&h40000000 Or (ExecHashText(cNode.value & ":" & cNode.kind) And &h0FFFFFFF))
+
         Case Else
             errText = "exec: unsupported call " & callName
             Return 0
@@ -183,6 +380,254 @@ Private Function ExecRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVa
     st = ps.ast.nodes(stmtIdx)
 
     Select Case UCase(st.kind)
+    Case "OPEN_STMT"
+        Dim openFileExpr As Integer
+        Dim openModeExpr As Integer
+        Dim openHandleExpr As Integer
+        openFileExpr = ExecChildAt(ps, stmtIdx, 0)
+        openModeExpr = ExecChildAt(ps, stmtIdx, 1)
+        openHandleExpr = ExecChildAt(ps, stmtIdx, 2)
+
+        If openFileExpr = -1 Or openModeExpr = -1 Or openHandleExpr = -1 Then
+            errText = "exec: OPEN args missing"
+            Return 0
+        End If
+
+        Dim filePath As String
+        If ExecEvalStringLiteral(ps, es, openFileExpr, filePath, errText) = 0 Then
+            Return 0
+        End If
+
+        If UCase(ps.ast.nodes(openModeExpr).kind) <> "MODE_REF" Then
+            errText = "exec: OPEN mode node invalid"
+            Return 0
+        End If
+
+        Dim modeText As String
+        modeText = ps.ast.nodes(openModeExpr).value
+
+        Dim channelNumber As Integer
+        channelNumber = ExecEvalNode(ps, es, openHandleExpr, errText)
+        If errText <> "" Then Return 0
+
+        If UxbFileOpen(es.fileIo, channelNumber, filePath, modeText) = 0 Then
+            errText = "exec: OPEN failed " & ExecFormatFileError(es.fileIo)
+            Return 0
+        End If
+        Return 1
+
+    Case "CLOSE_STMT"
+        Dim closeCount As Integer
+        closeCount = ExecChildCount(ps, stmtIdx)
+
+        If closeCount = 0 Then
+            UxbFileCloseAll es.fileIo
+            Return 1
+        End If
+
+        Dim closeIndex As Integer
+        For closeIndex = 0 To closeCount - 1
+            Dim closeHandleExpr As Integer
+            closeHandleExpr = ExecChildAt(ps, stmtIdx, closeIndex)
+            If closeHandleExpr = -1 Then
+                errText = "exec: CLOSE handle missing"
+                Return 0
+            End If
+
+            Dim closeChannel As Integer
+            closeChannel = ExecEvalNode(ps, es, closeHandleExpr, errText)
+            If errText <> "" Then Return 0
+
+            If UxbFileClose(es.fileIo, closeChannel) = 0 Then
+                errText = "exec: CLOSE failed " & ExecFormatFileError(es.fileIo)
+                Return 0
+            End If
+        Next closeIndex
+
+        Return 1
+
+    Case "GET_STMT"
+        Dim getCount As Integer
+        getCount = ExecChildCount(ps, stmtIdx)
+        If getCount < 2 Or getCount > 4 Then
+            errText = "exec: GET argument count invalid"
+            Return 0
+        End If
+
+        Dim getHandleExpr As Integer
+        getHandleExpr = ExecChildAt(ps, stmtIdx, 0)
+        If getHandleExpr = -1 Then
+            errText = "exec: GET handle missing"
+            Return 0
+        End If
+
+        Dim getChannel As Integer
+        getChannel = ExecEvalNode(ps, es, getHandleExpr, errText)
+        If errText <> "" Then Return 0
+
+        Dim getPositionValue As LongInt
+        Dim getBytesValue As Integer
+        Dim getTargetExpr As Integer
+        getPositionValue = -1
+        getBytesValue = 0
+        getTargetExpr = -1
+
+        If getCount = 2 Then
+            getTargetExpr = ExecChildAt(ps, stmtIdx, 1)
+        ElseIf getCount = 3 Then
+            Dim getPositionExpr As Integer
+            getPositionExpr = ExecChildAt(ps, stmtIdx, 1)
+            getTargetExpr = ExecChildAt(ps, stmtIdx, 2)
+            If getPositionExpr = -1 Or getTargetExpr = -1 Then
+                errText = "exec: GET position/target missing"
+                Return 0
+            End If
+            getPositionValue = ExecEvalNode(ps, es, getPositionExpr, errText)
+            If errText <> "" Then Return 0
+        Else
+            Dim getPositionExpr As Integer
+            Dim getBytesExpr As Integer
+            getPositionExpr = ExecChildAt(ps, stmtIdx, 1)
+            getBytesExpr = ExecChildAt(ps, stmtIdx, 2)
+            getTargetExpr = ExecChildAt(ps, stmtIdx, 3)
+            If getPositionExpr = -1 Or getBytesExpr = -1 Or getTargetExpr = -1 Then
+                errText = "exec: GET position/bytes/target missing"
+                Return 0
+            End If
+            getPositionValue = ExecEvalNode(ps, es, getPositionExpr, errText)
+            If errText <> "" Then Return 0
+            getBytesValue = ExecEvalNode(ps, es, getBytesExpr, errText)
+            If errText <> "" Then Return 0
+        End If
+
+        If getTargetExpr = -1 Then
+            errText = "exec: GET target missing"
+            Return 0
+        End If
+
+        If UCase(ps.ast.nodes(getTargetExpr).kind) <> "IDENT" Then
+            errText = "exec: GET target must be ident"
+            Return 0
+        End If
+
+        Dim getReadValue As Integer
+        If UxbFileGetI32(es.fileIo, getChannel, getPositionValue, getBytesValue, getReadValue) = 0 Then
+            errText = "exec: GET failed " & ExecFormatFileError(es.fileIo)
+            Return 0
+        End If
+
+        ExecSetVar es, ps.ast.nodes(getTargetExpr).value, getReadValue
+        Return 1
+
+    Case "PUT_STMT"
+        Dim putCount As Integer
+        putCount = ExecChildCount(ps, stmtIdx)
+        If putCount < 2 Or putCount > 4 Then
+            errText = "exec: PUT argument count invalid"
+            Return 0
+        End If
+
+        Dim putHandleExpr As Integer
+        putHandleExpr = ExecChildAt(ps, stmtIdx, 0)
+        If putHandleExpr = -1 Then
+            errText = "exec: PUT handle missing"
+            Return 0
+        End If
+
+        Dim putChannel As Integer
+        putChannel = ExecEvalNode(ps, es, putHandleExpr, errText)
+        If errText <> "" Then Return 0
+
+        Dim putPositionValue As LongInt
+        Dim putBytesValue As Integer
+        Dim putSourceExpr As Integer
+        putPositionValue = -1
+        putBytesValue = 0
+        putSourceExpr = -1
+
+        If putCount = 2 Then
+            putSourceExpr = ExecChildAt(ps, stmtIdx, 1)
+        ElseIf putCount = 3 Then
+            Dim putPositionExpr As Integer
+            putPositionExpr = ExecChildAt(ps, stmtIdx, 1)
+            putSourceExpr = ExecChildAt(ps, stmtIdx, 2)
+            If putPositionExpr = -1 Or putSourceExpr = -1 Then
+                errText = "exec: PUT position/source missing"
+                Return 0
+            End If
+            putPositionValue = ExecEvalNode(ps, es, putPositionExpr, errText)
+            If errText <> "" Then Return 0
+        Else
+            Dim putPositionExpr As Integer
+            Dim putBytesExpr As Integer
+            putPositionExpr = ExecChildAt(ps, stmtIdx, 1)
+            putBytesExpr = ExecChildAt(ps, stmtIdx, 2)
+            putSourceExpr = ExecChildAt(ps, stmtIdx, 3)
+            If putPositionExpr = -1 Or putBytesExpr = -1 Or putSourceExpr = -1 Then
+                errText = "exec: PUT position/bytes/source missing"
+                Return 0
+            End If
+            putPositionValue = ExecEvalNode(ps, es, putPositionExpr, errText)
+            If errText <> "" Then Return 0
+            putBytesValue = ExecEvalNode(ps, es, putBytesExpr, errText)
+            If errText <> "" Then Return 0
+        End If
+
+        If putSourceExpr = -1 Then
+            errText = "exec: PUT source missing"
+            Return 0
+        End If
+
+        Dim putValue As Integer
+        putValue = ExecEvalNode(ps, es, putSourceExpr, errText)
+        If errText <> "" Then Return 0
+
+        If UxbFilePutI32(es.fileIo, putChannel, putPositionValue, putBytesValue, putValue) = 0 Then
+            errText = "exec: PUT failed " & ExecFormatFileError(es.fileIo)
+            Return 0
+        End If
+
+        Return 1
+
+    Case "SEEK_STMT"
+        Dim seekCount As Integer
+        seekCount = ExecChildCount(ps, stmtIdx)
+        If seekCount < 1 Or seekCount > 2 Then
+            errText = "exec: SEEK argument count invalid"
+            Return 0
+        End If
+
+        Dim seekHandleExpr As Integer
+        seekHandleExpr = ExecChildAt(ps, stmtIdx, 0)
+        If seekHandleExpr = -1 Then
+            errText = "exec: SEEK handle missing"
+            Return 0
+        End If
+
+        Dim seekChannel As Integer
+        seekChannel = ExecEvalNode(ps, es, seekHandleExpr, errText)
+        If errText <> "" Then Return 0
+
+        Dim seekPositionValue As LongInt
+        seekPositionValue = -1
+        If seekCount = 2 Then
+            Dim seekPositionExpr As Integer
+            seekPositionExpr = ExecChildAt(ps, stmtIdx, 1)
+            If seekPositionExpr = -1 Then
+                errText = "exec: SEEK position missing"
+                Return 0
+            End If
+            seekPositionValue = ExecEvalNode(ps, es, seekPositionExpr, errText)
+            If errText <> "" Then Return 0
+        End If
+
+        Dim currentFilePosition As LongInt
+        If UxbFileSeek(es.fileIo, seekChannel, seekPositionValue, currentFilePosition) = 0 Then
+            errText = "exec: SEEK failed " & ExecFormatFileError(es.fileIo)
+            Return 0
+        End If
+        Return 1
+
     Case "ASSIGN_STMT"
         Dim lhs As Integer
         lhs = st.left
@@ -354,6 +799,191 @@ Private Function ExecRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVa
         End If
         Return 1
 
+    Case "POKES_STMT"
+        Dim ps0 As Integer
+        Dim ps1 As Integer
+        ps0 = ExecChildAt(ps, stmtIdx, 0)
+        ps1 = ExecChildAt(ps, stmtIdx, 1)
+        If ps0 = -1 Or ps1 = -1 Then
+            errText = "exec: POKES args missing"
+            Return 0
+        End If
+
+        Dim pokeAddr As Integer
+        pokeAddr = ExecEvalNode(ps, es, ps0, errText)
+        If errText <> "" Then Return 0
+
+        Dim textValue As String
+        If UCase(ps.ast.nodes(ps1).kind) = "STRING" Then
+            textValue = ps.ast.nodes(ps1).value
+        Else
+            Dim textNum As Integer
+            textNum = ExecEvalNode(ps, es, ps1, errText)
+            If errText <> "" Then Return 0
+            textValue = LTrim(Str(textNum))
+        End If
+
+        If VMemPokeS(CUInt(pokeAddr), textValue) = 0 Then
+            errText = "exec: POKES out of range"
+            Return 0
+        End If
+        Return 1
+
+    Case "MEMCOPYW_STMT"
+        Dim mcw0 As Integer
+        Dim mcw1 As Integer
+        Dim mcw2 As Integer
+        mcw0 = ExecChildAt(ps, stmtIdx, 0)
+        mcw1 = ExecChildAt(ps, stmtIdx, 1)
+        mcw2 = ExecChildAt(ps, stmtIdx, 2)
+        If mcw0 = -1 Or mcw1 = -1 Or mcw2 = -1 Then
+            errText = "exec: MEMCOPYW args missing"
+            Return 0
+        End If
+
+        Dim srcW As Integer
+        Dim dstW As Integer
+        Dim lenW As Integer
+        srcW = ExecEvalNode(ps, es, mcw0, errText)
+        If errText <> "" Then Return 0
+        dstW = ExecEvalNode(ps, es, mcw1, errText)
+        If errText <> "" Then Return 0
+        lenW = ExecEvalNode(ps, es, mcw2, errText)
+        If errText <> "" Then Return 0
+
+        If lenW < 0 Then
+            errText = "exec: MEMCOPYW negative length"
+            Return 0
+        End If
+
+        If VMemCopyW(CUInt(srcW), CUInt(dstW), CUInt(lenW)) = 0 Then
+            errText = "exec: MEMCOPYW out of range"
+            Return 0
+        End If
+        Return 1
+
+    Case "MEMCOPYD_STMT"
+        Dim mcd0 As Integer
+        Dim mcd1 As Integer
+        Dim mcd2 As Integer
+        mcd0 = ExecChildAt(ps, stmtIdx, 0)
+        mcd1 = ExecChildAt(ps, stmtIdx, 1)
+        mcd2 = ExecChildAt(ps, stmtIdx, 2)
+        If mcd0 = -1 Or mcd1 = -1 Or mcd2 = -1 Then
+            errText = "exec: MEMCOPYD args missing"
+            Return 0
+        End If
+
+        Dim srcD As Integer
+        Dim dstD As Integer
+        Dim lenD As Integer
+        srcD = ExecEvalNode(ps, es, mcd0, errText)
+        If errText <> "" Then Return 0
+        dstD = ExecEvalNode(ps, es, mcd1, errText)
+        If errText <> "" Then Return 0
+        lenD = ExecEvalNode(ps, es, mcd2, errText)
+        If errText <> "" Then Return 0
+
+        If lenD < 0 Then
+            errText = "exec: MEMCOPYD negative length"
+            Return 0
+        End If
+
+        If VMemCopyD(CUInt(srcD), CUInt(dstD), CUInt(lenD)) = 0 Then
+            errText = "exec: MEMCOPYD out of range"
+            Return 0
+        End If
+        Return 1
+
+    Case "MEMFILLW_STMT"
+        Dim mfw0 As Integer
+        Dim mfw1 As Integer
+        Dim mfw2 As Integer
+        mfw0 = ExecChildAt(ps, stmtIdx, 0)
+        mfw1 = ExecChildAt(ps, stmtIdx, 1)
+        mfw2 = ExecChildAt(ps, stmtIdx, 2)
+        If mfw0 = -1 Or mfw1 = -1 Or mfw2 = -1 Then
+            errText = "exec: MEMFILLW args missing"
+            Return 0
+        End If
+
+        Dim fillWAddr As Integer
+        Dim fillWVal As Integer
+        Dim fillWLen As Integer
+        fillWAddr = ExecEvalNode(ps, es, mfw0, errText)
+        If errText <> "" Then Return 0
+        fillWVal = ExecEvalNode(ps, es, mfw1, errText)
+        If errText <> "" Then Return 0
+        fillWLen = ExecEvalNode(ps, es, mfw2, errText)
+        If errText <> "" Then Return 0
+
+        If fillWLen < 0 Then
+            errText = "exec: MEMFILLW negative length"
+            Return 0
+        End If
+
+        If VMemFillW(CUInt(fillWAddr), fillWVal, CUInt(fillWLen)) = 0 Then
+            errText = "exec: MEMFILLW out of range"
+            Return 0
+        End If
+        Return 1
+
+    Case "MEMFILLD_STMT"
+        Dim mfd0 As Integer
+        Dim mfd1 As Integer
+        Dim mfd2 As Integer
+        mfd0 = ExecChildAt(ps, stmtIdx, 0)
+        mfd1 = ExecChildAt(ps, stmtIdx, 1)
+        mfd2 = ExecChildAt(ps, stmtIdx, 2)
+        If mfd0 = -1 Or mfd1 = -1 Or mfd2 = -1 Then
+            errText = "exec: MEMFILLD args missing"
+            Return 0
+        End If
+
+        Dim fillDAddr As Integer
+        Dim fillDVal As Integer
+        Dim fillDLen As Integer
+        fillDAddr = ExecEvalNode(ps, es, mfd0, errText)
+        If errText <> "" Then Return 0
+        fillDVal = ExecEvalNode(ps, es, mfd1, errText)
+        If errText <> "" Then Return 0
+        fillDLen = ExecEvalNode(ps, es, mfd2, errText)
+        If errText <> "" Then Return 0
+
+        If fillDLen < 0 Then
+            errText = "exec: MEMFILLD negative length"
+            Return 0
+        End If
+
+        If VMemFillD(CUInt(fillDAddr), fillDVal, CUInt(fillDLen)) = 0 Then
+            errText = "exec: MEMFILLD out of range"
+            Return 0
+        End If
+        Return 1
+
+    Case "SETNEWOFFSET_STMT"
+        Dim so0 As Integer
+        Dim so1 As Integer
+        so0 = ExecChildAt(ps, stmtIdx, 0)
+        so1 = ExecChildAt(ps, stmtIdx, 1)
+        If so0 = -1 Or so1 = -1 Then
+            errText = "exec: SETNEWOFFSET args missing"
+            Return 0
+        End If
+
+        If UCase(ps.ast.nodes(so0).kind) <> "IDENT" Then
+            errText = "exec: SETNEWOFFSET target must be ident"
+            Return 0
+        End If
+
+        Dim newAddr As Integer
+        newAddr = ExecEvalNode(ps, es, so1, errText)
+        If errText <> "" Then Return 0
+
+        ExecSetVarAddr es, ps.ast.nodes(so0).value, CUInt(newAddr)
+        ExecSetVar es, ps.ast.nodes(so0).value, newAddr
+        Return 1
+
     Case "EXPR_STMT"
         If st.left <> -1 Then
             Dim v As Integer
@@ -384,10 +1014,12 @@ Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) A
 
     Do While st <> -1
         If ExecRunStmt(ps, es, st, errText) = 0 Then
+            UxbFileCloseAll es.fileIo
             Return 0
         End If
         st = ps.ast.nodes(st).nextSibling
     Loop
 
+    UxbFileCloseAll es.fileIo
     Return 1
 End Function

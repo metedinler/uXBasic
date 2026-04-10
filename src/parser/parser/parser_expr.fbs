@@ -1,5 +1,7 @@
-Private Function ParseExpression(ByRef ps As ParseState) As Integer
-    Return ParseRelation(ps)
+Declare Function ParseExpression(ByRef ps As ParseState) As Integer
+
+Private Function IsKeywordOp(ByRef tk As Token, ByRef opText As String) As Integer
+    Return tk.kind = "KEYWORD" And UCase(tk.lexeme) = UCase(opText)
 End Function
 
 Private Function ParsePrimary(ByRef ps As ParseState) As Integer
@@ -138,8 +140,10 @@ Private Function ParseTerm(ByRef ps As ParseState) As Integer
     Do
         Dim tk As Token
         tk = CurToken(ps)
-        If tk.kind <> "OP" Then Exit Do
-        If tk.lexeme <> "*" And tk.lexeme <> "/" And tk.lexeme <> "\\" And tk.lexeme <> "%" Then Exit Do
+        If tk.kind <> "OP" And IsKeywordOp(tk, "MOD") = 0 Then Exit Do
+        If tk.kind = "OP" Then
+            If tk.lexeme <> "*" And tk.lexeme <> "/" And tk.lexeme <> "\\" And tk.lexeme <> "%" Then Exit Do
+        End If
 
         AdvanceTok ps
         Dim rightExpr As Integer
@@ -147,7 +151,11 @@ Private Function ParseTerm(ByRef ps As ParseState) As Integer
         If rightExpr = -1 Then Return -1
 
         Dim n As Integer
-        n = MakeNodeFromToken(ps, "BINARY", "", tk.lexeme, tk)
+        If tk.kind = "KEYWORD" Then
+            n = MakeNodeFromToken(ps, "BINARY", "", UCase(tk.lexeme), tk)
+        Else
+            n = MakeNodeFromToken(ps, "BINARY", "", tk.lexeme, tk)
+        End If
         ps.ast.nodes(n).left = leftExpr
         ps.ast.nodes(n).right = rightExpr
         leftExpr = n
@@ -182,9 +190,51 @@ Private Function ParseAdd(ByRef ps As ParseState) As Integer
     Return leftExpr
 End Function
 
-Function ParseRelation(ByRef ps As ParseState) As Integer
+Private Function ParseShift(ByRef ps As ParseState) As Integer
     Dim leftExpr As Integer
     leftExpr = ParseAdd(ps)
+    If leftExpr = -1 Then Return -1
+
+    Do
+        Dim tk As Token
+        tk = CurToken(ps)
+
+        Dim isShiftOp As Integer
+        isShiftOp = 0
+        If tk.kind = "OP" And (tk.lexeme = "<<" Or tk.lexeme = ">>") Then
+            isShiftOp = 1
+        End If
+        If IsKeywordOp(tk, "SHL") Or IsKeywordOp(tk, "SHR") Or IsKeywordOp(tk, "ROL") Or IsKeywordOp(tk, "ROR") Then
+            isShiftOp = 1
+        End If
+        If isShiftOp = 0 Then Exit Do
+
+        AdvanceTok ps
+
+        Dim rightExpr As Integer
+        rightExpr = ParseAdd(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim opText As String
+        If tk.kind = "KEYWORD" Then
+            opText = UCase(tk.lexeme)
+        Else
+            opText = tk.lexeme
+        End If
+
+        Dim n As Integer
+        n = MakeNodeFromToken(ps, "BINARY", "", opText, tk)
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        leftExpr = n
+    Loop
+
+    Return leftExpr
+End Function
+
+Function ParseRelation(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParseShift(ps)
     If leftExpr = -1 Then Return -1
 
     Do
@@ -195,7 +245,7 @@ Function ParseRelation(ByRef ps As ParseState) As Integer
 
         AdvanceTok ps
         Dim rightExpr As Integer
-        rightExpr = ParseAdd(ps)
+        rightExpr = ParseShift(ps)
         If rightExpr = -1 Then Return -1
 
         Dim n As Integer
@@ -206,4 +256,80 @@ Function ParseRelation(ByRef ps As ParseState) As Integer
     Loop
 
     Return leftExpr
+End Function
+
+Private Function ParseBitwiseAnd(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParseRelation(ps)
+    If leftExpr = -1 Then Return -1
+
+    Do While IsKeywordOp(CurToken(ps), "AND")
+        Dim tk As Token
+        tk = CurToken(ps)
+        AdvanceTok ps
+
+        Dim rightExpr As Integer
+        rightExpr = ParseRelation(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        n = MakeNodeFromToken(ps, "BINARY", "", "AND", tk)
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        leftExpr = n
+    Loop
+
+    Return leftExpr
+End Function
+
+Private Function ParseBitwiseXor(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParseBitwiseAnd(ps)
+    If leftExpr = -1 Then Return -1
+
+    Do While IsKeywordOp(CurToken(ps), "XOR")
+        Dim tk As Token
+        tk = CurToken(ps)
+        AdvanceTok ps
+
+        Dim rightExpr As Integer
+        rightExpr = ParseBitwiseAnd(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        n = MakeNodeFromToken(ps, "BINARY", "", "XOR", tk)
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        leftExpr = n
+    Loop
+
+    Return leftExpr
+End Function
+
+Private Function ParseBitwiseOr(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParseBitwiseXor(ps)
+    If leftExpr = -1 Then Return -1
+
+    Do While IsKeywordOp(CurToken(ps), "OR")
+        Dim tk As Token
+        tk = CurToken(ps)
+        AdvanceTok ps
+
+        Dim rightExpr As Integer
+        rightExpr = ParseBitwiseXor(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        n = MakeNodeFromToken(ps, "BINARY", "", "OR", tk)
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        leftExpr = n
+    Loop
+
+    Return leftExpr
+End Function
+
+Private Function ParseExpression(ByRef ps As ParseState) As Integer
+    Return ParseBitwiseOr(ps)
 End Function

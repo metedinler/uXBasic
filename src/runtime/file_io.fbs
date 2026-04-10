@@ -1,0 +1,388 @@
+Const UXB_FILE_OK = 0
+Const UXB_FILE_ERR_BAD_CHANNEL = 7001
+Const UXB_FILE_ERR_CHANNEL_NOT_OPEN = 7002
+Const UXB_FILE_ERR_CHANNEL_ALREADY_OPEN = 7003
+Const UXB_FILE_ERR_INVALID_MODE = 7004
+Const UXB_FILE_ERR_INVALID_ARGUMENT = 7005
+Const UXB_FILE_ERR_MODE_NOT_READABLE = 7006
+Const UXB_FILE_ERR_MODE_NOT_WRITABLE = 7007
+Const UXB_FILE_ERR_SEEK_NOT_ALLOWED = 7008
+Const UXB_FILE_ERR_SEEK_OUT_OF_RANGE = 7009
+Const UXB_FILE_ERR_IO = 7010
+Const UXB_FILE_ERR_EOF = 7011
+Const UXB_FILE_ERR_NOT_FOUND = 7012
+Const UXB_FILE_ERR_ACCESS_DENIED = 7013
+
+Const UXB_FILE_MODE_UNKNOWN = 0
+Const UXB_FILE_MODE_INPUT = 1
+Const UXB_FILE_MODE_OUTPUT = 2
+Const UXB_FILE_MODE_APPEND = 3
+Const UXB_FILE_MODE_BINARY = 4
+Const UXB_FILE_MODE_RANDOM = 5
+
+Type UxbFileChannel
+    inUse As Integer
+    modeId As Integer
+    modeName As String
+    filePath As String
+    recordLength As Integer
+    canRead As Integer
+    canWrite As Integer
+    allowSeek As Integer
+End Type
+
+Type UxbFileRuntime
+    channels(1 To 255) As UxbFileChannel
+    lastErrorCode As Integer
+End Type
+
+Private Function UxbFileMapSystemError() As Integer
+    Dim systemCode As Integer
+    systemCode = Err
+
+    Select Case systemCode
+    Case 0
+        Return UXB_FILE_OK
+    Case 53
+        Return UXB_FILE_ERR_NOT_FOUND
+    Case 70
+        Return UXB_FILE_ERR_ACCESS_DENIED
+    Case Else
+        Return UXB_FILE_ERR_IO
+    End Select
+End Function
+
+Private Sub UxbFileResetChannel(ByRef io As UxbFileRuntime, ByVal channelNumber As Integer)
+    io.channels(channelNumber).inUse = 0
+    io.channels(channelNumber).modeId = UXB_FILE_MODE_UNKNOWN
+    io.channels(channelNumber).modeName = ""
+    io.channels(channelNumber).filePath = ""
+    io.channels(channelNumber).recordLength = 0
+    io.channels(channelNumber).canRead = 0
+    io.channels(channelNumber).canWrite = 0
+    io.channels(channelNumber).allowSeek = 0
+End Sub
+
+Private Function UxbFileIsValidChannel(ByVal channelNumber As Integer) As Integer
+    Return channelNumber >= 1 And channelNumber <= 255
+End Function
+
+Private Sub UxbFileSetError(ByRef io As UxbFileRuntime, ByVal errorCode As Integer)
+    io.lastErrorCode = errorCode
+End Sub
+
+Private Function UxbFileDefaultTransferBytes(ByRef channel As UxbFileChannel) As Integer
+    If channel.modeId = UXB_FILE_MODE_RANDOM And channel.recordLength > 0 Then
+        If channel.recordLength <= 4 Then Return channel.recordLength
+    End If
+    Return 4
+End Function
+
+Function UxbFileErrorText(ByVal errorCode As Integer) As String
+    Select Case errorCode
+    Case UXB_FILE_OK
+        Return "ok"
+    Case UXB_FILE_ERR_BAD_CHANNEL
+        Return "bad channel"
+    Case UXB_FILE_ERR_CHANNEL_NOT_OPEN
+        Return "channel not open"
+    Case UXB_FILE_ERR_CHANNEL_ALREADY_OPEN
+        Return "channel already open"
+    Case UXB_FILE_ERR_INVALID_MODE
+        Return "invalid mode"
+    Case UXB_FILE_ERR_INVALID_ARGUMENT
+        Return "invalid argument"
+    Case UXB_FILE_ERR_MODE_NOT_READABLE
+        Return "mode not readable"
+    Case UXB_FILE_ERR_MODE_NOT_WRITABLE
+        Return "mode not writable"
+    Case UXB_FILE_ERR_SEEK_NOT_ALLOWED
+        Return "seek not allowed in mode"
+    Case UXB_FILE_ERR_SEEK_OUT_OF_RANGE
+        Return "seek out of range"
+    Case UXB_FILE_ERR_IO
+        Return "io error"
+    Case UXB_FILE_ERR_EOF
+        Return "end of file"
+    Case UXB_FILE_ERR_NOT_FOUND
+        Return "file not found"
+    Case UXB_FILE_ERR_ACCESS_DENIED
+        Return "access denied"
+    Case Else
+        Return "unknown file error"
+    End Select
+End Function
+
+Sub UxbFileInit(ByRef io As UxbFileRuntime)
+    Dim i As Integer
+    For i = 1 To 255
+        UxbFileResetChannel io, i
+    Next i
+    io.lastErrorCode = UXB_FILE_OK
+End Sub
+
+Function UxbFileGetLastError(ByRef io As UxbFileRuntime) As Integer
+    Return io.lastErrorCode
+End Function
+
+Function UxbFileNormalizeMode(ByRef rawMode As String, ByRef canonicalMode As String, ByRef modeId As Integer) As Integer
+    Dim modeText As String
+    modeText = UCase(Trim(rawMode))
+
+    Select Case modeText
+    Case "INPUT", "IN", "I"
+        canonicalMode = "INPUT"
+        modeId = UXB_FILE_MODE_INPUT
+        Return 1
+    Case "OUTPUT", "OUT", "O"
+        canonicalMode = "OUTPUT"
+        modeId = UXB_FILE_MODE_OUTPUT
+        Return 1
+    Case "APPEND", "A"
+        canonicalMode = "APPEND"
+        modeId = UXB_FILE_MODE_APPEND
+        Return 1
+    Case "BINARY", "BIN", "B"
+        canonicalMode = "BINARY"
+        modeId = UXB_FILE_MODE_BINARY
+        Return 1
+    Case "RANDOM", "RAND", "R"
+        canonicalMode = "RANDOM"
+        modeId = UXB_FILE_MODE_RANDOM
+        Return 1
+    End Select
+
+    canonicalMode = ""
+    modeId = UXB_FILE_MODE_UNKNOWN
+    Return 0
+End Function
+
+Function UxbFileOpen(ByRef io As UxbFileRuntime, ByVal channelNumber As Integer, ByRef filePath As String, ByRef rawMode As String, ByVal recordLength As Integer = 0) As Integer
+    If UxbFileIsValidChannel(channelNumber) = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_BAD_CHANNEL
+        Return 0
+    End If
+
+    If io.channels(channelNumber).inUse <> 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_CHANNEL_ALREADY_OPEN
+        Return 0
+    End If
+
+    Dim canonicalMode As String
+    Dim normalizedModeId As Integer
+    If UxbFileNormalizeMode(rawMode, canonicalMode, normalizedModeId) = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_INVALID_MODE
+        Return 0
+    End If
+
+    If normalizedModeId = UXB_FILE_MODE_RANDOM Then
+        If recordLength <= 0 Then recordLength = 4
+    Else
+        recordLength = 0
+    End If
+
+    Select Case normalizedModeId
+    Case UXB_FILE_MODE_INPUT
+        Open filePath For Input As #channelNumber
+    Case UXB_FILE_MODE_OUTPUT
+        Open filePath For Output As #channelNumber
+    Case UXB_FILE_MODE_APPEND
+        Open filePath For Append As #channelNumber
+    Case UXB_FILE_MODE_BINARY
+        Open filePath For Binary As #channelNumber
+    Case UXB_FILE_MODE_RANDOM
+        Open filePath For Random As #channelNumber Len = recordLength
+    End Select
+
+    If Err <> 0 Then
+        UxbFileSetError io, UxbFileMapSystemError()
+        UxbFileResetChannel io, channelNumber
+        Return 0
+    End If
+
+    io.channels(channelNumber).inUse = 1
+    io.channels(channelNumber).modeId = normalizedModeId
+    io.channels(channelNumber).modeName = canonicalMode
+    io.channels(channelNumber).filePath = filePath
+    io.channels(channelNumber).recordLength = recordLength
+
+    Select Case normalizedModeId
+    Case UXB_FILE_MODE_BINARY, UXB_FILE_MODE_RANDOM
+        io.channels(channelNumber).canRead = 1
+        io.channels(channelNumber).canWrite = 1
+        io.channels(channelNumber).allowSeek = 1
+    Case Else
+        io.channels(channelNumber).canRead = 0
+        io.channels(channelNumber).canWrite = 0
+        io.channels(channelNumber).allowSeek = 0
+    End Select
+
+    UxbFileSetError io, UXB_FILE_OK
+    Return 1
+End Function
+
+Function UxbFileClose(ByRef io As UxbFileRuntime, ByVal channelNumber As Integer) As Integer
+    If UxbFileIsValidChannel(channelNumber) = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_BAD_CHANNEL
+        Return 0
+    End If
+
+    If io.channels(channelNumber).inUse = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_CHANNEL_NOT_OPEN
+        Return 0
+    End If
+
+    Close #channelNumber
+    If Err <> 0 Then
+        UxbFileSetError io, UxbFileMapSystemError()
+        Return 0
+    End If
+
+    UxbFileResetChannel io, channelNumber
+    UxbFileSetError io, UXB_FILE_OK
+    Return 1
+End Function
+
+Sub UxbFileCloseAll(ByRef io As UxbFileRuntime)
+    Dim i As Integer
+    For i = 1 To 255
+        If io.channels(i).inUse <> 0 Then
+            Close #i
+            UxbFileResetChannel io, i
+        End If
+    Next i
+    UxbFileSetError io, UXB_FILE_OK
+End Sub
+
+Function UxbFileSeek(ByRef io As UxbFileRuntime, ByVal channelNumber As Integer, ByVal positionValue As LongInt = -1, ByRef currentPositionOut As LongInt = 0) As Integer
+    If UxbFileIsValidChannel(channelNumber) = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_BAD_CHANNEL
+        Return 0
+    End If
+
+    If io.channels(channelNumber).inUse = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_CHANNEL_NOT_OPEN
+        Return 0
+    End If
+
+    If positionValue >= 0 Then
+        If io.channels(channelNumber).allowSeek = 0 Then
+            UxbFileSetError io, UXB_FILE_ERR_SEEK_NOT_ALLOWED
+            Return 0
+        End If
+
+        If positionValue < 1 Then
+            UxbFileSetError io, UXB_FILE_ERR_SEEK_OUT_OF_RANGE
+            Return 0
+        End If
+
+        Seek #channelNumber, positionValue
+        If Err <> 0 Then
+            UxbFileSetError io, UxbFileMapSystemError()
+            Return 0
+        End If
+    End If
+
+    currentPositionOut = Seek(channelNumber)
+    UxbFileSetError io, UXB_FILE_OK
+    Return 1
+End Function
+
+Function UxbFileGetI32(ByRef io As UxbFileRuntime, ByVal channelNumber As Integer, ByVal positionValue As LongInt, ByVal bytesToRead As Integer, ByRef valueOut As Integer) As Integer
+    If UxbFileIsValidChannel(channelNumber) = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_BAD_CHANNEL
+        Return 0
+    End If
+
+    If io.channels(channelNumber).inUse = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_CHANNEL_NOT_OPEN
+        Return 0
+    End If
+
+    If io.channels(channelNumber).canRead = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_MODE_NOT_READABLE
+        Return 0
+    End If
+
+    If bytesToRead = 0 Then
+        bytesToRead = UxbFileDefaultTransferBytes(io.channels(channelNumber))
+    End If
+
+    If bytesToRead < 1 Or bytesToRead > 4 Then
+        UxbFileSetError io, UXB_FILE_ERR_INVALID_ARGUMENT
+        Return 0
+    End If
+
+    If positionValue >= 0 Then
+        Dim ignoredPosition As LongInt
+        If UxbFileSeek(io, channelNumber, positionValue, ignoredPosition) = 0 Then
+            Return 0
+        End If
+    End If
+
+    valueOut = 0
+    If bytesToRead = 4 Then
+        Get #channelNumber, , valueOut
+    Else
+        Get #channelNumber, , valueOut, bytesToRead
+    End If
+
+    If Err <> 0 Then
+        If Eof(channelNumber) Then
+            UxbFileSetError io, UXB_FILE_ERR_EOF
+        Else
+            UxbFileSetError io, UxbFileMapSystemError()
+        End If
+        Return 0
+    End If
+
+    UxbFileSetError io, UXB_FILE_OK
+    Return 1
+End Function
+
+Function UxbFilePutI32(ByRef io As UxbFileRuntime, ByVal channelNumber As Integer, ByVal positionValue As LongInt, ByVal bytesToWrite As Integer, ByVal valueIn As Integer) As Integer
+    If UxbFileIsValidChannel(channelNumber) = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_BAD_CHANNEL
+        Return 0
+    End If
+
+    If io.channels(channelNumber).inUse = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_CHANNEL_NOT_OPEN
+        Return 0
+    End If
+
+    If io.channels(channelNumber).canWrite = 0 Then
+        UxbFileSetError io, UXB_FILE_ERR_MODE_NOT_WRITABLE
+        Return 0
+    End If
+
+    If bytesToWrite = 0 Then
+        bytesToWrite = UxbFileDefaultTransferBytes(io.channels(channelNumber))
+    End If
+
+    If bytesToWrite < 1 Or bytesToWrite > 4 Then
+        UxbFileSetError io, UXB_FILE_ERR_INVALID_ARGUMENT
+        Return 0
+    End If
+
+    If positionValue >= 0 Then
+        Dim ignoredPosition As LongInt
+        If UxbFileSeek(io, channelNumber, positionValue, ignoredPosition) = 0 Then
+            Return 0
+        End If
+    End If
+
+    If bytesToWrite = 4 Then
+        Put #channelNumber, , valueIn
+    Else
+        Put #channelNumber, , valueIn, bytesToWrite
+    End If
+
+    If Err <> 0 Then
+        UxbFileSetError io, UxbFileMapSystemError()
+        Return 0
+    End If
+
+    UxbFileSetError io, UXB_FILE_OK
+    Return 1
+End Function

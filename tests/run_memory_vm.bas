@@ -30,6 +30,23 @@ Private Sub Main()
     ok And= AssertEq(VMemCopyB(&h300, &h310, 1), 1, "MEMCOPYB status")
     ok And= AssertEq(VMemPeekB(&h310), &h41, "MEMCOPYB verify")
 
+    ok And= AssertEq(VMemFillW(&h320, &h1234, 2), 1, "MEMFILLW status")
+    ok And= AssertEq(VMemPeekW(&h320), &h1234, "MEMFILLW verify start")
+    ok And= AssertEq(VMemPeekW(&h322), &h1234, "MEMFILLW verify end")
+
+    ok And= AssertEq(VMemCopyW(&h320, &h340, 2), 1, "MEMCOPYW status")
+    ok And= AssertEq(VMemPeekW(&h340), &h1234, "MEMCOPYW verify")
+
+    ok And= AssertEq(VMemFillD(&h360, &h78563412, 1), 1, "MEMFILLD status")
+    ok And= AssertEq(VMemPeekD(&h360), &h78563412, "MEMFILLD verify")
+
+    ok And= AssertEq(VMemCopyD(&h360, &h380, 1), 1, "MEMCOPYD status")
+    ok And= AssertEq(VMemPeekD(&h380), &h78563412, "MEMCOPYD verify")
+
+    ok And= AssertEq(VMemPokeS(&h3A0, "AB"), 1, "POKES status")
+    ok And= AssertEq(VMemPeekB(&h3A0), Asc("A"), "POKES first byte")
+    ok And= AssertEq(VMemPeekB(&h3A1), Asc("B"), "POKES second byte")
+
     ok And= AssertEq(VMemPokeB(&hB8000, Asc("A")), 1, "Text char write")
     ok And= AssertEq(VMemPokeB(&hB8001, &h1E), 1, "Text attr write")
     ok And= AssertEq(VMemPeekB(&hB8000), Asc("A"), "Text char read")

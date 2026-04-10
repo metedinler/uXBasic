@@ -1,0 +1,282 @@
+#include once "../../parser/parser.fbs"
+
+Type InlineX64Block
+    arch As String
+    assemblerName As String
+    blockKind As String
+    policy As String
+    bodyText As String
+    startLine As Integer
+End Type
+
+Private Function InlineIsOp(ByRef tk As Token, ByRef opText As String) As Integer
+    Return (tk.kind = "OP") And (tk.lexeme = opText)
+End Function
+
+Private Function InlineIsKw(ByRef tk As Token, ByRef kwText As String) As Integer
+    Return (tk.kind = "KEYWORD") And (UCase(tk.lexeme) = UCase(kwText))
+End Function
+
+Private Sub InlinePushBlock(blocks() As InlineX64Block, ByRef blockCount As Integer, ByRef blockItem As InlineX64Block)
+    If blockCount = 0 Then
+        ReDim blocks(0)
+    Else
+        ReDim Preserve blocks(blockCount)
+    End If
+    blocks(blockCount) = blockItem
+    blockCount += 1
+End Sub
+
+Private Function InlineReadHeaderArg(ByRef lx As LexerState, ByRef i As Integer, ByRef argText As String, ByRef errText As String) As Integer
+    If i >= lx.tokens.count Then
+        errText = "inline-x64: unexpected end while reading INLINE header"
+        Return 0
+    End If
+
+    Dim tk As Token
+    tk = lx.tokens.items(i)
+
+    Select Case UCase(tk.kind)
+    Case "STRING", "IDENT", "KEYWORD", "NUMBER"
+        argText = tk.lexeme
+        i += 1
+        Return 1
+    Case Else
+        errText = "inline-x64: invalid INLINE header arg at line " & LTrim(Str(tk.lineNo))
+        Return 0
+    End Select
+End Function
+
+Private Function InlineParseHeader(ByRef lx As LexerState, ByRef i As Integer, ByRef blockItem As InlineX64Block, ByRef errText As String) As Integer
+    If i >= lx.tokens.count OrElse InlineIsOp(lx.tokens.items(i), "(") = 0 Then
+        errText = "inline-x64: INLINE header must start with '('"
+        Return 0
+    End If
+    i += 1
+
+    Dim args(3) As String
+    Dim argIdx As Integer
+    For argIdx = 0 To 3
+        If InlineReadHeaderArg(lx, i, args(argIdx), errText) = 0 Then Return 0
+
+        If argIdx < 3 Then
+            If i >= lx.tokens.count OrElse InlineIsOp(lx.tokens.items(i), ",") = 0 Then
+                errText = "inline-x64: INLINE header requires 4 comma-separated args"
+                Return 0
+            End If
+            i += 1
+        End If
+    Next argIdx
+
+    If i >= lx.tokens.count OrElse InlineIsOp(lx.tokens.items(i), ")") = 0 Then
+        errText = "inline-x64: INLINE header must end with ')'"
+        Return 0
+    End If
+    i += 1
+
+    blockItem.arch = args(0)
+    blockItem.assemblerName = args(1)
+    blockItem.blockKind = args(2)
+    blockItem.policy = args(3)
+    blockItem.bodyText = ""
+
+    Return 1
+End Function
+
+Private Sub InlineAppendBodyToken(ByRef bodyText As String, ByRef tk As Token)
+    If tk.kind = "EOL" Then
+        If Len(bodyText) = 0 OrElse Right(bodyText, 1) <> Chr(10) Then
+            bodyText &= Chr(10)
+        End If
+        Exit Sub
+    End If
+
+    If tk.kind = "EOF" Then Exit Sub
+
+    If Len(bodyText) > 0 Then
+        Dim tail As String
+        tail = Right(bodyText, 1)
+        If tail <> Chr(10) Then bodyText &= " "
+    End If
+
+    bodyText &= tk.lexeme
+End Sub
+
+Private Function InlineParseBody(ByRef lx As LexerState, ByRef i As Integer, ByRef blockItem As InlineX64Block, ByRef errText As String) As Integer
+    Do While i < lx.tokens.count
+        Dim tk As Token
+        tk = lx.tokens.items(i)
+
+        If InlineIsKw(tk, "END") Then
+            If i + 1 < lx.tokens.count AndAlso InlineIsKw(lx.tokens.items(i + 1), "INLINE") Then
+                i += 2
+                Return 1
+            End If
+        End If
+
+        InlineAppendBodyToken blockItem.bodyText, tk
+        i += 1
+    Loop
+
+    errText = "inline-x64: missing END INLINE terminator"
+    Return 0
+End Function
+
+Private Function InlineCollectX64Blocks(ByRef ps As ParseState, blocks() As InlineX64Block, ByRef blockCount As Integer, ByRef errText As String) As Integer
+    blockCount = 0
+
+    Dim i As Integer
+    i = 0
+    Do While i < ps.lx.tokens.count
+        Dim tk As Token
+        tk = ps.lx.tokens.items(i)
+
+        If InlineIsKw(tk, "INLINE") Then
+            Dim blockItem As InlineX64Block
+            blockItem.startLine = tk.lineNo
+
+            i += 1
+            If InlineParseHeader(ps.lx, i, blockItem, errText) = 0 Then Return 0
+            If InlineParseBody(ps.lx, i, blockItem, errText) = 0 Then Return 0
+
+            InlinePushBlock blocks(), blockCount, blockItem
+            Continue Do
+        End If
+
+        i += 1
+    Loop
+
+    If blockCount = 0 Then
+        errText = "inline-x64: no INLINE block found"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function InlineContainsWord(ByRef textValue As String, ByRef wordValue As String) As Integer
+    Dim hay As String
+    Dim needle As String
+    hay = UCase(textValue)
+    needle = UCase(wordValue)
+
+    Dim pos1 As Integer
+    pos1 = Instr(1, hay, needle)
+
+    Do While pos1 > 0
+        Dim leftOk As Integer
+        Dim rightOk As Integer
+
+        leftOk = (pos1 = 1)
+        If leftOk = 0 Then
+            Dim leftCh As String
+            leftCh = Mid(hay, pos1 - 1, 1)
+            leftOk = (leftCh = " ") Or (leftCh = Chr(10))
+        End If
+
+        Dim rightPos As Integer
+        rightPos = pos1 + Len(needle)
+        rightOk = (rightPos > Len(hay))
+        If rightOk = 0 Then
+            Dim rightCh As String
+            rightCh = Mid(hay, rightPos, 1)
+            rightOk = (rightCh = " ") Or (rightCh = Chr(10))
+        End If
+
+        If leftOk And rightOk Then Return 1
+        pos1 = Instr(pos1 + 1, hay, needle)
+    Loop
+
+    Return 0
+End Function
+
+Private Function InlineValidateBlock(ByRef blockItem As InlineX64Block, ByRef errText As String) As Integer
+    Dim archU As String
+    archU = UCase(Trim(blockItem.arch))
+
+    If archU <> "X64" And archU <> "X86_64" And archU <> "AMD64" Then
+        errText = "inline-x64: unsupported arch at line " & LTrim(Str(blockItem.startLine))
+        Return 0
+    End If
+
+    Dim asmU As String
+    asmU = UCase(Trim(blockItem.assemblerName))
+
+    If asmU <> "NASM" And asmU <> "MASM" And asmU <> "GAS" Then
+        errText = "inline-x64: unsupported assembler at line " & LTrim(Str(blockItem.startLine))
+        Return 0
+    End If
+
+    Dim kindU As String
+    kindU = UCase(Trim(blockItem.blockKind))
+
+    If kindU <> "SUB" And kindU <> "FUNCTION" And kindU <> "PROC" Then
+        errText = "inline-x64: unsupported kind at line " & LTrim(Str(blockItem.startLine))
+        Return 0
+    End If
+
+    Dim policyU As String
+    policyU = UCase(blockItem.policy)
+
+    If Instr(1, policyU, "ABI=WIN64") = 0 Then
+        errText = "inline-x64: ABI=WIN64 policy is required at line " & LTrim(Str(blockItem.startLine))
+        Return 0
+    End If
+
+    If Instr(1, policyU, "PRESERVE=") = 0 Then
+        errText = "inline-x64: PRESERVE register policy is required at line " & LTrim(Str(blockItem.startLine))
+        Return 0
+    End If
+
+    If Instr(1, policyU, "STACK=16") = 0 Then
+        errText = "inline-x64: STACK=16 policy is required at line " & LTrim(Str(blockItem.startLine))
+        Return 0
+    End If
+
+    If InlineContainsWord(blockItem.bodyText, "CALL") Then
+        If Instr(1, policyU, "SHADOW=32") = 0 Then
+            errText = "inline-x64: SHADOW=32 policy is required for CALL usage at line " & LTrim(Str(blockItem.startLine))
+            Return 0
+        End If
+    End If
+
+    Return 1
+End Function
+
+Function InlineX64BackendValidate(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim blocks(Any) As InlineX64Block
+    Dim blockCount As Integer
+
+    If InlineCollectX64Blocks(ps, blocks(), blockCount, errText) = 0 Then Return 0
+
+    Dim i As Integer
+    For i = 0 To blockCount - 1
+        If InlineValidateBlock(blocks(i), errText) = 0 Then Return 0
+    Next i
+
+    Return 1
+End Function
+
+Function InlineX64BackendEmitPlan(ByRef ps As ParseState, ByRef planCsv As String, ByRef errText As String) As Integer
+    Dim blocks(Any) As InlineX64Block
+    Dim blockCount As Integer
+
+    If InlineCollectX64Blocks(ps, blocks(), blockCount, errText) = 0 Then Return 0
+
+    planCsv = "line,arch,assembler,kind,requires_shadow32" & Chr(10)
+
+    Dim i As Integer
+    For i = 0 To blockCount - 1
+        Dim needsShadow As String
+        If InlineContainsWord(blocks(i).bodyText, "CALL") Then
+            needsShadow = "yes"
+        Else
+            needsShadow = "no"
+        End If
+
+        planCsv &= LTrim(Str(blocks(i).startLine)) & "," & blocks(i).arch & "," & blocks(i).assemblerName & "," & blocks(i).blockKind & "," & needsShadow
+        If i < blockCount - 1 Then planCsv &= Chr(10)
+    Next i
+
+    Return 1
+End Function
