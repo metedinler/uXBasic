@@ -32,6 +32,9 @@ if (-not $SkipBuild) {
     Invoke-Step "Build run_call_exec_64" { cmd /c build_64.bat tests\run_call_exec.bas }
     Invoke-Step "Build run_memory_vm_64" { cmd /c build_64.bat tests\run_memory_vm.bas }
     Invoke-Step "Build run_memory_exec_ast_64" { cmd /c build_64.bat tests\run_memory_exec_ast.bas }
+    Invoke-Step "Build run_each_exec_64" { cmd /c build_64.bat tests\run_each_exec.bas }
+    Invoke-Step "Build run_layout_intrinsics_64" { cmd /c build_64.bat tests\run_layout_intrinsics.bas }
+    Invoke-Step "Build run_memory_width_semantics_64" { cmd /c build_64.bat tests\run_memory_width_semantics.bas }
     Invoke-Step "Build run_runtime_intrinsics_64" { cmd /c build_64.bat tests\run_runtime_intrinsics.bas }
     Invoke-Step "Build run_diagnostics_log_64" { cmd /c build_64.bat tests\run_diagnostics_log.bas }
 }
@@ -43,6 +46,9 @@ Invoke-Step "Run run_file_io_exec_ast_negative_64" { cmd /c tests\run_file_io_ex
 Invoke-Step "Run run_call_exec_64" { cmd /c tests\run_call_exec_64.exe }
 Invoke-Step "Run run_memory_vm_64" { cmd /c tests\run_memory_vm_64.exe }
 Invoke-Step "Run run_memory_exec_ast_64" { cmd /c tests\run_memory_exec_ast_64.exe }
+Invoke-Step "Run run_each_exec_64" { cmd /c tests\run_each_exec_64.exe }
+Invoke-Step "Run run_layout_intrinsics_64" { cmd /c tests\run_layout_intrinsics_64.exe }
+Invoke-Step "Run run_memory_width_semantics_64" { cmd /c tests\run_memory_width_semantics_64.exe }
 Invoke-Step "Run run_runtime_intrinsics_64" { cmd /c tests\run_runtime_intrinsics_64.exe }
 Invoke-Step "Run run_diagnostics_log_64" { cmd /c tests\run_diagnostics_log_64.exe }
 

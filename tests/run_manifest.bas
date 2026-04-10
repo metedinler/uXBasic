@@ -586,6 +586,14 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasCallExprValue(ps, "CODEPTR")
         If resultOk = 0 Then detail = "missing CODEPTR call expression"
 
+    Case "SIZEOF_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "SIZEOF")
+        If resultOk = 0 Then detail = "missing SIZEOF call expression"
+
+    Case "OFFSETOF_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "OFFSETOF")
+        If resultOk = 0 Then detail = "missing OFFSETOF call expression"
+
     Case "POKES_OK"
         resultOk = parseOk And HasAstKind(ps, "POKES_STMT")
         If resultOk = 0 Then detail = "missing POKES_STMT AST node"

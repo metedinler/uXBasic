@@ -1,0 +1,952 @@
+Type TypeLayoutDim
+    lowerBound As Integer
+    upperBound As Integer
+    extent As Integer
+End Type
+
+Type TypeLayoutField
+    fieldName As String
+    fieldTypeName As String
+    offsetBytes As Integer
+    sizeBytes As Integer
+    alignBytes As Integer
+    isArray As Integer
+    elemTypeName As String
+    elemSizeBytes As Integer
+    elemAlignBytes As Integer
+    elemStrideBytes As Integer
+    firstDim As Integer
+    dimCount As Integer
+End Type
+
+Type TypeLayoutRecord
+    typeName As String
+    declNode As Integer
+    firstField As Integer
+    fieldCount As Integer
+    sizeBytes As Integer
+    alignBytes As Integer
+    computed As Integer
+    visiting As Integer
+End Type
+
+Dim Shared gTypeLayouts() As TypeLayoutRecord
+Dim Shared gTypeLayoutCount As Integer
+Dim Shared gTypeLayoutFields() As TypeLayoutField
+Dim Shared gTypeLayoutFieldCount As Integer
+Dim Shared gTypeLayoutDims() As TypeLayoutDim
+Dim Shared gTypeLayoutDimCount As Integer
+Dim Shared gTypeLayoutBuilt As Integer
+
+Private Sub LayoutResetState()
+    gTypeLayoutCount = 0
+    gTypeLayoutFieldCount = 0
+    gTypeLayoutDimCount = 0
+    gTypeLayoutBuilt = 0
+End Sub
+
+Private Function LayoutAlignUp(ByVal valueIn As Integer, ByVal alignBytes As Integer) As Integer
+    If alignBytes < 1 Then alignBytes = 1
+    Return ((valueIn + alignBytes - 1) \ alignBytes) * alignBytes
+End Function
+
+Private Function LayoutChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    Dim i As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i = i + 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function IsBuiltinLayoutType(ByRef rawTypeName As String, ByRef sizeOut As Integer, ByRef alignOut As Integer) As Integer
+    Dim t As String
+    t = UCase(Trim(rawTypeName))
+
+    Select Case t
+    Case "I8", "U8", "BOOLEAN"
+        sizeOut = 1
+        alignOut = 1
+        Return 1
+    Case "I16", "U16"
+        sizeOut = 2
+        alignOut = 2
+        Return 1
+    Case "I32", "U32", "F32"
+        sizeOut = 4
+        alignOut = 4
+        Return 1
+    Case "I64", "U64", "F64"
+        sizeOut = 8
+        alignOut = 8
+        Return 1
+    Case "F80"
+        sizeOut = 10
+        alignOut = 8
+        Return 1
+    Case "STRING", "ARRAY", "LIST", "DICT", "SET", "REF", "POINTER"
+        sizeOut = 8
+        alignOut = 8
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function FindTypeLayoutIndex(ByRef rawTypeName As String) As Integer
+    Dim normalized As String
+    normalized = UCase(Trim(rawTypeName))
+    If normalized = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To gTypeLayoutCount - 1
+        If gTypeLayouts(i).typeName = normalized Then Return i
+    Next i
+
+    Return -1
+End Function
+
+Private Function AddTypeLayoutDecl(ByRef rawTypeName As String, ByVal declNode As Integer, ByRef errOut As String) As Integer
+    Dim normalized As String
+    normalized = UCase(Trim(rawTypeName))
+    If normalized = "" Then
+        errOut = "layout: empty type name"
+        Return 0
+    End If
+
+    Dim i As Integer
+    i = FindTypeLayoutIndex(normalized)
+    If i <> -1 Then
+        If gTypeLayouts(i).declNode <> -1 Then
+            errOut = "layout: duplicate type declaration: " & normalized
+            Return 0
+        End If
+        gTypeLayouts(i).declNode = declNode
+        Return 1
+    End If
+
+    If gTypeLayoutCount = 0 Then
+        ReDim gTypeLayouts(0)
+    Else
+        ReDim Preserve gTypeLayouts(gTypeLayoutCount)
+    End If
+
+    gTypeLayouts(gTypeLayoutCount).typeName = normalized
+    gTypeLayouts(gTypeLayoutCount).declNode = declNode
+    gTypeLayouts(gTypeLayoutCount).firstField = -1
+    gTypeLayouts(gTypeLayoutCount).fieldCount = 0
+    gTypeLayouts(gTypeLayoutCount).sizeBytes = 0
+    gTypeLayouts(gTypeLayoutCount).alignBytes = 1
+    gTypeLayouts(gTypeLayoutCount).computed = 0
+    gTypeLayouts(gTypeLayoutCount).visiting = 0
+    gTypeLayoutCount = gTypeLayoutCount + 1
+
+    Return 1
+End Function
+
+Private Function AddLayoutDim(ByVal lowerBound As Integer, ByVal upperBound As Integer, ByVal extent As Integer) As Integer
+    Dim idx As Integer
+
+    If gTypeLayoutDimCount = 0 Then
+        ReDim gTypeLayoutDims(0)
+    Else
+        ReDim Preserve gTypeLayoutDims(gTypeLayoutDimCount)
+    End If
+
+    idx = gTypeLayoutDimCount
+    gTypeLayoutDimCount = gTypeLayoutDimCount + 1
+    gTypeLayoutDims(idx).lowerBound = lowerBound
+    gTypeLayoutDims(idx).upperBound = upperBound
+    gTypeLayoutDims(idx).extent = extent
+
+    Return idx
+End Function
+
+Private Function AddLayoutField(ByRef fieldName As String, ByRef fieldTypeName As String, ByVal offsetBytes As Integer, ByVal sizeBytes As Integer, ByVal alignBytes As Integer, ByVal isArray As Integer, ByRef elemTypeName As String, ByVal elemSizeBytes As Integer, ByVal elemAlignBytes As Integer, ByVal elemStrideBytes As Integer, ByVal firstDim As Integer, ByVal dimCount As Integer) As Integer
+    Dim idx As Integer
+
+    If gTypeLayoutFieldCount = 0 Then
+        ReDim gTypeLayoutFields(0)
+    Else
+        ReDim Preserve gTypeLayoutFields(gTypeLayoutFieldCount)
+    End If
+
+    idx = gTypeLayoutFieldCount
+    gTypeLayoutFieldCount = gTypeLayoutFieldCount + 1
+
+    gTypeLayoutFields(idx).fieldName = UCase(Trim(fieldName))
+    gTypeLayoutFields(idx).fieldTypeName = UCase(Trim(fieldTypeName))
+    gTypeLayoutFields(idx).offsetBytes = offsetBytes
+    gTypeLayoutFields(idx).sizeBytes = sizeBytes
+    gTypeLayoutFields(idx).alignBytes = alignBytes
+    gTypeLayoutFields(idx).isArray = isArray
+    gTypeLayoutFields(idx).elemTypeName = UCase(Trim(elemTypeName))
+    gTypeLayoutFields(idx).elemSizeBytes = elemSizeBytes
+    gTypeLayoutFields(idx).elemAlignBytes = elemAlignBytes
+    gTypeLayoutFields(idx).elemStrideBytes = elemStrideBytes
+    gTypeLayoutFields(idx).firstDim = firstDim
+    gTypeLayoutFields(idx).dimCount = dimCount
+
+    Return idx
+End Function
+
+Private Function EvalConstIntExpr(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef valueOut As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    Select Case UCase(n.kind)
+    Case "NUMBER"
+        valueOut = ValInt(n.value)
+        Return 1
+    Case "UNARY"
+        Dim rv As Integer
+        If EvalConstIntExpr(ps, n.right, rv) = 0 Then Return 0
+        If n.op = "-" Then
+            valueOut = -rv
+            Return 1
+        ElseIf n.op = "+" Then
+            valueOut = rv
+            Return 1
+        End If
+        Return 0
+    Case "BINARY"
+        Dim lv As Integer
+        Dim rv As Integer
+        If EvalConstIntExpr(ps, n.left, lv) = 0 Then Return 0
+        If EvalConstIntExpr(ps, n.right, rv) = 0 Then Return 0
+
+        Select Case n.op
+        Case "+"
+            valueOut = lv + rv
+            Return 1
+        Case "-"
+            valueOut = lv - rv
+            Return 1
+        Case "*"
+            valueOut = lv * rv
+            Return 1
+        Case "\\"
+            If rv = 0 Then Return 0
+            valueOut = lv \ rv
+            Return 1
+        Case "/"
+            If rv = 0 Then Return 0
+            valueOut = lv \ rv
+            Return 1
+        Case "%"
+            If rv = 0 Then Return 0
+            valueOut = lv Mod rv
+            Return 1
+        End Select
+    End Select
+
+    Return 0
+End Function
+
+Private Function ExtractBoundRange(ByRef ps As ParseState, ByVal boundNode As Integer, ByRef lowerOut As Integer, ByRef upperOut As Integer) As Integer
+    If boundNode < 0 Or boundNode >= ps.ast.count Then Return 0
+
+    Dim b As ASTNode
+    b = ps.ast.nodes(boundNode)
+
+    If UCase(b.kind) = "RANGE_EXPR" Then
+        If EvalConstIntExpr(ps, b.left, lowerOut) = 0 Then Return 0
+        If EvalConstIntExpr(ps, b.right, upperOut) = 0 Then Return 0
+        Return 1
+    End If
+
+    lowerOut = 0
+    If EvalConstIntExpr(ps, boundNode, upperOut) = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function ResolveTypeLayout(ByRef ps As ParseState, ByRef rawTypeName As String, ByRef sizeOut As Integer, ByRef alignOut As Integer, ByRef errOut As String) As Integer
+    Dim builtinSize As Integer
+    Dim builtinAlign As Integer
+    Dim typeIdx As Integer
+
+    If IsBuiltinLayoutType(rawTypeName, builtinSize, builtinAlign) Then
+        sizeOut = builtinSize
+        alignOut = builtinAlign
+        Return 1
+    End If
+
+    typeIdx = FindTypeLayoutIndex(rawTypeName)
+    If typeIdx = -1 Then
+        errOut = "unknown type: " & UCase(Trim(rawTypeName))
+        Return 0
+    End If
+
+    If gTypeLayouts(typeIdx).computed Then
+        sizeOut = gTypeLayouts(typeIdx).sizeBytes
+        alignOut = gTypeLayouts(typeIdx).alignBytes
+        Return 1
+    End If
+
+    If gTypeLayouts(typeIdx).visiting Then
+        errOut = "recursive by-value type: " & gTypeLayouts(typeIdx).typeName
+        Return 0
+    End If
+
+    gTypeLayouts(typeIdx).visiting = 1
+
+    Dim declNode As Integer
+    declNode = gTypeLayouts(typeIdx).declNode
+    If declNode < 0 Or declNode >= ps.ast.count Then
+        gTypeLayouts(typeIdx).visiting = 0
+        errOut = "layout: missing declaration node for type " & gTypeLayouts(typeIdx).typeName
+        Return 0
+    End If
+
+    Dim curOffset As Integer
+    Dim maxAlign As Integer
+    Dim firstField As Integer
+    Dim fieldCount As Integer
+    Dim fieldNode As Integer
+
+    curOffset = 0
+    maxAlign = 1
+    firstField = -1
+    fieldCount = 0
+
+    fieldNode = ps.ast.nodes(declNode).firstChild
+    Do While fieldNode <> -1
+        Dim fieldKind As String
+        fieldKind = UCase(ps.ast.nodes(fieldNode).kind)
+
+        If fieldKind = "TYPE_FIELD" Or fieldKind = "CLASS_FIELD" Then
+            Dim fieldTypeNode As Integer
+            Dim fieldTypeName As String
+            Dim elemSize As Integer
+            Dim elemAlign As Integer
+            Dim fieldOffset As Integer
+            Dim fieldSize As Integer
+            Dim boundsNode As Integer
+            Dim isArrayField As Integer
+            Dim firstDim As Integer
+            Dim dimCount As Integer
+            Dim elemStride As Integer
+            Dim arrayElemCount As Integer
+
+            fieldTypeNode = LayoutChildAt(ps, fieldNode, 0)
+            If fieldTypeNode = -1 Then
+                gTypeLayouts(typeIdx).visiting = 0
+                errOut = "layout: missing field type in " & gTypeLayouts(typeIdx).typeName
+                Return 0
+            End If
+
+            fieldTypeName = ps.ast.nodes(fieldTypeNode).value
+            If ResolveTypeLayout(ps, fieldTypeName, elemSize, elemAlign, errOut) = 0 Then
+                gTypeLayouts(typeIdx).visiting = 0
+                Return 0
+            End If
+
+            boundsNode = LayoutChildAt(ps, fieldNode, 1)
+            isArrayField = 0
+            firstDim = -1
+            dimCount = 0
+            elemStride = LayoutAlignUp(elemSize, elemAlign)
+            arrayElemCount = 1
+
+            If boundsNode <> -1 Then
+                If UCase(ps.ast.nodes(boundsNode).kind) = "DIM_BOUNDS" Then
+                    isArrayField = 1
+                    firstDim = gTypeLayoutDimCount
+
+                    Dim d As Integer
+                    Dim bNode As Integer
+                    bNode = ps.ast.nodes(boundsNode).firstChild
+                    Do While bNode <> -1
+                        Dim lowerBound As Integer
+                        Dim upperBound As Integer
+                        If ExtractBoundRange(ps, bNode, lowerBound, upperBound) = 0 Then
+                            gTypeLayouts(typeIdx).visiting = 0
+                            errOut = "layout: array bounds must be constant integers"
+                            Return 0
+                        End If
+
+                        Dim extent As Integer
+                        extent = upperBound - lowerBound + 1
+                        If extent <= 0 Then
+                            gTypeLayouts(typeIdx).visiting = 0
+                            errOut = "layout: invalid array bounds"
+                            Return 0
+                        End If
+
+                        d = AddLayoutDim(lowerBound, upperBound, extent)
+                        dimCount = dimCount + 1
+
+                        If arrayElemCount > 2147483647 \ extent Then
+                            gTypeLayouts(typeIdx).visiting = 0
+                            errOut = "layout: array extent overflow"
+                            Return 0
+                        End If
+                        arrayElemCount = arrayElemCount * extent
+
+                        bNode = ps.ast.nodes(bNode).nextSibling
+                    Loop
+
+                    If dimCount = 0 Then
+                        gTypeLayouts(typeIdx).visiting = 0
+                        errOut = "layout: empty array bounds"
+                        Return 0
+                    End If
+                End If
+            End If
+
+            If isArrayField <> 0 Then
+                If elemStride > 0 And arrayElemCount > 2147483647 \ elemStride Then
+                    gTypeLayouts(typeIdx).visiting = 0
+                    errOut = "layout: array size overflow"
+                    Return 0
+                End If
+                fieldSize = elemStride * arrayElemCount
+            Else
+                fieldSize = elemSize
+            End If
+
+            fieldOffset = LayoutAlignUp(curOffset, elemAlign)
+            If firstField = -1 Then firstField = gTypeLayoutFieldCount
+            AddLayoutField ps.ast.nodes(fieldNode).value, fieldTypeName, fieldOffset, fieldSize, elemAlign, isArrayField, fieldTypeName, elemSize, elemAlign, elemStride, firstDim, dimCount
+            fieldCount = fieldCount + 1
+            curOffset = fieldOffset + fieldSize
+            If elemAlign > maxAlign Then maxAlign = elemAlign
+        End If
+
+        fieldNode = ps.ast.nodes(fieldNode).nextSibling
+    Loop
+
+    If maxAlign > 8 Then maxAlign = 8
+    gTypeLayouts(typeIdx).firstField = firstField
+    gTypeLayouts(typeIdx).fieldCount = fieldCount
+    gTypeLayouts(typeIdx).alignBytes = maxAlign
+    gTypeLayouts(typeIdx).sizeBytes = LayoutAlignUp(curOffset, maxAlign)
+    gTypeLayouts(typeIdx).computed = 1
+    gTypeLayouts(typeIdx).visiting = 0
+
+    sizeOut = gTypeLayouts(typeIdx).sizeBytes
+    alignOut = gTypeLayouts(typeIdx).alignBytes
+    Return 1
+End Function
+
+Private Function CollectTypeDeclarations(ByRef ps As ParseState, ByRef errOut As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim nodeKind As String
+        nodeKind = UCase(ps.ast.nodes(i).kind)
+
+        If nodeKind = "TYPE_STMT" Or nodeKind = "CLASS_STMT" Then
+            If AddTypeLayoutDecl(ps.ast.nodes(i).value, i, errOut) = 0 Then Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Function BuildTypeLayoutTable(ByRef ps As ParseState) As Integer
+    Dim errText As String
+    Dim i As Integer
+    Dim ignoreSize As Integer
+    Dim ignoreAlign As Integer
+
+    LayoutResetState
+
+    If CollectTypeDeclarations(ps, errText) = 0 Then
+        ps.lastError = errText
+        Return 0
+    End If
+
+    For i = 0 To gTypeLayoutCount - 1
+        If ResolveTypeLayout(ps, gTypeLayouts(i).typeName, ignoreSize, ignoreAlign, errText) = 0 Then
+            ps.lastError = errText
+            Return 0
+        End If
+    Next i
+
+    gTypeLayoutBuilt = 1
+    Return 1
+End Function
+
+Function TypeLayoutSizeOf(ByRef ps As ParseState, ByRef rawTypeName As String, ByRef sizeOut As Integer, ByRef errOut As String) As Integer
+    Dim alignOut As Integer
+
+    If gTypeLayoutBuilt = 0 Then
+        If BuildTypeLayoutTable(ps) = 0 Then
+            errOut = ps.lastError
+            Return 0
+        End If
+    End If
+
+    If ResolveTypeLayout(ps, rawTypeName, sizeOut, alignOut, errOut) = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function FindFieldByName(ByVal typeIdx As Integer, ByRef fieldName As String) As Integer
+    Dim i As Integer
+    Dim normalized As String
+
+    If typeIdx < 0 Or typeIdx >= gTypeLayoutCount Then Return -1
+    normalized = UCase(Trim(fieldName))
+
+    If gTypeLayouts(typeIdx).firstField = -1 Then Return -1
+    For i = 0 To gTypeLayouts(typeIdx).fieldCount - 1
+        Dim fi As Integer
+        fi = gTypeLayouts(typeIdx).firstField + i
+        If fi >= 0 And fi < gTypeLayoutFieldCount Then
+            If gTypeLayoutFields(fi).fieldName = normalized Then Return fi
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Sub SkipPathSpaces(ByRef pathText As String, ByRef cursor As Integer)
+    Do While cursor <= Len(pathText)
+        Dim ch As String
+        ch = Mid(pathText, cursor, 1)
+        If ch = " " Or ch = Chr(9) Then
+            cursor = cursor + 1
+        Else
+            Exit Do
+        End If
+    Loop
+End Sub
+
+Private Function IsPathIdentStart(ByVal ch As String) As Integer
+    Dim c As Integer
+    c = Asc(ch)
+    If c >= Asc("A") And c <= Asc("Z") Then Return 1
+    If c >= Asc("a") And c <= Asc("z") Then Return 1
+    If ch = "_" Then Return 1
+    Return 0
+End Function
+
+Private Function IsPathIdentChar(ByVal ch As String) As Integer
+    Dim c As Integer
+    c = Asc(ch)
+    If c >= Asc("A") And c <= Asc("Z") Then Return 1
+    If c >= Asc("a") And c <= Asc("z") Then Return 1
+    If c >= Asc("0") And c <= Asc("9") Then Return 1
+    If ch = "_" Then Return 1
+    Return 0
+End Function
+
+Private Function ParsePathIdent(ByRef pathText As String, ByRef cursor As Integer, ByRef identOut As String) As Integer
+    Dim startPos As Integer
+
+    If cursor > Len(pathText) Then Return 0
+    If IsPathIdentStart(Mid(pathText, cursor, 1)) = 0 Then Return 0
+
+    startPos = cursor
+    cursor = cursor + 1
+    Do While cursor <= Len(pathText)
+        If IsPathIdentChar(Mid(pathText, cursor, 1)) = 0 Then Exit Do
+        cursor = cursor + 1
+    Loop
+
+    identOut = Mid(pathText, startPos, cursor - startPos)
+    Return 1
+End Function
+
+Private Function ParsePathIndexList(ByRef pathText As String, ByRef cursor As Integer, idxValues() As Integer, ByRef idxCount As Integer) As Integer
+    idxCount = 0
+    If cursor > Len(pathText) Then Return 0
+    If Mid(pathText, cursor, 1) <> "(" Then Return 0
+
+    cursor = cursor + 1
+    SkipPathSpaces pathText, cursor
+
+    Do
+        If cursor > Len(pathText) Then Return 0
+
+        Dim sign As Integer
+        sign = 1
+        If Mid(pathText, cursor, 1) = "+" Then
+            cursor = cursor + 1
+        ElseIf Mid(pathText, cursor, 1) = "-" Then
+            sign = -1
+            cursor = cursor + 1
+        End If
+        If cursor > Len(pathText) Then Return 0
+
+        Dim hasDigit As Integer
+        Dim value As Integer
+        hasDigit = 0
+        value = 0
+        Do While cursor <= Len(pathText)
+            Dim ch As String
+            ch = Mid(pathText, cursor, 1)
+            If ch < "0" Or ch > "9" Then Exit Do
+            hasDigit = 1
+            value = value * 10 + (Asc(ch) - Asc("0"))
+            cursor = cursor + 1
+        Loop
+
+        If hasDigit = 0 Then Return 0
+        value = value * sign
+
+        If idxCount = 0 Then
+            ReDim idxValues(0)
+        Else
+            ReDim Preserve idxValues(idxCount)
+        End If
+        idxValues(idxCount) = value
+        idxCount = idxCount + 1
+
+        SkipPathSpaces pathText, cursor
+        If cursor > Len(pathText) Then Return 0
+
+        If Mid(pathText, cursor, 1) = "," Then
+            cursor = cursor + 1
+            SkipPathSpaces pathText, cursor
+        Else
+            Exit Do
+        End If
+    Loop
+
+    If idxCount = 0 Then Return 0
+    If cursor > Len(pathText) Then Return 0
+    If Mid(pathText, cursor, 1) <> ")" Then Return 0
+    cursor = cursor + 1
+
+    Return 1
+End Function
+
+Private Function ComputeArrayLinearOffset(ByVal fieldIdx As Integer, idxValues() As Integer, ByVal idxCount As Integer, ByRef byteOffsetOut As Integer, ByRef errOut As String) As Integer
+    If fieldIdx < 0 Or fieldIdx >= gTypeLayoutFieldCount Then Return 0
+    If gTypeLayoutFields(fieldIdx).isArray = 0 Then
+        errOut = "OFFSETOF index applied to non-array field"
+        Return 0
+    End If
+
+    If idxCount <> gTypeLayoutFields(fieldIdx).dimCount Then
+        errOut = "OFFSETOF index count mismatch"
+        Return 0
+    End If
+
+    Dim linear As Integer
+    linear = 0
+
+    Dim k As Integer
+    For k = 0 To gTypeLayoutFields(fieldIdx).dimCount - 1
+        Dim d As TypeLayoutDim
+        d = gTypeLayoutDims(gTypeLayoutFields(fieldIdx).firstDim + k)
+
+        If idxValues(k) < d.lowerBound Or idxValues(k) > d.upperBound Then
+            errOut = "OFFSETOF index out of bounds"
+            Return 0
+        End If
+
+        Dim stride As Integer
+        stride = 1
+
+        Dim j As Integer
+        For j = k + 1 To gTypeLayoutFields(fieldIdx).dimCount - 1
+            stride = stride * gTypeLayoutDims(gTypeLayoutFields(fieldIdx).firstDim + j).extent
+        Next j
+
+        linear = linear + (idxValues(k) - d.lowerBound) * stride
+    Next k
+
+    byteOffsetOut = linear * gTypeLayoutFields(fieldIdx).elemStrideBytes
+    Return 1
+End Function
+
+Function TypeLayoutResolvePath(ByRef ps As ParseState, ByRef rawTypeName As String, ByRef pathText As String, ByRef offsetOut As Integer, ByRef targetTypeOut As String, ByRef targetSizeOut As Integer, ByRef errOut As String) As Integer
+    Dim currentType As String
+    Dim cursor As Integer
+
+    If gTypeLayoutBuilt = 0 Then
+        If BuildTypeLayoutTable(ps) = 0 Then
+            errOut = ps.lastError
+            Return 0
+        End If
+    End If
+
+    currentType = UCase(Trim(rawTypeName))
+    If currentType = "" Then
+        errOut = "OFFSETOF requires type name"
+        Return 0
+    End If
+
+    If Len(Trim(pathText)) = 0 Then
+        errOut = "OFFSETOF path cannot be empty"
+        Return 0
+    End If
+
+    offsetOut = 0
+    targetTypeOut = currentType
+    targetSizeOut = 0
+    cursor = 1
+
+    Do
+        Dim typeIdx As Integer
+        Dim fieldName As String
+        Dim fieldIdx As Integer
+        Dim indexApplied As Integer
+
+        SkipPathSpaces pathText, cursor
+        If ParsePathIdent(pathText, cursor, fieldName) = 0 Then
+            errOut = "OFFSETOF invalid path syntax"
+            Return 0
+        End If
+
+        typeIdx = FindTypeLayoutIndex(currentType)
+        If typeIdx = -1 Then
+            errOut = "OFFSETOF path enters non-aggregate type: " & currentType
+            Return 0
+        End If
+
+        fieldIdx = FindFieldByName(typeIdx, fieldName)
+        If fieldIdx = -1 Then
+            errOut = "OFFSETOF unknown field: " & UCase(fieldName)
+            Return 0
+        End If
+
+        offsetOut = offsetOut + gTypeLayoutFields(fieldIdx).offsetBytes
+        targetTypeOut = gTypeLayoutFields(fieldIdx).fieldTypeName
+        targetSizeOut = gTypeLayoutFields(fieldIdx).sizeBytes
+        currentType = gTypeLayoutFields(fieldIdx).fieldTypeName
+        indexApplied = 0
+
+        SkipPathSpaces pathText, cursor
+        If cursor <= Len(pathText) And Mid(pathText, cursor, 1) = "(" Then
+            Dim idxValues() As Integer
+            Dim idxCount As Integer
+            Dim arrByteOffset As Integer
+
+            If ParsePathIndexList(pathText, cursor, idxValues(), idxCount) = 0 Then
+                errOut = "OFFSETOF invalid index syntax"
+                Return 0
+            End If
+
+            If ComputeArrayLinearOffset(fieldIdx, idxValues(), idxCount, arrByteOffset, errOut) = 0 Then
+                Return 0
+            End If
+
+            offsetOut = offsetOut + arrByteOffset
+            targetTypeOut = gTypeLayoutFields(fieldIdx).elemTypeName
+            targetSizeOut = gTypeLayoutFields(fieldIdx).elemSizeBytes
+            currentType = gTypeLayoutFields(fieldIdx).elemTypeName
+            indexApplied = 1
+        ElseIf gTypeLayoutFields(fieldIdx).isArray <> 0 Then
+            targetTypeOut = "ARRAY"
+            targetSizeOut = gTypeLayoutFields(fieldIdx).sizeBytes
+        End If
+
+        SkipPathSpaces pathText, cursor
+        If cursor > Len(pathText) Then Exit Do
+
+        If Mid(pathText, cursor, 1) <> "." Then
+            errOut = "OFFSETOF invalid path separator"
+            Return 0
+        End If
+
+        If gTypeLayoutFields(fieldIdx).isArray <> 0 And indexApplied = 0 Then
+            errOut = "OFFSETOF array field requires index before member access"
+            Return 0
+        End If
+
+        cursor = cursor + 1
+    Loop
+
+    Return 1
+End Function
+
+Function TypeLayoutOffsetOf(ByRef ps As ParseState, ByRef rawTypeName As String, ByRef pathText As String, ByRef offsetOut As Integer, ByRef errOut As String) As Integer
+    Dim targetTypeName As String
+    Dim targetSize As Integer
+    Return TypeLayoutResolvePath(ps, rawTypeName, pathText, offsetOut, targetTypeName, targetSize, errOut)
+End Function
+
+Private Function TryExtractTypeNameArg(ByRef ps As ParseState, ByVal callNode As Integer, ByVal argPos As Integer, ByRef typeNameOut As String) As Integer
+    Dim argNode As Integer
+    argNode = LayoutChildAt(ps, callNode, argPos)
+    If argNode = -1 Then Return 0
+
+    Select Case UCase(ps.ast.nodes(argNode).kind)
+    Case "IDENT", "KEYWORD_REF"
+        typeNameOut = ps.ast.nodes(argNode).value
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function MemoryAccessWidthBytes(ByRef opName As String) As Integer
+    Select Case UCase(opName)
+    Case "PEEKB", "POKEB"
+        Return 1
+    Case "PEEKW", "POKEW"
+        Return 2
+    Case "PEEKD", "POKED", "POKE"
+        Return 4
+    End Select
+
+    Return 0
+End Function
+
+Private Function FindOffsetOfCallInExpr(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    If UCase(n.kind) = "CALL_EXPR" And UCase(n.value) = "OFFSETOF" Then Return nodeIdx
+
+    If n.left <> -1 Then
+        Dim fLeft As Integer
+        fLeft = FindOffsetOfCallInExpr(ps, n.left)
+        If fLeft <> -1 Then Return fLeft
+    End If
+
+    If n.right <> -1 Then
+        Dim fRight As Integer
+        fRight = FindOffsetOfCallInExpr(ps, n.right)
+        If fRight <> -1 Then Return fRight
+    End If
+
+    Dim ch As Integer
+    ch = n.firstChild
+    Do While ch <> -1
+        Dim fChild As Integer
+        fChild = FindOffsetOfCallInExpr(ps, ch)
+        If fChild <> -1 Then Return fChild
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function ValidateMemWidthAgainstOffsetOf(ByRef ps As ParseState, ByVal addrExprNode As Integer, ByRef opName As String, ByRef errOut As String) As Integer
+    Dim offsetCall As Integer
+    offsetCall = FindOffsetOfCallInExpr(ps, addrExprNode)
+    If offsetCall = -1 Then Return 1
+
+    Dim baseType As String
+    Dim pathNode As Integer
+    Dim offBytes As Integer
+    Dim targetTypeName As String
+    Dim targetSize As Integer
+
+    If TryExtractTypeNameArg(ps, offsetCall, 0, baseType) = 0 Then
+        errOut = "OFFSETOF expects a type name as first argument"
+        Return 0
+    End If
+
+    pathNode = LayoutChildAt(ps, offsetCall, 1)
+    If pathNode = -1 Or UCase(ps.ast.nodes(pathNode).kind) <> "STRING" Then
+        errOut = "OFFSETOF expects a string path as second argument"
+        Return 0
+    End If
+
+    If TypeLayoutResolvePath(ps, baseType, ps.ast.nodes(pathNode).value, offBytes, targetTypeName, targetSize, errOut) = 0 Then
+        Return 0
+    End If
+
+    Dim expectedWidth As Integer
+    expectedWidth = MemoryAccessWidthBytes(opName)
+    If expectedWidth = 0 Then Return 1
+
+    If targetSize <> expectedWidth Then
+        errOut = UCase(opName) & " width mismatch for OFFSETOF target"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Function ValidateLayoutIntrinsicSemantics(ByRef ps As ParseState) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim nKind As String
+        nKind = UCase(ps.ast.nodes(i).kind)
+
+        If nKind = "CALL_EXPR" Then
+            Dim callName As String
+            callName = UCase(ps.ast.nodes(i).value)
+
+            If callName = "SIZEOF" Then
+                Dim tName As String
+                Dim sz As Integer
+                Dim errText As String
+
+                If TryExtractTypeNameArg(ps, i, 0, tName) = 0 Then
+                    ps.lastError = "SIZEOF expects a type name argument"
+                    Return 0
+                End If
+
+                If TypeLayoutSizeOf(ps, tName, sz, errText) = 0 Then
+                    ps.lastError = errText
+                    Return 0
+                End If
+            ElseIf callName = "OFFSETOF" Then
+                Dim baseType As String
+                Dim pathNode As Integer
+                Dim off As Integer
+                Dim errText2 As String
+
+                If TryExtractTypeNameArg(ps, i, 0, baseType) = 0 Then
+                    ps.lastError = "OFFSETOF expects a type name as first argument"
+                    Return 0
+                End If
+
+                pathNode = LayoutChildAt(ps, i, 1)
+                If pathNode = -1 Or UCase(ps.ast.nodes(pathNode).kind) <> "STRING" Then
+                    ps.lastError = "OFFSETOF expects a string path as second argument"
+                    Return 0
+                End If
+
+                If TypeLayoutOffsetOf(ps, baseType, ps.ast.nodes(pathNode).value, off, errText2) = 0 Then
+                    ps.lastError = errText2
+                    Return 0
+                End If
+            ElseIf callName = "PEEKB" Or callName = "PEEKW" Or callName = "PEEKD" Then
+                Dim addrNode As Integer
+                Dim errText3 As String
+                addrNode = LayoutChildAt(ps, i, 0)
+                If addrNode = -1 Then
+                    ps.lastError = callName & " expects exactly 1 argument"
+                    Return 0
+                End If
+                If ValidateMemWidthAgainstOffsetOf(ps, addrNode, callName, errText3) = 0 Then
+                    ps.lastError = errText3
+                    Return 0
+                End If
+            End If
+        ElseIf nKind = "POKEB_STMT" Or nKind = "POKEW_STMT" Or nKind = "POKED_STMT" Then
+            Dim stmtName As String
+            Dim addrNode2 As Integer
+            Dim errText4 As String
+
+            If nKind = "POKEB_STMT" Then
+                stmtName = "POKEB"
+            ElseIf nKind = "POKEW_STMT" Then
+                stmtName = "POKEW"
+            Else
+                stmtName = "POKED"
+            End If
+
+            addrNode2 = LayoutChildAt(ps, i, 0)
+            If addrNode2 <> -1 Then
+                If ValidateMemWidthAgainstOffsetOf(ps, addrNode2, stmtName, errText4) = 0 Then
+                    ps.lastError = errText4
+                    Return 0
+                End If
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
