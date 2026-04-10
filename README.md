@@ -43,6 +43,12 @@ uXbasic, ubasic031 kod tabaninin Windows 11 odakli ve FreeBASIC temelli yeniden 
 - Parser artik gercek AST node havuzu uretir.
 - Token listesi kapasite bazli dinamik buyume modeli kullanir.
 
+## Faz B.2 Milestone (B2-DONE)
+- Kapsam: nested layout semantigi, indexed `OFFSETOF`, width fail-fast, runtime `VARPTR+OFFSETOF` entegrasyonu.
+- Toplu fail-fast kosusu: `tools\run_faz_b2_failfast.ps1`
+- Kapanis checklist raporu: `reports/faz_b2_done_checklist.md`
+- Release notes ozeti: `reports/faz_b2_release_notes.md`
+
 ## Not
 Bu proje strict syntax modunda sonek tip belirteclerini (`$`, `%`, `&`, `!`, `#`, `@`) kabul etmez.
 `@` yalnizca operator olarak kullanilir.

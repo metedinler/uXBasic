@@ -3,14 +3,7 @@
 #include once "../src/parser/parser.fbs"
 #include once "../src/runtime/memory_vm.fbs"
 #include once "../src/runtime/memory_exec.fbs"
-
-Private Function AssertEq(ByVal actualValue As Integer, ByVal expectedValue As Integer, ByRef msg As String) As Integer
-    If actualValue <> expectedValue Then
-        Print "FAIL "; msg; " expected="; expectedValue; " actual="; actualValue
-        Return 0
-    End If
-    Return 1
-End Function
+#include once "helpers/runtime_test_common.fbs"
 
 Private Sub Main()
     Dim src As String
@@ -66,47 +59,42 @@ Private Sub Main()
         "INC a" & Chr(10) & _
         "DEC a"
 
-    Dim st As LexerState
-    LexerInit st, src
-
     Dim ps As ParseState
-    ParserInit ps, st
-
-    If ParseProgram(ps) = 0 Then
-        Print "FAIL parse | "; ps.lastError
+    Dim errText As String
+    If RTParseProgram(src, ps, errText) = 0 Then
+        Print "FAIL parse | "; errText
         End 1
     End If
 
-    Dim execErr As String
-    If ExecRunMemoryProgram(ps, execErr) = 0 Then
-        Print "FAIL exec | "; execErr
+    If RTExecProgram(ps, errText) = 0 Then
+        Print "FAIL exec | "; errText
         End 1
     End If
 
     Dim ok As Integer
     ok = 1
 
-    ok And= AssertEq(VMemPeekB(4096), 65, "POKEB/PEEKB")
-    ok And= AssertEq(VMemPeekW(4098), 4660, "POKEW/PEEKW")
-    ok And= AssertEq(VMemPeekD(4104), 305419896, "POKED/PEEKD")
-    ok And= AssertEq(VMemPeekB(4112), 7, "MEMFILLB start")
-    ok And= AssertEq(VMemPeekB(4115), 7, "MEMFILLB end")
-    ok And= AssertEq(VMemPeekB(4128), 65, "MEMCOPYB")
-    ok And= AssertEq(VMemPeekB(4136), Asc("H"), "POKES first")
-    ok And= AssertEq(VMemPeekB(4137), Asc("I"), "POKES second")
-    ok And= AssertEq(VMemPeekW(4144), 4660, "MEMFILLW")
-    ok And= AssertEq(VMemPeekW(4152), 4660, "MEMCOPYW")
-    ok And= AssertEq(VMemPeekD(4160), 305419896, "MEMFILLD")
-    ok And= AssertEq(VMemPeekD(4168), 305419896, "MEMCOPYD")
-    ok And= AssertEq(VMemPeekD(4176), 8192, "SETNEWOFFSET + VARPTR")
-    ok And= AssertEq(VMemPeekD(4180), 17, "SHL/OR")
-    ok And= AssertEq(VMemPeekD(4184), 2, "MOD")
-    ok And= AssertEq(VMemPeekD(4188), 8, "ROL")
-    ok And= AssertEq(VMemPeekB(4193), 1, "MEMCOPYB overlap byte0")
-    ok And= AssertEq(VMemPeekB(4194), 2, "MEMCOPYB overlap byte1")
-    ok And= AssertEq(VMemPeekB(4195), 3, "MEMCOPYB overlap byte2")
-    ok And= AssertEq(VMemPeekW(4212), 13398, "VARPTR+OFFSETOF nested i16")
-    ok And= AssertEq(VMemPeekD(4216), 287454020, "VARPTR+OFFSETOF nested i32")
+    ok And= RTAssertEq(VMemPeekB(4096), 65, "POKEB/PEEKB")
+    ok And= RTAssertEq(VMemPeekW(4098), 4660, "POKEW/PEEKW")
+    ok And= RTAssertEq(VMemPeekD(4104), 305419896, "POKED/PEEKD")
+    ok And= RTAssertEq(VMemPeekB(4112), 7, "MEMFILLB start")
+    ok And= RTAssertEq(VMemPeekB(4115), 7, "MEMFILLB end")
+    ok And= RTAssertEq(VMemPeekB(4128), 65, "MEMCOPYB")
+    ok And= RTAssertEq(VMemPeekB(4136), Asc("H"), "POKES first")
+    ok And= RTAssertEq(VMemPeekB(4137), Asc("I"), "POKES second")
+    ok And= RTAssertEq(VMemPeekW(4144), 4660, "MEMFILLW")
+    ok And= RTAssertEq(VMemPeekW(4152), 4660, "MEMCOPYW")
+    ok And= RTAssertEq(VMemPeekD(4160), 305419896, "MEMFILLD")
+    ok And= RTAssertEq(VMemPeekD(4168), 305419896, "MEMCOPYD")
+    ok And= RTAssertEq(VMemPeekD(4176), 8192, "SETNEWOFFSET + VARPTR")
+    ok And= RTAssertEq(VMemPeekD(4180), 17, "SHL/OR")
+    ok And= RTAssertEq(VMemPeekD(4184), 2, "MOD")
+    ok And= RTAssertEq(VMemPeekD(4188), 8, "ROL")
+    ok And= RTAssertEq(VMemPeekB(4193), 1, "MEMCOPYB overlap byte0")
+    ok And= RTAssertEq(VMemPeekB(4194), 2, "MEMCOPYB overlap byte1")
+    ok And= RTAssertEq(VMemPeekB(4195), 3, "MEMCOPYB overlap byte2")
+    ok And= RTAssertEq(VMemPeekW(4212), 13398, "VARPTR+OFFSETOF nested i16")
+    ok And= RTAssertEq(VMemPeekD(4216), 287454020, "VARPTR+OFFSETOF nested i32")
 
     If ok = 0 Then End 1
 
