@@ -268,6 +268,14 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasAstKind(ps, "SEEK_STMT")
         If resultOk = 0 Then detail = "missing SEEK_STMT AST node"
 
+    Case "FILE_IO_ADVANCED_OK"
+        resultOk = parseOk And HasAstKind(ps, "OPEN_STMT") And HasAstKind(ps, "PUT_STMT") And HasAstKind(ps, "GET_STMT") And HasAstKind(ps, "SEEK_STMT")
+        If resultOk = 0 Then detail = "missing OPEN/PUT/GET/SEEK AST coverage"
+
+    Case "FILE_IO_ADVANCED_FAIL"
+        resultOk = (parseOk = 0)
+        If resultOk = 0 Then detail = "expected file-io advanced parse failure"
+
     Case "LOF_OK"
         resultOk = parseOk And HasCallExprValue(ps, "LOF")
         If resultOk = 0 Then detail = "missing LOF call expression"

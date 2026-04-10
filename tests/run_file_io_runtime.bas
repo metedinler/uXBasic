@@ -57,7 +57,26 @@ Private Sub Main()
     ok And= AssertEq(UxbFileGetI32(io, 9, 1, 4, afterCloseRead), 0, "get on closed channel rejected")
     ok And= AssertEq(UxbFileGetLastError(io), UXB_FILE_ERR_CHANNEL_NOT_OPEN, "closed channel error code")
 
+    Dim tmpPathRandom As String
+    tmpPathRandom = "tests\\tmp_file_io_runtime_random.bin"
+    Kill tmpPathRandom
+
+    ok And= AssertTrue(UxbFileOpen(io, 10, tmpPathRandom, "rand", 2), "open random alias with len")
+    ok And= AssertTrue(UxbFilePutI32(io, 10, 1, 0, &h1234), "put random default-bytes")
+
+    Dim randomReadBack As Integer
+    randomReadBack = 0
+    ok And= AssertTrue(UxbFileGetI32(io, 10, 1, 0, randomReadBack), "get random default-bytes")
+    ok And= AssertEq((randomReadBack And &hFFFF), &h1234, "random len=2 default transfer")
+
+    randomReadBack = 0
+    ok And= AssertEq(UxbFileGetI32(io, 10, 1, 4, randomReadBack), 0, "random bytes mismatch rejected")
+    ok And= AssertEq(UxbFileGetLastError(io), UXB_FILE_ERR_INVALID_ARGUMENT, "random bytes mismatch error code")
+
+    ok And= AssertTrue(UxbFileClose(io, 10), "close random")
+
     Kill tmpPath
+    Kill tmpPathRandom
 
     If ok = 0 Then End 1
 

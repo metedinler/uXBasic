@@ -23,9 +23,17 @@ Private Sub Main()
         "v = 0" & Chr(10) & _
         "GET #7, 1, 4, v" & Chr(10) & _
         "POKED x, v" & Chr(10) & _
+        "OPEN ""tests\\tmp_file_io_exec_random.bin"" FOR random AS #8 LEN = 2" & Chr(10) & _
+        "w = 4660" & Chr(10) & _
+        "PUT #8, 1, w" & Chr(10) & _
+        "w = 0" & Chr(10) & _
+        "GET #8, 1, w" & Chr(10) & _
+        "POKEW x + 4, w" & Chr(10) & _
+        "CLOSE #8" & Chr(10) & _
         "CLOSE #7"
 
     Kill "tests\\tmp_file_io_exec.bin"
+    Kill "tests\\tmp_file_io_exec_random.bin"
 
     Dim st As LexerState
     LexerInit st, src
@@ -47,8 +55,10 @@ Private Sub Main()
     Dim ok As Integer
     ok = 1
     ok And= AssertEq(VMemPeekD(4096), 287454020, "file open/put/get/seek flow")
+    ok And= AssertEq(VMemPeekW(4100), 4660, "file random len default transfer flow")
 
     Kill "tests\\tmp_file_io_exec.bin"
+    Kill "tests\\tmp_file_io_exec_random.bin"
 
     If ok = 0 Then End 1
 

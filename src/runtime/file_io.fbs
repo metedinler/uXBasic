@@ -29,6 +29,8 @@ Type UxbFileChannel
     canRead As Integer
     canWrite As Integer
     allowSeek As Integer
+    currentPosition As LongInt
+    positionKnown As Integer
 End Type
 
 Type UxbFileRuntime
@@ -61,6 +63,8 @@ Private Sub UxbFileResetChannel(ByRef io As UxbFileRuntime, ByVal channelNumber 
     io.channels(channelNumber).canRead = 0
     io.channels(channelNumber).canWrite = 0
     io.channels(channelNumber).allowSeek = 0
+    io.channels(channelNumber).currentPosition = 0
+    io.channels(channelNumber).positionKnown = 0
 End Sub
 
 Private Function UxbFileIsValidChannel(ByVal channelNumber As Integer) As Integer
@@ -181,6 +185,8 @@ Function UxbFileOpen(ByRef io As UxbFileRuntime, ByVal channelNumber As Integer,
         recordLength = 0
     End If
 
+    Err = 0
+
     Select Case normalizedModeId
     Case UXB_FILE_MODE_INPUT
         Open filePath For Input As #channelNumber
@@ -217,6 +223,9 @@ Function UxbFileOpen(ByRef io As UxbFileRuntime, ByVal channelNumber As Integer,
         io.channels(channelNumber).allowSeek = 0
     End Select
 
+    io.channels(channelNumber).currentPosition = 1
+    io.channels(channelNumber).positionKnown = 1
+
     UxbFileSetError io, UXB_FILE_OK
     Return 1
 End Function
@@ -232,6 +241,7 @@ Function UxbFileClose(ByRef io As UxbFileRuntime, ByVal channelNumber As Integer
         Return 0
     End If
 
+    Err = 0
     Close #channelNumber
     If Err <> 0 Then
         UxbFileSetError io, UxbFileMapSystemError()
@@ -276,14 +286,25 @@ Function UxbFileSeek(ByRef io As UxbFileRuntime, ByVal channelNumber As Integer,
             Return 0
         End If
 
+        Err = 0
         Seek #channelNumber, positionValue
         If Err <> 0 Then
             UxbFileSetError io, UxbFileMapSystemError()
             Return 0
         End If
+
+        io.channels(channelNumber).currentPosition = positionValue
+        io.channels(channelNumber).positionKnown = 1
     End If
 
-    currentPositionOut = Seek(channelNumber)
+    If io.channels(channelNumber).positionKnown <> 0 Then
+        currentPositionOut = io.channels(channelNumber).currentPosition
+    Else
+        currentPositionOut = Seek(channelNumber)
+        io.channels(channelNumber).currentPosition = currentPositionOut
+        io.channels(channelNumber).positionKnown = 1
+    End If
+
     UxbFileSetError io, UXB_FILE_OK
     Return 1
 End Function
@@ -304,6 +325,78 @@ Function UxbFileGetI32(ByRef io As UxbFileRuntime, ByVal channelNumber As Intege
         Return 0
     End If
 
+    If io.channels(channelNumber).modeId = UXB_FILE_MODE_RANDOM Then
+        If bytesToRead = 0 Then bytesToRead = io.channels(channelNumber).recordLength
+        If bytesToRead <> io.channels(channelNumber).recordLength Then
+            UxbFileSetError io, UXB_FILE_ERR_INVALID_ARGUMENT
+            Return 0
+        End If
+
+        If bytesToRead <> 1 And bytesToRead <> 2 And bytesToRead <> 4 Then
+            UxbFileSetError io, UXB_FILE_ERR_INVALID_ARGUMENT
+            Return 0
+        End If
+
+        valueOut = 0
+        Select Case bytesToRead
+        Case 1
+            Dim tmpB As UByte
+            tmpB = 0
+            If positionValue >= 0 Then
+                Err = 0
+                Get #channelNumber, positionValue, tmpB
+                io.channels(channelNumber).currentPosition = positionValue
+                io.channels(channelNumber).positionKnown = 1
+            Else
+                Err = 0
+                Get #channelNumber, , tmpB
+            End If
+            valueOut = CInt(tmpB)
+        Case 2
+            Dim tmpW As UShort
+            tmpW = 0
+            If positionValue >= 0 Then
+                Err = 0
+                Get #channelNumber, positionValue, tmpW
+                io.channels(channelNumber).currentPosition = positionValue
+                io.channels(channelNumber).positionKnown = 1
+            Else
+                Err = 0
+                Get #channelNumber, , tmpW
+            End If
+            valueOut = CInt(tmpW)
+        Case 4
+            Dim tmpI As Integer
+            tmpI = 0
+            If positionValue >= 0 Then
+                Err = 0
+                Get #channelNumber, positionValue, tmpI
+                io.channels(channelNumber).currentPosition = positionValue
+                io.channels(channelNumber).positionKnown = 1
+            Else
+                Err = 0
+                Get #channelNumber, , tmpI
+            End If
+            valueOut = tmpI
+        End Select
+
+        If Err <> 0 Then
+            If Eof(channelNumber) Then
+                UxbFileSetError io, UXB_FILE_ERR_EOF
+            Else
+                UxbFileSetError io, UxbFileMapSystemError()
+            End If
+            Return 0
+        End If
+
+        If io.channels(channelNumber).positionKnown <> 0 Then
+            io.channels(channelNumber).currentPosition += 1
+        End If
+
+        UxbFileSetError io, UXB_FILE_OK
+        Return 1
+    End If
+
     If bytesToRead = 0 Then
         bytesToRead = UxbFileDefaultTransferBytes(io.channels(channelNumber))
     End If
@@ -314,16 +407,22 @@ Function UxbFileGetI32(ByRef io As UxbFileRuntime, ByVal channelNumber As Intege
     End If
 
     If positionValue >= 0 Then
-        Dim ignoredPosition As LongInt
-        If UxbFileSeek(io, channelNumber, positionValue, ignoredPosition) = 0 Then
-            Return 0
+        If io.channels(channelNumber).positionKnown <> 0 And io.channels(channelNumber).currentPosition = positionValue Then
+            ' Fast path: already at requested position.
+        Else
+            Dim ignoredPosition As LongInt
+            If UxbFileSeek(io, channelNumber, positionValue, ignoredPosition) = 0 Then
+                Return 0
+            End If
         End If
     End If
 
     valueOut = 0
     If bytesToRead = 4 Then
+        Err = 0
         Get #channelNumber, , valueOut
     Else
+        Err = 0
         Get #channelNumber, , valueOut, bytesToRead
     End If
 
@@ -334,6 +433,10 @@ Function UxbFileGetI32(ByRef io As UxbFileRuntime, ByVal channelNumber As Intege
             UxbFileSetError io, UxbFileMapSystemError()
         End If
         Return 0
+    End If
+
+    If io.channels(channelNumber).positionKnown <> 0 Then
+        io.channels(channelNumber).currentPosition += bytesToRead
     End If
 
     UxbFileSetError io, UXB_FILE_OK
@@ -356,6 +459,70 @@ Function UxbFilePutI32(ByRef io As UxbFileRuntime, ByVal channelNumber As Intege
         Return 0
     End If
 
+    If io.channels(channelNumber).modeId = UXB_FILE_MODE_RANDOM Then
+        If bytesToWrite = 0 Then bytesToWrite = io.channels(channelNumber).recordLength
+        If bytesToWrite <> io.channels(channelNumber).recordLength Then
+            UxbFileSetError io, UXB_FILE_ERR_INVALID_ARGUMENT
+            Return 0
+        End If
+
+        If bytesToWrite <> 1 And bytesToWrite <> 2 And bytesToWrite <> 4 Then
+            UxbFileSetError io, UXB_FILE_ERR_INVALID_ARGUMENT
+            Return 0
+        End If
+
+        Select Case bytesToWrite
+        Case 1
+            Dim tmpB As UByte
+            tmpB = CUByte(valueIn And &hFF)
+            If positionValue >= 0 Then
+                Err = 0
+                Put #channelNumber, positionValue, tmpB
+                io.channels(channelNumber).currentPosition = positionValue
+                io.channels(channelNumber).positionKnown = 1
+            Else
+                Err = 0
+                Put #channelNumber, , tmpB
+            End If
+        Case 2
+            Dim tmpW As UShort
+            tmpW = CUShort(valueIn And &hFFFF)
+            If positionValue >= 0 Then
+                Err = 0
+                Put #channelNumber, positionValue, tmpW
+                io.channels(channelNumber).currentPosition = positionValue
+                io.channels(channelNumber).positionKnown = 1
+            Else
+                Err = 0
+                Put #channelNumber, , tmpW
+            End If
+        Case 4
+            Dim tmpI As Integer
+            tmpI = valueIn
+            If positionValue >= 0 Then
+                Err = 0
+                Put #channelNumber, positionValue, tmpI
+                io.channels(channelNumber).currentPosition = positionValue
+                io.channels(channelNumber).positionKnown = 1
+            Else
+                Err = 0
+                Put #channelNumber, , tmpI
+            End If
+        End Select
+
+        If Err <> 0 Then
+            UxbFileSetError io, UxbFileMapSystemError()
+            Return 0
+        End If
+
+        If io.channels(channelNumber).positionKnown <> 0 Then
+            io.channels(channelNumber).currentPosition += 1
+        End If
+
+        UxbFileSetError io, UXB_FILE_OK
+        Return 1
+    End If
+
     If bytesToWrite = 0 Then
         bytesToWrite = UxbFileDefaultTransferBytes(io.channels(channelNumber))
     End If
@@ -366,21 +533,31 @@ Function UxbFilePutI32(ByRef io As UxbFileRuntime, ByVal channelNumber As Intege
     End If
 
     If positionValue >= 0 Then
-        Dim ignoredPosition As LongInt
-        If UxbFileSeek(io, channelNumber, positionValue, ignoredPosition) = 0 Then
-            Return 0
+        If io.channels(channelNumber).positionKnown <> 0 And io.channels(channelNumber).currentPosition = positionValue Then
+            ' Fast path: already at requested position.
+        Else
+            Dim ignoredPosition As LongInt
+            If UxbFileSeek(io, channelNumber, positionValue, ignoredPosition) = 0 Then
+                Return 0
+            End If
         End If
     End If
 
     If bytesToWrite = 4 Then
+        Err = 0
         Put #channelNumber, , valueIn
     Else
+        Err = 0
         Put #channelNumber, , valueIn, bytesToWrite
     End If
 
     If Err <> 0 Then
         UxbFileSetError io, UxbFileMapSystemError()
         Return 0
+    End If
+
+    If io.channels(channelNumber).positionKnown <> 0 Then
+        io.channels(channelNumber).currentPosition += bytesToWrite
     End If
 
     UxbFileSetError io, UXB_FILE_OK
