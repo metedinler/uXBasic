@@ -304,6 +304,28 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
             If resultOk = 0 Then detail = "expected runtime unsupported call failure"
         End If
 
+    Case "RUNTIME_INTRINSICS_OK"
+        If parseOk = 0 Then
+            resultOk = 0
+            detail = ps.lastError
+        Else
+            Dim runtimeErrIntrOk As String
+            resultOk = ExecRunMemoryProgram(ps, runtimeErrIntrOk)
+            If resultOk = 0 Then detail = runtimeErrIntrOk
+        End If
+
+    Case "RUNTIME_INTRINSICS_FAIL"
+        If parseOk = 0 Then
+            resultOk = 0
+            detail = ps.lastError
+        Else
+            Dim runtimeErrIntrFail As String
+            Dim runtimeIntrOk As Integer
+            runtimeIntrOk = ExecRunMemoryProgram(ps, runtimeErrIntrFail)
+            resultOk = (runtimeIntrOk = 0) And ContainsText(runtimeErrIntrFail, "unsupported call")
+            If resultOk = 0 Then detail = "expected intrinsic runtime unsupported call failure"
+        End If
+
     Case "LOF_OK"
         resultOk = parseOk And HasCallExprValue(ps, "LOF")
         If resultOk = 0 Then detail = "missing LOF call expression"
