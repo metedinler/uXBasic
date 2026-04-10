@@ -156,6 +156,120 @@ Private Function ExecRor32(ByVal v As UInteger, ByVal s As Integer) As UInteger
     Return (v Shr shiftBits) Or (v Shl (32 - shiftBits))
 End Function
 
+Declare Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+
+Private Function ExecEvalBuiltinCall(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNameRaw As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Dim callName As String
+    callName = UCase(callNameRaw)
+
+    Select Case callName
+    Case "PEEKB"
+        Dim a0 As Integer
+        a0 = ExecChildAt(ps, callNodeIdx, 0)
+        If a0 = -1 Then
+            errText = "exec: PEEKB arg missing"
+            Return 0
+        End If
+        Dim addr As Integer
+        addr = ExecEvalNode(ps, es, a0, errText)
+        If errText <> "" Then Return 0
+        Return VMemPeekB(CUInt(addr))
+
+    Case "PEEKW"
+        Dim w0 As Integer
+        w0 = ExecChildAt(ps, callNodeIdx, 0)
+        If w0 = -1 Then
+            errText = "exec: PEEKW arg missing"
+            Return 0
+        End If
+        Dim addrW As Integer
+        addrW = ExecEvalNode(ps, es, w0, errText)
+        If errText <> "" Then Return 0
+        Return VMemPeekW(CUInt(addrW))
+
+    Case "PEEKD"
+        Dim d0 As Integer
+        d0 = ExecChildAt(ps, callNodeIdx, 0)
+        If d0 = -1 Then
+            errText = "exec: PEEKD arg missing"
+            Return 0
+        End If
+        Dim addrD As Integer
+        addrD = ExecEvalNode(ps, es, d0, errText)
+        If errText <> "" Then Return 0
+        Return VMemPeekD(CUInt(addrD))
+
+    Case "VARPTR"
+        Dim v0 As Integer
+        v0 = ExecChildAt(ps, callNodeIdx, 0)
+        If v0 = -1 Then
+            errText = "exec: VARPTR arg missing"
+            Return 0
+        End If
+
+        Dim argNode As ASTNode
+        argNode = ps.ast.nodes(v0)
+        If UCase(argNode.kind) = "IDENT" Then
+            Return CInt(ExecGetVarAddr(es, argNode.value))
+        End If
+
+        Dim vv As Integer
+        vv = ExecEvalNode(ps, es, v0, errText)
+        If errText <> "" Then Return 0
+        Return &h10000000 Or (vv And &h00FFFFFF)
+
+    Case "SADD"
+        Dim s0 As Integer
+        s0 = ExecChildAt(ps, callNodeIdx, 0)
+        If s0 = -1 Then
+            errText = "exec: SADD arg missing"
+            Return 0
+        End If
+
+        Dim sNode As ASTNode
+        sNode = ps.ast.nodes(s0)
+        If UCase(sNode.kind) = "STRING" Then
+            Return CInt(&h20000000 Or (ExecHashText(sNode.value) And &h0FFFFFFF))
+        End If
+        If UCase(sNode.kind) = "IDENT" Then
+            Return CInt(&h20000000 Or (ExecHashText(sNode.value) And &h0FFFFFFF))
+        End If
+
+        Dim sv As Integer
+        sv = ExecEvalNode(ps, es, s0, errText)
+        If errText <> "" Then Return 0
+        Return &h20000000 Or (sv And &h00FFFFFF)
+
+    Case "LPTR"
+        Dim l0 As Integer
+        l0 = ExecChildAt(ps, callNodeIdx, 0)
+        If l0 = -1 Then
+            errText = "exec: LPTR arg missing"
+            Return 0
+        End If
+
+        Dim lNode As ASTNode
+        lNode = ps.ast.nodes(l0)
+        Return CInt(&h30000000 Or (ExecHashText(lNode.value & ":" & lNode.kind) And &h0FFFFFFF))
+
+    Case "CODEPTR"
+        Dim c0 As Integer
+        c0 = ExecChildAt(ps, callNodeIdx, 0)
+        If c0 = -1 Then
+            errText = "exec: CODEPTR arg missing"
+            Return 0
+        End If
+
+        Dim cNode As ASTNode
+        cNode = ps.ast.nodes(c0)
+        Return CInt(&h40000000 Or (ExecHashText(cNode.value & ":" & cNode.kind) And &h0FFFFFFF))
+
+    Case Else
+        errText = "exec: unsupported call " & callName
+        Return 0
+    End Select
+End Function
+
 Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
     If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then
         errText = "exec: invalid node index"
@@ -260,115 +374,7 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
         End Select
 
     Case "CALL_EXPR"
-        Dim callName As String
-        callName = UCase(n.value)
-
-        Select Case callName
-        Case "PEEKB"
-            Dim a0 As Integer
-            a0 = ExecChildAt(ps, nodeIdx, 0)
-            If a0 = -1 Then
-                errText = "exec: PEEKB arg missing"
-                Return 0
-            End If
-            Dim addr As Integer
-            addr = ExecEvalNode(ps, es, a0, errText)
-            If errText <> "" Then Return 0
-            Return VMemPeekB(CUInt(addr))
-
-        Case "PEEKW"
-            Dim w0 As Integer
-            w0 = ExecChildAt(ps, nodeIdx, 0)
-            If w0 = -1 Then
-                errText = "exec: PEEKW arg missing"
-                Return 0
-            End If
-            Dim addrW As Integer
-            addrW = ExecEvalNode(ps, es, w0, errText)
-            If errText <> "" Then Return 0
-            Return VMemPeekW(CUInt(addrW))
-
-        Case "PEEKD"
-            Dim d0 As Integer
-            d0 = ExecChildAt(ps, nodeIdx, 0)
-            If d0 = -1 Then
-                errText = "exec: PEEKD arg missing"
-                Return 0
-            End If
-            Dim addrD As Integer
-            addrD = ExecEvalNode(ps, es, d0, errText)
-            If errText <> "" Then Return 0
-            Return VMemPeekD(CUInt(addrD))
-
-        Case "VARPTR"
-            Dim v0 As Integer
-            v0 = ExecChildAt(ps, nodeIdx, 0)
-            If v0 = -1 Then
-                errText = "exec: VARPTR arg missing"
-                Return 0
-            End If
-
-            Dim argNode As ASTNode
-            argNode = ps.ast.nodes(v0)
-            If UCase(argNode.kind) = "IDENT" Then
-                Return CInt(ExecGetVarAddr(es, argNode.value))
-            End If
-
-            Dim vv As Integer
-            vv = ExecEvalNode(ps, es, v0, errText)
-            If errText <> "" Then Return 0
-            Return &h10000000 Or (vv And &h00FFFFFF)
-
-        Case "SADD"
-            Dim s0 As Integer
-            s0 = ExecChildAt(ps, nodeIdx, 0)
-            If s0 = -1 Then
-                errText = "exec: SADD arg missing"
-                Return 0
-            End If
-
-            Dim sNode As ASTNode
-            sNode = ps.ast.nodes(s0)
-            If UCase(sNode.kind) = "STRING" Then
-                Return CInt(&h20000000 Or (ExecHashText(sNode.value) And &h0FFFFFFF))
-            End If
-            If UCase(sNode.kind) = "IDENT" Then
-                Return CInt(&h20000000 Or (ExecHashText(sNode.value) And &h0FFFFFFF))
-            End If
-
-            Dim sv As Integer
-            sv = ExecEvalNode(ps, es, s0, errText)
-            If errText <> "" Then Return 0
-            Return &h20000000 Or (sv And &h00FFFFFF)
-
-        Case "LPTR"
-            Dim l0 As Integer
-            l0 = ExecChildAt(ps, nodeIdx, 0)
-            If l0 = -1 Then
-                errText = "exec: LPTR arg missing"
-                Return 0
-            End If
-
-            Dim lNode As ASTNode
-            lNode = ps.ast.nodes(l0)
-            Return CInt(&h30000000 Or (ExecHashText(lNode.value & ":" & lNode.kind) And &h0FFFFFFF))
-
-        Case "CODEPTR"
-            Dim c0 As Integer
-            c0 = ExecChildAt(ps, nodeIdx, 0)
-            If c0 = -1 Then
-                errText = "exec: CODEPTR arg missing"
-                Return 0
-            End If
-
-            Dim cNode As ASTNode
-            cNode = ps.ast.nodes(c0)
-            Return CInt(&h40000000 Or (ExecHashText(cNode.value & ":" & cNode.kind) And &h0FFFFFFF))
-
-        Case Else
-            errText = "exec: unsupported call " & callName
-            Return 0
-        End Select
+        Return ExecEvalBuiltinCall(ps, es, n.value, nodeIdx, errText)
 
     Case Else
         errText = "exec: unsupported node kind " & n.kind
@@ -1015,6 +1021,12 @@ Private Function ExecRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVa
             v = ExecEvalNode(ps, es, st.left, errText)
             If errText <> "" Then Return 0
         End If
+        Return 1
+
+    Case "CALL_STMT"
+        Dim ignoredCallResult As Integer
+        ignoredCallResult = ExecEvalBuiltinCall(ps, es, st.value, stmtIdx, errText)
+        If errText <> "" Then Return 0
         Return 1
 
     Case Else
