@@ -75,8 +75,45 @@ Private Sub Main()
 
     ok And= AssertTrue(UxbFileClose(io, 10), "close random")
 
+    ' Negative edge set: mode transitions, seek guards, eof, and channel reuse.
+    Dim tmpPathEdge As String
+    tmpPathEdge = "tests\\tmp_file_io_runtime_edge.bin"
+    Kill tmpPathEdge
+
+    Open tmpPathEdge For Output As #1
+    Close #1
+
+    ok And= AssertTrue(UxbFileOpen(io, 11, tmpPathEdge, "binary"), "open edge binary")
+
+    ok And= AssertEq(UxbFileOpen(io, 11, tmpPathEdge, "binary"), 0, "open already-open channel rejected")
+    ok And= AssertEq(UxbFileGetLastError(io), UXB_FILE_ERR_CHANNEL_ALREADY_OPEN, "already-open channel error code")
+
+    ok And= AssertEq(UxbFileSeek(io, 11, 0, currentPosition), 0, "seek zero rejected")
+    ok And= AssertEq(UxbFileGetLastError(io), UXB_FILE_ERR_SEEK_OUT_OF_RANGE, "seek out-of-range error code")
+
+    ok And= AssertTrue(UxbFileClose(io, 11), "close edge binary")
+
+    ok And= AssertTrue(UxbFileOpen(io, 12, tmpPathEdge, "append"), "open append mode")
+    ok And= AssertEq(UxbFileSeek(io, 12, 1, currentPosition), 0, "seek append rejected")
+    ok And= AssertEq(UxbFileGetLastError(io), UXB_FILE_ERR_SEEK_NOT_ALLOWED, "seek not allowed error code")
+    ok And= AssertTrue(UxbFileClose(io, 12), "close append")
+
+    ok And= AssertTrue(UxbFileOpen(io, 13, tmpPathEdge, "output"), "open output mode")
+    Dim outputRead As Integer
+    outputRead = 0
+    ok And= AssertEq(UxbFileGetI32(io, 13, 1, 4, outputRead), 0, "read denied on output")
+    ok And= AssertEq(UxbFileGetLastError(io), UXB_FILE_ERR_MODE_NOT_READABLE, "output read error code")
+    ok And= AssertTrue(UxbFileClose(io, 13), "close output")
+
+    ok And= AssertEq(UxbFileOpen(io, 0, tmpPathEdge, "binary"), 0, "open invalid channel rejected")
+    ok And= AssertEq(UxbFileGetLastError(io), UXB_FILE_ERR_BAD_CHANNEL, "invalid channel error code")
+
+    ok And= AssertEq(UxbFileOpen(io, 14, "tests\\__missing_file_runtime__.bin", "input"), 0, "open missing input rejected")
+    ok And= AssertEq(UxbFileGetLastError(io), UXB_FILE_ERR_NOT_FOUND, "missing file error code")
+
     Kill tmpPath
     Kill tmpPathRandom
+    Kill tmpPathEdge
 
     If ok = 0 Then End 1
 
