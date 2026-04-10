@@ -1,6 +1,8 @@
 #include once "../src/parser/token_kinds.fbs"
 #include once "../src/parser/lexer.fbs"
 #include once "../src/parser/parser.fbs"
+#include once "../src/runtime/memory_vm.fbs"
+#include once "../src/runtime/memory_exec.fbs"
 #include once "../src/codegen/x64/inline_backend.fbs"
 
 Type ManifestRow
@@ -90,6 +92,10 @@ Private Function HasCallExprValue(ByRef ps As ParseState, ByRef callName As Stri
         If UCase(ps.ast.nodes(i).kind) = "CALL_EXPR" And UCase(ps.ast.nodes(i).value) = UCase(callName) Then Return 1
     Next i
     Return 0
+End Function
+
+Private Function ContainsText(ByRef haystack As String, ByRef needle As String) As Integer
+    Return Instr(UCase(haystack), UCase(needle)) > 0
 End Function
 
 Private Function UnescapeBackslashQuote(ByRef textIn As String) As String
@@ -275,6 +281,28 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
     Case "FILE_IO_ADVANCED_FAIL"
         resultOk = (parseOk = 0)
         If resultOk = 0 Then detail = "expected file-io advanced parse failure"
+
+    Case "CALL_RUNTIME_OK"
+        If parseOk = 0 Then
+            resultOk = 0
+            detail = ps.lastError
+        Else
+            Dim runtimeErrOk As String
+            resultOk = ExecRunMemoryProgram(ps, runtimeErrOk)
+            If resultOk = 0 Then detail = runtimeErrOk
+        End If
+
+    Case "CALL_RUNTIME_FAIL"
+        If parseOk = 0 Then
+            resultOk = 0
+            detail = ps.lastError
+        Else
+            Dim runtimeErrFail As String
+            Dim runtimeOk As Integer
+            runtimeOk = ExecRunMemoryProgram(ps, runtimeErrFail)
+            resultOk = (runtimeOk = 0) And ContainsText(runtimeErrFail, "unsupported call")
+            If resultOk = 0 Then detail = "expected runtime unsupported call failure"
+        End If
 
     Case "LOF_OK"
         resultOk = parseOk And HasCallExprValue(ps, "LOF")
