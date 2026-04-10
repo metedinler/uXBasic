@@ -157,6 +157,19 @@ if ($cmpRows.Count -eq 0) {
     }
 }
 
+$compatRows = Import-Csv $compatPath
+for ($j = 0; $j -lt $compatRows.Count; $j++) {
+    $cmd = [string]$compatRows[$j].command
+    if ([string]::IsNullOrWhiteSpace($cmd)) {
+        $errors.Add("empty command value at command_compatibility row $($j + 2)")
+        continue
+    }
+
+    if ($cmd.Contains('_')) {
+        $errors.Add("command cannot include underscore at command_compatibility row $($j + 2): $cmd")
+    }
+}
+
 foreach ($cmpRef in $compatCmpRefs.Keys) {
     if (-not $cmpPlanIds.ContainsKey($cmpRef)) {
         $errors.Add("compatibility test_ref CMP id not found in cmp_interop plan: $cmpRef")

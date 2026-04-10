@@ -37,6 +37,10 @@ Ornekler:
 - Compat testleri (`CMP-*`) oldugu gibi korunur.
 - Bos test_ref kullanilmaz.
 
+`tests/plan/command_compatibility_win11.csv` icindeki `command` alaninda:
+- Komut adlarinda `_` kullanilmaz.
+- Alt cizgi sadece degisken adlarinda kullanilir, komut adlarinda kullanilmaz.
+
 `tests/plan/cmp_interop_win11.csv` icinde:
 - `cmp_id` alani `CMP-<GROUP...>` formatini kullanir.
 - `cmp_id` degerleri tekildir.
