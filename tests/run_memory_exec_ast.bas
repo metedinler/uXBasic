@@ -42,6 +42,11 @@ Private Sub Main()
         "POKED x + 88, m" & Chr(10) & _
         "t = 1 ROL 3" & Chr(10) & _
         "POKED x + 92, t" & Chr(10) & _
+        "POKEB x + 96, 1" & Chr(10) & _
+        "POKEB x + 97, 2" & Chr(10) & _
+        "POKEB x + 98, 3" & Chr(10) & _
+        "MEMCOPYB x + 96, x + 97, 3" & Chr(10) & _
+        "MEMFILLB x + 112, 255, 0" & Chr(10) & _
         "INC a" & Chr(10) & _
         "DEC a"
 
@@ -81,6 +86,9 @@ Private Sub Main()
     ok And= AssertEq(VMemPeekD(4180), 17, "SHL/OR")
     ok And= AssertEq(VMemPeekD(4184), 2, "MOD")
     ok And= AssertEq(VMemPeekD(4188), 8, "ROL")
+    ok And= AssertEq(VMemPeekB(4193), 1, "MEMCOPYB overlap byte0")
+    ok And= AssertEq(VMemPeekB(4194), 2, "MEMCOPYB overlap byte1")
+    ok And= AssertEq(VMemPeekB(4195), 3, "MEMCOPYB overlap byte2")
 
     If ok = 0 Then End 1
 
