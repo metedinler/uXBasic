@@ -20,6 +20,26 @@ Private Function HasArg(ByRef keyText As String) As Integer
     Return 0
 End Function
 
+Private Function YerellestirHata(ByRef rawText As String) As String
+    Dim u As String
+    u = UCase(rawText)
+
+    If Instr(u, "UNSUPPORTED CALL") > 0 Then Return "Desteklenmeyen cagir" 
+    If Instr(u, "ARG MISSING") > 0 Then Return "Eksik parametre"
+    If Instr(u, "OUT OF RANGE") > 0 Then Return "Aralik disi erisim"
+    If Instr(u, "DIVISION BY ZERO") > 0 Then Return "Sifira bolme hatasi"
+    If Instr(u, "MODULO BY ZERO") > 0 Then Return "Sifira gore mod alma hatasi"
+    If Instr(u, "OPEN FAILED") > 0 Then Return "Dosya acma hatasi"
+    If Instr(u, "CLOSE FAILED") > 0 Then Return "Dosya kapatma hatasi"
+    If Instr(u, "GET FAILED") > 0 Then Return "Dosya okuma hatasi"
+    If Instr(u, "PUT FAILED") > 0 Then Return "Dosya yazma hatasi"
+    If Instr(u, "SEEK FAILED") > 0 Then Return "Dosya konumlama hatasi"
+    If Instr(u, "PARSE") > 0 Then Return "Sozdizimi cozumleme hatasi"
+    If Instr(u, "INVALID") > 0 Then Return "Gecersiz deger"
+
+    Return "Isletim hatasi"
+End Function
+
 Private Function LoadTextFile(ByRef filePath As String, ByRef textOut As String) As Integer
     Dim f As Integer
     f = FreeFile
@@ -70,7 +90,7 @@ Dim As ParseState ps
 ParserInit ps, st
 
 If ParseProgram(ps) = 0 Then
-    DiagHata "Ayristirma basarisiz: " & ps.lastError
+    DiagHata "Ayristirma basarisiz: " & YerellestirHata(ps.lastError)
     End 1
 End If
 
@@ -82,7 +102,7 @@ End If
 If LCase(Command(2)) = "--execmem" Then
     Dim execErr As String
     If ExecRunMemoryProgram(ps, execErr) = 0 Then
-        DiagHata "Bellek yurutme basarisiz: " & execErr
+        DiagHata "Bellek yurutme basarisiz: " & YerellestirHata(execErr)
         End 5
     End If
     DiagBilgi "Bellek yurutme basarili"
@@ -93,12 +113,12 @@ If sourcePath <> "" Then
     Dim interopErr As String
 
     If ResolveInteropManifestForSource(sourcePath, manifest, interopErr) = 0 Then
-        DiagHata "Baglanti cozumleme basarisiz: " & interopErr
+        DiagHata "Baglanti cozumleme basarisiz: " & YerellestirHata(interopErr)
         End 3
     End If
 
     If EmitInteropArtifacts(manifest, "dist\interop", interopErr) = 0 Then
-        DiagHata "Baglanti cikti yazimi basarisiz: " & interopErr
+        DiagHata "Baglanti cikti yazimi basarisiz: " & YerellestirHata(interopErr)
         End 4
     End If
 
