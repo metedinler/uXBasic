@@ -284,3 +284,50 @@
 	- `tests/manifest.csv`, `tests/run_manifest.bas`
 	- `tests/plan/command_compatibility_win11.csv`
 	- `spec/LANGUAGE_CONTRACT.md`
+
+## Sira 8.Q - Pointer Intrinsic Ailesi (Win11 Guvenli Runtime)
+- Durum: tamamlandi
+- Gorev: `VARPTR`, `SADD`, `LPTR`, `CODEPTR` komut/fonksiyonlarinin Win11 user-mode guvenlik kurallariyla runtime tasarimini yapmak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/parser/parser_shared.fbs`
+	- `src/runtime/memory_exec.fbs`
+	- `spec/LANGUAGE_CONTRACT.md` (pointer semantik eki)
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.R - Inline x64 Backend Semantik Fazi
+- Durum: tamamlandi
+- Gorev: `INLINE(...) ... END INLINE` parser kabulunden sonra x64 ABI/register koruma ve cagri guvenligi semantigini backendde tamamlamak
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/codegen/x64/inline_backend.fbs`
+	- `spec/LANGUAGE_CONTRACT.md` (inline x64 semantik eki)
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `tests/run_inline_x64_backend.bas`
+	- `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.S - Genisletilmis Bellek Komutlari (POKES/MEMCOPY*/MEMFILL*)
+- Durum: tamamlandi
+- Gorev: `POKES`, `MEMCOPYW`, `MEMCOPYD`, `MEMFILLW`, `MEMFILLD`, `SETNEWOFFSET` komutlarini Win11 guvenlik modeliyle asamali aktiflestirmek
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/parser/parser/parser_stmt_basic.fbs`
+	- `src/parser/parser/parser_stmt_dispatch.fbs`
+	- `src/runtime/memory_vm.fbs`
+	- `src/runtime/memory_exec.fbs`
+	- `tests/manifest.csv`, `tests/run_manifest.bas`
+	- `tests/run_memory_vm.bas`, `tests/run_memory_exec_ast.bas`
+	- `tests/plan/command_compatibility_win11.csv`
+
+## Sira 8.T - Dosya I/O Ileri Semantik Standardizasyonu
+- Durum: tamamlandi
+- Gorev: `OPEN/GET/PUT/SEEK` komutlarinda record/binary mod semantigi, kanal sozlesmesi ve hata kodlarini Win11 profilinde standardize etmek
+- Sorumlu: Agent-Backend64
+- Cikti:
+	- `src/runtime/file_io.fbs`
+	- `src/runtime/memory_exec.fbs`
+	- `spec/LANGUAGE_CONTRACT.md` (dosya semantik eki)
+	- `tests/run_file_io_runtime.bas`
+	- `tests/run_file_io_exec_ast.bas`
+	- `tests/plan/command_compatibility_win11.csv`

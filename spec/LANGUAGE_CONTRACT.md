@@ -3,7 +3,8 @@
 ## Core Rules
 - QB 7.1 style syntax, strict declarations.
 - No variable/type suffix identifiers in declarations (e.g. `x$`, `n%`, `v!`).
-- Legacy intrinsic alias names are supported: `GETKEY`, `INKEY$`, `MID$`, `STR$`, `UCASE$`, `LCASE$`, `CHR$`, `STRING$`.
+- Command/intrinsic names use non-suffix form only (`INKEY`, `MID`, `STR`, `UCASE`, `LCASE`, `CHR`, `STRING`).
+- Win11 x64 profile is the active development target.
 - Predeclare `SUB/FUNCTION` with `DECLARE`.
 - Includes in header region.
 - Arrays are 0-based by default.
@@ -12,9 +13,16 @@
 - Old forms (`_ASM`, `ASM_SUB`, `ASM_FUNCTION`) are replaced by:
   - `INLINE(language, programId, kind, params)`
   - `END INLINE`
+- Win11 x64 backend policy (minimum active semantic gate):
+  - `language` must be one of: `x64`, `x86_64`, `amd64`
+  - `programId` (assembler) must be one of: `nasm`, `masm`, `gas`
+  - `kind` must be one of: `sub`, `function`, `proc`
+  - `params` must include `abi=win64`, `preserve=...`, `stack=16`
+  - If inline body contains `call`, `params` must also include `shadow=32`
 
 ## Operators (delta)
 - Added: `++`, `--`, `+=`, `-=`, `*=`, `/=`, `\\=`, `=+`, `=-`, `**`, `@`
+- Added: `AND`, `OR`, `XOR`, `MOD`, `SHL`, `SHR`, `ROL`, `ROR`, `<<`, `>>`
 - `@` is pointer operator only.
 
 ## Timer
@@ -46,6 +54,30 @@
 - `INPUT promptExpr; target[, target ...]`
 - `INPUT #channelExpr, target[, target ...]`
 
+## File I/O Advanced Standardization (Win11)
+- `OPEN fileExpr FOR mode AS [#]channelExpr`
+- `GET [#]channelExpr, targetExpr`
+- `GET [#]channelExpr, posExpr, targetExpr`
+- `GET [#]channelExpr, posExpr, bytesExpr, targetExpr`
+- `PUT [#]channelExpr, sourceExpr`
+- `PUT [#]channelExpr, posExpr, sourceExpr`
+- `PUT [#]channelExpr, posExpr, bytesExpr, sourceExpr`
+- `SEEK [#]channelExpr[, posExpr]`
+- Channel contract:
+  - Valid channel range is `1..255`.
+  - A channel cannot be opened twice without `CLOSE`.
+  - `BINARY` and `RANDOM` modes are the advanced read/write modes.
+- Mode normalization:
+  - `INPUT|IN|I` -> `INPUT`
+  - `OUTPUT|OUT|O` -> `OUTPUT`
+  - `APPEND|A` -> `APPEND`
+  - `BINARY|BIN|B` -> `BINARY`
+  - `RANDOM|RAND|R` -> `RANDOM`
+- Runtime error codes are standardized in `src/runtime/file_io.fbs` with canonical categories:
+  - bad channel, channel state, invalid mode/arg
+  - mode read/write violations, seek violations
+  - eof and os-level io/access/not-found mapping
+
 ## Default Type Declarations
 - `DEFINT rangeList`
 - `DEFLNG rangeList`
@@ -70,8 +102,8 @@
 - `RANDOMIZE [seedExpr]` statement
 
 ## Memory Command Subset (Current)
-- Intrinsics: `PEEKB(addr)`, `PEEKW(addr)`, `PEEKD(addr)`
-- Statements: `POKEB addr,val`, `POKEW addr,val`, `POKED addr,val`, `MEMCOPYB src,dst,n`, `MEMFILLB addr,val,n`, `INC ident`, `DEC ident`
+- Intrinsics: `PEEKB(addr)`, `PEEKW(addr)`, `PEEKD(addr)`, `VARPTR(expr)`, `SADD(expr)`, `LPTR(label)`, `CODEPTR(proc)`
+- Statements: `POKEB addr,val`, `POKEW addr,val`, `POKED addr,val`, `POKES addr,text`, `MEMCOPYB src,dst,n`, `MEMCOPYW src,dst,n`, `MEMCOPYD src,dst,n`, `MEMFILLB addr,val,n`, `MEMFILLW addr,val,n`, `MEMFILLD addr,val,n`, `SETNEWOFFSET var,newaddr`, `INC ident`, `DEC ident`
 - Runtime is implemented through `memory_vm` and optional AST execution path `--execmem`.
 
 ## Win11 Port I/O Scope

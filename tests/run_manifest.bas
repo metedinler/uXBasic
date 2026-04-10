@@ -1,6 +1,7 @@
 #include once "../src/parser/token_kinds.fbs"
 #include once "../src/parser/lexer.fbs"
 #include once "../src/parser/parser.fbs"
+#include once "../src/codegen/x64/inline_backend.fbs"
 
 Type ManifestRow
     testId As String
@@ -143,6 +144,46 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasToken(st, "OP", "@")
         If resultOk = 0 Then detail = "missing @ operator token"
 
+    Case "AST_AND"
+        resultOk = parseOk And HasAstKindWithOp(ps, "BINARY", "AND")
+        If resultOk = 0 Then detail = "missing BINARY AND node"
+
+    Case "AST_OR"
+        resultOk = parseOk And HasAstKindWithOp(ps, "BINARY", "OR")
+        If resultOk = 0 Then detail = "missing BINARY OR node"
+
+    Case "AST_XOR"
+        resultOk = parseOk And HasAstKindWithOp(ps, "BINARY", "XOR")
+        If resultOk = 0 Then detail = "missing BINARY XOR node"
+
+    Case "AST_MOD"
+        resultOk = parseOk And (HasAstKindWithOp(ps, "BINARY", "MOD") Or HasAstKindWithOp(ps, "BINARY", "%"))
+        If resultOk = 0 Then detail = "missing BINARY MOD node"
+
+    Case "AST_SHL"
+        resultOk = parseOk And HasAstKindWithOp(ps, "BINARY", "SHL")
+        If resultOk = 0 Then detail = "missing BINARY SHL node"
+
+    Case "AST_SHR"
+        resultOk = parseOk And HasAstKindWithOp(ps, "BINARY", "SHR")
+        If resultOk = 0 Then detail = "missing BINARY SHR node"
+
+    Case "AST_ROL"
+        resultOk = parseOk And HasAstKindWithOp(ps, "BINARY", "ROL")
+        If resultOk = 0 Then detail = "missing BINARY ROL node"
+
+    Case "AST_ROR"
+        resultOk = parseOk And HasAstKindWithOp(ps, "BINARY", "ROR")
+        If resultOk = 0 Then detail = "missing BINARY ROR node"
+
+    Case "AST_LSHIFT"
+        resultOk = parseOk And HasAstKindWithOp(ps, "BINARY", "<<")
+        If resultOk = 0 Then detail = "missing BINARY << node"
+
+    Case "AST_RSHIFT"
+        resultOk = parseOk And HasAstKindWithOp(ps, "BINARY", ">>")
+        If resultOk = 0 Then detail = "missing BINARY >> node"
+
     Case "AST_INC"
         resultOk = parseOk And HasToken(st, "OP", "++")
         If resultOk = 0 Then detail = "missing ++ operator token"
@@ -150,6 +191,30 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
     Case "INLINE_OK"
         resultOk = parseOk And HasToken(st, "KEYWORD", "INLINE") And HasToken(st, "KEYWORD", "END")
         If resultOk = 0 Then detail = "missing INLINE/END token pattern"
+
+    Case "INLINE_X64_OK"
+        resultOk = parseOk
+        If resultOk = 0 Then
+            detail = ps.lastError
+        Else
+            Dim backendErr As String
+            resultOk = InlineX64BackendValidate(ps, backendErr)
+            If resultOk = 0 Then detail = backendErr
+        End If
+
+    Case "INLINE_X64_FAIL"
+        If parseOk = 0 Then
+            resultOk = 0
+            detail = "parse failed before backend check: " & ps.lastError
+        Else
+            Dim backendErr2 As String
+            If InlineX64BackendValidate(ps, backendErr2) = 0 Then
+                resultOk = 1
+            Else
+                resultOk = 0
+                detail = "expected inline-x64 backend rejection"
+            End If
+        End If
 
     Case "UNIT_OK"
         resultOk = parseOk And HasToken(st, "KEYWORD", "TIMER") And HasToken(st, "STRING", "ms")
@@ -367,33 +432,33 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
         resultOk = parseOk And HasCallExprValue(ps, "GETKEY")
         If resultOk = 0 Then detail = "missing GETKEY call expression"
 
-    Case "INKEY_DOLLAR_OK"
-        resultOk = parseOk And HasCallExprValue(ps, "INKEY$")
-        If resultOk = 0 Then detail = "missing INKEY$ call expression"
+    Case "INKEY_COMPAT_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "GETKEY")
+        If resultOk = 0 Then detail = "missing GETKEY compatibility call expression"
 
-    Case "MID_DOLLAR_OK"
-        resultOk = parseOk And HasCallExprValue(ps, "MID$")
-        If resultOk = 0 Then detail = "missing MID$ call expression"
+    Case "MID_COMPAT_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "MID")
+        If resultOk = 0 Then detail = "missing MID compatibility call expression"
 
-    Case "STR_DOLLAR_OK"
-        resultOk = parseOk And HasCallExprValue(ps, "STR$")
-        If resultOk = 0 Then detail = "missing STR$ call expression"
+    Case "STR_COMPAT_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "STR")
+        If resultOk = 0 Then detail = "missing STR compatibility call expression"
 
-    Case "UCASE_DOLLAR_OK"
-        resultOk = parseOk And HasCallExprValue(ps, "UCASE$")
-        If resultOk = 0 Then detail = "missing UCASE$ call expression"
+    Case "UCASE_COMPAT_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "UCASE")
+        If resultOk = 0 Then detail = "missing UCASE compatibility call expression"
 
-    Case "LCASE_DOLLAR_OK"
-        resultOk = parseOk And HasCallExprValue(ps, "LCASE$")
-        If resultOk = 0 Then detail = "missing LCASE$ call expression"
+    Case "LCASE_COMPAT_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "LCASE")
+        If resultOk = 0 Then detail = "missing LCASE compatibility call expression"
 
-    Case "CHR_DOLLAR_OK"
-        resultOk = parseOk And HasCallExprValue(ps, "CHR$")
-        If resultOk = 0 Then detail = "missing CHR$ call expression"
+    Case "CHR_COMPAT_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "CHR")
+        If resultOk = 0 Then detail = "missing CHR compatibility call expression"
 
-    Case "STRING_DOLLAR_OK"
-        resultOk = parseOk And HasCallExprValue(ps, "STRING$")
-        If resultOk = 0 Then detail = "missing STRING$ call expression"
+    Case "STRING_COMPAT_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "STRING")
+        If resultOk = 0 Then detail = "missing STRING compatibility call expression"
 
     Case "DEFTYPE_OK"
         resultOk = parseOk And HasAstKind(ps, "DEFTYPE_STMT")
@@ -446,6 +511,46 @@ Private Function EvaluateRow(ByRef row As ManifestRow, ByRef detail As String) A
     Case "PEEKD_OK"
         resultOk = parseOk And HasCallExprValue(ps, "PEEKD")
         If resultOk = 0 Then detail = "missing PEEKD call expression"
+
+    Case "VARPTR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "VARPTR")
+        If resultOk = 0 Then detail = "missing VARPTR call expression"
+
+    Case "SADD_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "SADD")
+        If resultOk = 0 Then detail = "missing SADD call expression"
+
+    Case "LPTR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "LPTR")
+        If resultOk = 0 Then detail = "missing LPTR call expression"
+
+    Case "CODEPTR_OK"
+        resultOk = parseOk And HasCallExprValue(ps, "CODEPTR")
+        If resultOk = 0 Then detail = "missing CODEPTR call expression"
+
+    Case "POKES_OK"
+        resultOk = parseOk And HasAstKind(ps, "POKES_STMT")
+        If resultOk = 0 Then detail = "missing POKES_STMT AST node"
+
+    Case "MEMCOPYW_OK"
+        resultOk = parseOk And HasAstKind(ps, "MEMCOPYW_STMT")
+        If resultOk = 0 Then detail = "missing MEMCOPYW_STMT AST node"
+
+    Case "MEMCOPYD_OK"
+        resultOk = parseOk And HasAstKind(ps, "MEMCOPYD_STMT")
+        If resultOk = 0 Then detail = "missing MEMCOPYD_STMT AST node"
+
+    Case "MEMFILLW_OK"
+        resultOk = parseOk And HasAstKind(ps, "MEMFILLW_STMT")
+        If resultOk = 0 Then detail = "missing MEMFILLW_STMT AST node"
+
+    Case "MEMFILLD_OK"
+        resultOk = parseOk And HasAstKind(ps, "MEMFILLD_STMT")
+        If resultOk = 0 Then detail = "missing MEMFILLD_STMT AST node"
+
+    Case "SETNEWOFFSET_OK"
+        resultOk = parseOk And HasAstKind(ps, "SETNEWOFFSET_STMT")
+        If resultOk = 0 Then detail = "missing SETNEWOFFSET_STMT AST node"
 
     Case "CINT_OK"
         resultOk = parseOk And HasCallExprValue(ps, "CINT")
