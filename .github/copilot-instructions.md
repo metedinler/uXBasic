@@ -17,3 +17,17 @@ Bu workspace icinde calisan tum ajanlar (ana ajan + alt ajanlar):
 - yeni test adlandirmasinda bu standardi kullanir,
 - eski/legacy test ID uretmez,
 - test naming validator basarisizsa degisikligi tamamlanmis saymaz.
+
+## Zorunlu Yurutme Kurallari
+
+- Tum gorevler varsayilan olarak cok ajanli(multi-agent) ve paralel(parallel) yurutulur.
+- Faz kapisi yesil oldugunda bir sonraki faza otomatik gecilir.
+- Her kod adiminda semantik kontrol(semantic checks) ve test kosusu zorunludur.
+- Runtime once ilkesine uyulur; runtime kirmiziysa yeni ozellik acilmaz.
+- Her faz sonunda zorunlu islem: git commit + git push.
+
+## Dil ve Cikti Sozlesmesi
+
+- Program bildirimleri Turkce yazilir.
+- Hata bildirimleri Turkce yazilir ve dosyaya yazilir.
+- Programin standart cikisi yalnizca komut sonucu olur; ekstra teknik gosterim log dosyasina gider.

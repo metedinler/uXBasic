@@ -4,14 +4,21 @@
 #include "parser/parser.fbs"
 #include "build/interop_manifest.fbs"
 #include "runtime/timer.fbs"
+#include "runtime/diagnostics.fbs"
 #include "runtime/memory_vm.fbs"
 #include "runtime/memory_exec.fbs"
 #include "legacy/get_commands_port.fbs"
 
-Sub PrintBanner()
-    Print "uXbasic bootstrap (FreeBASIC)"
-    Print "Phase: lexer/parser skeleton"
-End Sub
+Private Function HasArg(ByRef keyText As String) As Integer
+    Dim i As Integer
+    For i = 1 To 16
+        Dim a As String
+        a = Command(i)
+        If a = "" Then Exit For
+        If LCase(a) = LCase(keyText) Then Return 1
+    Next i
+    Return 0
+End Function
 
 Private Function LoadTextFile(ByRef filePath As String, ByRef textOut As String) As Integer
     Dim f As Integer
@@ -34,47 +41,51 @@ End Function
 
 Dim As String sourceText
 Dim As String sourcePath
+Dim As Integer debugMode
+
+DiagInit
+
+debugMode = HasArg("--debug") Or HasArg("--ayikla")
+DiagBilgi "uXBasic calistirildi"
 
 sourcePath = Command(1)
 If sourcePath <> "" Then
     If LoadTextFile(sourcePath, sourceText) = 0 Then
-        Print "Cannot read source file:"; sourcePath
+        DiagHata "Kaynak dosya okunamadi: " & sourcePath
         End 2
     End If
 Else
-    sourceText = "PRINT 1 + 2 : IF a = 1 THEN b += 2 ELSE b =- 1 END IF"
+    DiagHata "Kaynak dosya yolu verilmedi"
+    End 2
 End If
-
-PrintBanner()
 
 Dim As LexerState st
 LexerInit st, sourceText
 
-Print "Token count:"; st.tokens.count
-Dim As Integer i
-For i = 0 To st.tokens.count - 1
-    Print i; "|"; st.tokens.items(i).kind; "|"; st.tokens.items(i).lexeme
-Next i
+If debugMode Then
+    DiagBilgi "Token sayisi: " & Str(st.tokens.count)
+End If
 
 Dim As ParseState ps
 ParserInit ps, st
 
 If ParseProgram(ps) = 0 Then
-    Print "Parse failed: "; ps.lastError
+    DiagHata "Ayristirma basarisiz: " & ps.lastError
     End 1
 End If
 
-Print "Parse ok."
-Print "AST nodes:"; ps.ast.count
-ASTDump ps.ast, ps.rootNode
+If debugMode Then
+    DiagBilgi "Ayristirma basarili. AST dugum sayisi: " & Str(ps.ast.count)
+    ASTDump ps.ast, ps.rootNode
+End If
 
 If LCase(Command(2)) = "--execmem" Then
     Dim execErr As String
     If ExecRunMemoryProgram(ps, execErr) = 0 Then
-        Print "Memory exec failed:"; execErr
+        DiagHata "Bellek yurutme basarisiz: " & execErr
         End 5
     End If
-    Print "Memory exec ok."
+    DiagBilgi "Bellek yurutme basarili"
 End If
 
 If sourcePath <> "" Then
@@ -82,24 +93,28 @@ If sourcePath <> "" Then
     Dim interopErr As String
 
     If ResolveInteropManifestForSource(sourcePath, manifest, interopErr) = 0 Then
-        Print "Interop resolve failed:"; interopErr
+        DiagHata "Baglanti cozumleme basarisiz: " & interopErr
         End 3
     End If
 
     If EmitInteropArtifacts(manifest, "dist\interop", interopErr) = 0 Then
-        Print "Interop emit failed:"; interopErr
+        DiagHata "Baglanti cikti yazimi basarisiz: " & interopErr
         End 4
     End If
 
-    Print "Interop include count:"; manifest.includeCount
-    Print "Interop import count:"; manifest.importCount
+    If debugMode Then
+        DiagBilgi "Interop include sayisi: " & Str(manifest.includeCount)
+        DiagBilgi "Interop import sayisi: " & Str(manifest.importCount)
+    End If
 End If
 
 Dim As String selected
 Dim As Integer n
 n = LegacyGetCommands(sourceText, 0, selected)
-Print "Legacy split count:"; n
-Print "Legacy part[0]:"; selected
-Print "Timer(ms) sample:"; TimerNow("ms")
+If debugMode Then
+    DiagBilgi "Legacy ayrim sayisi: " & Str(n)
+    DiagBilgi "Legacy parcasi[0]: " & selected
+    DiagBilgi "Zaman(ornek ms): " & Str(TimerNow("ms"))
+End If
 
 End 0

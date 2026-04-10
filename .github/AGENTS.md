@@ -13,3 +13,17 @@ Uygulama zorunlulugu:
 ## Enforcement
 
 Ajanlar naming standardina uymayan degisiklikleri bitmis kabul etmez.
+
+## Otomatik Yurutme Kurallari (Zorunlu)
+
+- Tum isler varsayilan olarak cok ajanli(multi-agent) ve paralel(parallel) yurutulur.
+- Faz kapisi yesilse bir sonraki faza otomatik gecilir; kullanicidan tekrar onay beklenmez.
+- Her adimda semantik kontrol(semantic checks) + test + gate kosusu zorunludur.
+- Runtime once ilkesi gecerlidir: runtime kirmiziyken yeni dil ozelligi acilmaz.
+- Faz sonu zorunlu: git commit ve git push.
+
+## Dil ve Bildirim Sozlesmesi
+
+- Program bildirim metinleri Turkce yazilir.
+- Hata bildirimleri Turkce yazilir ve dosyaya loglanir.
+- Programin standart cikisi, komut sonucunun kendisi disinda ek bilgi basmaz.

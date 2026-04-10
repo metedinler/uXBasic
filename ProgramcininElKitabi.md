@@ -1,339 +1,343 @@
-﻿# Programcinin El Kitabi
+# uXBasic Programcinin El Kitabi
 
-## 1) Amac ve Kapsam
-Bu belge uXBasic icin tek dogru gelistirici referansidir.
-Belge, su anki kodun gercek kapasitesini ve plandaki siradaki isleri ayri ayri belirtir.
+Bu dokuman parser gercegi + test plani uzerinden standardize edilmis tek referanstir.
+Hedef profil: Windows 11 x64.
 
-Kaynak dogrulama noktasi:
-- src altindaki gercek moduller
-- tests/manifest.csv
-- tests/plan/command_compatibility_win11.csv
-- .plan.md ve WORK_QUEUE.md
+## 1. Amac
 
-## 2) Mevcut Derleyici Gercegi
-uXBasic bugun su asamalari gercekten yapiyor:
-1. Lexer ile token uretimi
-2. Parser ile AST uretimi
-3. Include/import icin interop manifest cikarma
-4. Sinirli runtime: timer + memory VM
-5. Opsiyonel memory komut yurutmeye ozel yol: --execmem
+- Belgedeki tum syntax kaliplari parser tarafinda gecerli olmalidir.
+- Corrupt satirlar, kopya bolumler ve celiskili ornekler temizlenmistir.
+- Komutlar iki etikette verilir:
+  - implemented: parser/test ile dogrulanmis.
+  - planned: parser veya runtime backlog.
 
-Onemli:
-- Genel amacli tam runtime interpreter henuz yok.
-- Tum komutlar parser seviyesinde taninmak ile runtime seviyesinde calismak ayni sey degil.
+## 2. Lexer Gercegi ve Yazim Kurali
 
-## 3) Dil Kurallari (Kod Gercegi ile)
-- Yazim stili QB 7.1 yaklasimina yakindir.
-- Acik bildirim esastir.
-- Degisken/tanimlayici tip soneki kullanimi (x$, y%, z! vb.) hedef kural olarak kapali tutulur.
-- Buna ragmen bazi legacy intrinsic adlar parserda alias olarak vardir:
-  - GETKEY, INKEY$, MID$, STR$, UCASE$, LCASE$, CHR$, STRING$
-- Eski inline adlari kapali:
-  - _ASM, ASM_SUB, ASM_FUNCTION
-- Guncel yol:
-  - INLINE(...) ... END INLINE
+### 2.1 Identifier Kurali
 
-## 4) Komut Durumu Ozeti
-Asagidaki liste parser+test gercegine gore verilmistir.
+Parser identifier kurali:
 
-### 4.1 Parser+AST Olarak Implement Edilen Statement Komutlari
-- PRINT
-- IF, SELECT, FOR, DO
-- GOTO, GOSUB, RETURN, EXIT, END
-- DECLARE, SUB, FUNCTION
-- CONST, DIM, REDIM, TYPE
-- DEFINT, DEFLNG, DEFSNG, DEFDBL, DEFEXT, DEFSTR, DEFBYT
-- SETSTRINGSIZE
-- INCLUDE, IMPORT
-- INPUT, OPEN, CLOSE, GET, PUT, SEEK
-- LOCATE, COLOR, CLS
-- INC, DEC
-- POKEB, POKEW, POKED
-- MEMCOPYB, MEMFILLB
-- RANDOMIZE
+- baslangic: harf veya `_`
+- devam: harf, rakam veya `_`
+- pratik regex: `[A-Za-z_][A-Za-z0-9_]*`
 
-### 4.2 Parser+Expr Validation Olarak Implement Edilen Intrinsic Fonksiyonlar
-- LEN, MID, STR, VAL, ABS, INT, UCASE, LCASE, ASC, CHR, LTRIM, RTRIM, STRING, SPACE
-- SGN, SQRT, SIN, COS, TAN, ATN, EXP, LOG
-- INKEY, GETKEY, INKEY$
-- MID$, STR$, UCASE$, LCASE$, CHR$, STRING$
-- PEEKB, PEEKW, PEEKD
-- CINT, CLNG, CDBL, CSNG, FIX, SQR, RND
-- LOF, EOF, TIMER
+Sonuc:
 
-### 4.3 Runtime Olarak Gercekten Calisan Alt Kume
-- TIMER runtime:
-  - TimerNow, TimerRange, birim donusumu
-- Memory VM runtime:
-  - VMemPeekB/W/D
-  - VMemPokeB/W/D
-  - VMemCopyB
-  - VMemFillB
-- AST tabanli memory execution:
-  - ExecRunMemoryProgram
-  - src/main.exe icinde --execmem modu ile cagrilabilir
+- `x%`, `name$`, `pid&` gibi sonekli degisken adlari gecerli degildir.
+- Turkce karakterli degisken adlari yerine ASCII ad kullan.
 
-### 4.4 Win11 Profilinden Cikarilanlar
-- Port I/O komutlari bu profilde yok:
-  - INP, INPB, INPW, INPD
-  - OUT, OUTB, OUTW, OUTD
+### 2.2 Sonek Tip Isaretleri
+
+Strict parser profilinde su sonekler degisken adinin parcasi degildir:
+
+- `$`, `%`, `&`, `!`, `#`, `@`
+
+Tip belirtimi sadece `AS TYPE` ile yapilir.
+
+### 2.3 Anahtar Kelime ve Operator
+
+- keyword tanima buyuk/kucuk harf duyarsizdir.
+- parser operatorleri: `+ - * / \\ % = < > <= >= <> ** << >> += -= *= /= \\= =+ =- ++ -- @`.
+
+## 3. Tip Sistemi (Parser Builtin)
+
+Builtin tip adlari:
+
+- `I8`, `U8`
+- `I16`, `U16`
+- `I32`, `U32`
+- `I64`, `U64`
+- `F32`, `F64`, `F80`
+- `BOOLEAN`
+- `STRING`
+- `ARRAY`, `LIST`, `DICT`, `SET`
 
 Not:
-- INT, INT16, SETVECT gibi komutlar legacy/dusuk seviye kategori olarak belgede gecse de Win11 user-mode hedefte dogrudan runtime garantisi yoktur.
 
-## 5) 8 Komutluk Numerik/Cast Dalgasi Durumu
-Soru edilen dalga kodlandi ve testlere eklendi:
+- `LONG`, `INTEGER`, `DOUBLE`, `SINGLE`, `BYTE` parser builtin listesinde yoktur.
+- `STRING * N` formu parser syntaxinda yoktur.
+
+## 4. Parser Uyumlu Standart Soz Dizimi
+
+### 4.1 Akis Komutlari
+
+- `IF expr THEN ... [ELSEIF expr THEN ...] [ELSE ...] END IF`
+- `SELECT CASE expr ... CASE expr [,expr ...] ... [CASE ELSE ...] END SELECT`
+- `FOR ident = expr TO expr [STEP expr] ... NEXT [ident]`
+- `DO [WHILE expr | UNTIL expr] ... LOOP [WHILE expr | UNTIL expr]`
+- `GOTO label`
+- `GOSUB label`
+- `RETURN [expr]`
+- `EXIT [FOR|DO]`
+- `END`
+
+### 4.2 Tanim ve Yapi Komutlari
+
+- `CONST name = expr [, ...]`
+- `DIM name[(bounds)] AS TYPE [= expr] [, ...]`
+- `REDIM name[(bounds)] AS TYPE [, ...]`
+- `TYPE Name ... field AS TYPE ... END TYPE`
+- `DECLARE SUB Name(params)`
+- `DECLARE FUNCTION Name(params) AS TYPE`
+- `SUB Name(params) ... END SUB`
+- `FUNCTION Name(params) AS TYPE ... END FUNCTION`
+- `DEFINT rangeList`
+- `DEFLNG rangeList`
+- `DEFSNG rangeList`
+- `DEFDBL rangeList`
+- `DEFEXT rangeList`
+- `DEFSTR rangeList`
+- `DEFBYT rangeList`
+- `SETSTRINGSIZE expr`
+- `INCLUDE "file.bas"`
+- `IMPORT(LANG, "file.ext")`
+
+IMPORT notlari:
+
+- `LANG`: `C`, `CPP`, `ASM`
+- uzanti dil ile uyumlu olmalidir.
+
+### 4.3 Giris-Cikis ve Dosya Komutlari
+
+- `PRINT expr [,|; expr ...]`
+- `INPUT target [, target ...]`
+- `INPUT "prompt"; target [, target ...]`
+- `INPUT #handle, target [, target ...]`
+- `OPEN fileExpr FOR mode AS [#]handleExpr`
+- `CLOSE`
+- `CLOSE [#]handleExpr [, [#]handleExpr ...]`
+- `GET [#]handleExpr, targetExpr`
+- `GET [#]handleExpr, posExpr, targetExpr`
+- `GET [#]handleExpr, posExpr, bytesExpr, targetExpr`
+- `PUT [#]handleExpr, sourceExpr`
+- `PUT [#]handleExpr, posExpr, sourceExpr`
+- `PUT [#]handleExpr, posExpr, bytesExpr, sourceExpr`
+- `SEEK [#]handleExpr [, posExpr]`
+- `LOCATE rowExpr, colExpr`
+- `COLOR fgExpr, bgExpr`
+- `CLS`
+
+Dosya handle notu:
+
+- parser `#` isaretini kabul eder, zorunlu degildir.
+- belge standardinda handle yaziminda `#` onerilir.
+- legacy uyumluluk icin GET/PUT komutlarinda `pos` ve `bytes` ara argumanlari da kabul edilir.
+
+### 4.4 Bellek ve Yardimci Komutlar
+
+- `INC ident`
+- `DEC ident`
+- `RANDOMIZE [seedExpr]`
+- `POKEB addrExpr, valueExpr`
+- `POKEW addrExpr, valueExpr`
+- `POKED addrExpr, valueExpr`
+- `POKE addrExpr, valueExpr` (legacy alias, POKED semantigi)
+- `MEMCOPYB srcExpr, dstExpr, countExpr`
+- `MEMFILLB addrExpr, countExpr, valueExpr`
+- `INLINE(...) ... END INLINE`
+
+## 5. Intrinsic Fonksiyon Imzalari (Parser Validation)
+
+### 5.1 1 Arguman
+
+- `LEN(expr)`
+- `STR(expr)`
+- `VAL(expr)`
+- `ABS(expr)`
+- `INT(expr)`
+- `UCASE(expr)`
+- `LCASE(expr)`
+- `ASC(expr)`
+- `CHR(expr)`
+- `LTRIM(expr)`
+- `RTRIM(expr)`
+- `SPACE(expr)`
+- `SGN(expr)`
+- `SQRT(expr)`
+- `SIN(expr)`
+- `COS(expr)`
+- `TAN(expr)`
+- `ATN(expr)`
+- `EXP(expr)`
+- `LOG(expr)`
+- `CINT(expr)`
+- `CLNG(expr)`
+- `CDBL(expr)`
+- `CSNG(expr)`
+- `FIX(expr)`
+- `SQR(expr)`
+- `LOF(expr)`
+- `EOF(expr)`
+- `PEEKB(expr)`
+- `PEEKW(expr)`
+- `PEEKD(expr)`
+
+### 5.2 Diger Arity Kurallari
+
+- `MID(strExpr, startExpr [, lenExpr])` -> 2..3 arg
+- `STRING(countExpr, charExpr)` -> 2 arg
+- `RND([expr])` -> 0..1 arg
+- `INKEY(flagsExpr [, stateExpr])` -> 1..2 arg
+- `GETKEY()` -> 0 arg
+- `TIMER()` / `TIMER(unitStr)` / `TIMER(startExpr, endExpr, unitStr)` -> 0, 1 veya 3 arg
+
+## 6. Parser Uyumlu Ornekler
+
+### 6.1 Temel If
+
+```bas
+DIM score AS I32 = 85
+
+IF score >= 90 THEN
+    PRINT "A"
+ELSEIF score >= 80 THEN
+    PRINT "B"
+ELSE
+    PRINT "C"
+END IF
+```
+
+### 6.2 FOR + SUB + FUNCTION
+
+```bas
+DECLARE FUNCTION Add(a AS I32, b AS I32) AS I32
+DECLARE SUB Show(v AS I32)
+
+FUNCTION Add(a AS I32, b AS I32) AS I32
+    RETURN a + b
+END FUNCTION
+
+SUB Show(v AS I32)
+    PRINT v
+END SUB
+
+DIM i AS I32
+FOR i = 1 TO 3
+    Show(Add(i, 10))
+NEXT i
+```
+
+### 6.3 TYPE / UDT
+
+```bas
+TYPE Vec2
+    x AS I32
+    y AS I32
+END TYPE
+
+DIM p AS Vec2
+p.x = 10
+p.y = 20
+PRINT p.x
+PRINT p.y
+```
+
+### 6.4 INPUT ve INPUT#
+
+```bas
+DIM name AS STRING
+DIM age AS I32
+
+INPUT "Name?"; name
+INPUT "Age?"; age
+
+OPEN "in.txt" FOR INPUT AS #1
+INPUT #1, name, age
+CLOSE #1
+```
+
+### 6.5 OPEN / GET / PUT / SEEK
+
+```bas
+DIM value AS I32
+
+OPEN "data.bin" FOR RANDOM AS #1
+
+value = 42
+SEEK #1, 1
+PUT #1, value
+
+value = 0
+SEEK #1, 1
+GET #1, value
+
+PRINT value
+CLOSE #1
+```
+
+### 6.6 LOCATE / COLOR / CLS
+
+```bas
+CLS
+COLOR 2, 0
+LOCATE 5, 10
+PRINT "uXBasic"
+COLOR 7, 0
+```
+
+### 6.7 INCLUDE / IMPORT
+
+```bas
+INCLUDE "lib.bas"
+IMPORT(C, "cmod.c")
+IMPORT(CPP, "cpmod.cpp")
+IMPORT(ASM, "asmstub.asm")
+```
+
+## 7. Komut Durum Matrisi (Ozet)
+
+### 7.1 Implemented
+
+- PRINT, CONST, DIM, REDIM, TYPE
+- DECLARE, SUB, FUNCTION
+- INCLUDE, IMPORT, INLINE
+- IF, SELECT CASE, FOR, DO, GOTO, GOSUB, RETURN, EXIT, END
+- TIMER
+- OPEN, CLOSE, GET, PUT, SEEK, LOF, EOF
+- LOCATE, COLOR, CLS
+- INPUT, INPUT#
+- LEN, MID, STR, VAL, ABS, INT, UCASE, LCASE, ASC, CHR, LTRIM, RTRIM, STRING, SPACE, SGN, SQRT, SIN, COS, TAN, ATN, EXP, LOG
+- INKEY, GETKEY
+- DEFINT, DEFLNG, DEFSNG, DEFDBL, DEFEXT, DEFSTR, DEFBYT
+- SETSTRINGSIZE
 - CINT, CLNG, CDBL, CSNG, FIX, SQR, RND, RANDOMIZE
 
-Katman durumu:
-- CINT/CLNG/CDBL/CSNG/FIX/SQR: parser+expr-validation
-- RND: parser+expr-validation (0 veya 1 arg)
-- RANDOMIZE: parser+ast (opsiyonel seed expression)
+### 7.2 Planned
 
-Test referanslari:
-- tests/manifest.csv icinde phase18 testleri
-- tests/run_manifest.bas icinde CINT_OK..RANDOMIZE_OK etiketleri
-- tests/plan/command_compatibility_win11.csv icinde matrix satirlari
+- VARPTR, SADD, LPTR, CODEPTR
+- POKES
+- MEMCOPYW, MEMCOPYD
+- MEMFILLW, MEMFILLD
+- SETNEWOFFSET
+- FILE_IO_ADVANCED
+- INLINE x64 backend semantiklerinin tamamlanmasi
 
-## 6) DLL ve HTTP/API Durumu
-Bu alanlar planli ama henuz kodlanmadi.
+## 8. Bilincli Olarak Kaldirilan Hatali/Karmasik Kullanimlar
 
-### DLL (Plan)
-- DECLARE/USEDLL modeli korunacak
-- Parametre donusum tablosu resmi hale getirilecek
-- ANSI/UTF-16 stratejisi netlestirilecek
+- sonekli degisken adlari (`x%`, `name$`, `pid&`)
+- parser builtin olmayan tip adlariyla ornekler (`LONG`, `INTEGER`, vb.)
+- `STRING * N`
+- parser desteklemeyen bozuk print-channel kaliplari
+- tekrar eden ve birbirini kopyalayan EK bloklari
+- bozulmus (corrupt) satirlar ve anlamsiz karisimlar
 
-### HTTP/API (Plan)
-- Secenek-1: WinHTTP tabanli yerel katman
-- Secenek-2: libcurl tabanli katman
+## 9. Hizli Referans
 
-### Onerilen Sira
-- Win11 odagi icin once WinHTTP MVP
-- Sonra opsiyonel libcurl baglayicisi
+- degisken: `DIM n AS I32`
+- dizi: `DIM a(0 TO 9) AS I32`
+- udt: `TYPE T ... END TYPE`
+- fonksiyon: `FUNCTION F() AS I32 ... END FUNCTION`
+- input: `INPUT "Prompt"; x`
+- dosya: `OPEN "f" FOR INPUT AS #1`, `GET #1, x`, `PUT #1, x`, `SEEK #1, 10`
+- intrinsics: `LEN(x)`, `MID(s,1,3)`, `GETKEY()`, `TIMER("ms")`
 
-### Planlanan Test Paketi
-- TST-DLL-CALL-001
-- TST-HTTP-GET-001
-- TST-HTTP-POST-001
-- TST-HTTP-TIMEOUT-001
+## 10. Kaynaklar
 
-## 7) Geriye Donuk Uyumluluk Kurali
-- Eski komut davranisini bozan degisiklik yasak.
-- Yeni komut/genisletme dalga bazli ve testle acilir.
-- Parserda tanima ile runtime etkisi birbirine karistirilmaz.
+Bu standardizasyon su kaynaklardan cikartilmistir:
 
-## 8) Basari Kriteri Yaklasimi
-Kod tabanina gore uygulanabilir kriter:
-- Manifest smoke: Fail = 0
-- CMP interop: PASS
-- Yeni dalgada eklenen testlerin tamaminda green
-- Derleme kapisi: src/main.bas ve ilgili test ikilileri green
+- parser statement dispatch ve parser modulleri
+- lexer identifier/keyword kurallari
+- expression intrinsic arguman dogrulamasi
+- tests/plan/command_compatibility_win11.csv
 
-## 9) Mimari: AST ve Guvenli Yurutme
-Bu projede AST gercektir.
-- ParseProgram ile AST uretimi zorunludur.
-- ASTDump ile gorulebilir.
-
-Guvenli yurutme yaklasimi:
-- Tum dili dogrudan native calistirmak yerine once kontrollu alt-kume yurutucu acilir.
-- Memory komutlari icin bu yapildi:
-  - memory_vm.fbs ile sinirli sanal bellek alaninda calisir
-  - memory_exec.fbs ile AST uzerinden kontrollu degerlendirme yapilir
-
-## 10) EK-18 Modul, Tip, Degisken ve API Dokumu (Tam)
-Bu bolum tum aktif moduller icin tip/veri yapisi ve disa acik API ozetidir.
-
-### 10.1 src/main.bas
-- Global degiskenler:
-  - sourceText As String
-  - sourcePath As String
-  - st As LexerState
-  - ps As ParseState
-  - selected As String
-  - n As Integer
-- Ana akis:
-  - source oku -> lexer -> parser -> AST dump -> interop emit -> opsiyonel --execmem
-
-### 10.2 src/parser/token_kinds.fbs
-- Type Token
-  - kind, lexeme, lineNo, colNo
-- Type TokenList
-  - items(Any), count, capacity
-- API
-  - TokenListInit
-  - TokenListPush
-  - TokenListClear
-  - TokenListAt
-
-### 10.3 src/parser/ast.fbs
-- Type ASTNode
-  - kind, value, op
-  - lineNo, colNo
-  - left, right, firstChild, nextSibling
-- Type ASTPool
-  - nodes(Any), count, capacity
-- API
-  - ASTPoolInit
-  - ASTNewNode
-  - ASTAddChild
-  - ASTDump
-
-### 10.4 src/parser/lexer_core.fbs + lexer_driver/readers/keyword_table
-- Type LexerState
-  - sourceText
-  - cursor, lineNo, colNo
-  - tokens As TokenList
-- API
-  - LexerInit
-  - karakter okuma/token uretim yardimcilari
-  - keyword siniflandirma
-
-### 10.5 src/parser/parser.fbs
-- Type ParseState
-  - lx As LexerState
-  - cursorIndex
-  - lastError
-  - ast As ASTPool
-  - rootNode
-- Declare katmani
-  - statement/expr parser fonksiyon bildirimleri
-
-### 10.6 src/parser/parser_shared.fbs
-- Ortak parser yardimcilari
-  - token ilerleme
-  - keyword/operator esleme
-  - intrinsic arguman dogrulama
-  - timer/file-info dogrulama
-
-### 10.7 src/parser/parser_expr.fbs
-- Expression parser
-  - ParsePrimary, ParseUnary, ParsePower, ParseTerm, ParseAdd, ParseRelation
-- CALL_EXPR uretimi ve intrinsic dogrulama cagrilari
-
-### 10.8 src/parser/parser_stmt_basic.fbs
-- Statement parserlari
-  - ParsePrintStmt
-  - ParseInlineStmt
-  - ParseIncStmt, ParseDecStmt
-  - ParseRandomizeStmt
-  - ParsePokebStmt, ParsePokewStmt, ParsePokedStmt
-  - ParseMemcopybStmt, ParseMemfillbStmt
-
-### 10.9 src/parser/parser_stmt_io.fbs
-- ParseOpenStmt
-- ParseInputStmt
-- ParseCloseStmt
-- ParseGetStmt
-- ParsePutStmt
-- ParseSeekStmt
-- ParseLocateStmt
-- ParseColorStmt
-- ParseClsStmt
-
-### 10.10 src/parser/parser_stmt_flow.fbs
-- ParseIfStmt
-- ParseSelectStmt
-- ParseForStmt
-- ParseDoStmt
-- ParseGotoStmt
-- ParseGosubStmt
-- ParseReturnStmt
-- ParseExitStmt
-- ParseEndStmt
-
-### 10.11 src/parser/parser_stmt_decl.fbs
-- ParseDimBound
-- ParseDimDeclarator
-- ParseDimStmt
-- ParseConstStmt
-- ParseRedimStmt
-- ParseTypeStmt
-- ParseDefTypeStmt
-- ParseSetStringSizeStmt
-- ParseIncludeStmt
-- ParseImportStmt
-- ParseDeclareStmt
-- ParseSubStmt
-- ParseFunctionStmt
-
-### 10.12 src/parser/parser_stmt_dispatch.fbs
-- ParseSimpleStatement
-- ParserInit
-- ParseProgram
-- Tum statement parserlarina merkez dispatch
-
-### 10.13 src/build/interop_manifest.fbs
-- Type InteropIncludeEntry
-- Type InteropImportEntry
-- Type InteropManifest
-- Type InteropStringSet
-- API
-  - InteropManifestInit
-  - ResolveInteropManifestForSource
-  - EmitInteropArtifacts
-
-### 10.14 src/runtime/timer.fbs
-- API
-  - TimerNormalizeUnit
-  - TimerConvertSeconds
-  - TimerNow
-  - TimerRange
-
-### 10.15 src/runtime/memory_vm.fbs
-- Type VMemState
-  - data(Any)
-  - sizeBytes
-  - textBase
-  - textCols, textRows
-  - active
-- Global
-  - g_vmem As VMemState
-- API
-  - VMemInit
-  - VMemPeekB/W/D
-  - VMemPokeB/W/D
-  - VMemCopyB
-  - VMemFillB
-  - VMemBlitTextWindow
-
-### 10.16 src/runtime/memory_exec.fbs
-- Type ExecVar
-  - nameText, value
-- Type ExecState
-  - vars(Any), count
-- API
-  - ExecRunMemoryProgram
-- Davranis
-  - AST statement/expr degerlendirme
-  - assign/inc-dec/call_expr(memory) yurutme
-
-### 10.17 src/legacy/get_commands_port.fbs
-- API
-  - LegacyGetCommands
-- Amac
-  - legacy satir parcalama davranisini korumak
-
-## 11) Veri Yapilari ve Anahtar Kelime Durumu
-Asagidaki veri yapisi anahtar kelimeleri lexer tarafinda taninmaktadir:
-- ARRAY
-- LIST
-- DICT
-- SET
-
-Gercek durum:
-- Bu kelimeler henuz parser+runtime semantigi tamamlanmis koleksiyon sistemi degildir.
-- Bu alan planli gelisim maddesidir.
-
-## 12) Dogru Okuma Rehberi
-- Bir ozellik icin "implemented" denmesi icin test/matrix satiri olmalidir.
-- Runtime etkisi iddia ediliyorsa o modulu src/runtime altinda bulunmali ve testle calismalidir.
-- Belge ile kod celisirse kod + test gercegi ustundur; belge hemen guncellenir.
-
-## 13) Kisa Yol Komutlari
-- Ana derleme: build.bat src/main.bas
-- Manifest smoke: build.bat tests/run_manifest.bas ve tests/run_manifest.exe
-- CMP interop: build.bat tests/run_cmp_interop.bas ve tests/run_cmp_interop.exe
-- Memory VM runtime testi: build.bat tests/run_memory_vm.bas ve tests/run_memory_vm.exe
-- Memory AST exec testi: build.bat tests/run_memory_exec_ast.bas ve tests/run_memory_exec_ast.exe
-
-Bu belge append-only disiplinini korur, ama icerik olarak kod gercegi disina cikmaz.
+Bu belge append-only duplicate yaklasimi yerine tekil ve sistematik kaynak olarak korunmalidir.
