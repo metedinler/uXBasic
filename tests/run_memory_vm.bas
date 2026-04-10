@@ -12,7 +12,8 @@ Private Sub Main()
     Dim ok As Integer
     ok = 1
 
-    VMemInit 1048576, &hB8000, 80, 25
+    ' Keep text window away from tested addresses to avoid terminal-dependent blit behavior.
+    VMemInit 1048576, &hF0000, 80, 25
 
     ok And= AssertEq(VMemPokeB(&h100, 42), 1, "POKEB status")
     ok And= AssertEq(VMemPeekB(&h100), 42, "PEEKB value")

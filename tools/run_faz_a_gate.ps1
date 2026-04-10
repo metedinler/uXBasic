@@ -1,0 +1,42 @@
+param(
+    [switch]$SkipBuild
+)
+
+$ErrorActionPreference = 'Stop'
+$repoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $repoRoot
+
+function Invoke-Step {
+    param(
+        [string]$Name,
+        [scriptblock]$Action
+    )
+
+    Write-Host "[STEP] $Name"
+    & $Action
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[FAIL] $Name (exit=$LASTEXITCODE)"
+        exit $LASTEXITCODE
+    }
+    Write-Host "[PASS] $Name"
+}
+
+Invoke-Step "Validate test naming" { .\tools\validate_test_naming.ps1 }
+
+if (-not $SkipBuild) {
+    Invoke-Step "Build main_64" { cmd /c build_64.bat src\main.bas }
+    Invoke-Step "Build run_manifest_64" { cmd /c build_64.bat tests\run_manifest.bas }
+    Invoke-Step "Build run_file_io_runtime_64" { cmd /c build_64.bat tests\run_file_io_runtime.bas }
+    Invoke-Step "Build run_file_io_exec_ast_64" { cmd /c build_64.bat tests\run_file_io_exec_ast.bas }
+    Invoke-Step "Build run_memory_vm_64" { cmd /c build_64.bat tests\run_memory_vm.bas }
+    Invoke-Step "Build run_memory_exec_ast_64" { cmd /c build_64.bat tests\run_memory_exec_ast.bas }
+}
+
+Invoke-Step "Run run_manifest_64" { cmd /c tests\run_manifest_64.exe }
+Invoke-Step "Run run_file_io_runtime_64" { cmd /c tests\run_file_io_runtime_64.exe }
+Invoke-Step "Run run_file_io_exec_ast_64" { cmd /c tests\run_file_io_exec_ast_64.exe }
+Invoke-Step "Run run_memory_vm_64" { cmd /c tests\run_memory_vm_64.exe }
+Invoke-Step "Run run_memory_exec_ast_64" { cmd /c tests\run_memory_exec_ast_64.exe }
+
+Write-Host "[DONE] Faz A quality gate passed."
+exit 0
