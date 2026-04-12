@@ -1,0 +1,277 @@
+Private Function FindFieldByName(ByVal typeIdx As Integer, ByRef fieldName As String) As Integer
+    Dim i As Integer
+    Dim normalized As String
+
+    If typeIdx < 0 Or typeIdx >= gTypeLayoutCount Then Return -1
+    normalized = UCase(Trim(fieldName))
+
+    If gTypeLayouts(typeIdx).firstField = -1 Then Return -1
+    For i = 0 To gTypeLayouts(typeIdx).fieldCount - 1
+        Dim fi As Integer
+        fi = gTypeLayouts(typeIdx).firstField + i
+        If fi >= 0 And fi < gTypeLayoutFieldCount Then
+            If gTypeLayoutFields(fi).fieldName = normalized Then Return fi
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Sub SkipPathSpaces(ByRef pathText As String, ByRef cursor As Integer)
+    Do While cursor <= Len(pathText)
+        Dim ch As String
+        ch = Mid(pathText, cursor, 1)
+        If ch = " " Or ch = Chr(9) Then
+            cursor = cursor + 1
+        Else
+            Exit Do
+        End If
+    Loop
+End Sub
+
+Private Function IsPathIdentStart(ByVal ch As String) As Integer
+    Dim c As Integer
+    c = Asc(ch)
+    If c >= Asc("A") And c <= Asc("Z") Then Return 1
+    If c >= Asc("a") And c <= Asc("z") Then Return 1
+    If ch = "_" Then Return 1
+    Return 0
+End Function
+
+Private Function IsPathIdentChar(ByVal ch As String) As Integer
+    Dim c As Integer
+    c = Asc(ch)
+    If c >= Asc("A") And c <= Asc("Z") Then Return 1
+    If c >= Asc("a") And c <= Asc("z") Then Return 1
+    If c >= Asc("0") And c <= Asc("9") Then Return 1
+    If ch = "_" Then Return 1
+    Return 0
+End Function
+
+Private Function ParsePathIdent(ByRef pathText As String, ByRef cursor As Integer, ByRef identOut As String) As Integer
+    Dim startPos As Integer
+
+    If cursor > Len(pathText) Then Return 0
+    If IsPathIdentStart(Mid(pathText, cursor, 1)) = 0 Then Return 0
+
+    startPos = cursor
+    cursor = cursor + 1
+    Do While cursor <= Len(pathText)
+        If IsPathIdentChar(Mid(pathText, cursor, 1)) = 0 Then Exit Do
+        cursor = cursor + 1
+    Loop
+
+    identOut = Mid(pathText, startPos, cursor - startPos)
+    Return 1
+End Function
+
+Private Function ParsePathIndexList(ByRef pathText As String, ByRef cursor As Integer, idxValues() As Integer, ByRef idxCount As Integer) As Integer
+    idxCount = 0
+    If cursor > Len(pathText) Then Return 0
+    If Mid(pathText, cursor, 1) <> "(" Then Return 0
+
+    cursor = cursor + 1
+    SkipPathSpaces pathText, cursor
+
+    Do
+        If cursor > Len(pathText) Then Return 0
+
+        Dim sign As Integer
+        sign = 1
+        If Mid(pathText, cursor, 1) = "+" Then
+            cursor = cursor + 1
+        ElseIf Mid(pathText, cursor, 1) = "-" Then
+            sign = -1
+            cursor = cursor + 1
+        End If
+        If cursor > Len(pathText) Then Return 0
+
+        Dim hasDigit As Integer
+        Dim value As Integer
+        hasDigit = 0
+        value = 0
+        Do While cursor <= Len(pathText)
+            Dim ch As String
+            ch = Mid(pathText, cursor, 1)
+            If ch < "0" Or ch > "9" Then Exit Do
+            hasDigit = 1
+            value = value * 10 + (Asc(ch) - Asc("0"))
+            cursor = cursor + 1
+        Loop
+
+        If hasDigit = 0 Then Return 0
+        value = value * sign
+
+        If idxCount = 0 Then
+            ReDim idxValues(0)
+        Else
+            ReDim Preserve idxValues(idxCount)
+        End If
+        idxValues(idxCount) = value
+        idxCount = idxCount + 1
+
+        SkipPathSpaces pathText, cursor
+        If cursor > Len(pathText) Then Return 0
+
+        If Mid(pathText, cursor, 1) = "," Then
+            cursor = cursor + 1
+            SkipPathSpaces pathText, cursor
+        Else
+            Exit Do
+        End If
+    Loop
+
+    If idxCount = 0 Then Return 0
+    If cursor > Len(pathText) Then Return 0
+    If Mid(pathText, cursor, 1) <> ")" Then Return 0
+    cursor = cursor + 1
+
+    Return 1
+End Function
+
+Private Function ComputeArrayLinearOffset(ByVal fieldIdx As Integer, idxValues() As Integer, ByVal idxCount As Integer, ByRef byteOffsetOut As Integer, ByRef errOut As String) As Integer
+    If fieldIdx < 0 Or fieldIdx >= gTypeLayoutFieldCount Then Return 0
+    If gTypeLayoutFields(fieldIdx).isArray = 0 Then
+        errOut = "OFFSETOF index applied to non-array field"
+        Return 0
+    End If
+
+    If idxCount <> gTypeLayoutFields(fieldIdx).dimCount Then
+        errOut = "OFFSETOF index count mismatch"
+        Return 0
+    End If
+
+    Dim linear As Integer
+    linear = 0
+
+    Dim k As Integer
+    For k = 0 To gTypeLayoutFields(fieldIdx).dimCount - 1
+        Dim d As TypeLayoutDim
+        d = gTypeLayoutDims(gTypeLayoutFields(fieldIdx).firstDim + k)
+
+        If idxValues(k) < d.lowerBound Or idxValues(k) > d.upperBound Then
+            errOut = "OFFSETOF index out of bounds"
+            Return 0
+        End If
+
+        Dim stride As Integer
+        stride = 1
+
+        Dim j As Integer
+        For j = k + 1 To gTypeLayoutFields(fieldIdx).dimCount - 1
+            stride = stride * gTypeLayoutDims(gTypeLayoutFields(fieldIdx).firstDim + j).extent
+        Next j
+
+        linear = linear + (idxValues(k) - d.lowerBound) * stride
+    Next k
+
+    byteOffsetOut = linear * gTypeLayoutFields(fieldIdx).elemStrideBytes
+    Return 1
+End Function
+
+Function TypeLayoutResolvePath(ByRef ps As ParseState, ByRef rawTypeName As String, ByRef pathText As String, ByRef offsetOut As Integer, ByRef targetTypeOut As String, ByRef targetSizeOut As Integer, ByRef errOut As String) As Integer
+    Dim currentType As String
+    Dim cursor As Integer
+
+    If gTypeLayoutBuilt = 0 Then
+        If BuildTypeLayoutTable(ps) = 0 Then
+            errOut = ps.lastError
+            Return 0
+        End If
+    End If
+
+    currentType = UCase(Trim(rawTypeName))
+    If currentType = "" Then
+        errOut = "OFFSETOF requires type name"
+        Return 0
+    End If
+
+    If Len(Trim(pathText)) = 0 Then
+        errOut = "OFFSETOF path cannot be empty"
+        Return 0
+    End If
+
+    offsetOut = 0
+    targetTypeOut = currentType
+    targetSizeOut = 0
+    cursor = 1
+
+    Do
+        Dim typeIdx As Integer
+        Dim fieldName As String
+        Dim fieldIdx As Integer
+        Dim indexApplied As Integer
+
+        SkipPathSpaces pathText, cursor
+        If ParsePathIdent(pathText, cursor, fieldName) = 0 Then
+            errOut = "OFFSETOF invalid path syntax"
+            Return 0
+        End If
+
+        typeIdx = FindTypeLayoutIndex(currentType)
+        If typeIdx = -1 Then
+            errOut = "OFFSETOF path enters non-aggregate type: " & currentType
+            Return 0
+        End If
+
+        fieldIdx = FindFieldByName(typeIdx, fieldName)
+        If fieldIdx = -1 Then
+            errOut = "OFFSETOF unknown field: " & UCase(fieldName)
+            Return 0
+        End If
+
+        offsetOut = offsetOut + gTypeLayoutFields(fieldIdx).offsetBytes
+        targetTypeOut = gTypeLayoutFields(fieldIdx).fieldTypeName
+        targetSizeOut = gTypeLayoutFields(fieldIdx).sizeBytes
+        currentType = gTypeLayoutFields(fieldIdx).fieldTypeName
+        indexApplied = 0
+
+        SkipPathSpaces pathText, cursor
+        If cursor <= Len(pathText) And Mid(pathText, cursor, 1) = "(" Then
+            Dim idxValues() As Integer
+            Dim idxCount As Integer
+            Dim arrByteOffset As Integer
+
+            If ParsePathIndexList(pathText, cursor, idxValues(), idxCount) = 0 Then
+                errOut = "OFFSETOF invalid index syntax"
+                Return 0
+            End If
+
+            If ComputeArrayLinearOffset(fieldIdx, idxValues(), idxCount, arrByteOffset, errOut) = 0 Then
+                Return 0
+            End If
+
+            offsetOut = offsetOut + arrByteOffset
+            targetTypeOut = gTypeLayoutFields(fieldIdx).elemTypeName
+            targetSizeOut = gTypeLayoutFields(fieldIdx).elemSizeBytes
+            currentType = gTypeLayoutFields(fieldIdx).elemTypeName
+            indexApplied = 1
+        ElseIf gTypeLayoutFields(fieldIdx).isArray <> 0 Then
+            targetTypeOut = "ARRAY"
+            targetSizeOut = gTypeLayoutFields(fieldIdx).sizeBytes
+        End If
+
+        SkipPathSpaces pathText, cursor
+        If cursor > Len(pathText) Then Exit Do
+
+        If Mid(pathText, cursor, 1) <> "." Then
+            errOut = "OFFSETOF invalid path separator"
+            Return 0
+        End If
+
+        If gTypeLayoutFields(fieldIdx).isArray <> 0 And indexApplied = 0 Then
+            errOut = "OFFSETOF array field requires index before member access"
+            Return 0
+        End If
+
+        cursor = cursor + 1
+    Loop
+
+    Return 1
+End Function
+
+Function TypeLayoutOffsetOf(ByRef ps As ParseState, ByRef rawTypeName As String, ByRef pathText As String, ByRef offsetOut As Integer, ByRef errOut As String) As Integer
+    Dim targetTypeName As String
+    Dim targetSize As Integer
+    Return TypeLayoutResolvePath(ps, rawTypeName, pathText, offsetOut, targetTypeName, targetSize, errOut)
+End Function

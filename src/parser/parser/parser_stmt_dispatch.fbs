@@ -518,6 +518,134 @@ Private Function ValidateCallDllSemantics(ByRef ps As ParseState) As Integer
     Return ValidateCallDllSemanticsNode(ps, ps.rootNode)
 End Function
 
+Private Function NodeChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    Dim i As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function NodeChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim count As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        count += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return count
+End Function
+
+Private Function HasConstDeclName(ByRef ps As ParseState, ByRef symbolName As String) As Integer
+    Dim normalized As String
+    normalized = UCase(Trim(symbolName))
+    If normalized = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CONST_DECL" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = normalized Then Return 1
+        End If
+    Next i
+
+    Return 0
+End Function
+
+Private Function ValidatePointerIntrinsicCallNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim nodeKind As String
+    nodeKind = UCase(ps.ast.nodes(nodeIdx).kind)
+    If nodeKind <> "CALL_STMT" And nodeKind <> "CALL_EXPR" Then Return 1
+
+    Dim callName As String
+    callName = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+    If callName <> "VARPTR" And callName <> "SADD" And callName <> "LPTR" And callName <> "CODEPTR" Then Return 1
+
+    Dim argc As Integer
+    argc = NodeChildCount(ps, nodeIdx)
+    If argc <> 1 Then
+        ps.lastError = callName & " expects exactly 1 argument"
+        Return 0
+    End If
+
+    Dim argNode As Integer
+    argNode = NodeChildAt(ps, nodeIdx, 0)
+    If argNode = -1 Then
+        ps.lastError = callName & " expects exactly 1 argument"
+        Return 0
+    End If
+
+    Dim argKind As String
+    argKind = UCase(ps.ast.nodes(argNode).kind)
+
+    Select Case callName
+    Case "VARPTR"
+        If argKind <> "IDENT" Then
+            ps.lastError = "VARPTR expects an identifier argument"
+            Return 0
+        End If
+
+        If HasConstDeclName(ps, ps.ast.nodes(argNode).value) <> 0 Then
+            ps.lastError = "VARPTR expects a mutable variable identifier"
+            Return 0
+        End If
+
+    Case "SADD"
+        If argKind <> "STRING" And argKind <> "IDENT" Then
+            ps.lastError = "SADD expects a string literal or identifier argument"
+            Return 0
+        End If
+
+    Case "LPTR", "CODEPTR"
+        If argKind <> "IDENT" And argKind <> "KEYWORD_REF" Then
+            ps.lastError = callName & " expects an identifier argument"
+            Return 0
+        End If
+    End Select
+
+    Return 1
+End Function
+
+Private Function ValidatePointerIntrinsicSemanticsNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx = -1 Then Return 1
+
+    If ValidatePointerIntrinsicCallNode(ps, nodeIdx) = 0 Then Return 0
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If ValidatePointerIntrinsicSemanticsNode(ps, ps.ast.nodes(nodeIdx).left) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If ValidatePointerIntrinsicSemanticsNode(ps, ps.ast.nodes(nodeIdx).right) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ValidatePointerIntrinsicSemanticsNode(ps, ch) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidatePointerIntrinsicSemantics(ByRef ps As ParseState) As Integer
+    If ps.rootNode = -1 Then Return 1
+    Return ValidatePointerIntrinsicSemanticsNode(ps, ps.rootNode)
+End Function
+
 Sub ParserInit(ByRef ps As ParseState, ByRef lx As LexerState)
     ps.lx = lx
     ps.cursorIndex = 0
@@ -554,6 +682,7 @@ Function ParseProgram(ByRef ps As ParseState) As Integer
     If ValidateUsingAliasSemantics(ps) = 0 Then Return 0
     If ValidateClassAccessFriendSemantics(ps) = 0 Then Return 0
     If ValidateCallDllSemantics(ps) = 0 Then Return 0
+    If ValidatePointerIntrinsicSemantics(ps) = 0 Then Return 0
     If ValidateTypeReferences(ps) = 0 Then Return 0
     If BuildTypeLayoutTable(ps) = 0 Then Return 0
     If ValidateLayoutIntrinsicSemantics(ps) = 0 Then Return 0

@@ -40,6 +40,8 @@ Private Sub Main()
         "s = SADD(""abc"")" & Chr(10) & _
         "l = LPTR(label1)" & Chr(10) & _
         "k = CODEPTR(proc1)" & Chr(10) & _
+        "label1:" & Chr(10) & _
+        "DECLARE SUB proc1()" & Chr(10) & _
         "SETNEWOFFSET a, 8192" & Chr(10) & _
         "q = VARPTR(a)" & Chr(10) & _
         "POKED x + 80, q" & Chr(10) & _

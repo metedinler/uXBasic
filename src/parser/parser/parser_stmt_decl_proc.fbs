@@ -1,0 +1,220 @@
+Private Function IsEndSubStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "SUB")
+End Function
+
+Private Function IsEndFunctionStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "FUNCTION")
+End Function
+
+Private Function ParseParamDeclarator(ByRef ps As ParseState) As Integer
+    Dim modeText As String
+    modeText = ""
+
+    Dim modeTok As Token
+    modeTok = CurToken(ps)
+    If modeTok.kind = "KEYWORD" Then
+        Dim modeUpper As String
+        modeUpper = UCase(modeTok.lexeme)
+        If modeUpper = "BYREF" Or modeUpper = "BYVAL" Then
+            modeText = modeUpper
+            AdvanceTok ps
+        End If
+    End If
+
+    Dim identTok As Token
+    identTok = CurToken(ps)
+    If identTok.kind <> "IDENT" Then
+        ps.lastError = "parameter identifier expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim paramNode As Integer
+    paramNode = MakeNodeFromToken(ps, "PARAM_DECL", identTok.lexeme, "", identTok)
+    If modeText <> "" Then
+        ps.ast.nodes(paramNode).op = modeText
+    End If
+
+    If MatchKeyword(ps, "AS") Then
+        Dim typeTok As Token
+        typeTok = CurToken(ps)
+        If ValidateTypeToken(ps, typeTok) = 0 Then
+            If ps.lastError = "" Then ps.lastError = "parameter type expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim typeNode As Integer
+        typeNode = MakeNodeFromToken(ps, "TYPE_REF", typeTok.lexeme, "", typeTok)
+        ASTAddChild ps.ast, paramNode, typeNode
+    End If
+
+    Return paramNode
+End Function
+
+Private Function ParseParamList(ByRef ps As ParseState, ByVal ownerNode As Integer) As Integer
+    If MatchOp(ps, "(") = 0 Then
+        ps.lastError = "missing ( in signature"
+        Return 0
+    End If
+
+    If MatchOp(ps, ")") Then Return 1
+
+    Do
+        Dim paramNode As Integer
+        paramNode = ParseParamDeclarator(ps)
+        If paramNode = -1 Then Return 0
+        ASTAddChild ps.ast, ownerNode, paramNode
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    If MatchOp(ps, ")") = 0 Then
+        ps.lastError = "missing ) in signature"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Function ParseDeclareStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim kindTok As Token
+    kindTok = CurToken(ps)
+    If kindTok.kind <> "KEYWORD" Then
+        ps.lastError = "DECLARE: expected SUB or FUNCTION"
+        Return -1
+    End If
+
+    Dim declKind As String
+    declKind = UCase(kindTok.lexeme)
+    If declKind <> "SUB" And declKind <> "FUNCTION" Then
+        ps.lastError = "DECLARE: expected SUB or FUNCTION"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "DECLARE: name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim declNode As Integer
+    If declKind = "SUB" Then
+        declNode = MakeNodeFromToken(ps, "DECLARE_SUB_STMT", nameTok.lexeme, "", firstTok)
+    Else
+        declNode = MakeNodeFromToken(ps, "DECLARE_FUNCTION_STMT", nameTok.lexeme, "", firstTok)
+    End If
+
+    If ParseParamList(ps, declNode) = 0 Then Return -1
+
+    If declKind = "FUNCTION" Then
+        If MatchKeyword(ps, "AS") = 0 Then
+            ps.lastError = "DECLARE FUNCTION: missing AS return type"
+            Return -1
+        End If
+
+        Dim retTok As Token
+        retTok = CurToken(ps)
+        If ValidateTypeToken(ps, retTok) = 0 Then
+            If ps.lastError = "" Then ps.lastError = "DECLARE FUNCTION: return type expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim retNode As Integer
+        retNode = MakeNodeFromToken(ps, "RETURN_TYPE", retTok.lexeme, "", retTok)
+        ASTAddChild ps.ast, declNode, retNode
+    End If
+
+    Return declNode
+End Function
+
+Function ParseSubStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "SUB: name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim subNode As Integer
+    subNode = MakeNodeFromToken(ps, "SUB_STMT", nameTok.lexeme, "", firstTok)
+
+    If ParseParamList(ps, subNode) = 0 Then Return -1
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndSubStart(ps) Then Exit Do
+
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then Return -1
+        ASTAddChild ps.ast, subNode, st
+        SkipSeparators ps
+    Loop
+
+    If IsEndSubStart(ps) = 0 Then
+        ps.lastError = "missing END SUB"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    Return subNode
+End Function
+
+Function ParseFunctionStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "FUNCTION: name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim fnNode As Integer
+    fnNode = MakeNodeFromToken(ps, "FUNCTION_STMT", nameTok.lexeme, "", firstTok)
+
+    If ParseParamList(ps, fnNode) = 0 Then Return -1
+
+    If MatchKeyword(ps, "AS") = 0 Then
+        ps.lastError = "FUNCTION: missing AS return type"
+        Return -1
+    End If
+
+    Dim retTok As Token
+    retTok = CurToken(ps)
+    If ValidateTypeToken(ps, retTok) = 0 Then
+        If ps.lastError = "" Then ps.lastError = "FUNCTION: return type expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim retNode As Integer
+    retNode = MakeNodeFromToken(ps, "RETURN_TYPE", retTok.lexeme, "", retTok)
+    ASTAddChild ps.ast, fnNode, retNode
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndFunctionStart(ps) Then Exit Do
+
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then Return -1
+        ASTAddChild ps.ast, fnNode, st
+        SkipSeparators ps
+    Loop
+
+    If IsEndFunctionStart(ps) = 0 Then
+        ps.lastError = "missing END FUNCTION"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    Return fnNode
+End Function

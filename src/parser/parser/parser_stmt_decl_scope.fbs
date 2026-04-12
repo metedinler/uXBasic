@@ -1,0 +1,230 @@
+Private Function IsDeclStmtTerminator(ByRef tk As Token) As Integer
+    If tk.kind = "EOF" Or tk.kind = "EOL" Then Return 1
+    If tk.kind = "OP" And tk.lexeme = ":" Then Return 1
+    Return 0
+End Function
+
+Private Function ParseQualifiedName(ByRef ps As ParseState, ByRef nameOut As String) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+    If tk.kind <> "IDENT" And tk.kind <> "KEYWORD" Then
+        Return 0
+    End If
+
+    nameOut = tk.lexeme
+    AdvanceTok ps
+
+    Do While MatchOp(ps, ".")
+        tk = CurToken(ps)
+        If tk.kind <> "IDENT" And tk.kind <> "KEYWORD" Then
+            ps.lastError = "qualified name: identifier expected after ."
+            Return 0
+        End If
+
+        nameOut &= "." & tk.lexeme
+        AdvanceTok ps
+    Loop
+
+    Return 1
+End Function
+
+Private Function IsEndNamespaceStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "NAMESPACE")
+End Function
+
+Private Function IsEndModuleStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "MODULE")
+End Function
+
+Private Function IsEndMainStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "MAIN")
+End Function
+
+Function ParseUsingStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim usingNode As Integer
+    usingNode = MakeNodeFromToken(ps, "USING_STMT", "", "", firstTok)
+
+    Do
+        Dim qn As String
+        If ParseQualifiedName(ps, qn) = 0 Then
+            If ps.lastError = "" Then ps.lastError = "USING: qualified name expected"
+            Return -1
+        End If
+
+        Dim itemNode As Integer
+        itemNode = MakeNodeFromToken(ps, "USING_ITEM", qn, "", firstTok)
+        ASTAddChild ps.ast, usingNode, itemNode
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    If IsDeclStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "USING: unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return usingNode
+End Function
+
+Function ParseAliasStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim aliasTok As Token
+    aliasTok = CurToken(ps)
+    If aliasTok.kind <> "IDENT" Then
+        ps.lastError = "ALIAS: alias name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    If MatchOp(ps, "=") = 0 Then
+        ps.lastError = "ALIAS: missing ="
+        Return -1
+    End If
+
+    Dim targetText As String
+    targetText = ""
+
+    Do While IsDeclStmtTerminator(CurToken(ps)) = 0
+        Dim tk As Token
+        tk = CurToken(ps)
+
+        If targetText <> "" Then targetText &= " "
+        targetText &= tk.lexeme
+        AdvanceTok ps
+    Loop
+
+    If Len(Trim(targetText)) = 0 Then
+        ps.lastError = "ALIAS: target expression expected"
+        Return -1
+    End If
+
+    Dim aliasNode As Integer
+    aliasNode = MakeNodeFromToken(ps, "ALIAS_STMT", aliasTok.lexeme, "", firstTok)
+
+    Dim targetNode As Integer
+    targetNode = MakeNodeFromToken(ps, "ALIAS_TARGET", targetText, "", aliasTok)
+    ASTAddChild ps.ast, aliasNode, targetNode
+
+    Return aliasNode
+End Function
+
+Function ParseNamespaceStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim nsName As String
+    If ParseQualifiedName(ps, nsName) = 0 Then
+        If ps.lastError = "" Then ps.lastError = "NAMESPACE: name expected"
+        Return -1
+    End If
+
+    Dim nsNode As Integer
+    nsNode = MakeNodeFromToken(ps, "NAMESPACE_STMT", nsName, "", firstTok)
+
+    ps.namespaceDepth += 1
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndNamespaceStart(ps) Then Exit Do
+
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then
+            ps.namespaceDepth -= 1
+            Return -1
+        End If
+
+        ASTAddChild ps.ast, nsNode, st
+        SkipSeparators ps
+    Loop
+
+    If IsEndNamespaceStart(ps) = 0 Then
+        ps.namespaceDepth -= 1
+        ps.lastError = "missing END NAMESPACE"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    ps.namespaceDepth -= 1
+    Return nsNode
+End Function
+
+Function ParseModuleStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim moduleName As String
+    If ParseQualifiedName(ps, moduleName) = 0 Then
+        If ps.lastError = "" Then ps.lastError = "MODULE: name expected"
+        Return -1
+    End If
+
+    Dim moduleNode As Integer
+    moduleNode = MakeNodeFromToken(ps, "MODULE_STMT", moduleName, "", firstTok)
+
+    ps.moduleDepth += 1
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndModuleStart(ps) Then Exit Do
+
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then
+            ps.moduleDepth -= 1
+            Return -1
+        End If
+
+        ASTAddChild ps.ast, moduleNode, st
+        SkipSeparators ps
+    Loop
+
+    If IsEndModuleStart(ps) = 0 Then
+        ps.moduleDepth -= 1
+        ps.lastError = "missing END MODULE"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    ps.moduleDepth -= 1
+    Return moduleNode
+End Function
+
+Function ParseMainStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    If ps.namespaceDepth > 0 Or ps.moduleDepth > 0 Then
+        ps.lastError = "MAIN: only global scope is allowed"
+        Return -1
+    End If
+
+    If ps.mainDepth > 0 Then
+        ps.lastError = "MAIN: nested MAIN block is not allowed"
+        Return -1
+    End If
+
+    Dim mainNode As Integer
+    mainNode = MakeNodeFromToken(ps, "MAIN_STMT", "", "", firstTok)
+
+    ps.mainDepth += 1
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndMainStart(ps) Then Exit Do
+
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then
+            ps.mainDepth -= 1
+            Return -1
+        End If
+
+        ASTAddChild ps.ast, mainNode, st
+        SkipSeparators ps
+    Loop
+
+    If IsEndMainStart(ps) = 0 Then
+        ps.mainDepth -= 1
+        ps.lastError = "missing END MAIN"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    ps.mainDepth -= 1
+    Return mainNode
+End Function
+

@@ -16,6 +16,8 @@ p = VARPTR(a)
 s = SADD("abc")
 l = LPTR(label1)
 k = CODEPTR(proc1)
+label1:
+DECLARE SUB proc1()
 SETNEWOFFSET a, 8192
 q = VARPTR(a)
 r = (1 SHL 4) OR 1

@@ -1,0 +1,186 @@
+Private Function TryExtractTypeNameArg(ByRef ps As ParseState, ByVal callNode As Integer, ByVal argPos As Integer, ByRef typeNameOut As String) As Integer
+    Dim argNode As Integer
+    argNode = LayoutChildAt(ps, callNode, argPos)
+    If argNode = -1 Then Return 0
+
+    Select Case UCase(ps.ast.nodes(argNode).kind)
+    Case "IDENT", "KEYWORD_REF"
+        typeNameOut = ps.ast.nodes(argNode).value
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function MemoryAccessWidthBytes(ByRef opName As String) As Integer
+    Select Case UCase(opName)
+    Case "PEEKB", "POKEB"
+        Return 1
+    Case "PEEKW", "POKEW"
+        Return 2
+    Case "PEEKD", "POKED", "POKE"
+        Return 4
+    End Select
+
+    Return 0
+End Function
+
+Private Function FindOffsetOfCallInExpr(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    If UCase(n.kind) = "CALL_EXPR" And UCase(n.value) = "OFFSETOF" Then Return nodeIdx
+
+    If n.left <> -1 Then
+        Dim fLeft As Integer
+        fLeft = FindOffsetOfCallInExpr(ps, n.left)
+        If fLeft <> -1 Then Return fLeft
+    End If
+
+    If n.right <> -1 Then
+        Dim fRight As Integer
+        fRight = FindOffsetOfCallInExpr(ps, n.right)
+        If fRight <> -1 Then Return fRight
+    End If
+
+    Dim ch As Integer
+    ch = n.firstChild
+    Do While ch <> -1
+        Dim fChild As Integer
+        fChild = FindOffsetOfCallInExpr(ps, ch)
+        If fChild <> -1 Then Return fChild
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function ValidateMemWidthAgainstOffsetOf(ByRef ps As ParseState, ByVal addrExprNode As Integer, ByRef opName As String, ByRef errOut As String) As Integer
+    Dim offsetCall As Integer
+    offsetCall = FindOffsetOfCallInExpr(ps, addrExprNode)
+    If offsetCall = -1 Then Return 1
+
+    Dim baseType As String
+    Dim pathNode As Integer
+    Dim offBytes As Integer
+    Dim targetTypeName As String
+    Dim targetSize As Integer
+    Dim pathText As String
+
+    If TryExtractTypeNameArg(ps, offsetCall, 0, baseType) = 0 Then
+        errOut = "OFFSETOF expects a type name as first argument"
+        Return 0
+    End If
+
+    pathNode = LayoutChildAt(ps, offsetCall, 1)
+    If pathNode = -1 Or UCase(ps.ast.nodes(pathNode).kind) <> "STRING" Then
+        errOut = "OFFSETOF expects a string path as second argument"
+        Return 0
+    End If
+    pathText = ps.ast.nodes(pathNode).value
+
+    If TypeLayoutResolvePath(ps, baseType, pathText, offBytes, targetTypeName, targetSize, errOut) = 0 Then
+        Return 0
+    End If
+
+    Dim expectedWidth As Integer
+    expectedWidth = MemoryAccessWidthBytes(opName)
+    If expectedWidth = 0 Then Return 1
+
+    If targetSize <> expectedWidth Then
+        errOut = UCase(opName) & " width mismatch: expected=" & LTrim(Str(expectedWidth)) & _
+                 " got=" & LTrim(Str(targetSize)) & _
+                 " fieldType=" & UCase(targetTypeName) & _
+                 " path=" & UCase(baseType) & "." & pathText
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Function ValidateLayoutIntrinsicSemantics(ByRef ps As ParseState) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim nKind As String
+        nKind = UCase(ps.ast.nodes(i).kind)
+
+        If nKind = "CALL_EXPR" Then
+            Dim callName As String
+            callName = UCase(ps.ast.nodes(i).value)
+
+            If callName = "SIZEOF" Then
+                Dim tName As String
+                Dim sz As Integer
+                Dim errText As String
+
+                If TryExtractTypeNameArg(ps, i, 0, tName) = 0 Then
+                    ps.lastError = "SIZEOF expects a type name argument"
+                    Return 0
+                End If
+
+                If TypeLayoutSizeOf(ps, tName, sz, errText) = 0 Then
+                    ps.lastError = errText
+                    Return 0
+                End If
+            ElseIf callName = "OFFSETOF" Then
+                Dim baseType As String
+                Dim pathNode As Integer
+                Dim off As Integer
+                Dim errText2 As String
+
+                If TryExtractTypeNameArg(ps, i, 0, baseType) = 0 Then
+                    ps.lastError = "OFFSETOF expects a type name as first argument"
+                    Return 0
+                End If
+
+                pathNode = LayoutChildAt(ps, i, 1)
+                If pathNode = -1 Or UCase(ps.ast.nodes(pathNode).kind) <> "STRING" Then
+                    ps.lastError = "OFFSETOF expects a string path as second argument"
+                    Return 0
+                End If
+
+                If TypeLayoutOffsetOf(ps, baseType, ps.ast.nodes(pathNode).value, off, errText2) = 0 Then
+                    ps.lastError = errText2
+                    Return 0
+                End If
+            ElseIf callName = "PEEKB" Or callName = "PEEKW" Or callName = "PEEKD" Then
+                Dim addrNode As Integer
+                Dim errText3 As String
+                addrNode = LayoutChildAt(ps, i, 0)
+                If addrNode = -1 Then
+                    ps.lastError = callName & " expects exactly 1 argument"
+                    Return 0
+                End If
+                If ValidateMemWidthAgainstOffsetOf(ps, addrNode, callName, errText3) = 0 Then
+                    ps.lastError = errText3
+                    Return 0
+                End If
+            End If
+        ElseIf nKind = "POKEB_STMT" Or nKind = "POKEW_STMT" Or nKind = "POKED_STMT" Then
+            Dim stmtName As String
+            Dim addrNode2 As Integer
+            Dim errText4 As String
+
+            If nKind = "POKEB_STMT" Then
+                stmtName = "POKEB"
+            ElseIf nKind = "POKEW_STMT" Then
+                stmtName = "POKEW"
+            Else
+                stmtName = "POKED"
+            End If
+
+            addrNode2 = LayoutChildAt(ps, i, 0)
+            If addrNode2 <> -1 Then
+                If ValidateMemWidthAgainstOffsetOf(ps, addrNode2, stmtName, errText4) = 0 Then
+                    ps.lastError = errText4
+                    Return 0
+                End If
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
