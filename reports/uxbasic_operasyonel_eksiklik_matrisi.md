@@ -50,7 +50,7 @@ Bu turdaki modulerlestirme sonucu:
 4. Yapisal warning sayisi 12 -> 10 dusuruldu.
 
 Matristeki acik urun eksikleri (D/P/S/R/T):
-1. EXIT IF: KISMEN/YOK/YOK/YOK/YOK
+1. EXIT IF: KISMEN/OK/KISMEN/OK/OK
 2. FLOATING POINT: YOK/YOK/YOK/YOK/YOK
 3. IMPORT(C/CPP/ASM, file): OK/OK/KISMEN/YOK/YOK
 4. INLINE(...): OK/OK/KISMEN/YOK/KISMEN
@@ -72,7 +72,7 @@ Sikilastirma hedefi:
 | CASE IS | OK | OK | OK | OK | OK | CASE IS iliskisel parser/runtime modeli fail-fast parse kurallari ve test kosucusuyla dogrulandi | R1 |
 | EXIT FOR | OK | OK | OK | OK | OK | Destekli | B2 tamam |
 | EXIT DO | OK | OK | OK | OK | OK | Destekli | B2 tamam |
-| EXIT IF | KISMEN | YOK | YOK | YOK | YOK | Dilde net degil, parse/runtime yok | R1 |
+| EXIT IF | KISMEN | OK | KISMEN | OK | OK | Parse/runtime aktif; IF disinda kullanim runtime fail-fast ve dedicated test ile dogrulandi | R1 |
 | FOR / NEXT | OK | OK | OK | OK | OK | Destekli | B2 tamam |
 | FOR EACH / NEXT | OK | OK | OK | OK | OK | Stride capraz dogrulandi | B2 tamam |
 | DO / LOOP | OK | OK | OK | OK | OK | DO_WHILE/UNTIL, LOOP_WHILE/UNTIL var | B2 tamam |

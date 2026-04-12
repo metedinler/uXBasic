@@ -45,6 +45,7 @@ if (-not $SkipBuild) {
     Invoke-Step "Build run_memory_exec_ast_64" { cmd /c build_64.bat tests\run_memory_exec_ast.bas }
     Invoke-Step "Build run_flow_io_exec_ast_64" { cmd /c build_64.bat tests\run_flow_io_exec_ast.bas }
     Invoke-Step "Build run_if_exec_ast_64" { cmd /c build_64.bat tests\run_if_exec_ast.bas }
+    Invoke-Step "Build run_exit_if_byval_parse_exec_64" { cmd /c build_64.bat tests\run_exit_if_byval_parse_exec.bas }
     Invoke-Step "Build run_console_state_exec_ast_64" { cmd /c build_64.bat tests\run_console_state_exec_ast.bas }
     Invoke-Step "Build run_case_is_exec_ast_64" { cmd /c build_64.bat tests\run_case_is_exec_ast.bas }
     Invoke-Step "Build run_print_exec_ast_64" { cmd /c build_64.bat tests\run_print_exec_ast.bas }
@@ -75,6 +76,7 @@ Invoke-Step "Run run_memory_vm_64" { cmd /c tests\run_memory_vm_64.exe }
 Invoke-Step "Run run_memory_exec_ast_64" { cmd /c tests\run_memory_exec_ast_64.exe }
 Invoke-Step "Run run_flow_io_exec_ast_64" { cmd /c tests\run_flow_io_exec_ast_64.exe }
 Invoke-Step "Run run_if_exec_ast_64" { cmd /c tests\run_if_exec_ast_64.exe }
+Invoke-Step "Run run_exit_if_byval_parse_exec_64" { cmd /c tests\run_exit_if_byval_parse_exec_64.exe }
 Invoke-Step "Run run_console_state_exec_ast_64" { cmd /c tests\run_console_state_exec_ast_64.exe }
 Invoke-Step "Run run_case_is_exec_ast_64" { cmd /c tests\run_case_is_exec_ast_64.exe }
 Invoke-Step "Run run_print_exec_ast_64" { cmd /c tests\run_print_exec_ast_64.exe }
