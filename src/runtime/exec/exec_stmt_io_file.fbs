@@ -1,0 +1,558 @@
+Private Function ExecRunPrintStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim printCount As Integer
+    printCount = ExecChildCount(ps, stmtIdx)
+
+    If printCount = 0 Then
+        Print
+        gDebugPrintColumnPos = 0
+        Return 1
+    End If
+
+    Dim trailingSep As String
+    trailingSep = ""
+
+    Dim printPos As Integer
+    For printPos = 0 To printCount - 1
+        Dim printExpr As Integer
+        printExpr = ExecChildAt(ps, stmtIdx, printPos)
+        If printExpr = -1 Then
+            errText = "exec: PRINT expression missing"
+            Return 0
+        End If
+
+        Dim printNode As ASTNode
+        printNode = ps.ast.nodes(printExpr)
+
+        Dim printSep As String
+        printSep = ""
+
+        If UCase(printNode.kind) = "PRINT_ITEM" Then
+            printSep = printNode.op
+            printExpr = printNode.left
+            If printExpr = -1 Then
+                errText = "exec: PRINT item expression missing"
+                Return 0
+            End If
+            printNode = ps.ast.nodes(printExpr)
+        ElseIf printPos < printCount - 1 Then
+            printSep = " "
+        End If
+
+        Dim printText As String
+        If ExecEvalNodeAsText(ps, es, printExpr, printText, errText) = 0 Then Return 0
+        Print printText;
+        gDebugPrintColumnPos += Len(printText)
+
+        If printSep = "," Then
+            Dim nextZone As Integer
+            Dim spacesToEmit As Integer
+            nextZone = ((gDebugPrintColumnPos \ EXEC_PRINT_ZONE_WIDTH) + 1) * EXEC_PRINT_ZONE_WIDTH
+            spacesToEmit = nextZone - gDebugPrintColumnPos
+            If spacesToEmit < 1 Then spacesToEmit = EXEC_PRINT_ZONE_WIDTH
+
+            Dim zonePad As String
+            zonePad = String(spacesToEmit, " ")
+            Print zonePad;
+            gDebugPrintColumnPos += spacesToEmit
+        ElseIf printSep = " " Then
+            Print " ";
+            gDebugPrintColumnPos += 1
+        End If
+
+        trailingSep = printSep
+    Next printPos
+
+    If trailingSep = ";" Or trailingSep = "," Then
+        Return 1
+    End If
+
+    Print
+    gDebugPrintColumnPos = 0
+    Return 1
+End Function
+
+Private Function ExecRunInputStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim inputCount As Integer
+    inputCount = ExecChildCount(ps, stmtIdx)
+    If inputCount < 1 Then
+        errText = "exec: INPUT target missing"
+        Return 0
+    End If
+
+    Dim inputStartPos As Integer
+    inputStartPos = 0
+
+    Dim firstInputChild As Integer
+    firstInputChild = ExecChildAt(ps, stmtIdx, 0)
+    If firstInputChild = -1 Then
+        errText = "exec: INPUT first child missing"
+        Return 0
+    End If
+
+    If UCase(ps.ast.nodes(firstInputChild).kind) = "PROMPT_EXPR" Then
+        Dim promptExpr As Integer
+        promptExpr = ps.ast.nodes(firstInputChild).left
+        If promptExpr = -1 Then
+            errText = "exec: INPUT prompt missing"
+            Return 0
+        End If
+
+        If UCase(ps.ast.nodes(promptExpr).kind) = "STRING" Then
+            Print ps.ast.nodes(promptExpr).value;
+        Else
+            Dim promptVal As Integer
+            promptVal = ExecEvalNode(ps, es, promptExpr, errText)
+            If errText <> "" Then Return 0
+            Print LTrim(Str(promptVal));
+        End If
+
+        inputStartPos = 1
+    End If
+
+    If inputStartPos >= inputCount Then
+        errText = "exec: INPUT target missing"
+        Return 0
+    End If
+
+    Dim inputPos As Integer
+    For inputPos = inputStartPos To inputCount - 1
+        Dim inputTarget As Integer
+        inputTarget = ExecChildAt(ps, stmtIdx, inputPos)
+        If inputTarget = -1 Then
+            errText = "exec: INPUT target missing"
+            Return 0
+        End If
+
+        If UCase(ps.ast.nodes(inputTarget).kind) <> "IDENT" Then
+            errText = "exec: INPUT target must be ident"
+            Return 0
+        End If
+
+        Dim inputText As String
+        If ExecDebugInputQueuePop(inputText) = 0 Then
+            Line Input inputText
+        End If
+
+        ExecSetVar es, ps.ast.nodes(inputTarget).value, ValInt(inputText)
+    Next inputPos
+
+    Return 1
+End Function
+
+Private Function ExecRunInputFileStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim inputFileCount As Integer
+    inputFileCount = ExecChildCount(ps, stmtIdx)
+    If inputFileCount < 2 Then
+        errText = "exec: INPUT# handle/target missing"
+        Return 0
+    End If
+
+    Dim inputHandleExpr As Integer
+    inputHandleExpr = ExecChildAt(ps, stmtIdx, 0)
+    If inputHandleExpr = -1 Then
+        errText = "exec: INPUT# handle missing"
+        Return 0
+    End If
+
+    Dim inputChannel As Integer
+    inputChannel = ExecEvalNode(ps, es, inputHandleExpr, errText)
+    If errText <> "" Then Return 0
+
+    Dim inputFilePos As Integer
+    For inputFilePos = 1 To inputFileCount - 1
+        Dim inputFileTarget As Integer
+        inputFileTarget = ExecChildAt(ps, stmtIdx, inputFilePos)
+        If inputFileTarget = -1 Then
+            errText = "exec: INPUT# target missing"
+            Return 0
+        End If
+
+        If UCase(ps.ast.nodes(inputFileTarget).kind) <> "IDENT" Then
+            errText = "exec: INPUT# target must be ident"
+            Return 0
+        End If
+
+        Dim inputReadValue As Integer
+        If UxbFileGetI32(es.fileIo, inputChannel, -1, 0, inputReadValue) = 0 Then
+            errText = "exec: INPUT# failed " & ExecFormatFileError(es.fileIo)
+            Return 0
+        End If
+
+        ExecSetVar es, ps.ast.nodes(inputFileTarget).value, inputReadValue
+    Next inputFilePos
+
+    Return 1
+End Function
+
+Private Function ExecRunLocateStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim locateCount As Integer
+    locateCount = ExecChildCount(ps, stmtIdx)
+    If locateCount < 2 Then
+        errText = "exec: LOCATE missing row/col"
+        Return 0
+    End If
+
+    Dim locateRowExpr As Integer
+    Dim locateColExpr As Integer
+    locateRowExpr = ExecChildAt(ps, stmtIdx, 0)
+    locateColExpr = ExecChildAt(ps, stmtIdx, 1)
+    If locateRowExpr = -1 Or locateColExpr = -1 Then
+        errText = "exec: LOCATE missing row/col"
+        Return 0
+    End If
+
+    Dim locateRow As Integer
+    Dim locateCol As Integer
+    locateRow = ExecEvalNode(ps, es, locateRowExpr, errText)
+    If errText <> "" Then Return 0
+    locateCol = ExecEvalNode(ps, es, locateColExpr, errText)
+    If errText <> "" Then Return 0
+
+    gDebugLocateRow = locateRow
+    gDebugLocateCol = locateCol
+    Locate locateRow, locateCol
+    Return 1
+End Function
+
+Private Function ExecRunColorStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim colorCount As Integer
+    colorCount = ExecChildCount(ps, stmtIdx)
+    If colorCount < 2 Then
+        errText = "exec: COLOR missing fg/bg"
+        Return 0
+    End If
+
+    Dim colorFgExpr As Integer
+    Dim colorBgExpr As Integer
+    colorFgExpr = ExecChildAt(ps, stmtIdx, 0)
+    colorBgExpr = ExecChildAt(ps, stmtIdx, 1)
+    If colorFgExpr = -1 Or colorBgExpr = -1 Then
+        errText = "exec: COLOR missing fg/bg"
+        Return 0
+    End If
+
+    Dim colorFg As Integer
+    Dim colorBg As Integer
+    colorFg = ExecEvalNode(ps, es, colorFgExpr, errText)
+    If errText <> "" Then Return 0
+    colorBg = ExecEvalNode(ps, es, colorBgExpr, errText)
+    If errText <> "" Then Return 0
+
+    gDebugColorFg = colorFg
+    gDebugColorBg = colorBg
+    Color colorFg, colorBg
+    Return 1
+End Function
+
+Private Function ExecRunClsStmt() As Integer
+    gDebugClsCount += 1
+    CLS
+    Return 1
+End Function
+
+Private Function ExecRunOpenStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim openCount As Integer
+    openCount = ExecChildCount(ps, stmtIdx)
+    If openCount < 3 Or openCount > 4 Then
+        errText = "exec: OPEN argument count invalid"
+        Return 0
+    End If
+
+    Dim openFileExpr As Integer
+    Dim openModeExpr As Integer
+    Dim openHandleExpr As Integer
+    openFileExpr = ExecChildAt(ps, stmtIdx, 0)
+    openModeExpr = ExecChildAt(ps, stmtIdx, 1)
+    openHandleExpr = ExecChildAt(ps, stmtIdx, 2)
+
+    If openFileExpr = -1 Or openModeExpr = -1 Or openHandleExpr = -1 Then
+        errText = "exec: OPEN args missing"
+        Return 0
+    End If
+
+    Dim filePath As String
+    If ExecEvalStringLiteral(ps, es, openFileExpr, filePath, errText) = 0 Then
+        Return 0
+    End If
+
+    If UCase(ps.ast.nodes(openModeExpr).kind) <> "MODE_REF" Then
+        errText = "exec: OPEN mode node invalid"
+        Return 0
+    End If
+
+    Dim modeText As String
+    modeText = ps.ast.nodes(openModeExpr).value
+
+    Dim channelNumber As Integer
+    channelNumber = ExecEvalNode(ps, es, openHandleExpr, errText)
+    If errText <> "" Then Return 0
+
+    Dim recordLength As Integer
+    recordLength = 0
+    If openCount = 4 Then
+        Dim lenExpr As Integer
+        lenExpr = ExecChildAt(ps, stmtIdx, 3)
+        If lenExpr = -1 Then
+            errText = "exec: OPEN LEN arg missing"
+            Return 0
+        End If
+        recordLength = ExecEvalNode(ps, es, lenExpr, errText)
+        If errText <> "" Then Return 0
+        If recordLength <= 0 Then
+            errText = "exec: OPEN LEN must be positive"
+            Return 0
+        End If
+    End If
+
+    If UxbFileOpen(es.fileIo, channelNumber, filePath, modeText, recordLength) = 0 Then
+        errText = "exec: OPEN failed " & ExecFormatFileError(es.fileIo)
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function ExecRunCloseStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim closeCount As Integer
+    closeCount = ExecChildCount(ps, stmtIdx)
+
+    If closeCount = 0 Then
+        UxbFileCloseAll es.fileIo
+        Return 1
+    End If
+
+    Dim closeIndex As Integer
+    For closeIndex = 0 To closeCount - 1
+        Dim closeHandleExpr As Integer
+        closeHandleExpr = ExecChildAt(ps, stmtIdx, closeIndex)
+        If closeHandleExpr = -1 Then
+            errText = "exec: CLOSE handle missing"
+            Return 0
+        End If
+
+        Dim closeChannel As Integer
+        closeChannel = ExecEvalNode(ps, es, closeHandleExpr, errText)
+        If errText <> "" Then Return 0
+
+        If UxbFileClose(es.fileIo, closeChannel) = 0 Then
+            errText = "exec: CLOSE failed " & ExecFormatFileError(es.fileIo)
+            Return 0
+        End If
+    Next closeIndex
+
+    Return 1
+End Function
+
+Private Function ExecRunGetStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim getCount As Integer
+    getCount = ExecChildCount(ps, stmtIdx)
+    If getCount < 2 Or getCount > 4 Then
+        errText = "exec: GET argument count invalid"
+        Return 0
+    End If
+
+    Dim getHandleExpr As Integer
+    getHandleExpr = ExecChildAt(ps, stmtIdx, 0)
+    If getHandleExpr = -1 Then
+        errText = "exec: GET handle missing"
+        Return 0
+    End If
+
+    Dim getChannel As Integer
+    getChannel = ExecEvalNode(ps, es, getHandleExpr, errText)
+    If errText <> "" Then Return 0
+
+    Dim getPositionValue As LongInt
+    Dim getBytesValue As Integer
+    Dim getTargetExpr As Integer
+    getPositionValue = -1
+    getBytesValue = 0
+    getTargetExpr = -1
+
+    If getCount = 2 Then
+        getTargetExpr = ExecChildAt(ps, stmtIdx, 1)
+    ElseIf getCount = 3 Then
+        Dim getPositionExpr As Integer
+        getPositionExpr = ExecChildAt(ps, stmtIdx, 1)
+        getTargetExpr = ExecChildAt(ps, stmtIdx, 2)
+        If getPositionExpr = -1 Or getTargetExpr = -1 Then
+            errText = "exec: GET position/target missing"
+            Return 0
+        End If
+        getPositionValue = ExecEvalNode(ps, es, getPositionExpr, errText)
+        If errText <> "" Then Return 0
+    Else
+        Dim getPositionExpr As Integer
+        Dim getBytesExpr As Integer
+        getPositionExpr = ExecChildAt(ps, stmtIdx, 1)
+        getBytesExpr = ExecChildAt(ps, stmtIdx, 2)
+        getTargetExpr = ExecChildAt(ps, stmtIdx, 3)
+        If getPositionExpr = -1 Or getBytesExpr = -1 Or getTargetExpr = -1 Then
+            errText = "exec: GET position/bytes/target missing"
+            Return 0
+        End If
+        getPositionValue = ExecEvalNode(ps, es, getPositionExpr, errText)
+        If errText <> "" Then Return 0
+        getBytesValue = ExecEvalNode(ps, es, getBytesExpr, errText)
+        If errText <> "" Then Return 0
+    End If
+
+    If getTargetExpr = -1 Then
+        errText = "exec: GET target missing"
+        Return 0
+    End If
+
+    If UCase(ps.ast.nodes(getTargetExpr).kind) <> "IDENT" Then
+        errText = "exec: GET target must be ident"
+        Return 0
+    End If
+
+    Dim getReadValue As Integer
+    If UxbFileGetI32(es.fileIo, getChannel, getPositionValue, getBytesValue, getReadValue) = 0 Then
+        errText = "exec: GET failed " & ExecFormatFileError(es.fileIo)
+        Return 0
+    End If
+
+    ExecSetVar es, ps.ast.nodes(getTargetExpr).value, getReadValue
+    Return 1
+End Function
+
+Private Function ExecRunPutStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim putCount As Integer
+    putCount = ExecChildCount(ps, stmtIdx)
+    If putCount < 2 Or putCount > 4 Then
+        errText = "exec: PUT argument count invalid"
+        Return 0
+    End If
+
+    Dim putHandleExpr As Integer
+    putHandleExpr = ExecChildAt(ps, stmtIdx, 0)
+    If putHandleExpr = -1 Then
+        errText = "exec: PUT handle missing"
+        Return 0
+    End If
+
+    Dim putChannel As Integer
+    putChannel = ExecEvalNode(ps, es, putHandleExpr, errText)
+    If errText <> "" Then Return 0
+
+    Dim putPositionValue As LongInt
+    Dim putBytesValue As Integer
+    Dim putSourceExpr As Integer
+    putPositionValue = -1
+    putBytesValue = 0
+    putSourceExpr = -1
+
+    If putCount = 2 Then
+        putSourceExpr = ExecChildAt(ps, stmtIdx, 1)
+    ElseIf putCount = 3 Then
+        Dim putPositionExpr As Integer
+        putPositionExpr = ExecChildAt(ps, stmtIdx, 1)
+        putSourceExpr = ExecChildAt(ps, stmtIdx, 2)
+        If putPositionExpr = -1 Or putSourceExpr = -1 Then
+            errText = "exec: PUT position/source missing"
+            Return 0
+        End If
+        putPositionValue = ExecEvalNode(ps, es, putPositionExpr, errText)
+        If errText <> "" Then Return 0
+    Else
+        Dim putPositionExpr As Integer
+        Dim putBytesExpr As Integer
+        putPositionExpr = ExecChildAt(ps, stmtIdx, 1)
+        putBytesExpr = ExecChildAt(ps, stmtIdx, 2)
+        putSourceExpr = ExecChildAt(ps, stmtIdx, 3)
+        If putPositionExpr = -1 Or putBytesExpr = -1 Or putSourceExpr = -1 Then
+            errText = "exec: PUT position/bytes/source missing"
+            Return 0
+        End If
+        putPositionValue = ExecEvalNode(ps, es, putPositionExpr, errText)
+        If errText <> "" Then Return 0
+        putBytesValue = ExecEvalNode(ps, es, putBytesExpr, errText)
+        If errText <> "" Then Return 0
+    End If
+
+    If putSourceExpr = -1 Then
+        errText = "exec: PUT source missing"
+        Return 0
+    End If
+
+    Dim putValue As Integer
+    putValue = ExecEvalNode(ps, es, putSourceExpr, errText)
+    If errText <> "" Then Return 0
+
+    If UxbFilePutI32(es.fileIo, putChannel, putPositionValue, putBytesValue, putValue) = 0 Then
+        errText = "exec: PUT failed " & ExecFormatFileError(es.fileIo)
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunSeekStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim seekCount As Integer
+    seekCount = ExecChildCount(ps, stmtIdx)
+    If seekCount < 1 Or seekCount > 2 Then
+        errText = "exec: SEEK argument count invalid"
+        Return 0
+    End If
+
+    Dim seekHandleExpr As Integer
+    seekHandleExpr = ExecChildAt(ps, stmtIdx, 0)
+    If seekHandleExpr = -1 Then
+        errText = "exec: SEEK handle missing"
+        Return 0
+    End If
+
+    Dim seekChannel As Integer
+    seekChannel = ExecEvalNode(ps, es, seekHandleExpr, errText)
+    If errText <> "" Then Return 0
+
+    Dim seekPositionValue As LongInt
+    seekPositionValue = -1
+    If seekCount = 2 Then
+        Dim seekPositionExpr As Integer
+        seekPositionExpr = ExecChildAt(ps, stmtIdx, 1)
+        If seekPositionExpr = -1 Then
+            errText = "exec: SEEK position missing"
+            Return 0
+        End If
+        seekPositionValue = ExecEvalNode(ps, es, seekPositionExpr, errText)
+        If errText <> "" Then Return 0
+    End If
+
+    Dim currentFilePosition As LongInt
+    If UxbFileSeek(es.fileIo, seekChannel, seekPositionValue, currentFilePosition) = 0 Then
+        errText = "exec: SEEK failed " & ExecFormatFileError(es.fileIo)
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunIoFileStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Select Case UCase(st.kind)
+    Case "PRINT_STMT"
+        Return ExecRunPrintStmt(ps, es, stmtIdx, errText)
+    Case "INPUT_STMT"
+        Return ExecRunInputStmt(ps, es, stmtIdx, errText)
+    Case "INPUT_FILE_STMT"
+        Return ExecRunInputFileStmt(ps, es, stmtIdx, errText)
+    Case "LOCATE_STMT"
+        Return ExecRunLocateStmt(ps, es, stmtIdx, errText)
+    Case "COLOR_STMT"
+        Return ExecRunColorStmt(ps, es, stmtIdx, errText)
+    Case "CLS_STMT"
+        Return ExecRunClsStmt()
+    Case "OPEN_STMT"
+        Return ExecRunOpenStmt(ps, es, stmtIdx, errText)
+    Case "CLOSE_STMT"
+        Return ExecRunCloseStmt(ps, es, stmtIdx, errText)
+    Case "GET_STMT"
+        Return ExecRunGetStmt(ps, es, stmtIdx, errText)
+    Case "PUT_STMT"
+        Return ExecRunPutStmt(ps, es, stmtIdx, errText)
+    Case "SEEK_STMT"
+        Return ExecRunSeekStmt(ps, es, stmtIdx, errText)
+    End Select
+
+    Return -2
+End Function

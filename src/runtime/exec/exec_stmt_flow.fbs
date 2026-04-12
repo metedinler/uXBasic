@@ -1,0 +1,612 @@
+Private Function ExecRunIfStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim ifCount As Integer
+    ifCount = ExecChildCount(ps, stmtIdx)
+    If ifCount < 1 Then
+        errText = "exec: IF condition missing"
+        Return 0
+    End If
+
+    Dim ifCondExpr As Integer
+    ifCondExpr = ExecChildAt(ps, stmtIdx, 0)
+    If ifCondExpr = -1 Then
+        errText = "exec: IF condition missing"
+        Return 0
+    End If
+
+    Dim ifCondValue As Integer
+    ifCondValue = ExecEvalNode(ps, es, ifCondExpr, errText)
+    If errText <> "" Then Return 0
+
+    If ifCondValue <> 0 Then
+        Dim ifThenPos As Integer
+        For ifThenPos = 1 To ifCount - 1
+            Dim ifThenChild As Integer
+            ifThenChild = ExecChildAt(ps, stmtIdx, ifThenPos)
+            If ifThenChild = -1 Then
+                errText = "exec: IF then-body statement missing"
+                Return 0
+            End If
+
+            Dim ifThenKind As String
+            ifThenKind = UCase(ps.ast.nodes(ifThenChild).kind)
+            If ifThenKind = "ELSEIF_PART" Or ifThenKind = "ELSE_PART" Then Exit For
+
+            If ExecRunStmt(ps, es, ifThenChild, errText) = 0 Then Return 0
+            If gExitRequest <> "" Then
+                If UCase(gExitRequest) = "IF" Then
+                    gExitRequest = ""
+                    Return 1
+                End If
+                Return 1
+            End If
+        Next ifThenPos
+
+        Return 1
+    End If
+
+    Dim ifPartPos As Integer
+    For ifPartPos = 1 To ifCount - 1
+        Dim ifPartNode As Integer
+        ifPartNode = ExecChildAt(ps, stmtIdx, ifPartPos)
+        If ifPartNode = -1 Then
+            errText = "exec: IF branch part missing"
+            Return 0
+        End If
+
+        Dim ifPartKind As String
+        ifPartKind = UCase(ps.ast.nodes(ifPartNode).kind)
+
+        If ifPartKind = "ELSEIF_PART" Then
+            Dim elseifCount As Integer
+            elseifCount = ExecChildCount(ps, ifPartNode)
+            If elseifCount < 1 Then
+                errText = "exec: ELSEIF condition missing"
+                Return 0
+            End If
+
+            Dim elseifCondExpr As Integer
+            elseifCondExpr = ExecChildAt(ps, ifPartNode, 0)
+            If elseifCondExpr = -1 Then
+                errText = "exec: ELSEIF condition missing"
+                Return 0
+            End If
+
+            Dim elseifCondValue As Integer
+            elseifCondValue = ExecEvalNode(ps, es, elseifCondExpr, errText)
+            If errText <> "" Then Return 0
+
+            If elseifCondValue <> 0 Then
+                Dim elseifBodyPos As Integer
+                For elseifBodyPos = 1 To elseifCount - 1
+                    Dim elseifBodyStmt As Integer
+                    elseifBodyStmt = ExecChildAt(ps, ifPartNode, elseifBodyPos)
+                    If elseifBodyStmt = -1 Then
+                        errText = "exec: ELSEIF body statement missing"
+                        Return 0
+                    End If
+
+                    If ExecRunStmt(ps, es, elseifBodyStmt, errText) = 0 Then Return 0
+                    If gExitRequest <> "" Then
+                        If UCase(gExitRequest) = "IF" Then
+                            gExitRequest = ""
+                            Return 1
+                        End If
+                        Return 1
+                    End If
+                Next elseifBodyPos
+                Return 1
+            End If
+
+        ElseIf ifPartKind = "ELSE_PART" Then
+            Dim elseCount As Integer
+            elseCount = ExecChildCount(ps, ifPartNode)
+
+            Dim elseBodyPos As Integer
+            For elseBodyPos = 0 To elseCount - 1
+                Dim elseBodyStmt As Integer
+                elseBodyStmt = ExecChildAt(ps, ifPartNode, elseBodyPos)
+                If elseBodyStmt = -1 Then
+                    errText = "exec: ELSE body statement missing"
+                    Return 0
+                End If
+
+                If ExecRunStmt(ps, es, elseBodyStmt, errText) = 0 Then Return 0
+                If gExitRequest <> "" Then
+                    If UCase(gExitRequest) = "IF" Then
+                        gExitRequest = ""
+                        Return 1
+                    End If
+                    Return 1
+                End If
+            Next elseBodyPos
+            Return 1
+        End If
+    Next ifPartPos
+
+    Return 1
+End Function
+
+Private Function ExecRunSelectStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim selectCount As Integer
+    selectCount = ExecChildCount(ps, stmtIdx)
+    If selectCount < 1 Then
+        errText = "exec: SELECT selector missing"
+        Return 0
+    End If
+
+    Dim selectorExpr As Integer
+    selectorExpr = ExecChildAt(ps, stmtIdx, 0)
+    If selectorExpr = -1 Then
+        errText = "exec: SELECT selector missing"
+        Return 0
+    End If
+
+    Dim selectorValue As Integer
+    selectorValue = ExecEvalNode(ps, es, selectorExpr, errText)
+    If errText <> "" Then Return 0
+
+    Dim elseCaseNode As Integer
+    elseCaseNode = -1
+
+    Dim casePos As Integer
+    For casePos = 1 To selectCount - 1
+        Dim caseNode As Integer
+        caseNode = ExecChildAt(ps, stmtIdx, casePos)
+        If caseNode = -1 Then
+            errText = "exec: SELECT case node missing"
+            Return 0
+        End If
+
+        Dim caseKind As String
+        caseKind = UCase(ps.ast.nodes(caseNode).kind)
+
+        If caseKind = "CASE_ELSE" Then
+            elseCaseNode = caseNode
+            Continue For
+        End If
+
+        If caseKind <> "CASE_BLOCK" Then
+            errText = "exec: SELECT unexpected case node " & ps.ast.nodes(caseNode).kind
+            Return 0
+        End If
+
+        Dim caseChildCount As Integer
+        caseChildCount = ExecChildCount(ps, caseNode)
+
+        Dim bodyStart As Integer
+        bodyStart = caseChildCount
+
+        Dim caseChildPos As Integer
+        For caseChildPos = 0 To caseChildCount - 1
+            Dim caseChildNode As Integer
+            caseChildNode = ExecChildAt(ps, caseNode, caseChildPos)
+            If caseChildNode = -1 Then
+                errText = "exec: CASE child missing"
+                Return 0
+            End If
+
+            If ExecIsStmtNode(ps, caseChildNode) <> 0 Then
+                bodyStart = caseChildPos
+                Exit For
+            End If
+        Next caseChildPos
+
+        If bodyStart = 0 Then
+            errText = "exec: CASE values missing"
+            Return 0
+        End If
+
+        Dim matchedCase As Integer
+        matchedCase = 0
+
+        Dim caseValuePos As Integer
+        For caseValuePos = 0 To bodyStart - 1
+            Dim caseExpr As Integer
+            caseExpr = ExecChildAt(ps, caseNode, caseValuePos)
+            If caseExpr = -1 Then
+                errText = "exec: CASE value missing"
+                Return 0
+            End If
+
+            Dim caseExprNode As ASTNode
+            caseExprNode = ps.ast.nodes(caseExpr)
+
+            If UCase(caseExprNode.kind) = "CASE_IS_VALUE" Then
+                If caseExprNode.left = -1 Then
+                    errText = "exec: CASE IS expression missing"
+                    Return 0
+                End If
+
+                Dim caseIsValue As Integer
+                caseIsValue = ExecEvalNode(ps, es, caseExprNode.left, errText)
+                If errText <> "" Then Return 0
+
+                Select Case caseExprNode.op
+                Case "="
+                    matchedCase = IIf(selectorValue = caseIsValue, 1, 0)
+                Case "<>"
+                    matchedCase = IIf(selectorValue <> caseIsValue, 1, 0)
+                Case "<"
+                    matchedCase = IIf(selectorValue < caseIsValue, 1, 0)
+                Case ">"
+                    matchedCase = IIf(selectorValue > caseIsValue, 1, 0)
+                Case "<="
+                    matchedCase = IIf(selectorValue <= caseIsValue, 1, 0)
+                Case ">="
+                    matchedCase = IIf(selectorValue >= caseIsValue, 1, 0)
+                Case Else
+                    errText = "exec: CASE IS invalid operator " & caseExprNode.op
+                    Return 0
+                End Select
+            Else
+                Dim caseValue As Integer
+                caseValue = ExecEvalNode(ps, es, caseExpr, errText)
+                If errText <> "" Then Return 0
+
+                If caseValue = selectorValue Then
+                    matchedCase = 1
+                End If
+            End If
+
+            If matchedCase <> 0 Then Exit For
+        Next caseValuePos
+
+        If matchedCase <> 0 Then
+            Dim caseBodyPos As Integer
+            For caseBodyPos = bodyStart To caseChildCount - 1
+                Dim caseBodyStmt As Integer
+                caseBodyStmt = ExecChildAt(ps, caseNode, caseBodyPos)
+                If caseBodyStmt = -1 Then
+                    errText = "exec: CASE body statement missing"
+                    Return 0
+                End If
+
+                If ExecRunStmt(ps, es, caseBodyStmt, errText) = 0 Then Return 0
+                If gExitRequest <> "" Then Return 1
+            Next caseBodyPos
+
+            Return 1
+        End If
+    Next casePos
+
+    If elseCaseNode <> -1 Then
+        Dim elseCaseCount As Integer
+        elseCaseCount = ExecChildCount(ps, elseCaseNode)
+
+        Dim elseCasePos As Integer
+        For elseCasePos = 0 To elseCaseCount - 1
+            Dim elseStmt As Integer
+            elseStmt = ExecChildAt(ps, elseCaseNode, elseCasePos)
+            If elseStmt = -1 Then
+                errText = "exec: CASE ELSE statement missing"
+                Return 0
+            End If
+
+            If ExecRunStmt(ps, es, elseStmt, errText) = 0 Then Return 0
+            If gExitRequest <> "" Then Return 1
+        Next elseCasePos
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunForStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim forCount As Integer
+    forCount = ExecChildCount(ps, stmtIdx)
+    If forCount < 3 Then
+        errText = "exec: FOR missing start/end/step"
+        Return 0
+    End If
+
+    Dim forStartExpr As Integer
+    Dim forEndExpr As Integer
+    Dim forStepExpr As Integer
+    forStartExpr = ExecChildAt(ps, stmtIdx, 0)
+    forEndExpr = ExecChildAt(ps, stmtIdx, 1)
+    forStepExpr = ExecChildAt(ps, stmtIdx, 2)
+    If forStartExpr = -1 Or forEndExpr = -1 Or forStepExpr = -1 Then
+        errText = "exec: FOR header missing"
+        Return 0
+    End If
+
+    Dim forStartValue As Integer
+    Dim forEndValue As Integer
+    Dim forStepValue As Integer
+    forStartValue = ExecEvalNode(ps, es, forStartExpr, errText)
+    If errText <> "" Then Return 0
+    forEndValue = ExecEvalNode(ps, es, forEndExpr, errText)
+    If errText <> "" Then Return 0
+    forStepValue = ExecEvalNode(ps, es, forStepExpr, errText)
+    If errText <> "" Then Return 0
+
+    If forStepValue = 0 Then
+        errText = "exec: FOR step cannot be zero"
+        Return 0
+    End If
+
+    ExecSetVar es, st.value, forStartValue
+
+    Dim forIterGuard As Integer
+    Do
+        Dim forCur As Integer
+        forCur = ExecGetVar(es, st.value)
+
+        If forStepValue > 0 Then
+            If forCur > forEndValue Then Exit Do
+        Else
+            If forCur < forEndValue Then Exit Do
+        End If
+
+        Dim forBreak As Integer
+        Dim forBodyPos As Integer
+        For forBodyPos = 3 To forCount - 1
+            Dim forBodyStmt As Integer
+            forBodyStmt = ExecChildAt(ps, stmtIdx, forBodyPos)
+            If forBodyStmt = -1 Then
+                errText = "exec: FOR body statement missing"
+                Return 0
+            End If
+
+            If ExecRunStmt(ps, es, forBodyStmt, errText) = 0 Then Return 0
+
+            Dim forExitStatus As Integer
+            forExitStatus = ExecConsumeLoopExit("FOR")
+            If forExitStatus = 1 Then
+                forBreak = 1
+                Exit For
+            ElseIf forExitStatus = 2 Then
+                Return 1
+            End If
+        Next forBodyPos
+
+        If forBreak <> 0 Then Exit Do
+
+        ExecSetVar es, st.value, ExecGetVar(es, st.value) + forStepValue
+        forIterGuard += 1
+        If forIterGuard > 1000000 Then
+            errText = "exec: FOR iteration guard exceeded"
+            Return 0
+        End If
+    Loop
+
+    Return 1
+End Function
+
+Private Function ExecRunDoStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim doMode As String
+    doMode = UCase(st.op)
+
+    Dim doCount As Integer
+    doCount = ExecChildCount(ps, stmtIdx)
+
+    Dim hasPreCond As Integer
+    Dim hasPostCond As Integer
+    hasPreCond = (doMode = "DO_WHILE" Or doMode = "DO_UNTIL")
+    hasPostCond = (doMode = "LOOP_WHILE" Or doMode = "LOOP_UNTIL")
+
+    Dim preCondPos As Integer
+    Dim postCondPos As Integer
+    Dim bodyStartPos As Integer
+    Dim bodyEndPos As Integer
+    preCondPos = IIf(hasPreCond <> 0, 0, -1)
+    postCondPos = IIf(hasPostCond <> 0, doCount - 1, -1)
+    bodyStartPos = IIf(hasPreCond <> 0, 1, 0)
+    bodyEndPos = IIf(hasPostCond <> 0, doCount - 2, doCount - 1)
+
+    Dim doIterGuard As Integer
+    Do
+        If hasPreCond <> 0 Then
+            Dim preExpr As Integer
+            preExpr = ExecChildAt(ps, stmtIdx, preCondPos)
+            If preExpr = -1 Then
+                errText = "exec: DO pre-condition missing"
+                Return 0
+            End If
+
+            Dim preValue As Integer
+            preValue = ExecEvalNode(ps, es, preExpr, errText)
+            If errText <> "" Then Return 0
+
+            If doMode = "DO_WHILE" Then
+                If preValue = 0 Then Exit Do
+            ElseIf doMode = "DO_UNTIL" Then
+                If preValue <> 0 Then Exit Do
+            End If
+        End If
+
+        Dim doBreak As Integer
+        Dim doBodyPos As Integer
+        For doBodyPos = bodyStartPos To bodyEndPos
+            If doBodyPos < 0 Then Exit For
+
+            Dim doBodyStmt As Integer
+            doBodyStmt = ExecChildAt(ps, stmtIdx, doBodyPos)
+            If doBodyStmt = -1 Then
+                errText = "exec: DO body statement missing"
+                Return 0
+            End If
+
+            If ExecRunStmt(ps, es, doBodyStmt, errText) = 0 Then Return 0
+
+            Dim doExitStatus As Integer
+            doExitStatus = ExecConsumeLoopExit("DO")
+            If doExitStatus = 1 Then
+                doBreak = 1
+                Exit For
+            ElseIf doExitStatus = 2 Then
+                Return 1
+            End If
+        Next doBodyPos
+
+        If doBreak <> 0 Then Exit Do
+
+        If hasPostCond <> 0 Then
+            Dim postExpr As Integer
+            postExpr = ExecChildAt(ps, stmtIdx, postCondPos)
+            If postExpr = -1 Then
+                errText = "exec: LOOP post-condition missing"
+                Return 0
+            End If
+
+            Dim postValue As Integer
+            postValue = ExecEvalNode(ps, es, postExpr, errText)
+            If errText <> "" Then Return 0
+
+            If doMode = "LOOP_WHILE" Then
+                If postValue = 0 Then Exit Do
+            ElseIf doMode = "LOOP_UNTIL" Then
+                If postValue <> 0 Then Exit Do
+            End If
+        End If
+
+        doIterGuard += 1
+        If doIterGuard > 1000000 Then
+            errText = "exec: DO iteration guard exceeded"
+            Return 0
+        End If
+    Loop
+
+    Return 1
+End Function
+
+Private Function ExecRunForEachStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim feItemsNode As Integer
+    Dim feBodyNode As Integer
+    feItemsNode = ExecChildAt(ps, stmtIdx, 0)
+    feBodyNode = ExecChildAt(ps, stmtIdx, 1)
+    If feItemsNode = -1 Or feBodyNode = -1 Then
+        errText = "exec: FOR EACH items/body missing"
+        Return 0
+    End If
+
+    Dim feItemsCount As Integer
+    feItemsCount = ExecChildCount(ps, feItemsNode)
+    If feItemsCount < 0 Then feItemsCount = 0
+
+    Dim feValues(Any) As Integer
+    If feItemsCount > 0 Then ReDim feValues(feItemsCount - 1)
+
+    Dim feIdx As Integer
+    For feIdx = 0 To feItemsCount - 1
+        Dim feItemExpr As Integer
+        feItemExpr = ExecChildAt(ps, feItemsNode, feIdx)
+        If feItemExpr = -1 Then
+            errText = "exec: FOR EACH item missing"
+            Return 0
+        End If
+
+        feValues(feIdx) = ExecEvalNode(ps, es, feItemExpr, errText)
+        If errText <> "" Then Return 0
+    Next feIdx
+
+    Dim feBodyCount As Integer
+    feBodyCount = ExecChildCount(ps, feBodyNode)
+
+    For feIdx = 0 To feItemsCount - 1
+        ExecSetVar es, st.value, feValues(feIdx)
+        If st.op <> "" Then ExecSetVar es, st.op, feIdx
+
+        Dim feBodyPos As Integer
+        Dim feBreak As Integer
+        For feBodyPos = 0 To feBodyCount - 1
+            Dim feBodyStmt As Integer
+            feBodyStmt = ExecChildAt(ps, feBodyNode, feBodyPos)
+            If feBodyStmt = -1 Then
+                errText = "exec: FOR EACH body statement missing"
+                Return 0
+            End If
+
+            If ExecRunStmt(ps, es, feBodyStmt, errText) = 0 Then Return 0
+
+            Dim feExitStatus As Integer
+            feExitStatus = ExecConsumeLoopExit("FOR")
+            If feExitStatus = 1 Then
+                feBreak = 1
+                Exit For
+            ElseIf feExitStatus = 2 Then
+                Return 1
+            End If
+        Next feBodyPos
+
+        If feBreak <> 0 Then Exit For
+    Next feIdx
+
+    Return 1
+End Function
+
+Private Function ExecRunDoEachStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim deItemsNode As Integer
+    Dim deBodyNode As Integer
+    deItemsNode = ExecChildAt(ps, stmtIdx, 0)
+    deBodyNode = ExecChildAt(ps, stmtIdx, 1)
+    If deItemsNode = -1 Or deBodyNode = -1 Then
+        errText = "exec: DO EACH items/body missing"
+        Return 0
+    End If
+
+    Dim deItemsCount As Integer
+    deItemsCount = ExecChildCount(ps, deItemsNode)
+    Dim deBodyCount As Integer
+    deBodyCount = ExecChildCount(ps, deBodyNode)
+
+    Dim deIdx As Integer
+    For deIdx = 0 To deItemsCount - 1
+        Dim deItemExpr As Integer
+        deItemExpr = ExecChildAt(ps, deItemsNode, deIdx)
+        If deItemExpr = -1 Then
+            errText = "exec: DO EACH item missing"
+            Return 0
+        End If
+
+        Dim deValue As Integer
+        deValue = ExecEvalNode(ps, es, deItemExpr, errText)
+        If errText <> "" Then Return 0
+
+        ExecSetVar es, st.value, deValue
+
+        Dim deBodyPos As Integer
+        Dim deBreak As Integer
+        For deBodyPos = 0 To deBodyCount - 1
+            Dim deBodyStmt As Integer
+            deBodyStmt = ExecChildAt(ps, deBodyNode, deBodyPos)
+            If deBodyStmt = -1 Then
+                errText = "exec: DO EACH body statement missing"
+                Return 0
+            End If
+
+            If ExecRunStmt(ps, es, deBodyStmt, errText) = 0 Then Return 0
+
+            Dim deExitStatus As Integer
+            deExitStatus = ExecConsumeLoopExit("DO")
+            If deExitStatus = 1 Then
+                deBreak = 1
+                Exit For
+            ElseIf deExitStatus = 2 Then
+                Return 1
+            End If
+        Next deBodyPos
+
+        If deBreak <> 0 Then Exit For
+    Next deIdx
+
+    Return 1
+End Function
+
+Private Function ExecRunFlowStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Select Case UCase(st.kind)
+    Case "IF_STMT"
+        Return ExecRunIfStmt(ps, es, stmtIdx, errText)
+    Case "SELECT_STMT"
+        Return ExecRunSelectStmt(ps, es, stmtIdx, errText)
+    Case "FOR_STMT"
+        Return ExecRunForStmt(ps, es, stmtIdx, st, errText)
+    Case "DO_STMT"
+        Return ExecRunDoStmt(ps, es, stmtIdx, st, errText)
+    Case "FOR_EACH_STMT"
+        Return ExecRunForEachStmt(ps, es, stmtIdx, st, errText)
+    Case "DO_EACH_STMT"
+        Return ExecRunDoEachStmt(ps, es, stmtIdx, st, errText)
+    End Select
+
+    Return -2
+End Function
