@@ -478,8 +478,8 @@ Bu bolum istatistik fonksiyon isimlerinden bagimsiz olarak CALL(DLL)/IMPORT ve s
 | Calling convention: stdcall/cdecl secimi | OK | OK | OK | KISMEN | OK | Parser+runtime token destegi aktif (CDECL/STDCALL) ve ilk faz testleri PASS (tests/run_call_dll_scope_exec_ast.bas; tests/run_call_dll_alias_exec_ast.bas). Runtime dis cagrida halen policy/no-op modunda oldugu icin R=KISMEN korunur. | FFI-CONV-1 |
 | DLL path policy (absolute/segments/invalid chars) | OK | OK | OK | OK | OK | Runtime fail-fast kodlari aktif | FFI-CORE |
 | Signature/arity/byref contract | OK | OK | OK | OK | OK | runtime exec_eval_builtin_categories kaniti mevcut | FFI-CORE |
-| NAMESPACE+MODULE+MAIN ile DLL cagrisi | OK | OK | OK | KISMEN | KISMEN | Scope icinde CALL(DLL) entegrasyon testi ayrik paket olarak tamamlanacak | FFI-SCOPE-1 |
-| USING/ALIAS ile DLL cagrisi isim cozumleme | OK | OK | OK | KISMEN | KISMEN | alias/use-path uzerinden wrapper dispatch testleri acik | FFI-SCOPE-1 |
+| NAMESPACE+MODULE+MAIN ile DLL cagrisi | OK | OK | OK | KISMEN | OK | Scope parse+exec kaniti PASS (tests/run_call_dll_scope_exec_ast.bas). MAIN global-scope kuralina uygun senaryo ile dogrulandi. Runtime dis cagrida policy/no-op modeli nedeniyle R=KISMEN korunur. | FFI-SCOPE-1 |
+| USING/ALIAS ile DLL cagrisi isim cozumleme | OK | OK | OK | KISMEN | OK | USING/ALIAS + CALL(DLL) entegrasyon kaniti PASS (tests/run_call_dll_alias_exec_ast.bas). Runtime dis cagrida policy/no-op modeli nedeniyle R=KISMEN korunur. | FFI-SCOPE-1 |
 | Strongly-typed marshalling (STRING/PTR/NUM) | OK | KISMEN | KISMEN | KISMEN | KISMEN | Signature token var; type-marshalling kapsam testleri genisletilecek | FFI-SCOPE-2 |
 | Win64 ABI uyumu (shadow space + alignment) | OK | PLAN | PLAN | PLAN | PLAN | DLL cagrilarinda stack alignment/shadow-space zorunlu kontrol lane'i (codegen ile birlikte kapanir) | FFI-CONV-2 |
 | x86 stdcall/cdecl ayristirma | OK | PLAN | PLAN | PLAN | PLAN | x86 lane acildiginda caller/callee stack temizleme farki icin ayrik test paketi zorunlu | FFI-CONV-3 |

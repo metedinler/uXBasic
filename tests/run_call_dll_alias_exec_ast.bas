@@ -19,7 +19,12 @@ Private Sub Main()
         "USING Core.IO" & Chr(10) & _
         "ALIAS MsgBox = CALL ( DLL , ""user32.dll"" , ""MessageBoxA"" , I32, CDECL )" & Chr(10) & _
         "END MODULE" & Chr(10) & _
-        "END NAMESPACE"
+        "END NAMESPACE" & Chr(10) & _
+        "MAIN" & Chr(10) & _
+        "a = 33" & Chr(10) & _
+        "CALL(DLL, ""kernel32.dll"", ""GetTickCount"", I32, STDCALL, a)" & Chr(10) & _
+        "POKED 4320, a" & Chr(10) & _
+        "END MAIN"
 
     Dim psScope As ParseState
     Dim errText As String
@@ -28,19 +33,7 @@ Private Sub Main()
         End 1
     End If
 
-    Dim srcExec As String
-    srcExec = _
-        "a = 33" & Chr(10) & _
-        "CALL(DLL, ""kernel32.dll"", ""GetTickCount"", I32, STDCALL, a)" & Chr(10) & _
-        "POKED 4320, a"
-
-    Dim ps As ParseState
-    If RTParseProgram(srcExec, ps, errText) = 0 Then
-        Print "FAIL call_dll_alias exec-parse | "; errText
-        End 1
-    End If
-
-    If RTExecProgram(ps, errText) = 0 Then
+    If RTExecProgram(psScope, errText) = 0 Then
         Print "FAIL call_dll_alias exec | "; errText
         End 1
     End If

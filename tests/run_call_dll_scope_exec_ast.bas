@@ -14,11 +14,17 @@ Private Sub Main()
 
     Dim src As String
     src = _
+        "NAMESPACE App" & Chr(10) & _
+        "MODULE Net" & Chr(10) & _
+        "END MODULE" & Chr(10) & _
+        "END NAMESPACE" & Chr(10) & _
+        "MAIN" & Chr(10) & _
         "a = 21" & Chr(10) & _
         "CALL(DLL, ""kernel32.dll"", ""GetTickCount"", I32, CDECL, a)" & Chr(10) & _
         "POKED 4300, a" & Chr(10) & _
         "CALL(DLL, ""kernel32.dll"", ""GetTickCount"", I32, STDCALL, a)" & Chr(10) & _
-        "POKED 4304, a"
+        "POKED 4304, a" & Chr(10) & _
+        "END MAIN"
 
     Dim ps As ParseState
     Dim errText As String
