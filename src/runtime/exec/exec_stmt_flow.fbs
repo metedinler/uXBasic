@@ -1,3 +1,90 @@
+Private Function ExecHandleIfExitRequest() As Integer
+    If gExitRequest = "" Then Return 0
+
+    If UCase(gExitRequest) = "IF" Then
+        gExitRequest = ""
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecCaseExprMatches(ByRef ps As ParseState, ByRef es As ExecState, ByVal caseExpr As Integer, ByVal selectorValue As Integer, ByRef errText As String) As Integer
+    Dim caseExprNode As ASTNode
+    caseExprNode = ps.ast.nodes(caseExpr)
+
+    If UCase(caseExprNode.kind) = "CASE_IS_VALUE" Then
+        If caseExprNode.left = -1 Then
+            errText = "exec: CASE IS expression missing"
+            Return -1
+        End If
+
+        Dim caseIsValue As Integer
+        caseIsValue = ExecEvalNode(ps, es, caseExprNode.left, errText)
+        If errText <> "" Then Return -1
+
+        Select Case caseExprNode.op
+        Case "="
+            Return IIf(selectorValue = caseIsValue, 1, 0)
+        Case "<>"
+            Return IIf(selectorValue <> caseIsValue, 1, 0)
+        Case "<"
+            Return IIf(selectorValue < caseIsValue, 1, 0)
+        Case ">"
+            Return IIf(selectorValue > caseIsValue, 1, 0)
+        Case "<="
+            Return IIf(selectorValue <= caseIsValue, 1, 0)
+        Case ">="
+            Return IIf(selectorValue >= caseIsValue, 1, 0)
+        Case Else
+            errText = "exec: CASE IS invalid operator " & caseExprNode.op
+            Return -1
+        End Select
+    End If
+
+    Dim caseValue As Integer
+    caseValue = ExecEvalNode(ps, es, caseExpr, errText)
+    If errText <> "" Then Return -1
+
+    Return IIf(caseValue = selectorValue, 1, 0)
+End Function
+
+Private Function ExecRunSelectCaseBody(ByRef ps As ParseState, ByRef es As ExecState, ByVal caseNode As Integer, ByVal bodyStart As Integer, ByVal caseChildCount As Integer, ByRef errText As String) As Integer
+    Dim caseBodyPos As Integer
+    For caseBodyPos = bodyStart To caseChildCount - 1
+        Dim caseBodyStmt As Integer
+        caseBodyStmt = ExecChildAt(ps, caseNode, caseBodyPos)
+        If caseBodyStmt = -1 Then
+            errText = "exec: CASE body statement missing"
+            Return 0
+        End If
+
+        If ExecRunStmt(ps, es, caseBodyStmt, errText) = 0 Then Return 0
+        If gExitRequest <> "" Then Return 2
+    Next caseBodyPos
+
+    Return 1
+End Function
+
+Private Function ExecRunSelectElseBody(ByRef ps As ParseState, ByRef es As ExecState, ByVal elseCaseNode As Integer, ByRef errText As String) As Integer
+    Dim elseCaseCount As Integer
+    elseCaseCount = ExecChildCount(ps, elseCaseNode)
+
+    Dim elseCasePos As Integer
+    For elseCasePos = 0 To elseCaseCount - 1
+        Dim elseStmt As Integer
+        elseStmt = ExecChildAt(ps, elseCaseNode, elseCasePos)
+        If elseStmt = -1 Then
+            errText = "exec: CASE ELSE statement missing"
+            Return 0
+        End If
+
+        If ExecRunStmt(ps, es, elseStmt, errText) = 0 Then Return 0
+        If gExitRequest <> "" Then Return 2
+    Next elseCasePos
+
+    Return 1
+End Function
+
 Private Function ExecRunIfStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
     Dim ifCount As Integer
     ifCount = ExecChildCount(ps, stmtIdx)
@@ -32,13 +119,7 @@ Private Function ExecRunIfStmt(ByRef ps As ParseState, ByRef es As ExecState, By
             If ifThenKind = "ELSEIF_PART" Or ifThenKind = "ELSE_PART" Then Exit For
 
             If ExecRunStmt(ps, es, ifThenChild, errText) = 0 Then Return 0
-            If gExitRequest <> "" Then
-                If UCase(gExitRequest) = "IF" Then
-                    gExitRequest = ""
-                    Return 1
-                End If
-                Return 1
-            End If
+            If ExecHandleIfExitRequest() <> 0 Then Return 1
         Next ifThenPos
 
         Return 1
@@ -86,14 +167,9 @@ Private Function ExecRunIfStmt(ByRef ps As ParseState, ByRef es As ExecState, By
                     End If
 
                     If ExecRunStmt(ps, es, elseifBodyStmt, errText) = 0 Then Return 0
-                    If gExitRequest <> "" Then
-                        If UCase(gExitRequest) = "IF" Then
-                            gExitRequest = ""
-                            Return 1
-                        End If
-                        Return 1
-                    End If
+                    If ExecHandleIfExitRequest() <> 0 Then Return 1
                 Next elseifBodyPos
+
                 Return 1
             End If
 
@@ -111,14 +187,9 @@ Private Function ExecRunIfStmt(ByRef ps As ParseState, ByRef es As ExecState, By
                 End If
 
                 If ExecRunStmt(ps, es, elseBodyStmt, errText) = 0 Then Return 0
-                If gExitRequest <> "" Then
-                    If UCase(gExitRequest) = "IF" Then
-                        gExitRequest = ""
-                        Return 1
-                    End If
-                    Return 1
-                End If
+                If ExecHandleIfExitRequest() <> 0 Then Return 1
             Next elseBodyPos
+
             Return 1
         End If
     Next ifPartPos
@@ -208,83 +279,28 @@ Private Function ExecRunSelectStmt(ByRef ps As ParseState, ByRef es As ExecState
                 Return 0
             End If
 
-            Dim caseExprNode As ASTNode
-            caseExprNode = ps.ast.nodes(caseExpr)
+            Dim caseMatchResult As Integer
+            caseMatchResult = ExecCaseExprMatches(ps, es, caseExpr, selectorValue, errText)
+            If caseMatchResult = -1 Then Return 0
 
-            If UCase(caseExprNode.kind) = "CASE_IS_VALUE" Then
-                If caseExprNode.left = -1 Then
-                    errText = "exec: CASE IS expression missing"
-                    Return 0
-                End If
-
-                Dim caseIsValue As Integer
-                caseIsValue = ExecEvalNode(ps, es, caseExprNode.left, errText)
-                If errText <> "" Then Return 0
-
-                Select Case caseExprNode.op
-                Case "="
-                    matchedCase = IIf(selectorValue = caseIsValue, 1, 0)
-                Case "<>"
-                    matchedCase = IIf(selectorValue <> caseIsValue, 1, 0)
-                Case "<"
-                    matchedCase = IIf(selectorValue < caseIsValue, 1, 0)
-                Case ">"
-                    matchedCase = IIf(selectorValue > caseIsValue, 1, 0)
-                Case "<="
-                    matchedCase = IIf(selectorValue <= caseIsValue, 1, 0)
-                Case ">="
-                    matchedCase = IIf(selectorValue >= caseIsValue, 1, 0)
-                Case Else
-                    errText = "exec: CASE IS invalid operator " & caseExprNode.op
-                    Return 0
-                End Select
-            Else
-                Dim caseValue As Integer
-                caseValue = ExecEvalNode(ps, es, caseExpr, errText)
-                If errText <> "" Then Return 0
-
-                If caseValue = selectorValue Then
-                    matchedCase = 1
-                End If
+            If caseMatchResult <> 0 Then
+                matchedCase = 1
+                Exit For
             End If
-
-            If matchedCase <> 0 Then Exit For
         Next caseValuePos
 
         If matchedCase <> 0 Then
-            Dim caseBodyPos As Integer
-            For caseBodyPos = bodyStart To caseChildCount - 1
-                Dim caseBodyStmt As Integer
-                caseBodyStmt = ExecChildAt(ps, caseNode, caseBodyPos)
-                If caseBodyStmt = -1 Then
-                    errText = "exec: CASE body statement missing"
-                    Return 0
-                End If
-
-                If ExecRunStmt(ps, es, caseBodyStmt, errText) = 0 Then Return 0
-                If gExitRequest <> "" Then Return 1
-            Next caseBodyPos
-
+            Dim caseBodyResult As Integer
+            caseBodyResult = ExecRunSelectCaseBody(ps, es, caseNode, bodyStart, caseChildCount, errText)
+            If caseBodyResult = 0 Then Return 0
             Return 1
         End If
     Next casePos
 
     If elseCaseNode <> -1 Then
-        Dim elseCaseCount As Integer
-        elseCaseCount = ExecChildCount(ps, elseCaseNode)
-
-        Dim elseCasePos As Integer
-        For elseCasePos = 0 To elseCaseCount - 1
-            Dim elseStmt As Integer
-            elseStmt = ExecChildAt(ps, elseCaseNode, elseCasePos)
-            If elseStmt = -1 Then
-                errText = "exec: CASE ELSE statement missing"
-                Return 0
-            End If
-
-            If ExecRunStmt(ps, es, elseStmt, errText) = 0 Then Return 0
-            If gExitRequest <> "" Then Return 1
-        Next elseCasePos
+        Dim elseBodyResult As Integer
+        elseBodyResult = ExecRunSelectElseBody(ps, es, elseCaseNode, errText)
+        If elseBodyResult = 0 Then Return 0
     End If
 
     Return 1
@@ -558,6 +574,7 @@ Private Function ExecRunDoEachStmt(ByRef ps As ParseState, ByRef es As ExecState
             Return 0
         End If
 
+        ' DO EACH intentionally evaluates each item expression just-in-time.
         Dim deValue As Integer
         deValue = ExecEvalNode(ps, es, deItemExpr, errText)
         If errText <> "" Then Return 0
@@ -596,14 +613,19 @@ Private Function ExecRunFlowStmt(ByRef ps As ParseState, ByRef es As ExecState, 
     Select Case UCase(st.kind)
     Case "IF_STMT"
         Return ExecRunIfStmt(ps, es, stmtIdx, errText)
+
     Case "SELECT_STMT"
         Return ExecRunSelectStmt(ps, es, stmtIdx, errText)
+
     Case "FOR_STMT"
         Return ExecRunForStmt(ps, es, stmtIdx, st, errText)
+
     Case "DO_STMT"
         Return ExecRunDoStmt(ps, es, stmtIdx, st, errText)
+
     Case "FOR_EACH_STMT"
         Return ExecRunForEachStmt(ps, es, stmtIdx, st, errText)
+
     Case "DO_EACH_STMT"
         Return ExecRunDoEachStmt(ps, es, stmtIdx, st, errText)
     End Select

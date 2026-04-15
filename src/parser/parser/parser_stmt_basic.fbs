@@ -6,9 +6,21 @@ Private Function ParsePrintStmt(ByRef ps As ParseState, ByRef firstTok As Token)
         Dim exprIdx As Integer
         exprIdx = ParseExpression(ps)
         If exprIdx = -1 Then Exit Do
-        ASTAddChild ps.ast, stmtIdx, exprIdx
 
-        If MatchOp(ps, ",") = 0 And MatchOp(ps, ";") = 0 Then Exit Do
+        Dim printItem As Integer
+        printItem = ASTNewNode(ps.ast, "PRINT_ITEM", "", "", ps.ast.nodes(exprIdx).lineNo, ps.ast.nodes(exprIdx).colNo)
+        ps.ast.nodes(printItem).left = exprIdx
+
+        If MatchOp(ps, ",") Then
+            ps.ast.nodes(printItem).op = ","
+        ElseIf MatchOp(ps, ";") Then
+            ps.ast.nodes(printItem).op = ";"
+        Else
+            ps.ast.nodes(printItem).op = ""
+        End If
+
+        ASTAddChild ps.ast, stmtIdx, printItem
+        If ps.ast.nodes(printItem).op = "" Then Exit Do
     Loop
 
     Return stmtIdx
@@ -36,14 +48,69 @@ Private Function IsBasicStmtTerminator(ByRef tk As Token) As Integer
     Return 0
 End Function
 
-Function ParseCallStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
-    Dim calleeTok As Token
-    calleeTok = CurToken(ps)
-    If calleeTok.kind <> "IDENT" And calleeTok.kind <> "KEYWORD" Then
+Private Function ParseCallableName(ByRef ps As ParseState, ByRef nameOut As String) As Integer
+    Dim firstTok As Token
+    firstTok = CurToken(ps)
+    If firstTok.kind <> "IDENT" And firstTok.kind <> "KEYWORD" Then
         ps.lastError = "CALL: callee name expected"
-        Return -1
+        Return 0
     End If
+
+    nameOut = firstTok.lexeme
     AdvanceTok ps
+
+    If MatchOp(ps, ".") Then
+        Dim methodTok As Token
+        methodTok = CurToken(ps)
+        If methodTok.kind <> "IDENT" And methodTok.kind <> "KEYWORD" Then
+            ps.lastError = "CALL: method name expected after ."
+            Return 0
+        End If
+
+        nameOut &= "." & methodTok.lexeme
+        AdvanceTok ps
+    End If
+
+    Return 1
+End Function
+
+Function ParseCallStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    If MatchOp(ps, "(") Then
+        Dim canonicalCalleeName As String
+        If ParseCallableName(ps, canonicalCalleeName) = 0 Then Return -1
+
+        Dim canonicalStmtNode As Integer
+        canonicalStmtNode = MakeNodeFromToken(ps, "CALL_STMT", canonicalCalleeName, "", firstTok)
+
+        If MatchOp(ps, ",") Then
+            Do
+                Dim canonicalArgExpr As Integer
+                canonicalArgExpr = ParseExpression(ps)
+                If canonicalArgExpr = -1 Then
+                    ps.lastError = "CALL: argument expression expected"
+                    Return -1
+                End If
+                ASTAddChild ps.ast, canonicalStmtNode, canonicalArgExpr
+
+                If MatchOp(ps, ",") = 0 Then Exit Do
+            Loop
+        End If
+
+        If MatchOp(ps, ")") = 0 Then
+            ps.lastError = "CALL: missing )"
+            Return -1
+        End If
+
+        If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+            ps.lastError = "CALL: unexpected trailing tokens"
+            Return -1
+        End If
+
+        Return canonicalStmtNode
+    End If
+
+    Dim calleeName As String
+    If ParseCallableName(ps, calleeName) = 0 Then Return -1
 
     If MatchOp(ps, "(") = 0 Then
         ps.lastError = "CALL: missing ("
@@ -51,7 +118,7 @@ Function ParseCallStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integ
     End If
 
     Dim stmtNode As Integer
-    stmtNode = MakeNodeFromToken(ps, "CALL_STMT", calleeTok.lexeme, "", firstTok)
+    stmtNode = MakeNodeFromToken(ps, "CALL_STMT", calleeName, "", firstTok)
 
     If MatchOp(ps, ")") = 0 Then
         Do

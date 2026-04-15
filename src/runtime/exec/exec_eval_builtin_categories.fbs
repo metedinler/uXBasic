@@ -1,3 +1,102 @@
+Private Function ExecEvalDllCallCore(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argStartPos As Integer, ByRef errText As String) As Integer
+    Dim ffiArgCount As Integer
+    ffiArgCount = ExecChildCount(ps, callNodeIdx)
+
+    If signatureText = "BYREF" Then
+        Dim byrefNode As Integer
+        byrefNode = ExecChildAt(ps, callNodeIdx, argStartPos)
+        If byrefNode = -1 Or UCase(ps.ast.nodes(byrefNode).kind) <> "IDENT" Then
+            errText = "exec: CALL(DLL) BYREF requires addressable target argument (" & LTrim(Str(UXB_FFI_ERR_BYREF_TARGET)) & ")"
+            Return 0
+        End If
+    End If
+
+    Dim ai As Integer
+    For ai = argStartPos To ffiArgCount - 1
+        Dim argNode As Integer
+        argNode = ExecChildAt(ps, callNodeIdx, ai)
+        If argNode = -1 Then
+            errText = "exec: CALL(DLL) argument missing"
+            Return 0
+        End If
+
+        If ExecValidateDllMarshalArg(ps, es, argNode, signatureText, errText) = 0 Then Return 0
+    Next ai
+
+    Dim denyReason As String
+    Dim allowDecision As Integer
+    Dim requireAttestation As Integer
+    Dim ffiMode As String
+    ffiMode = ExecGetFfiPolicyMode()
+    requireAttestation = IIf(ffiMode = "ENFORCE", 1, 0)
+    allowDecision = ExecDllCallIsAllowlisted(dllName, symbolName, signatureText, callingConventionText, requireAttestation, denyReason)
+    ExecAuditDllPolicy dllName, symbolName, signatureText, callingConventionText, ffiMode, allowDecision, denyReason
+
+    If allowDecision = 0 And ffiMode = "ENFORCE" Then
+        If denyReason = "deny-policy-load-failed" Then
+            errText = "exec: CALL(DLL) denied by policy load failed (" & LTrim(Str(UXB_FFI_ERR_POLICY_LOAD_FAILED)) & ")"
+            Return 0
+        End If
+        If denyReason = "deny-attestation-required" Then
+            errText = "exec: CALL(DLL) denied by policy attestation required (" & LTrim(Str(UXB_FFI_ERR_POLICY_ATTEST_REQUIRED)) & ")"
+            Return 0
+        End If
+        If denyReason = "deny-hash-extract-failed" Then
+            errText = "exec: CALL(DLL) denied by policy hash extraction failed (" & LTrim(Str(UXB_FFI_ERR_POLICY_HASH_EXTRACT_FAILED)) & ")"
+            Return 0
+        End If
+        If denyReason = "deny-hash-mismatch" Then
+            errText = "exec: CALL(DLL) denied by policy hash mismatch (" & LTrim(Str(UXB_FFI_ERR_POLICY_HASH_MISMATCH)) & ")"
+            Return 0
+        End If
+        If denyReason = "deny-signer-extract-failed" Then
+            errText = "exec: CALL(DLL) denied by policy signer extraction failed (" & LTrim(Str(UXB_FFI_ERR_POLICY_SIGNER_EXTRACT_FAILED)) & ")"
+            Return 0
+        End If
+        If denyReason = "deny-signer-mismatch" Then
+            errText = "exec: CALL(DLL) denied by policy signer mismatch (" & LTrim(Str(UXB_FFI_ERR_POLICY_SIGNER_MISMATCH)) & ")"
+            Return 0
+        End If
+        errText = "exec: CALL(DLL) denied by policy (" & LTrim(Str(UXB_FFI_ERR_POLICY_DENY)) & ")"
+        Return 0
+    End If
+
+    Dim resolverMode As String
+    resolverMode = ExecGetFfiResolverMode()
+
+    Dim ffiArgRuntimeCount As Integer
+    ffiArgRuntimeCount = ffiArgCount - argStartPos
+    If ffiArgRuntimeCount < 0 Then ffiArgRuntimeCount = 0
+
+    Dim cleanupType As String
+    Dim resolverErr As String
+    If ExecResolveX86InteropTarget(dllName, symbolName, signatureText, callingConventionText, ffiArgRuntimeCount, cleanupType, resolverErr) = 0 Then
+        If resolverMode = "ENFORCE" Then
+            errText = resolverErr
+            Return 0
+        End If
+        If resolverErr <> "" Then DiagUyari "FFI x86 resolver report-only: " & resolverErr
+    Else
+        DiagBilgi "FFI x86 resolver matched cleanup=" & cleanupType & " args=" & LTrim(Str(ffiArgRuntimeCount))
+
+        Dim invokedValue As Integer
+        Dim invokedOut As Integer
+        Dim invokeErr As String
+        If ExecTryInvokeResolvedX86I32(ps, es, callNodeIdx, argStartPos, dllName, symbolName, signatureText, callingConventionText, ffiArgRuntimeCount, invokedValue, invokedOut, invokeErr) = 0 Then
+            If resolverMode = "ENFORCE" Then
+                errText = invokeErr
+                Return 0
+            End If
+            If invokeErr <> "" Then DiagUyari "FFI x86 invoke proof report-only: " & invokeErr
+        ElseIf invokedOut <> 0 Then
+            Return invokedValue
+        End If
+    End If
+
+    ' FFI report-only path: marshalling + policy checks pass, call stays deterministic no-op.
+    Return 0
+End Function
+
 Private Function ExecEvalBuiltinFfiCategory(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
     Select Case callName
     Case "DLL"
@@ -69,55 +168,7 @@ Private Function ExecEvalBuiltinFfiCategory(ByRef ps As ParseState, ByRef es As 
             End If
         End If
 
-        If signatureText = "BYREF" Then
-            Dim byrefNode As Integer
-            byrefNode = ExecChildAt(ps, callNodeIdx, argStartPos)
-            If byrefNode = -1 Or UCase(ps.ast.nodes(byrefNode).kind) <> "IDENT" Then
-                errText = "exec: CALL(DLL) BYREF requires addressable target argument (" & LTrim(Str(UXB_FFI_ERR_BYREF_TARGET)) & ")"
-                Return 0
-            End If
-        End If
-
-        Dim denyReason As String
-        Dim allowDecision As Integer
-        Dim requireAttestation As Integer
-        Dim ffiMode As String
-        ffiMode = ExecGetFfiPolicyMode()
-        requireAttestation = IIf(ffiMode = "ENFORCE", 1, 0)
-        allowDecision = ExecDllCallIsAllowlisted(dllName, symbolName, signatureText, callingConventionText, requireAttestation, denyReason)
-        ExecAuditDllPolicy dllName, symbolName, signatureText, callingConventionText, ffiMode, allowDecision, denyReason
-
-        If allowDecision = 0 And ffiMode = "ENFORCE" Then
-            If denyReason = "deny-policy-load-failed" Then
-                errText = "exec: CALL(DLL) denied by policy load failed (" & LTrim(Str(UXB_FFI_ERR_POLICY_LOAD_FAILED)) & ")"
-                Return 0
-            End If
-            If denyReason = "deny-attestation-required" Then
-                errText = "exec: CALL(DLL) denied by policy attestation required (" & LTrim(Str(UXB_FFI_ERR_POLICY_ATTEST_REQUIRED)) & ")"
-                Return 0
-            End If
-            If denyReason = "deny-hash-extract-failed" Then
-                errText = "exec: CALL(DLL) denied by policy hash extraction failed (" & LTrim(Str(UXB_FFI_ERR_POLICY_HASH_EXTRACT_FAILED)) & ")"
-                Return 0
-            End If
-            If denyReason = "deny-hash-mismatch" Then
-                errText = "exec: CALL(DLL) denied by policy hash mismatch (" & LTrim(Str(UXB_FFI_ERR_POLICY_HASH_MISMATCH)) & ")"
-                Return 0
-            End If
-            If denyReason = "deny-signer-extract-failed" Then
-                errText = "exec: CALL(DLL) denied by policy signer extraction failed (" & LTrim(Str(UXB_FFI_ERR_POLICY_SIGNER_EXTRACT_FAILED)) & ")"
-                Return 0
-            End If
-            If denyReason = "deny-signer-mismatch" Then
-                errText = "exec: CALL(DLL) denied by policy signer mismatch (" & LTrim(Str(UXB_FFI_ERR_POLICY_SIGNER_MISMATCH)) & ")"
-                Return 0
-            End If
-            errText = "exec: CALL(DLL) denied by policy (" & LTrim(Str(UXB_FFI_ERR_POLICY_DENY)) & ")"
-            Return 0
-        End If
-
-        ' FFI-1 report-only mode: do not execute external call yet, return deterministic no-op value.
-        Return 0
+        Return ExecEvalDllCallCore(ps, es, callNodeIdx, dllName, symbolName, signatureText, callingConventionText, argStartPos, errText)
     End Select
 
     errText = "exec: unsupported call " & callName

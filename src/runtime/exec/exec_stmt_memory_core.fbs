@@ -1,0 +1,494 @@
+Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim lhs As Integer
+    lhs = st.left
+    If lhs = -1 Then
+        errText = "exec: assign lhs missing"
+        Return 0
+    End If
+
+    If UCase(ps.ast.nodes(lhs).kind) <> "IDENT" Then
+        errText = "exec: assign lhs must be ident"
+        Return 0
+    End If
+
+    Dim rhsValue As ExecValue
+    If ExecEvalExpression(ps, st.right, es, rhsValue, errText) = 0 Then Return 0
+
+    Dim targetName As String
+    targetName = ps.ast.nodes(lhs).value
+
+    Dim curValue As ExecValue
+    If ExecGetVarValue(es, targetName, curValue) = 0 Then
+        ExecValueInit curValue
+    End If
+
+    Dim opText As String
+    opText = Trim(st.op)
+    If opText = "" Then opText = "="
+
+    Dim outValue As ExecValue
+    Select Case opText
+    Case "="
+        outValue = rhsValue
+    Case "+="
+        If curValue.valueType = "FLOAT" Or rhsValue.valueType = "FLOAT" Then
+            ExecValueSetFloat outValue, ExecValueToFloat(curValue) + ExecValueToFloat(rhsValue)
+        Else
+            ExecValueSetInteger outValue, ExecValueToInteger(curValue) + ExecValueToInteger(rhsValue)
+        End If
+    Case "-="
+        If curValue.valueType = "FLOAT" Or rhsValue.valueType = "FLOAT" Then
+            ExecValueSetFloat outValue, ExecValueToFloat(curValue) - ExecValueToFloat(rhsValue)
+        Else
+            ExecValueSetInteger outValue, ExecValueToInteger(curValue) - ExecValueToInteger(rhsValue)
+        End If
+    Case "*="
+        If curValue.valueType = "FLOAT" Or rhsValue.valueType = "FLOAT" Then
+            ExecValueSetFloat outValue, ExecValueToFloat(curValue) * ExecValueToFloat(rhsValue)
+        Else
+            ExecValueSetInteger outValue, ExecValueToInteger(curValue) * ExecValueToInteger(rhsValue)
+        End If
+    Case "/="
+        If ExecValueToFloat(rhsValue) = 0.0 Then
+            errText = "exec: division by zero"
+            Return 0
+        End If
+        ExecValueSetFloat outValue, ExecValueToFloat(curValue) / ExecValueToFloat(rhsValue)
+    Case "\\="
+        If ExecValueToInteger(rhsValue) = 0 Then
+            errText = "exec: integer division by zero"
+            Return 0
+        End If
+        ExecValueSetInteger outValue, ExecValueToInteger(curValue) \ ExecValueToInteger(rhsValue)
+    Case "=+"
+        outValue = rhsValue
+    Case "=-"
+        If rhsValue.valueType = "FLOAT" Then
+            ExecValueSetFloat outValue, -ExecValueToFloat(rhsValue)
+        Else
+            ExecValueSetInteger outValue, -ExecValueToInteger(rhsValue)
+        End If
+    Case Else
+        errText = "exec: unsupported assign op " & opText
+        Return 0
+    End Select
+
+    ExecSetVarValue es, targetName, outValue
+    Return 1
+End Function
+
+Private Function ExecRunIncDecStmt(ByRef ps As ParseState, ByRef es As ExecState, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim lhs2 As Integer
+    lhs2 = st.left
+    If lhs2 = -1 Or UCase(ps.ast.nodes(lhs2).kind) <> "IDENT" Then
+        errText = "exec: inc/dec target must be ident"
+        Return 0
+    End If
+
+    Dim curVal As Integer
+    curVal = ExecGetVar(es, ps.ast.nodes(lhs2).value)
+
+    If st.op = "++" Then
+        ExecSetVar es, ps.ast.nodes(lhs2).value, curVal + 1
+    ElseIf st.op = "--" Then
+        ExecSetVar es, ps.ast.nodes(lhs2).value, curVal - 1
+    Else
+        errText = "exec: unknown inc/dec op"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunRandomizeStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim randomizeCount As Integer
+    randomizeCount = ExecChildCount(ps, stmtIdx)
+
+    If randomizeCount = 0 Then
+        Randomize Timer
+        Return 1
+    End If
+
+    Dim seedExpr As Integer
+    seedExpr = ExecChildAt(ps, stmtIdx, 0)
+    If seedExpr = -1 Then
+        errText = "exec: RANDOMIZE seed missing"
+        Return 0
+    End If
+
+    Dim seedValue As Integer
+    seedValue = ExecEvalNode(ps, es, seedExpr, errText)
+    If errText <> "" Then Return 0
+
+    Randomize seedValue
+    Return 1
+End Function
+
+Private Function ExecRunPokeBStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim pb0 As Integer
+    Dim pb1 As Integer
+    pb0 = ExecChildAt(ps, stmtIdx, 0)
+    pb1 = ExecChildAt(ps, stmtIdx, 1)
+    If pb0 = -1 Or pb1 = -1 Then
+        errText = "exec: POKEB args missing"
+        Return 0
+    End If
+
+    Dim pbAddr As Integer
+    Dim pbVal As Integer
+    pbAddr = ExecEvalNode(ps, es, pb0, errText)
+    If errText <> "" Then Return 0
+    pbVal = ExecEvalNode(ps, es, pb1, errText)
+    If errText <> "" Then Return 0
+
+    If VMemPokeB(CUInt(pbAddr), pbVal) = 0 Then
+        errText = "exec: POKEB out of range"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunPokeWStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim pw0 As Integer
+    Dim pw1 As Integer
+    pw0 = ExecChildAt(ps, stmtIdx, 0)
+    pw1 = ExecChildAt(ps, stmtIdx, 1)
+    If pw0 = -1 Or pw1 = -1 Then
+        errText = "exec: POKEW args missing"
+        Return 0
+    End If
+
+    Dim pwAddr As Integer
+    Dim pwVal As Integer
+    pwAddr = ExecEvalNode(ps, es, pw0, errText)
+    If errText <> "" Then Return 0
+    pwVal = ExecEvalNode(ps, es, pw1, errText)
+    If errText <> "" Then Return 0
+
+    If VMemPokeW(CUInt(pwAddr), pwVal) = 0 Then
+        errText = "exec: POKEW out of range"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunPokeDStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim pd0 As Integer
+    Dim pd1 As Integer
+    pd0 = ExecChildAt(ps, stmtIdx, 0)
+    pd1 = ExecChildAt(ps, stmtIdx, 1)
+    If pd0 = -1 Or pd1 = -1 Then
+        errText = "exec: POKED args missing"
+        Return 0
+    End If
+
+    Dim pdAddr As Integer
+    Dim pdVal As Integer
+    pdAddr = ExecEvalNode(ps, es, pd0, errText)
+    If errText <> "" Then Return 0
+    pdVal = ExecEvalNode(ps, es, pd1, errText)
+    If errText <> "" Then Return 0
+
+    If VMemPokeD(CUInt(pdAddr), pdVal) = 0 Then
+        errText = "exec: POKED out of range"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunMemCopyBStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim mc0 As Integer
+    Dim mc1 As Integer
+    Dim mc2 As Integer
+    mc0 = ExecChildAt(ps, stmtIdx, 0)
+    mc1 = ExecChildAt(ps, stmtIdx, 1)
+    mc2 = ExecChildAt(ps, stmtIdx, 2)
+    If mc0 = -1 Or mc1 = -1 Or mc2 = -1 Then
+        errText = "exec: MEMCOPYB args missing"
+        Return 0
+    End If
+
+    Dim srcAddr As Integer
+    Dim dstAddr As Integer
+    Dim copyLen As Integer
+    srcAddr = ExecEvalNode(ps, es, mc0, errText)
+    If errText <> "" Then Return 0
+    dstAddr = ExecEvalNode(ps, es, mc1, errText)
+    If errText <> "" Then Return 0
+    copyLen = ExecEvalNode(ps, es, mc2, errText)
+    If errText <> "" Then Return 0
+
+    If copyLen < 0 Then
+        errText = "exec: MEMCOPYB negative length"
+        Return 0
+    End If
+
+    If VMemCopyB(CUInt(srcAddr), CUInt(dstAddr), CUInt(copyLen)) = 0 Then
+        errText = "exec: MEMCOPYB out of range"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunMemFillBStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim mf0 As Integer
+    Dim mf1 As Integer
+    Dim mf2 As Integer
+    mf0 = ExecChildAt(ps, stmtIdx, 0)
+    mf1 = ExecChildAt(ps, stmtIdx, 1)
+    mf2 = ExecChildAt(ps, stmtIdx, 2)
+    If mf0 = -1 Or mf1 = -1 Or mf2 = -1 Then
+        errText = "exec: MEMFILLB args missing"
+        Return 0
+    End If
+
+    Dim fillAddr As Integer
+    Dim fillVal As Integer
+    Dim fillLen As Integer
+    fillAddr = ExecEvalNode(ps, es, mf0, errText)
+    If errText <> "" Then Return 0
+    fillVal = ExecEvalNode(ps, es, mf1, errText)
+    If errText <> "" Then Return 0
+    fillLen = ExecEvalNode(ps, es, mf2, errText)
+    If errText <> "" Then Return 0
+
+    If fillLen < 0 Then
+        errText = "exec: MEMFILLB negative length"
+        Return 0
+    End If
+
+    If VMemFillB(CUInt(fillAddr), fillVal, CUInt(fillLen)) = 0 Then
+        errText = "exec: MEMFILLB out of range"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunPokeSStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim ps0 As Integer
+    Dim ps1 As Integer
+    ps0 = ExecChildAt(ps, stmtIdx, 0)
+    ps1 = ExecChildAt(ps, stmtIdx, 1)
+    If ps0 = -1 Or ps1 = -1 Then
+        errText = "exec: POKES args missing"
+        Return 0
+    End If
+
+    Dim pokeAddr As Integer
+    pokeAddr = ExecEvalNode(ps, es, ps0, errText)
+    If errText <> "" Then Return 0
+
+    Dim textValue As String
+    If ExecEvalNodeAsText(ps, es, ps1, textValue, errText) = 0 Then Return 0
+
+    If VMemPokeS(CUInt(pokeAddr), textValue) = 0 Then
+        errText = "exec: POKES out of range"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunMemCopyWStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim mcw0 As Integer
+    Dim mcw1 As Integer
+    Dim mcw2 As Integer
+    mcw0 = ExecChildAt(ps, stmtIdx, 0)
+    mcw1 = ExecChildAt(ps, stmtIdx, 1)
+    mcw2 = ExecChildAt(ps, stmtIdx, 2)
+    If mcw0 = -1 Or mcw1 = -1 Or mcw2 = -1 Then
+        errText = "exec: MEMCOPYW args missing"
+        Return 0
+    End If
+
+    Dim srcW As Integer
+    Dim dstW As Integer
+    Dim lenW As Integer
+    srcW = ExecEvalNode(ps, es, mcw0, errText)
+    If errText <> "" Then Return 0
+    dstW = ExecEvalNode(ps, es, mcw1, errText)
+    If errText <> "" Then Return 0
+    lenW = ExecEvalNode(ps, es, mcw2, errText)
+    If errText <> "" Then Return 0
+
+    If lenW < 0 Then
+        errText = "exec: MEMCOPYW negative length"
+        Return 0
+    End If
+
+    If VMemCopyW(CUInt(srcW), CUInt(dstW), CUInt(lenW)) = 0 Then
+        errText = "exec: MEMCOPYW out of range"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunMemCopyDStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim mcd0 As Integer
+    Dim mcd1 As Integer
+    Dim mcd2 As Integer
+    mcd0 = ExecChildAt(ps, stmtIdx, 0)
+    mcd1 = ExecChildAt(ps, stmtIdx, 1)
+    mcd2 = ExecChildAt(ps, stmtIdx, 2)
+    If mcd0 = -1 Or mcd1 = -1 Or mcd2 = -1 Then
+        errText = "exec: MEMCOPYD args missing"
+        Return 0
+    End If
+
+    Dim srcD As Integer
+    Dim dstD As Integer
+    Dim lenD As Integer
+    srcD = ExecEvalNode(ps, es, mcd0, errText)
+    If errText <> "" Then Return 0
+    dstD = ExecEvalNode(ps, es, mcd1, errText)
+    If errText <> "" Then Return 0
+    lenD = ExecEvalNode(ps, es, mcd2, errText)
+    If errText <> "" Then Return 0
+
+    If lenD < 0 Then
+        errText = "exec: MEMCOPYD negative length"
+        Return 0
+    End If
+
+    If VMemCopyD(CUInt(srcD), CUInt(dstD), CUInt(lenD)) = 0 Then
+        errText = "exec: MEMCOPYD out of range"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunMemFillWStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim mfw0 As Integer
+    Dim mfw1 As Integer
+    Dim mfw2 As Integer
+    mfw0 = ExecChildAt(ps, stmtIdx, 0)
+    mfw1 = ExecChildAt(ps, stmtIdx, 1)
+    mfw2 = ExecChildAt(ps, stmtIdx, 2)
+    If mfw0 = -1 Or mfw1 = -1 Or mfw2 = -1 Then
+        errText = "exec: MEMFILLW args missing"
+        Return 0
+    End If
+
+    Dim fillWAddr As Integer
+    Dim fillWVal As Integer
+    Dim fillWLen As Integer
+    fillWAddr = ExecEvalNode(ps, es, mfw0, errText)
+    If errText <> "" Then Return 0
+    fillWVal = ExecEvalNode(ps, es, mfw1, errText)
+    If errText <> "" Then Return 0
+    fillWLen = ExecEvalNode(ps, es, mfw2, errText)
+    If errText <> "" Then Return 0
+
+    If fillWLen < 0 Then
+        errText = "exec: MEMFILLW negative length"
+        Return 0
+    End If
+
+    If VMemFillW(CUInt(fillWAddr), fillWVal, CUInt(fillWLen)) = 0 Then
+        errText = "exec: MEMFILLW out of range"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunMemFillDStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim mfd0 As Integer
+    Dim mfd1 As Integer
+    Dim mfd2 As Integer
+    mfd0 = ExecChildAt(ps, stmtIdx, 0)
+    mfd1 = ExecChildAt(ps, stmtIdx, 1)
+    mfd2 = ExecChildAt(ps, stmtIdx, 2)
+    If mfd0 = -1 Or mfd1 = -1 Or mfd2 = -1 Then
+        errText = "exec: MEMFILLD args missing"
+        Return 0
+    End If
+
+    Dim fillDAddr As Integer
+    Dim fillDVal As Integer
+    Dim fillDLen As Integer
+    fillDAddr = ExecEvalNode(ps, es, mfd0, errText)
+    If errText <> "" Then Return 0
+    fillDVal = ExecEvalNode(ps, es, mfd1, errText)
+    If errText <> "" Then Return 0
+    fillDLen = ExecEvalNode(ps, es, mfd2, errText)
+    If errText <> "" Then Return 0
+
+    If fillDLen < 0 Then
+        errText = "exec: MEMFILLD negative length"
+        Return 0
+    End If
+
+    If VMemFillD(CUInt(fillDAddr), fillDVal, CUInt(fillDLen)) = 0 Then
+        errText = "exec: MEMFILLD out of range"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRunSetNewOffsetStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim so0 As Integer
+    Dim so1 As Integer
+    so0 = ExecChildAt(ps, stmtIdx, 0)
+    so1 = ExecChildAt(ps, stmtIdx, 1)
+    If so0 = -1 Or so1 = -1 Then
+        errText = "exec: SETNEWOFFSET args missing"
+        Return 0
+    End If
+
+    If UCase(ps.ast.nodes(so0).kind) <> "IDENT" Then
+        errText = "exec: SETNEWOFFSET target must be ident"
+        Return 0
+    End If
+
+    Dim newAddr As Integer
+    newAddr = ExecEvalNode(ps, es, so1, errText)
+    If errText <> "" Then Return 0
+
+    ExecSetVarAddr es, ps.ast.nodes(so0).value, CUInt(newAddr)
+    ExecSetVar es, ps.ast.nodes(so0).value, newAddr
+    Return 1
+End Function
+
+Private Function ExecRunMemoryCoreStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Select Case UCase(st.kind)
+    Case "ASSIGN_STMT"
+        Return ExecRunAssignStmt(ps, es, st, errText)
+    Case "INCDEC_STMT"
+        Return ExecRunIncDecStmt(ps, es, st, errText)
+    Case "RANDOMIZE_STMT"
+        Return ExecRunRandomizeStmt(ps, es, stmtIdx, errText)
+    Case "POKEB_STMT"
+        Return ExecRunPokeBStmt(ps, es, stmtIdx, errText)
+    Case "POKEW_STMT"
+        Return ExecRunPokeWStmt(ps, es, stmtIdx, errText)
+    Case "POKED_STMT"
+        Return ExecRunPokeDStmt(ps, es, stmtIdx, errText)
+    Case "MEMCOPYB_STMT"
+        Return ExecRunMemCopyBStmt(ps, es, stmtIdx, errText)
+    Case "MEMFILLB_STMT"
+        Return ExecRunMemFillBStmt(ps, es, stmtIdx, errText)
+    Case "POKES_STMT"
+        Return ExecRunPokeSStmt(ps, es, stmtIdx, errText)
+    Case "MEMCOPYW_STMT"
+        Return ExecRunMemCopyWStmt(ps, es, stmtIdx, errText)
+    Case "MEMCOPYD_STMT"
+        Return ExecRunMemCopyDStmt(ps, es, stmtIdx, errText)
+    Case "MEMFILLW_STMT"
+        Return ExecRunMemFillWStmt(ps, es, stmtIdx, errText)
+    Case "MEMFILLD_STMT"
+        Return ExecRunMemFillDStmt(ps, es, stmtIdx, errText)
+    Case "SETNEWOFFSET_STMT"
+        Return ExecRunSetNewOffsetStmt(ps, es, stmtIdx, errText)
+    End Select
+
+    Return -2
+End Function

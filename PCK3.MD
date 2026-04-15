@@ -376,3 +376,41 @@ Not:
 
 PCK3, PCK2'yi koruyup daha okunur ve teknik bir katman ekler.
 Ana ilke: dokuman, compiler kod gercegine sadik kalir.
+
+## EK-A: Yeni Hata Komutlari ve Compiler Koprusu
+
+Bu ek, cekirdege alinacak yeni hata komutlarini muhendislik perspektifinden ozetler.
+
+### A.1 Komut seti
+
+1. `TRY/CATCH/FINALLY/END TRY`
+2. `THROW code[, message[, detail]]`
+3. `ASSERT expr[, message]`
+
+### A.2 Hata nesnesi standardi
+
+Tek ve ortak nesne: `ERROR`
+
+Alanlar:
+
+- `code`, `message`, `detail`
+- `module_name`, `source_file`
+- `line`, `column`
+- `phase` (LEX/PARSE/SEMANTIC/RUNTIME/CODEGEN)
+
+Amac:
+
+1. Compiler tarafinda uretilen hata bilgisini programciya dogrudan acmak.
+2. Runtime fail-fast ile compiler diagnostigini ayni modelde birlestirmek.
+3. uXBasic icinden hata odakli akislari (loglama, fallback, telemetry) mumkun kilmak.
+
+### A.3 MIR/Codegen etkisi
+
+1. TRY/CATCH icin control-flow edge'leri eklenecek.
+2. FINALLY blogu, her cikis yolunda garantili calisacak sekilde lower edilecek.
+3. THROW, handler'a sicrayan bir control transfer olarak emit edilecek.
+4. ASSERT, debug/release politika secimine gore trap/no-op veya runtime check uretecek.
+
+Not:
+
+- Bu bolum tasarim-kontrat katmanidir; kapanis kaniti test + matris lane'leriyle verilecektir.

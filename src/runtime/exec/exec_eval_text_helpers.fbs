@@ -1,0 +1,347 @@
+Private Function ExecBuiltinGetArgNode(ByRef ps As ParseState, ByVal callNodeIdx As Integer, ByRef callName As String, ByRef argNodeIdx As Integer, ByRef errText As String) As Integer
+    argNodeIdx = ExecChildAt(ps, callNodeIdx, 0)
+    If argNodeIdx = -1 Then
+        errText = "exec: " & callName & " arg missing"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function ExecBuiltinArgAsInt(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef callName As String, ByRef valueOut As Integer, ByRef errText As String, ByVal allowString As Integer) As Integer
+    Dim a0 As Integer
+    If ExecBuiltinGetArgNode(ps, callNodeIdx, callName, a0, errText) = 0 Then Return 0
+
+    Dim argNode As ASTNode
+    argNode = ps.ast.nodes(a0)
+    If allowString <> 0 And UCase(argNode.kind) = "STRING" Then
+        valueOut = ValInt(argNode.value)
+        Return 1
+    End If
+
+    valueOut = ExecEvalNode(ps, es, a0, errText)
+    If errText <> "" Then Return 0
+    Return 1
+End Function
+
+Private Function ExecBuiltinTextMidCall( _
+    ByRef ps As ParseState, ByRef es As ExecState, ByVal callExprIdx As Integer, _
+    ByRef textOut As String, ByRef errText As String _
+) As Integer
+    Dim midArgc As Integer
+    midArgc = ExecChildCount(ps, callExprIdx)
+    If midArgc < 2 Or midArgc > 3 Then
+        errText = "exec: MID expects 2 or 3 arguments"
+        Return 0
+    End If
+
+    Dim midSrcNode As Integer
+    Dim midStartNode As Integer
+    midSrcNode = ExecChildAt(ps, callExprIdx, 0)
+    midStartNode = ExecChildAt(ps, callExprIdx, 1)
+    If midSrcNode = -1 Or midStartNode = -1 Then
+        errText = "exec: MID args missing"
+        Return 0
+    End If
+
+    Dim midSrc As String
+    If ExecEvalNodeAsText(ps, es, midSrcNode, midSrc, errText) = 0 Then Return 0
+
+    Dim midStart As Integer
+    midStart = ExecEvalNode(ps, es, midStartNode, errText)
+    If errText <> "" Then Return 0
+    If midStart < 1 Then
+        errText = "exec: MID start must be >= 1"
+        Return 0
+    End If
+
+    If midStart > Len(midSrc) Then
+        textOut = ""
+        Return 1
+    End If
+
+    If midArgc = 2 Then
+        textOut = Mid(midSrc, midStart)
+        Return 1
+    End If
+
+    Dim midLenNode As Integer
+    midLenNode = ExecChildAt(ps, callExprIdx, 2)
+    If midLenNode = -1 Then
+        errText = "exec: MID length arg missing"
+        Return 0
+    End If
+
+    Dim midLen As Integer
+    midLen = ExecEvalNode(ps, es, midLenNode, errText)
+    If errText <> "" Then Return 0
+    If midLen < 0 Then
+        errText = "exec: MID length must be >= 0"
+        Return 0
+    End If
+
+    textOut = Mid(midSrc, midStart, midLen)
+    Return 1
+End Function
+
+Private Function ExecBuiltinTextSpaceCall( _
+    ByRef ps As ParseState, ByRef es As ExecState, ByVal callExprIdx As Integer, _
+    ByRef callName As String, ByRef textOut As String, ByRef errText As String _
+) As Integer
+    Dim spaceCount As Integer
+    If ExecBuiltinArgAsInt(ps, es, callExprIdx, callName, spaceCount, errText, 1) = 0 Then Return 0
+    If spaceCount < 0 Then
+        errText = "exec: SPACE count must be >= 0"
+        Return 0
+    End If
+    If spaceCount > EXEC_MAX_TEXT_LEN Then
+        errText = "exec: SPACE count too large"
+        Return 0
+    End If
+
+    textOut = Space(spaceCount)
+    Return 1
+End Function
+
+Private Function ExecBuiltinTextStringCall( _
+    ByRef ps As ParseState, ByRef es As ExecState, ByVal callExprIdx As Integer, _
+    ByRef textOut As String, ByRef errText As String _
+) As Integer
+    Dim stringArgc As Integer
+    stringArgc = ExecChildCount(ps, callExprIdx)
+    If stringArgc <> 2 Then
+        errText = "exec: STRING expects 2 arguments"
+        Return 0
+    End If
+
+    Dim stringCountNode As Integer
+    Dim stringCharNode As Integer
+    stringCountNode = ExecChildAt(ps, callExprIdx, 0)
+    stringCharNode = ExecChildAt(ps, callExprIdx, 1)
+    If stringCountNode = -1 Or stringCharNode = -1 Then
+        errText = "exec: STRING args missing"
+        Return 0
+    End If
+
+    Dim stringCount As Integer
+    stringCount = ExecEvalNode(ps, es, stringCountNode, errText)
+    If errText <> "" Then Return 0
+    If stringCount < 0 Then
+        errText = "exec: STRING count must be >= 0"
+        Return 0
+    End If
+    If stringCount > EXEC_MAX_TEXT_LEN Then
+        errText = "exec: STRING count too large"
+        Return 0
+    End If
+
+    Dim stringCharCode As Integer
+    Dim stringCharAst As ASTNode
+    stringCharAst = ps.ast.nodes(stringCharNode)
+    If UCase(stringCharAst.kind) = "STRING" Then
+        If Len(stringCharAst.value) = 0 Then
+            errText = "exec: STRING char arg empty"
+            Return 0
+        End If
+        stringCharCode = Asc(Left(stringCharAst.value, 1))
+    Else
+        stringCharCode = ExecEvalNode(ps, es, stringCharNode, errText)
+        If errText <> "" Then Return 0
+    End If
+
+    If stringCharCode < 0 Or stringCharCode > 255 Then
+        errText = "exec: STRING char code range error"
+        Return 0
+    End If
+
+    textOut = String(stringCount, stringCharCode)
+    Return 1
+End Function
+
+Private Function ExecBuiltinArgAsText( _
+    ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, _
+    ByRef callName As String, ByRef textOut As String, ByRef errText As String _
+) As Integer
+    Dim a0 As Integer
+    If ExecBuiltinGetArgNode(ps, callNodeIdx, callName, a0, errText) = 0 Then Return 0
+
+    Dim argNode As ASTNode
+    argNode = ps.ast.nodes(a0)
+
+    If UCase(argNode.kind) = "STRING" Then
+        textOut = argNode.value
+        Return 1
+    End If
+
+    If UCase(argNode.kind) = "CALL_EXPR" Then
+        Dim textCallName As String
+        textCallName = UCase(Trim(argNode.value))
+
+        Select Case textCallName
+        Case "STR"
+            Dim strArgNode As Integer
+            strArgNode = ExecChildAt(ps, a0, 0)
+            If strArgNode = -1 Then
+                errText = "exec: STR arg missing"
+                Return 0
+            End If
+
+            Dim strValue As ExecValue
+            If ExecEvalExpression(ps, strArgNode, es, strValue, errText) = 0 Then Return 0
+            textOut = ExecValueToString(strValue)
+            Return 1
+
+        Case "UCASE"
+            Dim ucSrc As String
+            If ExecBuiltinArgAsText(ps, es, a0, textCallName, ucSrc, errText) = 0 Then Return 0
+            textOut = UCase(ucSrc)
+            Return 1
+
+        Case "LCASE"
+            Dim lcSrc As String
+            If ExecBuiltinArgAsText(ps, es, a0, textCallName, lcSrc, errText) = 0 Then Return 0
+            textOut = LCase(lcSrc)
+            Return 1
+
+        Case "CHR"
+            Dim chrValue As Integer
+            If ExecBuiltinArgAsInt(ps, es, a0, textCallName, chrValue, errText, 1) = 0 Then Return 0
+            If chrValue < 0 Or chrValue > 255 Then
+                errText = "exec: CHR range error"
+                Return 0
+            End If
+            textOut = Chr(chrValue)
+            Return 1
+
+        Case "LTRIM"
+            Dim ltrimSrc As String
+            If ExecBuiltinArgAsText(ps, es, a0, textCallName, ltrimSrc, errText) = 0 Then Return 0
+            textOut = LTrim(ltrimSrc)
+            Return 1
+
+        Case "RTRIM"
+            Dim rtrimSrc As String
+            If ExecBuiltinArgAsText(ps, es, a0, textCallName, rtrimSrc, errText) = 0 Then Return 0
+            textOut = RTrim(rtrimSrc)
+            Return 1
+
+        Case "MID"
+            If ExecBuiltinTextMidCall(ps, es, a0, textOut, errText) = 0 Then Return 0
+            Return 1
+
+        Case "SPACE"
+            If ExecBuiltinTextSpaceCall(ps, es, a0, textCallName, textOut, errText) = 0 Then Return 0
+            Return 1
+
+        Case "STRING"
+            If ExecBuiltinTextStringCall(ps, es, a0, textOut, errText) = 0 Then Return 0
+            Return 1
+        End Select
+    End If
+
+    Dim v As Integer
+    v = ExecEvalNode(ps, es, a0, errText)
+    If errText <> "" Then Return 0
+
+    textOut = LTrim(Str(v))
+    Return 1
+End Function
+
+Private Function ExecTryEvalCallExprAsText(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef textOut As String, ByRef errText As String, ByRef handledOut As Integer) As Integer
+    Dim callNode As ASTNode
+    callNode = ps.ast.nodes(callNodeIdx)
+
+    Dim textCallName As String
+    textCallName = UCase(Trim(callNode.value))
+
+    handledOut = 1
+
+    Select Case textCallName
+    Case "STR"
+        Dim strArgNode As Integer
+        strArgNode = ExecChildAt(ps, callNodeIdx, 0)
+        If strArgNode = -1 Then
+            errText = "exec: STR arg missing"
+            Return 0
+        End If
+
+        Dim strValue As ExecValue
+        If ExecEvalExpression(ps, strArgNode, es, strValue, errText) = 0 Then Return 0
+        textOut = ExecValueToString(strValue)
+        Return 1
+
+    Case "UCASE"
+        Dim ucText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, textCallName, ucText, errText) = 0 Then Return 0
+        textOut = UCase(ucText)
+        Return 1
+
+    Case "LCASE"
+        Dim lcText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, textCallName, lcText, errText) = 0 Then Return 0
+        textOut = LCase(lcText)
+        Return 1
+
+    Case "CHR"
+        Dim chrValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, textCallName, chrValue, errText, 1) = 0 Then Return 0
+        If chrValue < 0 Or chrValue > 255 Then
+            errText = "exec: CHR range error"
+            Return 0
+        End If
+        textOut = Chr(chrValue)
+        Return 1
+
+    Case "LTRIM"
+        Dim ltrimText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, textCallName, ltrimText, errText) = 0 Then Return 0
+        textOut = LTrim(ltrimText)
+        Return 1
+
+    Case "RTRIM"
+        Dim rtrimText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, textCallName, rtrimText, errText) = 0 Then Return 0
+        textOut = RTrim(rtrimText)
+        Return 1
+
+    Case "MID"
+        Return ExecBuiltinTextMidCall(ps, es, callNodeIdx, textOut, errText)
+
+    Case "SPACE"
+        Return ExecBuiltinTextSpaceCall(ps, es, callNodeIdx, textCallName, textOut, errText)
+
+    Case "STRING"
+        Return ExecBuiltinTextStringCall(ps, es, callNodeIdx, textOut, errText)
+    End Select
+
+    handledOut = 0
+    Return 1
+End Function
+
+Private Function ExecEvalNodeAsText(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef textOut As String, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then
+        errText = "exec: invalid text node"
+        Return 0
+    End If
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    If UCase(n.kind) = "STRING" Then
+        textOut = n.value
+        Return 1
+    End If
+
+    If UCase(n.kind) = "CALL_EXPR" Then
+        Dim handledCallExpr As Integer
+        If ExecTryEvalCallExprAsText(ps, es, nodeIdx, textOut, errText, handledCallExpr) = 0 Then Return 0
+        If handledCallExpr <> 0 Then
+            Return 1
+        End If
+    End If
+
+    Dim valueOut As ExecValue
+    If ExecEvalExpression(ps, nodeIdx, es, valueOut, errText) = 0 Then Return 0
+
+    textOut = ExecValueToString(valueOut)
+    Return 1
+End Function

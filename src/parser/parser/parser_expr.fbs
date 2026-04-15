@@ -4,6 +4,105 @@ Private Function IsKeywordOp(ByRef tk As Token, ByRef opText As String) As Integ
     Return tk.kind = "KEYWORD" And UCase(tk.lexeme) = UCase(opText)
 End Function
 
+Private Function ParseIdentOrKeywordPrimary(ByRef ps As ParseState, ByRef tk As Token) As Integer
+    If tk.kind = "IDENT" Then
+        If IsLegacyInlineName(tk.lexeme) Then
+            ps.lastError = "legacy inline forms are disabled; use INLINE(...)"
+            Return -1
+        End If
+
+        Dim nextTok As Token
+        nextTok = LookToken(ps, 1)
+        If IsDisabledUnderscoreCommand(tk.lexeme, nextTok) And nextTok.kind = "OP" And nextTok.lexeme = "(" Then
+            ps.lastError = "underscore commands are disabled"
+            Return -1
+        End If
+    End If
+
+    Dim callName As String
+    callName = tk.lexeme
+
+    Dim isDottedCall As Integer
+    isDottedCall = 0
+
+    Dim nextTok As Token
+    nextTok = LookToken(ps, 1)
+    If nextTok.kind = "OP" And nextTok.lexeme = "." Then
+        Dim methodTok As Token
+        methodTok = LookToken(ps, 2)
+        If methodTok.kind <> "IDENT" Then
+            ps.lastError = "method name expected after ."
+            Return -1
+        End If
+
+        Dim afterMethodTok As Token
+        afterMethodTok = LookToken(ps, 3)
+        If afterMethodTok.kind <> "OP" Or afterMethodTok.lexeme <> "(" Then
+            ps.lastError = "member access expression unsupported; expected call"
+            Return -1
+        End If
+
+        isDottedCall = 1
+    End If
+
+    AdvanceTok ps
+
+    If isDottedCall <> 0 Then
+        If MatchOp(ps, ".") = 0 Then
+            ps.lastError = "missing . in dotted call"
+            Return -1
+        End If
+
+        Dim methodLex As Token
+        methodLex = CurToken(ps)
+        If methodLex.kind <> "IDENT" Then
+            ps.lastError = "method name expected after ."
+            Return -1
+        End If
+        AdvanceTok ps
+
+        callName = callName & "." & methodLex.lexeme
+    End If
+
+    If MatchOp(ps, "(") Then
+        Dim callNode As Integer
+        callNode = MakeNodeFromToken(ps, "CALL_EXPR", callName, "", tk)
+
+        If MatchOp(ps, ")") = 0 Then
+            Do
+                Dim argExpr As Integer
+                argExpr = ParseExpression(ps)
+                If argExpr = -1 Then Return -1
+                ASTAddChild ps.ast, callNode, argExpr
+                If MatchOp(ps, ",") = 0 Then Exit Do
+            Loop
+
+            If MatchOp(ps, ")") = 0 Then
+                ps.lastError = "missing ) in call"
+                Return -1
+            End If
+        End If
+
+        If UCase(tk.lexeme) = "TIMER" Then
+            If ValidateTimerCall(ps, callNode) = 0 Then Return -1
+        End If
+
+        If UCase(tk.lexeme) = "LOF" Or UCase(tk.lexeme) = "EOF" Then
+            If ValidateFileInfoCall(ps, callNode) = 0 Then Return -1
+        End If
+
+        If ValidateCoreIntrinsicCall(ps, callNode) = 0 Then Return -1
+
+        Return callNode
+    End If
+
+    If tk.kind = "KEYWORD" Then
+        Return MakeNodeFromToken(ps, "KEYWORD_REF", tk.lexeme, "", tk)
+    End If
+
+    Return MakeNodeFromToken(ps, "IDENT", tk.lexeme, "", tk)
+End Function
+
 Private Function ParsePrimary(ByRef ps As ParseState) As Integer
     Dim tk As Token
     tk = CurToken(ps)
@@ -19,59 +118,7 @@ Private Function ParsePrimary(ByRef ps As ParseState) As Integer
     End If
 
     If tk.kind = "IDENT" Or tk.kind = "KEYWORD" Then
-        If tk.kind = "IDENT" Then
-            If IsLegacyInlineName(tk.lexeme) Then
-                ps.lastError = "legacy inline forms are disabled; use INLINE(...)"
-                Return -1
-            End If
-
-            Dim nextTok As Token
-            nextTok = LookToken(ps, 1)
-            If IsDisabledUnderscoreCommand(tk.lexeme, nextTok) And nextTok.kind = "OP" And nextTok.lexeme = "(" Then
-                ps.lastError = "underscore commands are disabled"
-                Return -1
-            End If
-        End If
-
-        AdvanceTok ps
-
-        If MatchOp(ps, "(") Then
-            Dim callNode As Integer
-            callNode = MakeNodeFromToken(ps, "CALL_EXPR", tk.lexeme, "", tk)
-
-            If MatchOp(ps, ")") = 0 Then
-                Do
-                    Dim argExpr As Integer
-                    argExpr = ParseExpression(ps)
-                    If argExpr = -1 Then Return -1
-                    ASTAddChild ps.ast, callNode, argExpr
-                    If MatchOp(ps, ",") = 0 Then Exit Do
-                Loop
-
-                If MatchOp(ps, ")") = 0 Then
-                    ps.lastError = "missing ) in call"
-                    Return -1
-                End If
-            End If
-
-            If UCase(tk.lexeme) = "TIMER" Then
-                If ValidateTimerCall(ps, callNode) = 0 Then Return -1
-            End If
-
-            If UCase(tk.lexeme) = "LOF" Or UCase(tk.lexeme) = "EOF" Then
-                If ValidateFileInfoCall(ps, callNode) = 0 Then Return -1
-            End If
-
-            If ValidateCoreIntrinsicCall(ps, callNode) = 0 Then Return -1
-
-            Return callNode
-        End If
-
-        If tk.kind = "KEYWORD" Then
-            Return MakeNodeFromToken(ps, "KEYWORD_REF", tk.lexeme, "", tk)
-        End If
-
-        Return MakeNodeFromToken(ps, "IDENT", tk.lexeme, "", tk)
+        Return ParseIdentOrKeywordPrimary(ps, tk)
     End If
 
     If MatchOp(ps, "(") Then

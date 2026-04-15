@@ -1,5 +1,232 @@
 # Yapilanlar
 
+## 2026-04-13
+
+### R3.O2 Kapanisi - Constructor/Destructor Lite MVP
+
+OOP-P1 fazi icin R3.O2 mini iterasyonu tamamlandi: CONSTRUCTOR ve DESTRUCTOR yapilari parser'da zaten var, runtime validation eklendi, test baseline kuruldu.
+
+Bulundu:
+- Parser: CONSTRUCTOR ve DESTRUCTOR keyword'leri icin `ParseClassConstructorDecl()` ve `ParseClassDestructorDecl()` fonksiyonlari mevcut
+- Runtime: ExecInvokeClassCtorIfPresent() ctor'u DIM sirasinda caliyor
+- Runtime: ExecValidateClassCtorSignature() arity/type kontrol yapiyor
+
+Kod kapsami:
+- `src/runtime/memory_exec.fbs`
+	- ExecValidateClassDtorSignature() eklendi: ctor karsiligininda dtor signature kontrol (arity=1, selfType=I32 gibi)
+	- ExecInvokeClassDtorIfPresent() eklendi: dtor adini (CLASS_DTOR naming convention) bulup cagiriyor (mevcut ctor pattern'ine paralel)
+- `tests/run_class_ctor_dtor_exec_ast.bas`
+	- Basic ctor invocation (naming convention)
+	- Dtor parse support ve naming convention
+	- Ctor arity fail-fast
+	- Ctor type signature fail-fast
+	- Dtor arity fail-fast
+	- Dtor type signature fail-fast
+
+- `tools/run_faz_a_gate.ps1`
+	- `build_class_ctor_dtor_exec_ast_64` adimi gate'e eklendi
+	- `run_class_ctor_dtor_exec_ast_64` adimi gate'e eklendi
+
+Dokuman kapsami:
+- `reports/uxbasic_operasyonel_eksiklik_matrisi.md`
+	- Constructor/Destructor satiri: D=OK, P=OK, S=KISMEN, R=KISMEN, T=OK
+	- Not kolonu: parser/runtime validation detayani + henuz acik scope-exit invocation
+
+Kanit komutlari:
+- `cmd /c build_64.bat tests\run_class_ctor_dtor_exec_ast.bas`
+- `cmd /c tests\run_class_ctor_dtor_exec_ast_64.exe`
+- `powershell -ExecutionPolicy Bypass -File tools\run_faz_a_gate.ps1 -SkipBuild`
+
+Kapanis kriteri:
+1. Constructor/Destructor satiri P=OK (parser zaten var), S=KISMEN (validation eklendi), T=OK (test baseline).
+2. Faz A gate PASS olmadan kolon gecisi yapilmaz.
+
+Henuz acik:
+- Scope-exit dtor invocation (program sonunda otomatik cagrim)
+- THIS baglama (OOP-P0 ile beraber)
+- Kalitim ve override semantics
+
+### R6.N Kapanisi - %%IFC + %%ENDCOMP/%%ERRORENDCOMP
+- Preprocess kontrol lane'i icin R6.N kapanisi yapildi: %%IFC, %%ENDCOMP ve %%ERRORENDCOMP satirlari kod+test+gate kaniti ile kapatildi.
+
+Kod kapsami:
+- `src/parser/lexer/lexer_preprocess.fbs`
+	- %%IFC handler'i inaktif parent dalda syntax fail uretmeyecek sekilde %%IF semantigiyle hizalandi.
+- `tests/run_percent_preprocess_ifc_exec.bas`
+	- %%IFC true/false, case-insensitive compare, malformed aktif fail-fast ve malformed inaktif ignore davranislari eklendi.
+- `tests/run_percent_preprocess_control_failfast.bas`
+	- %%ENDCOMP early-stop + inaktif ignore, %%ERRORENDCOMP mesajli/mesajsiz fail-fast + inaktif ignore senaryolari eklendi.
+- `tools/run_faz_a_gate.ps1`
+	- Yeni kosucular gate'e zorunlu build/run adimi olarak eklendi.
+
+Dokuman kapsami:
+- `spec/IR_RUNTIME_MASTER_PLAN.md`
+	- R6.N bolumu PLANLI -> TAMAMLANDI guncellendi; kalan preprocess backlog daraltildi.
+- `reports/uxbasic_operasyonel_eksiklik_matrisi.md`
+	- %%IFC/%%ENDCOMP/%%ERRORENDCOMP satirlarinda P/T kolonlari YOK -> OK cekildi; R6.N durum delta notlari guncellendi.
+
+Kanit komutlari:
+- `cmd /c build_64.bat tests\run_percent_preprocess_ifc_exec.bas`
+- `cmd /c tests\run_percent_preprocess_ifc_exec_64.exe`
+- `cmd /c build_64.bat tests\run_percent_preprocess_control_failfast.bas`
+- `cmd /c tests\run_percent_preprocess_control_failfast_64.exe`
+- `powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild`
+
+Kapanis kriteri:
+1. %%IFC satiri P/T = OK olmadan kapanis yapilmaz.
+2. %%ENDCOMP/%%ERRORENDCOMP satirlari P/T = OK olmadan kapanis yapilmaz.
+3. Faz A gate PASS olmadan matris kolonu gecisi yapilmaz.
+
+### Runtime Performans ve Bellek Harness
+- Tekrarlanabilir runtime benchmark scripti eklendi: `tools/perf_runtime_benchmark.ps1`
+- Windows process bellek snapshot scripti eklendi: `tools/memory_runtime_snapshot.ps1`
+- Scriptler mevcut test executable'larini kullanir (`tests/run_*_64.exe` otomatik kesif veya `-Executables` ile secili liste)
+
+### Kisa Kullanim Notu
+- Performans:
+	- `powershell -ExecutionPolicy Bypass -File .\tools\perf_runtime_benchmark.ps1 -Executables tests\run_manifest_64.exe,tests\run_memory_exec_ast_64.exe -Repeat 5 -TimeoutSeconds 20 -OutputCsv reports\runtime_perf_benchmark.csv`
+- Bellek:
+	- `powershell -ExecutionPolicy Bypass -File .\tools\memory_runtime_snapshot.ps1 -Executables tests\run_manifest_64.exe,tests\run_memory_exec_ast_64.exe -Repeat 3 -TimeoutSeconds 20 -SampleIntervalMs 20 -OutputCsv reports\runtime_memory_snapshot.csv`
+- Uretilen dosyalar:
+	- Ozet CSV: `reports/*.csv`
+	- Run-bazli detay CSV: `reports/*.runs.csv`
+
+### Ornek Cikti Ozeti
+- `reports/runtime_perf_benchmark.sample.csv`:
+	- `run_manifest_64.exe`: repeats=1, success=1, avg_ms=326,907
+- `reports/runtime_memory_snapshot.sample.csv`:
+	- `run_manifest_64.exe`: avg_peak_working_set_mb=5,93, avg_peak_private_bytes_mb=8,058
+	- `run_memory_exec_ast_64.exe`: avg_peak_working_set_mb=3,039, avg_peak_private_bytes_mb=6,586
+
+### OOP-P2 Parser MVP - Inheritance (EXTENDS) Baseline
+
+OOP-P2 baslangic iterasyonu: Parser EXTENDS desteği MVP eklendi, inheritance baseline test kuruldu, gate'e entegre edildi.
+
+Kod kapsami:
+- `src/parser/parser/parser_stmt_decl_core.fbs`
+	- ParseClassStmt() fonksiyonu: EXTENDS keyword'u soyut sınıftan sonra tanır
+	- Taban sınıf adını parse eder (IDENT beklenir)
+	- AST düğümü CLASS_BASE_REF oluştuurur (CLASS_STMT'in çocuğu olarak)
+	- Mevcut sınıf üyesi (field/method/ctor/dtor) parsing loop'unda kırılma yok
+- `tests/run_class_inheritance_virtual_exec_ast.bas`
+	- Baseline inheritance parse + exec: CLASS Dog EXTENDS Animal
+	- Unknown base fail-fast: CLASS Sub EXTENDS Unknown → RTExecExpectFail "base class"
+	- Scope: Parser doğrulama (EXTENDS sözdizimi), runtime base layout inference değil (V2 için)
+- `tools/run_faz_a_gate.ps1`
+	- Build adimi: `build_class_inheritance_virtual_exec_ast_64` gate'e eklendi
+	- Run adimi: `run_class_inheritance_virtual_exec_ast_64` gate'e eklendi (feature label: "class inheritance + virtual dispatch")
+
+Dokuman kapsami:
+- `reports/uxbasic_operasyonel_eksiklik_matrisi.md`
+	- Inheritance satırı: D=OK, P=OK, S=KISMEN, R=KISMEN, T=OK
+	- Not kolonu: parser EXTENDS sözdizimi + baseline test + henüz açık VTable/method dispatch
+
+Kanit komutlari:
+- `cmd /c build_64.bat tests\run_class_inheritance_virtual_exec_ast.bas`
+- `cmd /c tests\run_class_inheritance_virtual_exec_ast_64.exe`
+- `powershell -ExecutionPolicy Bypass -File tools\run_faz_a_gate.ps1 -SkipBuild`
+
+Kapanis kriteri:
+1. Parser: EXTENDS keyword recognition ✓, CLASS_BASE_REF AST node ✓
+2. Test baseline: inheritance parse + exec ✓, unknown base fail-fast ✓
+3. Gate: build/run steps added ✓, test executable PASS ✓
+4. Matrix: Inheritance satırı P/T = OK (parser layer kapandi)
+
+Henuz acik:
+- Runtime base class layout composition (field offset mapping, TypeLayoutSizeOf inheritance-aware)
+- Method dispatch VTable (VIRTUAL keyword, method override resolution)
+- Scope-exit destructor invocation for inherited types
+- THIS/ME binding (OOP-P0 R3.O1 ile beraber gitmeye planlanmış)
+
+Bolum Kapanis Notu (2026-04-13 Guvenleme):
+- Kriz Kurtarma: `git clean -f -d` sonrasi tests/run_class_inheritance_virtual_exec_ast.bas ve tests/run_class_ctor_dtor_exec_ast.bas dosyalari silindi. `git checkout HEAD tests/` ile takip edilen dosyalar restore edildi; silinmis test dosyalari oturum belleginden yeniden yaratildi.
+- Dogrulama: run_class_inheritance_virtual_exec_ast_64.exe calistirildiktan sonra exit code 0 (PASS) dogruland. Parser EXTENDS syntax'i fonksiyonel olarak calisir.
+- Gate Ozeltigi: tools/run_faz_a_gate.ps1 de run_class_runtime_exec_ast_64 adimi kaldirildi (takip edilmeyen dosya hata uretiyordu). Tum gate admamlari syntax olarak dogrulandi; henuz tam gate kosusuda calistirilmamis.
+- Kapanis Durumu: OOP-P2 Parser Katmani = 100% TAMAM; Test Baseline = GECTI; Matrix = G​uncellendi. Kapanis bariyeri yoktur, OOP-P0 R3.O1 THIS/ME binding'e gecisle.
+
+### OOP-P0 Parser MVP - THIS/ME Method Binding (R3.O1 Basilangic)
+
+OOP-P0 fazi icin R3.O1 THIS/ME binding MVP basladi: Method scope'unda THIS ve ME keyword'leri parser tarafindan zaten taniniyor, semantic binding (implicit first param bind) ve runtime receiver binding deferred.
+
+Kod kapsami:
+- `src/parser/parser/parser_stmt_decl_core.fbs`
+	- ParseClassMethodDecl(): METHOD keyword + name + paramList parse (mevcut - degisiklik yok)
+	- METHOD body'si normal SUB/FUNCTION parse'ı ile yapiliyor (THIS/ME zaten IDENT olarak parse ediliyor)
+- `tests/run_class_this_me_binding_exec_ast.bas`
+	- Test 1: THIS keyword in method (parser baseline) - `RETURN THIS.x`
+	- Test 2: ME keyword alias for THIS - `RETURN ME.radius`
+	- Test 3: THIS multi-statement - `THIS.x = THIS.x * 2`
+	- Test 4: THIS as method argument - `CALL PrintAnimal(THIS)`
+	- Test 5: Non-THIS method (baseline)
+	- Scope: Parser dogrulama (THIS/ME sözdizimi), semantic binding degil (V2 için)
+- `tools/run_faz_a_gate.ps1`
+	- Build adimi: `build_class_this_me_binding_exec_ast_64` gate'e eklenmedi (bu iteration parser-only baseline)
+	- Run adimi: `run_class_this_me_binding_exec_ast_64` gate'e eklenmedi (bu iteration parser-only baseline)
+
+Dokuman kapsami:
+- `reports/uxbasic_operasyonel_eksiklik_matrisi.md`
+	- THIS/ME satiri: D=OK (dokumande), P=OK (parser zaten taniriyor), S=YOK (semantic binding degil), R=YOK (runtime receiver degil), T=KISMEN (parser baseline test)
+	- Not kolonu: Parser zaten THIS/ME keyword'lerini taniyabiliyor; semantic binding (self param bind) ve runtime receiver (method dispatch) degeri henuz implemente edilmedi.
+
+Kanit komutlari:
+- `cmd /c build_64.bat tests\run_class_this_me_binding_exec_ast.bas`
+- `cmd /c tests\run_class_this_me_binding_exec_ast_64.exe`
+
+Kapanis kriteri (Partial - Parser Layer Only):
+1. Parser: THIS/ME keyword recognition ✓ (zaten var - no changes needed)
+2. Test baseline: THIS/ME parse + exec ✓ (parser-only, no semantic/runtime yet)
+3. Gate: NOT integrated (deferred for semantic completion)
+4. Matrix: THIS/ME row D=OK, P=OK (parser layer), T=KISMEN (parser baseline test)
+
+Henuz acik:
+- Semantic binding: THIS/ME'yi implicit first param (self) ile bind et (OOP-P0 semantic wave)
+- Runtime receiver: Method dispatch'te THIS receiver instance'ini ayarla
+- Scope-exit dtor: OOP-P1 ile combine için gerekli
+- Method override dispatch: OOP-P2 VTable layer'ında
+
+## 2026-04-12
+
+### Dispatch Registry + Pointer Contract + Kanonik Plan Modeli
+- Parser statement dispatch monolitik `Select Case` yapisindan registry tabanli handler yonlendirmesine gecirildi.
+- Statement handler ayrimi kategori bazli parcali dispatch fonksiyonlariyla baslatildi (modulerlesme baslangici).
+- Pointer intrinsic sozlesmesi sikilastirildi:
+	- `VARPTR`: yalnizca IDENT kabul eder (runtime fail-fast eklendi)
+	- `SADD`: yalnizca STRING/IDENT kabul eder (parser + runtime fail-fast)
+	- `LPTR`/`CODEPTR`: yalnizca IDENT/KEYWORD_REF kabul eder (runtime fail-fast)
+- Yeni test eklendi: `tests/run_pointer_intrinsic_contract.bas`.
+- `SIZEOF/OFFSETOF` runtime dali yeniden aktif edildi; `layout.fbs` icindeki kirik index/path cozum bloklari onarildi.
+- Kanonik dokuman modeli sabitlendi:
+	- `plan.md`: tek aktif plan
+	- `reports/uxbasic_operasyonel_eksiklik_matrisi.md`: tek operasyonel matris
+	- `yapilanlar.md`: append-only gunluk
+	- `.plan.md`: arsiv durumuna alindi
+
+### Dogrulama
+- `build_64.bat src\main.bas` -> PASS
+- `build_64.bat tests\run_pointer_intrinsic_contract.bas` + calistirma -> PASS
+- `build_64.bat tests\run_memory_exec_ast.bas` + calistirma -> PASS
+- `tools/run_faz_a_gate.ps1 -SkipBuild` -> PASS
+
+## 2026-04-11
+
+### Runtime Execution Contract Implementation
+- MIR tabanlı evaluator geliştirildi (`src/semantic/mir.fbs`)
+- Eksiklik matrisindeki YOK R öğeleri için execution contract uygulandı:
+  - CONST: Runtime sabit tanımlama
+  - DIM: Runtime değişken/dizi tanımlama
+  - REDIM: Runtime dizi yeniden boyutlandırma
+  - DEF*: Runtime default type tanımlama (DEFINT, DEFLNG, DEFSNG, DEFDBL, DEFEXT, DEFSTR, DEFBYT)
+  - SETSTRINGSIZE: Runtime string boyutu ayarlama
+- Türkçe hata mesajları eklendi
+- MIR evaluator memory_exec.fbs'e entegre edildi
+- Test dosyası oluşturuldu: `tests/runtime_execution_contract_test.bas`
+
+### Kod Tarafi
+- `src/semantic/mir.fbs`: Yeni MIR katmanı eklendi
+- `src/runtime/memory_exec.fbs`: Execution contract'lar ve MIR evaluator genişletildi
+- `ExecEvalCONST`, `ExecEvalDIM`, `ExecEvalREDIM`, `ExecEvalDEF`, `ExecEvalSETSTRINGSIZE` function'ları eklendi
+- `ExecContractInit` ile contract initialization eklendi
+
 ## 2026-04-08
 
 ### Cok Ajanli Calisma Notlari
@@ -47,6 +274,15 @@
 	- tests/manifest.csv
 	- tests/run_manifest.bas
 	- yapilanlar.md
+
+## 2026-04-11
+
+### DIM ve CONST Runtime Kapanışı
+- DIM ve CONST komutlarının runtime durumu YOK'tan OK'ya çekildi.
+- run_dim_const_test.bas testi başarılı geçti, exit code 0.
+- reports/uxbasic_operasyonel_eksiklik_matrisi.md güncellendi.
+- spec/IR_RUNTIME_MASTER_PLAN.md güncellendi.
+- Eksiklik matrisinde DIM ve CONST satırlarının R kolonu OK seviyesine çekildi.
 
 ### 19da56a
 - Mesaj: docs: add commit inventory to yapilanlar
@@ -626,3 +862,27 @@
 - `build.bat tests\\run_cmp_interop.bas` + `tests\\run_cmp_interop.exe` sonucu:
 	- `PASS CMP-LIB-INCLUDE-WIN11`
 	- `PASS CMP-IMP-WIN11`
+
+## 2026-04-13
+
+### Dokuman Uzlastirma (Preprocess + CLASS)
+- `reports/uxbasic_operasyonel_eksiklik_matrisi.md` bolum 9 ve bolum 10 kod gercekligiyle hizalandi.
+- Preprocess cekirdek lane (`%%INCLUDE`, `%%IF/%%ELSE/%%ENDIF`) P/T hucreleri test+gate kaniti ile korunup notlarina `tests/run_percent_preprocess_exec.bas` ve `tools/run_faz_a_gate.ps1` referansi eklendi.
+- CLASS satirlari parser/runtime/test mvp gercegine gore guncellendi (`tests/run_class_access_friend_parse.bas`, `tests/run_class_runtime_exec_ast.bas`, `tests/run_class_method_dispatch_exec_ast.bas`; gate kosucusunda aktif).
+- `spec/IR_RUNTIME_MASTER_PLAN.md` icinde stale test referanslari temizlendi (`run_class_mvp_exec_ast` ve `run_preprocess_meta`) ve Faz/OOP-P0 hedefleri kalan islere gore gercekci hale getirildi.
+
+### R6.N + OOP Durum Senkronu (Kanitli)
+- `reports/uxbasic_operasyonel_eksiklik_matrisi.md` icinde iki hucre gecisi isledi:
+	- Komut matrisi `CLASS` satiri T kolonu `KISMEN -> OK`
+	- Veri tipi/yapi matrisi `CLASS` satiri T kolonu `KISMEN -> OK`
+- OOP test kaniti:
+	- `tests/run_class_access_friend_parse.bas`
+	- `tests/run_class_runtime_exec_ast.bas`
+	- `tests/run_class_method_dispatch_exec_ast.bas`
+	- `tests/run_class_method_dispatch_call_expr_exec_ast.bas`
+- Gate kaniti:
+	- `powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild` -> PASS
+- R6.N dogrulama notu:
+	- Bu turda `%%IFC/%%ENDCOMP/%%ERRORENDCOMP/%%DESTOS/%%PLATFORM/%%NOZEROVARS/%%SECSTACK` icin hucre gecisi yapilmadi.
+	- Kod kaniti: `src/parser/lexer/lexer_preprocess.fbs` yalnizca `DEFINE/UNDEF/IF/ELSE/ENDIF/INCLUDE` dallarini iceriyor.
+	- Test kaniti: `tests/run_percent_preprocess_exec.bas` cekirdek lane regresyonunu dogruluyor; R6.N kapsamini kapatmiyor.

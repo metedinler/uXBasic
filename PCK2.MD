@@ -4378,6 +4378,74 @@ Bellek komutlari yuksek guc verir ama yuksek risk tasir; gecersiz adresler Windo
 Port komutlari daha cok DOS/low-level donanım baglamina aittir; Windows 11 user-mode ortaminda dogrudan port erisimi kisitlidir. Bu kategori pratikte miras/ozel surucu katmani gerektiren alan olarak etiketlenmelidir.
 
 #### Kategori 11 (Kesme ve Stack)
+
+## EK-20: Structured Hata Yonetimi Taslagi (TRY/CATCH/FINALLY, THROW, ASSERT)
+
+Bu ek, cekirdege eklenecek hata yonetimi komutlarinin resmi taslagidir.
+
+### EK-20.1 Komutlar ve syntax
+
+1. TRY/CATCH/FINALLY:
+
+```basic
+TRY
+        ' riskli kod
+CATCH err
+        PRINT err.message
+FINALLY
+        ' her durumda calisir
+END TRY
+```
+
+2. THROW:
+
+```basic
+THROW 12001
+THROW 12001, "gecersiz islem"
+THROW 12001, "gecersiz islem", "modul: Hesap"
+```
+
+3. ASSERT:
+
+```basic
+ASSERT x > 0
+ASSERT x > 0, "x sifirdan buyuk olmali"
+```
+
+### EK-20.2 Error nesnesi (compiler + runtime koprusu)
+
+Kanonik nesne adi: `ERROR`
+
+Minimum alanlar:
+
+- `ERROR.code AS I32`
+- `ERROR.message AS STRING`
+- `ERROR.detail AS STRING`
+- `ERROR.module_name AS STRING`
+- `ERROR.source_file AS STRING`
+- `ERROR.line AS I32`
+- `ERROR.column AS I32`
+- `ERROR.phase AS STRING`  (LEX/PARSE/SEMANTIC/RUNTIME/CODEGEN)
+
+Model:
+
+1. Compiler'in urettigi hata kodlari ve mesajlari `ERROR` nesnesine map edilir.
+2. Runtime fail-fast aninda ayni nesneyi gunceller.
+3. Programci TRY/CATCH veya dogrudan `ERROR` okuyarak custom hata akislari kurabilir.
+
+### EK-20.3 Codegen'e kadar inis modeli
+
+1. AST katmani:
+    - `TRY_STMT`, `CATCH_CLAUSE`, `FINALLY_CLAUSE`, `THROW_STMT`, `ASSERT_STMT`
+2. MIR katmani:
+    - exception edge, unwind target, finally trampoline
+3. Codegen katmani:
+    - THROW icin handler jump
+    - ASSERT icin debug/release politika emit'i
+
+Durum notu:
+
+- Bu ek tasarim ve takip icindir; implementasyon asamasi matris lane'leriyle kapatilacaktir.
 INT/SETVECT gibi komutlar tarihsel olarak real/protected mode baglaminda kullanilir; Windows 11'de dogrudan kullanimi genel durumda mumkun degildir. Bu komutlar belgede "miras davranis" olarak belirtilmeli ve emulasyon/yardimci katman olmadan aktif varsayilmamalidir.
 
 #### Kategori 12 (Zaman ve System)

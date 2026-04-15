@@ -1,0 +1,586 @@
+# uXBasic MIR (Mid-Level Intermediate Representation)
+# Basic block tabanlı, backend bağımsız ara format
+# Runtime evaluator için MIR instruction set
+
+Type MIRInstruction
+    opcode As String  ' LOAD, STORE, ADD, SUB, MUL, DIV, CALL, JMP, JZ, JNZ, RET, etc.
+    operands(Any) As String  ' Operand listesi (variable names, constants, labels)
+    operandCount As Integer
+    result As String  ' Result variable name (for assignments)
+    blockId As Integer  ' Which block this belongs to
+End Type
+
+Type MIRBasicBlock
+    id As Integer
+    instructions(Any) As MIRInstruction
+    instructionCount As Integer
+    predecessors(Any) As Integer  ' Block IDs that can jump here
+    predecessorCount As Integer
+    successors(Any) As Integer  ' Block IDs this can jump to
+    successorCount As Integer
+    isEntry As Integer  ' 1 if this is entry block
+    isExit As Integer   ' 1 if this is exit block
+End Type
+
+Type MIRFunction
+    name As String
+    blocks(Any) As MIRBasicBlock
+    blockCount As Integer
+    entryBlock As Integer
+    localVars(Any) As String  ' Local variable names
+    localVarCount As Integer
+    paramVars(Any) As String  ' Parameter variable names
+    paramVarCount As Integer
+End Type
+
+Type MIRModule
+    functions(Any) As MIRFunction
+    functionCount As Integer
+    globalVars(Any) As String
+    globalVarCount As Integer
+End Type
+
+Type MIREvaluatorState
+    module As MIRModule
+    currentFunction As Integer  ' Index in module.functions
+    currentBlock As Integer     ' Index in function.blocks
+    currentInstruction As Integer ' Index in block.instructions
+    varValues(Any) As ExecValue  ' Variable name -> value mapping
+    varCount As Integer
+    callStack(Any) As Integer   ' Function call stack (return addresses)
+    callStackDepth As Integer
+End Type
+
+' MIR Instruction Opcodes
+Const MIR_OP_LOAD_CONST As String = "LOAD_CONST"
+Const MIR_OP_LOAD_VAR As String = "LOAD_VAR"
+Const MIR_OP_STORE_VAR As String = "STORE_VAR"
+Const MIR_OP_ADD As String = "ADD"
+Const MIR_OP_SUB As String = "SUB"
+Const MIR_OP_MUL As String = "MUL"
+Const MIR_OP_DIV As String = "DIV"
+Const MIR_OP_MOD As String = "MOD"
+Const MIR_OP_NEG As String = "NEG"
+Const MIR_OP_EQ As String = "EQ"
+Const MIR_OP_NE As String = "NE"
+Const MIR_OP_LT As String = "LT"
+Const MIR_OP_LE As String = "LE"
+Const MIR_OP_GT As String = "GT"
+Const MIR_OP_GE As String = "GE"
+Const MIR_OP_AND As String = "AND"
+Const MIR_OP_OR As String = "OR"
+Const MIR_OP_XOR As String = "XOR"
+Const MIR_OP_NOT As String = "NOT"
+Const MIR_OP_CALL As String = "CALL"
+Const MIR_OP_RET As String = "RET"
+Const MIR_OP_JMP As String = "JMP"
+Const MIR_OP_JZ As String = "JZ"
+Const MIR_OP_JNZ As String = "JNZ"
+Const MIR_OP_LABEL As String = "LABEL"
+Const MIR_OP_DIM As String = "DIM"
+Const MIR_OP_REDIM As String = "REDIM"
+Const MIR_OP_CONST As String = "CONST"
+Const MIR_OP_DEF_TYPE As String = "DEF_TYPE"
+Const MIR_OP_SETSTRINGSIZE As String = "SETSTRINGSIZE"
+
+Private Sub MIREvaluatorStateInit(ByRef state As MIREvaluatorState)
+    state.currentFunction = -1
+    state.currentBlock = -1
+    state.currentInstruction = -1
+    state.varCount = 0
+    state.callStackDepth = 0
+End Sub
+
+Private Function MIREvaluateLoadStoreInstruction(ByRef state As MIREvaluatorState, ByRef instr As MIRInstruction, ByRef errMsg As String) As Integer
+    Select Case instr.opcode
+        Case MIR_OP_LOAD_CONST
+            ' operand1 = constant value, result = target var
+            If instr.operandCount < 1 Then
+                errMsg = "MIR: LOAD_CONST için yeterli operand yok"
+                Return 0
+            End If
+            Dim val As ExecValue
+            If ExecValueFromString(instr.operands(0), val) = 0 Then
+                errMsg = "MIR: Geçersiz constant değeri: " & instr.operands(0)
+                Return 0
+            End If
+            If MIRSetVarValue(state, instr.result, val) = 0 Then
+                errMsg = "MIR: Değişken değeri ayarlanamadı: " & instr.result
+                Return 0
+            End If
+
+        Case MIR_OP_LOAD_VAR
+            ' operand1 = source var, result = target var
+            If instr.operandCount < 1 Then
+                errMsg = "MIR: LOAD_VAR için yeterli operand yok"
+                Return 0
+            End If
+            Dim val As ExecValue
+            If MIRGetVarValue(state, instr.operands(0), val) = 0 Then
+                errMsg = "MIR: Değişken bulunamadı: " & instr.operands(0)
+                Return 0
+            End If
+            If MIRSetVarValue(state, instr.result, val) = 0 Then
+                errMsg = "MIR: Değişken değeri ayarlanamadı: " & instr.result
+                Return 0
+            End If
+
+        Case MIR_OP_STORE_VAR
+            ' operand1 = source var, result = target var
+            If instr.operandCount < 1 Then
+                errMsg = "MIR: STORE_VAR için yeterli operand yok"
+                Return 0
+            End If
+            Dim val As ExecValue
+            If MIRGetVarValue(state, instr.operands(0), val) = 0 Then
+                errMsg = "MIR: Kaynak değişken bulunamadı: " & instr.operands(0)
+                Return 0
+            End If
+            If MIRSetVarValue(state, instr.result, val) = 0 Then
+                errMsg = "MIR: Hedef değişken ayarlanamadı: " & instr.result
+                Return 0
+            End If
+
+        Case Else
+            errMsg = "MIR: Bilinmeyen opcode: " & instr.opcode
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function MIREvaluateArithmeticInstruction(ByRef state As MIREvaluatorState, ByRef instr As MIRInstruction, ByRef errMsg As String) As Integer
+    Select Case instr.opcode
+        Case MIR_OP_ADD, MIR_OP_SUB, MIR_OP_MUL, MIR_OP_DIV, MIR_OP_MOD
+            ' operand1, operand2 = operands, result = target
+            If instr.operandCount < 2 Then
+                errMsg = "MIR: İkili işlem için yeterli operand yok"
+                Return 0
+            End If
+            Dim left As ExecValue, right As ExecValue, res As ExecValue
+            If MIRGetVarValue(state, instr.operands(0), left) = 0 Then
+                errMsg = "MIR: Sol operand bulunamadı: " & instr.operands(0)
+                Return 0
+            End If
+            If MIRGetVarValue(state, instr.operands(1), right) = 0 Then
+                errMsg = "MIR: Sağ operand bulunamadı: " & instr.operands(1)
+                Return 0
+            End If
+            If MIRBinaryOp(instr.opcode, left, right, res, errMsg) = 0 Then Return 0
+            If MIRSetVarValue(state, instr.result, res) = 0 Then
+                errMsg = "MIR: Sonuç değişkeni ayarlanamadı: " & instr.result
+                Return 0
+            End If
+
+        Case MIR_OP_NEG
+            ' operand1 = operand, result = target
+            If instr.operandCount < 1 Then
+                errMsg = "MIR: NEG için yeterli operand yok"
+                Return 0
+            End If
+            Dim val As ExecValue, res As ExecValue
+            If MIRGetVarValue(state, instr.operands(0), val) = 0 Then
+                errMsg = "MIR: Operand bulunamadı: " & instr.operands(0)
+                Return 0
+            End If
+            If val.valueType = "INTEGER" Then
+                res.valueType = "INTEGER"
+                res.intValue = -val.intValue
+            ElseIf val.valueType = "FLOAT" Then
+                res.valueType = "FLOAT"
+                res.floatValue = -val.floatValue
+            Else
+                errMsg = "MIR: NEG sadece sayı tipleri için"
+                Return 0
+            End If
+            If MIRSetVarValue(state, instr.result, res) = 0 Then
+                errMsg = "MIR: Sonuç değişkeni ayarlanamadı: " & instr.result
+                Return 0
+            End If
+
+        Case Else
+            errMsg = "MIR: Bilinmeyen opcode: " & instr.opcode
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function MIREvaluateCompareLogicalInstruction(ByRef state As MIREvaluatorState, ByRef instr As MIRInstruction, ByRef errMsg As String) As Integer
+    Select Case instr.opcode
+        Case MIR_OP_EQ, MIR_OP_NE, MIR_OP_LT, MIR_OP_LE, MIR_OP_GT, MIR_OP_GE
+            ' operand1, operand2 = operands, result = target (boolean)
+            If instr.operandCount < 2 Then
+                errMsg = "MIR: Karşılaştırma için yeterli operand yok"
+                Return 0
+            End If
+            Dim left As ExecValue, right As ExecValue, res As ExecValue
+            If MIRGetVarValue(state, instr.operands(0), left) = 0 Then
+                errMsg = "MIR: Sol operand bulunamadı: " & instr.operands(0)
+                Return 0
+            End If
+            If MIRGetVarValue(state, instr.operands(1), right) = 0 Then
+                errMsg = "MIR: Sağ operand bulunamadı: " & instr.operands(1)
+                Return 0
+            End If
+            res.valueType = "INTEGER"
+            If MIRCompareOp(instr.opcode, left, right, res.intValue, errMsg) = 0 Then Return 0
+            If MIRSetVarValue(state, instr.result, res) = 0 Then
+                errMsg = "MIR: Sonuç değişkeni ayarlanamadı: " & instr.result
+                Return 0
+            End If
+
+        Case MIR_OP_AND, MIR_OP_OR, MIR_OP_XOR
+            ' operand1, operand2 = operands, result = target
+            If instr.operandCount < 2 Then
+                errMsg = "MIR: Mantıksal işlem için yeterli operand yok"
+                Return 0
+            End If
+            Dim left As ExecValue, right As ExecValue, res As ExecValue
+            If MIRGetVarValue(state, instr.operands(0), left) = 0 Then
+                errMsg = "MIR: Sol operand bulunamadı: " & instr.operands(0)
+                Return 0
+            End If
+            If MIRGetVarValue(state, instr.operands(1), right) = 0 Then
+                errMsg = "MIR: Sağ operand bulunamadı: " & instr.operands(1)
+                Return 0
+            End If
+            If left.valueType <> "INTEGER" Or right.valueType <> "INTEGER" Then
+                errMsg = "MIR: Mantıksal işlemler sadece tamsayı için"
+                Return 0
+            End If
+            res.valueType = "INTEGER"
+            Select Case instr.opcode
+                Case MIR_OP_AND: res.intValue = left.intValue And right.intValue
+                Case MIR_OP_OR: res.intValue = left.intValue Or right.intValue
+                Case MIR_OP_XOR: res.intValue = left.intValue Xor right.intValue
+            End Select
+            If MIRSetVarValue(state, instr.result, res) = 0 Then
+                errMsg = "MIR: Sonuç değişkeni ayarlanamadı: " & instr.result
+                Return 0
+            End If
+
+        Case MIR_OP_NOT
+            ' operand1 = operand, result = target
+            If instr.operandCount < 1 Then
+                errMsg = "MIR: NOT için yeterli operand yok"
+                Return 0
+            End If
+            Dim val As ExecValue, res As ExecValue
+            If MIRGetVarValue(state, instr.operands(0), val) = 0 Then
+                errMsg = "MIR: Operand bulunamadı: " & instr.operands(0)
+                Return 0
+            End If
+            If val.valueType <> "INTEGER" Then
+                errMsg = "MIR: NOT sadece tamsayı için"
+                Return 0
+            End If
+            res.valueType = "INTEGER"
+            res.intValue = Not val.intValue
+            If MIRSetVarValue(state, instr.result, res) = 0 Then
+                errMsg = "MIR: Sonuç değişkeni ayarlanamadı: " & instr.result
+                Return 0
+            End If
+
+        Case Else
+            errMsg = "MIR: Bilinmeyen opcode: " & instr.opcode
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function MIREvaluateControlFlowInstruction(ByRef state As MIREvaluatorState, ByRef instr As MIRInstruction, ByRef errMsg As String) As Integer
+    Select Case instr.opcode
+        Case MIR_OP_CALL
+            ' operand1 = function name, operands(2..) = args, result = return var (optional)
+            If instr.operandCount < 1 Then
+                errMsg = "MIR: CALL için yeterli operand yok"
+                Return 0
+            End If
+            ' TODO: Function call implementation
+            errMsg = "MIR: CALL henüz implementasyon yok"
+            Return 0
+
+        Case MIR_OP_RET
+            ' operand1 = return value var (optional)
+            If instr.operandCount >= 1 Then
+                ' TODO: Return value handling
+            End If
+            ' TODO: Return implementation
+            errMsg = "MIR: RET henüz implementasyon yok"
+            Return 0
+
+        Case MIR_OP_JMP
+            ' operand1 = target block id
+            If instr.operandCount < 1 Then
+                errMsg = "MIR: JMP için hedef blok yok"
+                Return 0
+            End If
+            state.currentBlock = Val(instr.operands(0))
+            state.currentInstruction = -1 ' Will be incremented to 0
+
+        Case MIR_OP_JZ, MIR_OP_JNZ
+            ' operand1 = condition var, operand2 = target block id
+            If instr.operandCount < 2 Then
+                errMsg = "MIR: Koşullu sıçrama için yeterli operand yok"
+                Return 0
+            End If
+            Dim cond As ExecValue
+            If MIRGetVarValue(state, instr.operands(0), cond) = 0 Then
+                errMsg = "MIR: Koşul değişkeni bulunamadı: " & instr.operands(0)
+                Return 0
+            End If
+            If cond.valueType <> "INTEGER" Then
+                errMsg = "MIR: Koşul tamsayı olmalı"
+                Return 0
+            End If
+            Dim shouldJump As Integer
+            If instr.opcode = MIR_OP_JZ Then
+                shouldJump = (cond.intValue = 0)
+            Else
+                shouldJump = (cond.intValue <> 0)
+            End If
+            If shouldJump Then
+                state.currentBlock = Val(instr.operands(1))
+                state.currentInstruction = -1
+            End If
+
+        Case Else
+            errMsg = "MIR: Bilinmeyen opcode: " & instr.opcode
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function MIREvaluateDeclarationInstruction(ByRef instr As MIRInstruction, ByRef errMsg As String) As Integer
+    Select Case instr.opcode
+        Case MIR_OP_DIM
+            ' operand1 = var name, operands(2..) = dimensions
+            If instr.operandCount < 1 Then
+                errMsg = "MIR: DIM için değişken adı yok"
+                Return 0
+            End If
+            ' TODO: DIM implementation
+            errMsg = "MIR: DIM henüz implementasyon yok"
+            Return 0
+
+        Case MIR_OP_REDIM
+            ' operand1 = var name, operands(2..) = new dimensions
+            If instr.operandCount < 1 Then
+                errMsg = "MIR: REDIM için değişken adı yok"
+                Return 0
+            End If
+            ' TODO: REDIM implementation
+            errMsg = "MIR: REDIM henüz implementasyon yok"
+            Return 0
+
+        Case MIR_OP_CONST
+            ' operand1 = const name, operand2 = value
+            If instr.operandCount < 2 Then
+                errMsg = "MIR: CONST için yeterli operand yok"
+                Return 0
+            End If
+            ' TODO: CONST implementation
+            errMsg = "MIR: CONST henüz implementasyon yok"
+            Return 0
+
+        Case MIR_OP_DEF_TYPE
+            ' operand1 = type char, operand2 = type name
+            If instr.operandCount < 2 Then
+                errMsg = "MIR: DEF_TYPE için yeterli operand yok"
+                Return 0
+            End If
+            ' TODO: DEF_TYPE implementation
+            errMsg = "MIR: DEF_TYPE henüz implementasyon yok"
+            Return 0
+
+        Case MIR_OP_SETSTRINGSIZE
+            ' operand1 = size
+            If instr.operandCount < 1 Then
+                errMsg = "MIR: SETSTRINGSIZE için boyut yok"
+                Return 0
+            End If
+            ' TODO: SETSTRINGSIZE implementation
+            errMsg = "MIR: SETSTRINGSIZE henüz implementasyon yok"
+            Return 0
+
+        Case Else
+            errMsg = "MIR: Bilinmeyen opcode: " & instr.opcode
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Function MIREvaluateInstruction(ByRef state As MIREvaluatorState, ByRef instr As MIRInstruction, ByRef errMsg As String) As Integer
+    Select Case instr.opcode
+        Case MIR_OP_LOAD_CONST, MIR_OP_LOAD_VAR, MIR_OP_STORE_VAR
+            Return MIREvaluateLoadStoreInstruction(state, instr, errMsg)
+
+        Case MIR_OP_ADD, MIR_OP_SUB, MIR_OP_MUL, MIR_OP_DIV, MIR_OP_MOD, MIR_OP_NEG
+            Return MIREvaluateArithmeticInstruction(state, instr, errMsg)
+
+        Case MIR_OP_EQ, MIR_OP_NE, MIR_OP_LT, MIR_OP_LE, MIR_OP_GT, MIR_OP_GE, MIR_OP_AND, MIR_OP_OR, MIR_OP_XOR, MIR_OP_NOT
+            Return MIREvaluateCompareLogicalInstruction(state, instr, errMsg)
+
+        Case MIR_OP_CALL, MIR_OP_RET, MIR_OP_JMP, MIR_OP_JZ, MIR_OP_JNZ
+            Return MIREvaluateControlFlowInstruction(state, instr, errMsg)
+
+        Case MIR_OP_DIM, MIR_OP_REDIM, MIR_OP_CONST, MIR_OP_DEF_TYPE, MIR_OP_SETSTRINGSIZE
+            Return MIREvaluateDeclarationInstruction(instr, errMsg)
+
+        Case Else
+            errMsg = "MIR: Bilinmeyen opcode: " & instr.opcode
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Function MIRGetVarValue(ByRef state As MIREvaluatorState, ByRef varName As String, ByRef value As ExecValue) As Integer
+    Dim i As Integer
+    For i = 0 To state.varCount - 1
+        If state.varValues(i).nameText = varName Then
+            value = state.varValues(i).value
+            Return 1
+        End If
+    Next
+    Return 0
+End Function
+
+Function MIRSetVarValue(ByRef state As MIREvaluatorState, ByRef varName As String, ByRef value As ExecValue) As Integer
+    Dim i As Integer
+    For i = 0 To state.varCount - 1
+        If state.varValues(i).nameText = varName Then
+            state.varValues(i).value = value
+            Return 1
+        End If
+    Next
+    ' New variable
+    If state.varCount = 0 Then
+        ReDim state.varValues(0)
+    Else
+        ReDim Preserve state.varValues(state.varCount)
+    End If
+    state.varValues(state.varCount).nameText = varName
+    state.varValues(state.varCount).value = value
+    state.varCount += 1
+    Return 1
+End Function
+
+Function MIRBinaryOp(ByRef op As String, ByRef left As ExecValue, ByRef right As ExecValue, ByRef result As ExecValue, ByRef errMsg As String) As Integer
+    If left.valueType <> right.valueType Then
+        errMsg = "MIR: İkili işlem operand tipleri uyumsuz"
+        Return 0
+    End If
+
+    result.valueType = left.valueType
+
+    If left.valueType = "INTEGER" Then
+        Select Case op
+            Case MIR_OP_ADD: result.intValue = left.intValue + right.intValue
+            Case MIR_OP_SUB: result.intValue = left.intValue - right.intValue
+            Case MIR_OP_MUL: result.intValue = left.intValue * right.intValue
+            Case MIR_OP_DIV:
+                If right.intValue = 0 Then
+                    errMsg = "MIR: Sıfıra bölme hatası"
+                    Return 0
+                End If
+                result.intValue = left.intValue \ right.intValue
+            Case MIR_OP_MOD:
+                If right.intValue = 0 Then
+                    errMsg = "MIR: Sıfıra mod hatası"
+                    Return 0
+                End If
+                result.intValue = left.intValue Mod right.intValue
+            Case Else:
+                errMsg = "MIR: Bilinmeyen tamsayı işlemi: " & op
+                Return 0
+        End Select
+    ElseIf left.valueType = "FLOAT" Then
+        Select Case op
+            Case MIR_OP_ADD: result.floatValue = left.floatValue + right.floatValue
+            Case MIR_OP_SUB: result.floatValue = left.floatValue - right.floatValue
+            Case MIR_OP_MUL: result.floatValue = left.floatValue * right.floatValue
+            Case MIR_OP_DIV:
+                If right.floatValue = 0 Then
+                    errMsg = "MIR: Sıfıra bölme hatası"
+                    Return 0
+                End If
+                result.floatValue = left.floatValue / right.floatValue
+            Case MIR_OP_MOD:
+                errMsg = "MIR: Float mod işlemi desteklenmiyor"
+                Return 0
+            Case Else:
+                errMsg = "MIR: Bilinmeyen float işlemi: " & op
+                Return 0
+        End Select
+    Else
+        errMsg = "MIR: İkili işlem sadece sayı tipleri için"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Function MIRCompareOp(ByRef op As String, ByRef left As ExecValue, ByRef right As ExecValue, ByRef result As Integer, ByRef errMsg As String) As Integer
+    If left.valueType <> right.valueType Then
+        errMsg = "MIR: Karşılaştırma operand tipleri uyumsuz"
+        Return 0
+    End If
+
+    Dim cmp As Integer
+    If left.valueType = "INTEGER" Then
+        If left.intValue < right.intValue Then cmp = -1
+        If left.intValue = right.intValue Then cmp = 0
+        If left.intValue > right.intValue Then cmp = 1
+    ElseIf left.valueType = "FLOAT" Then
+        If left.floatValue < right.floatValue Then cmp = -1
+        If left.floatValue = right.floatValue Then cmp = 0
+        If left.floatValue > right.floatValue Then cmp = 1
+    ElseIf left.valueType = "STRING" Then
+        cmp = StrComp(left.stringValue, right.stringValue)
+    Else
+        errMsg = "MIR: Karşılaştırma bu tip için desteklenmiyor"
+        Return 0
+    End If
+
+    Select Case op
+        Case MIR_OP_EQ: result = (cmp = 0)
+        Case MIR_OP_NE: result = (cmp <> 0)
+        Case MIR_OP_LT: result = (cmp < 0)
+        Case MIR_OP_LE: result = (cmp <= 0)
+        Case MIR_OP_GT: result = (cmp > 0)
+        Case MIR_OP_GE: result = (cmp >= 0)
+        Case Else:
+            errMsg = "MIR: Bilinmeyen karşılaştırma: " & op
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Function ExecValueFromString(ByRef str As String, ByRef val As ExecValue) As Integer
+    ' Simple constant parsing - integers and floats
+    If IsNumeric(str) Then
+        If InStr(str, ".") > 0 Or InStr(UCase(str), "E") > 0 Then
+            val.valueType = "FLOAT"
+            val.floatValue = Val(str)
+        Else
+            val.valueType = "INTEGER"
+            val.intValue = Val(str)
+        End If
+        Return 1
+    End If
+
+    ' String constants (quoted)
+    If Left(str, 1) = Chr(34) And Right(str, 1) = Chr(34) Then
+        val.valueType = "STRING"
+        val.stringValue = Mid(str, 2, Len(str) - 2)
+        Return 1
+    End If
+
+    Return 0
+End Function

@@ -76,6 +76,29 @@ Type ExecFfiAllowEntry
     signerText As String
 End Type
 
+Type ExecFfiX86ResolverEntry
+    stubId As Integer
+    dllName As String
+    symbolName As String
+    signatureText As String
+    callingConventionText As String
+    argCount As Integer
+    argStackBytes As Integer
+    cleanupType As String
+    symptrLabel As String
+End Type
+
+Type ExecFfiX86ResolvedEntry
+    stubId As Integer
+    procAddr As Any Ptr
+End Type
+
+Type ExecFfiX86SymptrMapEntry
+    symptrLabel As String
+    stubId As Integer
+    procAddr As Any Ptr
+End Type
+
 Type ExecRoutineDef
     nameText As String
     nodeIdx As Integer
@@ -123,6 +146,10 @@ Private Const UXB_FFI_ERR_POLICY_SIGNER_MISMATCH As Integer = 9212
 Private Const UXB_FFI_ERR_POLICY_HASH_EXTRACT_FAILED As Integer = 9213
 Private Const UXB_FFI_ERR_POLICY_SIGNER_EXTRACT_FAILED As Integer = 9214
 Private Const UXB_FFI_ERR_POLICY_LOAD_FAILED As Integer = 9215
+Private Const UXB_FFI_ERR_RESOLVER_PLAN_MISSING As Integer = 9216
+Private Const UXB_FFI_ERR_RESOLVER_NO_MATCH As Integer = 9217
+Private Const UXB_FFI_ERR_DLL_LOAD_FAILED As Integer = 9218
+Private Const UXB_FFI_ERR_SYMBOL_RESOLVE_FAILED As Integer = 9219
 Private Const UXB_CTRL_ERR_RETURN_WITHOUT_GOSUB As Integer = 9301
 Private Const UXB_FFI_POLICY_HEADER_V1 As String = "UXB_FFI_ALLOWLIST_V1"
 Private Dim Shared gFfiPolicyEnforce As Integer
@@ -132,6 +159,22 @@ Private Dim Shared gFfiAllowEntryCount As Integer
 Private Dim Shared gFfiAllowlistLoaded As Integer
 Private Dim Shared gFfiAllowlistLoadFailed As Integer
 Private Dim Shared gFfiAllowlistLoadFailReason As String
+Private Dim Shared gFfiResolverPath As String
+Private Dim Shared gFfiResolverEnforce As Integer
+Private Dim Shared gFfiX86ResolverEntries(Any) As ExecFfiX86ResolverEntry
+Private Dim Shared gFfiX86ResolverEntryCount As Integer
+Private Dim Shared gFfiX86ResolverLoaded As Integer
+Private Dim Shared gFfiX86ResolverLoadFailed As Integer
+Private Dim Shared gFfiX86ResolverLoadFailReason As String
+Private Dim Shared gFfiX86ResolvedEntries(Any) As ExecFfiX86ResolvedEntry
+Private Dim Shared gFfiX86ResolvedEntryCount As Integer
+Private Dim Shared gFfiX86SymptrMapEntries(Any) As ExecFfiX86SymptrMapEntry
+Private Dim Shared gFfiX86SymptrMapEntryCount As Integer
+Private Dim Shared gFfiX86InvokeCount As Integer
+Private Dim Shared gFfiX86LastInvokeStubId As Integer
+Private Dim Shared gFfiX86LastInvokeConv As String
+Private Dim Shared gFfiX86CallerCleanupBytes As Integer
+Private Dim Shared gFfiX86CalleeCleanupBytes As Integer
 Private Dim Shared gRoutineDefs(Any) As ExecRoutineDef
 Private Dim Shared gRoutineDefCount As Integer
 Private Dim Shared gCallContextDepth As Integer
@@ -1388,6 +1431,52 @@ Private Function ExecEvalUserCall(ByRef ps As ParseState, ByRef es As ExecState,
     Return ExecInvokeRoutineByIndex(ps, es, routineIdx, callNodeIdx, expectValue, 0, 0, valueOut, errText)
 End Function
 
+Private Function ExecTryResolveAliasDllTarget(ByRef ps As ParseState, ByRef aliasUpper As String, ByVal callLineNo As Integer, ByRef dllNameOut As String, ByRef symbolNameOut As String, ByRef signatureOut As String, ByRef conventionOut As String, ByRef foundOut As Integer, ByRef errText As String) As Integer
+    foundOut = 0
+
+    Dim bestAliasNode As Integer
+    bestAliasNode = -1
+    Dim bestLineNo As Integer
+    bestLineNo = -2147483648
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim n As ASTNode
+        n = ps.ast.nodes(i)
+        If UCase(n.kind) = "ALIAS_STMT" Then
+            If UCase(Trim(n.value)) = aliasUpper Then
+                If callLineNo <= 0 Then
+                    bestAliasNode = i
+                    Exit For
+                End If
+                If n.lineNo <= callLineNo And n.lineNo >= bestLineNo Then
+                    bestAliasNode = i
+                    bestLineNo = n.lineNo
+                End If
+            End If
+        End If
+    Next i
+
+    If bestAliasNode = -1 Then Return 1
+
+    Dim targetNode As Integer
+    targetNode = ps.ast.nodes(bestAliasNode).firstChild
+    If targetNode = -1 Or UCase(ps.ast.nodes(targetNode).kind) <> "ALIAS_TARGET" Then
+        errText = "exec: ALIAS target missing for " & aliasUpper
+        Return 0
+    End If
+
+    Dim targetText As String
+    targetText = Trim(ps.ast.nodes(targetNode).value)
+    If ExecTryParseAliasDllTarget(targetText, dllNameOut, symbolNameOut, signatureOut, conventionOut) = 0 Then
+        errText = "exec: ALIAS target is not CALL(DLL, ...) for " & aliasUpper
+        Return 0
+    End If
+
+    foundOut = 1
+    Return 1
+End Function
+
 Private Function ExecEvalCall(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNameRaw As String, ByVal callNodeIdx As Integer, ByVal expectValue As Integer, ByRef valueOut As Integer, ByRef errText As String) As Integer
     Dim callName As String
     callName = UCase(Trim(callNameRaw))
@@ -1400,6 +1489,20 @@ Private Function ExecEvalCall(ByRef ps As ParseState, ByRef es As ExecState, ByV
 
     If InStr(callName, ".") > 0 Then
         Return ExecEvalMethodCall(ps, es, callName, callNodeIdx, expectValue, valueOut, errText)
+    End If
+
+    Dim aliasFound As Integer
+    Dim aliasDll As String
+    Dim aliasSymbol As String
+    Dim aliasSig As String
+    Dim aliasConv As String
+    If ExecTryResolveAliasDllTarget(ps, callName, ps.ast.nodes(callNodeIdx).lineNo, aliasDll, aliasSymbol, aliasSig, aliasConv, aliasFound, errText) = 0 Then
+        Return 0
+    End If
+    If aliasFound <> 0 Then
+        valueOut = ExecEvalDllCallCore(ps, es, callNodeIdx, aliasDll, aliasSymbol, aliasSig, aliasConv, 0, errText)
+        If errText <> "" Then Return 0
+        Return 1
     End If
 
     Return ExecEvalUserCall(ps, es, callName, callNodeIdx, expectValue, valueOut, errText)

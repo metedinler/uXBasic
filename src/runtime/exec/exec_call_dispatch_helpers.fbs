@@ -1,0 +1,275 @@
+Private Function ExecSplitMethodCallName(ByRef callNameRaw As String, ByRef ownerOut As String, ByRef methodOut As String) As Integer
+    Dim callName As String
+    callName = Trim(callNameRaw)
+
+    Dim dotPos As Integer
+    dotPos = InStr(callName, ".")
+    If dotPos <= 1 Then Return 0
+
+    ownerOut = Trim(Left(callName, dotPos - 1))
+    methodOut = Trim(Mid(callName, dotPos + 1))
+    If ownerOut = "" Or methodOut = "" Then Return 0
+
+    If InStr(methodOut, ".") > 0 Then Return 0
+    Return 1
+End Function
+
+Private Function ExecGetClassBaseTypeName(ByRef ps As ParseState, ByRef classTypeName As String, ByRef baseTypeOut As String) As Integer
+    baseTypeOut = ""
+
+    Dim classNode As Integer
+    classNode = ExecFindClassDeclNode(ps, classTypeName)
+    If classNode = -1 Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_BASE_REF" Then
+            baseTypeOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(baseTypeOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function ExecResolveMethodRoutineInHierarchy(ByRef ps As ParseState, ByRef startTypeName As String, ByRef methodUpper As String, ByRef routineIdxOut As Integer) As Integer
+    Dim curType As String
+    curType = UCase(Trim(startTypeName))
+
+    Dim hopGuard As Integer
+    Do While curType <> ""
+        hopGuard += 1
+        If hopGuard > 64 Then Exit Do
+
+        Dim routineName As String
+        routineName = curType & "_" & methodUpper
+
+        routineIdxOut = ExecRoutineIndexOf(routineName)
+        If routineIdxOut <> -1 Then Return 1
+
+        Dim nextBase As String
+        If ExecGetClassBaseTypeName(ps, curType, nextBase) = 0 Then Exit Do
+        curType = nextBase
+    Loop
+
+    routineIdxOut = -1
+    Return 0
+End Function
+
+Private Function ExecResolveMethodRoutineIndex(ByRef ps As ParseState, ByRef es As ExecState, ByRef ownerName As String, ByRef methodName As String, ByRef routineIdxOut As Integer, ByRef prependReceiverOut As Integer, ByRef receiverAddrOut As Integer, ByRef errText As String) As Integer
+    Dim ownerUpper As String
+    Dim methodUpper As String
+    ownerUpper = UCase(Trim(ownerName))
+    methodUpper = UCase(Trim(methodName))
+
+    Dim routineName As String
+    prependReceiverOut = 0
+    receiverAddrOut = 0
+
+    If ExecFindClassDeclNode(ps, ownerUpper) <> -1 Then
+        If ExecResolveMethodRoutineInHierarchy(ps, ownerUpper, methodUpper, routineIdxOut) = 0 Then
+            errText = "exec: unsupported call " & ownerUpper & "_" & methodUpper
+            Return 0
+        End If
+    Else
+        Dim receiverIdx As Integer
+        receiverIdx = ExecFindVar(es, ownerName)
+        If receiverIdx = -1 Then
+            errText = "exec: unknown method receiver " & ownerUpper
+            Return 0
+        End If
+
+        Dim receiverType As String
+        receiverType = UCase(Trim(es.vars(receiverIdx).declType))
+        If receiverType = "" Or ExecFindClassDeclNode(ps, receiverType) = -1 Then
+            errText = "exec: method receiver is not class instance " & ownerUpper
+            Return 0
+        End If
+
+        routineName = receiverType & "_" & methodUpper
+        prependReceiverOut = 1
+        receiverAddrOut = CInt(es.vars(receiverIdx).addr)
+
+        If ExecResolveMethodRoutineInHierarchy(ps, receiverType, methodUpper, routineIdxOut) = 0 Then
+            errText = "exec: unsupported call " & routineName
+            Return 0
+        End If
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecInvokeRoutineByIndex(ByRef ps As ParseState, ByRef es As ExecState, ByVal routineIdx As Integer, ByVal callNodeIdx As Integer, ByVal expectValue As Integer, ByVal prependReceiver As Integer, ByVal receiverAddr As Integer, ByRef valueOut As Integer, ByRef errText As String) As Integer
+    Dim routineNodeIdx As Integer
+    Dim routineKind As String
+    routineNodeIdx = gRoutineDefs(routineIdx).nodeIdx
+    routineKind = gRoutineDefs(routineIdx).routineKind
+
+    Dim callName As String
+    callName = gRoutineDefs(routineIdx).nameText
+
+    If expectValue <> 0 And routineKind <> "FUNCTION_STMT" Then
+        errText = "exec: call in expression requires FUNCTION " & callName
+        Return 0
+    End If
+
+    Dim paramNames(Any) As String
+    Dim paramCount As Integer
+
+    Dim bodyStart As Integer
+    bodyStart = ps.ast.nodes(routineNodeIdx).firstChild
+    Do While bodyStart <> -1
+        Dim childKind As String
+        childKind = UCase(ps.ast.nodes(bodyStart).kind)
+        If childKind <> "PARAM_DECL" Then Exit Do
+
+        If paramCount = 0 Then
+            ReDim paramNames(0)
+        Else
+            ReDim Preserve paramNames(paramCount)
+        End If
+
+        paramNames(paramCount) = ps.ast.nodes(bodyStart).value
+        paramCount += 1
+        bodyStart = ps.ast.nodes(bodyStart).nextSibling
+    Loop
+
+    If routineKind = "FUNCTION_STMT" And bodyStart <> -1 And UCase(ps.ast.nodes(bodyStart).kind) = "RETURN_TYPE" Then
+        bodyStart = ps.ast.nodes(bodyStart).nextSibling
+    End If
+
+    Dim explicitArgCount As Integer
+    If callNodeIdx = -1 Then
+        explicitArgCount = 0
+    Else
+        explicitArgCount = ExecChildCount(ps, callNodeIdx)
+    End If
+
+    Dim actualCount As Integer
+    actualCount = explicitArgCount
+    If prependReceiver <> 0 Then actualCount += 1
+
+    If actualCount <> paramCount Then
+        errText = "exec: call arity mismatch " & callName & " expected=" & LTrim(Str(paramCount)) & " actual=" & LTrim(Str(actualCount))
+        Return 0
+    End If
+
+    Dim argValues(Any) As Integer
+    If actualCount > 0 Then ReDim argValues(actualCount - 1)
+
+    Dim writePos As Integer
+    writePos = 0
+    If prependReceiver <> 0 Then
+        argValues(0) = receiverAddr
+        writePos = 1
+    End If
+
+    Dim ai As Integer
+    For ai = 0 To explicitArgCount - 1
+        Dim argNode As Integer
+        argNode = ExecChildAt(ps, callNodeIdx, ai)
+        If argNode = -1 Then
+            errText = "exec: call argument missing"
+            Return 0
+        End If
+
+        argValues(writePos) = ExecEvalNode(ps, es, argNode, errText)
+        If errText <> "" Then Return 0
+        writePos += 1
+    Next ai
+
+    Dim snapshotVars(Any) As ExecVar
+    Dim snapshotCount As Integer
+    Dim snapshotNextAddr As UInteger
+    ExecSnapshotVars es, snapshotVars(), snapshotCount, snapshotNextAddr
+
+    For ai = 0 To paramCount - 1
+        ExecSetVar es, paramNames(ai), argValues(ai)
+    Next ai
+
+    If prependReceiver <> 0 Then
+        ExecSetVar es, "THIS", receiverAddr
+        ExecSetVar es, "ME", receiverAddr
+    End If
+
+    If routineKind = "FUNCTION_STMT" Then
+        ExecSetVar es, ps.ast.nodes(routineNodeIdx).value, 0
+    End If
+
+    Dim savedReturnValue As Integer
+    Dim savedReturnHasValue As Integer
+    savedReturnValue = gCallReturnValue
+    savedReturnHasValue = gCallReturnHasValue
+    gCallReturnValue = 0
+    gCallReturnHasValue = 0
+    gCallContextDepth += 1
+
+    Dim bodyNode As Integer
+    bodyNode = bodyStart
+    Do While bodyNode <> -1
+        If ExecRunStmt(ps, es, bodyNode, errText) = 0 Then
+            gCallContextDepth -= 1
+            gCallReturnValue = savedReturnValue
+            gCallReturnHasValue = savedReturnHasValue
+            ExecRestoreVars es, snapshotVars(), snapshotCount, snapshotNextAddr
+            Return 0
+        End If
+
+        If gExitRequest <> "" Then
+            Dim callReq As String
+            callReq = UCase(gExitRequest)
+
+            If callReq = "RETURN_CALL" Then
+                gExitRequest = ""
+                Exit Do
+            End If
+
+            If callReq <> "END" Then
+                errText = "exec: unsupported control transfer inside user call"
+                gCallContextDepth -= 1
+                gCallReturnValue = savedReturnValue
+                gCallReturnHasValue = savedReturnHasValue
+                ExecRestoreVars es, snapshotVars(), snapshotCount, snapshotNextAddr
+                Return 0
+            End If
+
+            Exit Do
+        End If
+
+        bodyNode = ps.ast.nodes(bodyNode).nextSibling
+    Loop
+
+    If routineKind = "FUNCTION_STMT" Then
+        If gCallReturnHasValue <> 0 Then
+            valueOut = gCallReturnValue
+        Else
+            valueOut = ExecGetVar(es, ps.ast.nodes(routineNodeIdx).value)
+        End If
+    Else
+        valueOut = 0
+    End If
+
+    gCallContextDepth -= 1
+    gCallReturnValue = savedReturnValue
+    gCallReturnHasValue = savedReturnHasValue
+    ExecRestoreVars es, snapshotVars(), snapshotCount, snapshotNextAddr
+    Return 1
+End Function
+
+Private Function ExecEvalMethodCall(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNameRaw As String, ByVal callNodeIdx As Integer, ByVal expectValue As Integer, ByRef valueOut As Integer, ByRef errText As String) As Integer
+    Dim ownerName As String
+    Dim methodName As String
+    If ExecSplitMethodCallName(callNameRaw, ownerName, methodName) = 0 Then
+        errText = "exec: invalid method call name " & UCase(Trim(callNameRaw))
+        Return 0
+    End If
+
+    Dim routineIdx As Integer
+    Dim prependReceiver As Integer
+    Dim receiverAddr As Integer
+    If ExecResolveMethodRoutineIndex(ps, es, ownerName, methodName, routineIdx, prependReceiver, receiverAddr, errText) = 0 Then Return 0
+
+    Return ExecInvokeRoutineByIndex(ps, es, routineIdx, callNodeIdx, expectValue, prependReceiver, receiverAddr, valueOut, errText)
+End Function

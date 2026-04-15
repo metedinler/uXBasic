@@ -1,0 +1,469 @@
+Private Function SemChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    Dim i As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function SemChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return cnt
+End Function
+
+Private Function SemValidateTypeRefs(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "TYPE_REF" Then
+            Dim t As String
+            t = Trim(ps.ast.nodes(i).value)
+            If t = "" Then
+                errText = "semantic: bos type referansi"
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateCallNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "CALL_STMT" Or k = "CALL_EXPR" Then
+            If Trim(ps.ast.nodes(i).value) = "" Then
+                errText = "semantic: bos cagirilan isim"
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateImportNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "IMPORT_STMT" Then
+            Dim fileNode As Integer
+            fileNode = SemChildAt(ps, i, 0)
+            If fileNode = -1 Then
+                errText = "semantic: IMPORT dosya argumani eksik"
+                Return 0
+            End If
+
+            If UCase(ps.ast.nodes(fileNode).kind) <> "STRING" Then
+                errText = "semantic: IMPORT dosya argumani metin olmali"
+                Return 0
+            End If
+
+            If Trim(ps.ast.nodes(fileNode).value) = "" Then
+                errText = "semantic: IMPORT dosya argumani bos olamaz"
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateInputNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "INPUT_STMT" Then
+            Dim argc As Integer
+            argc = SemChildCount(ps, i)
+            If argc = 0 Then
+                errText = "semantic: INPUT icin en az bir hedef gerekli"
+                Return 0
+            End If
+
+            Dim firstTargetPos As Integer
+            firstTargetPos = 0
+
+            Dim firstChild As Integer
+            firstChild = SemChildAt(ps, i, 0)
+            If firstChild <> -1 Then
+                If UCase(ps.ast.nodes(firstChild).kind) = "PROMPT_EXPR" Then firstTargetPos = 1
+            End If
+
+            If argc <= firstTargetPos Then
+                errText = "semantic: INPUT icin en az bir hedef gerekli"
+                Return 0
+            End If
+
+            Dim t As Integer
+            For t = firstTargetPos To argc - 1
+                Dim targetNode As Integer
+                targetNode = SemChildAt(ps, i, t)
+                If targetNode = -1 Or UCase(ps.ast.nodes(targetNode).kind) <> "IDENT" Then
+                    errText = "semantic: INPUT hedefleri IDENT olmali"
+                    Return 0
+                End If
+            Next t
+        ElseIf k = "INPUT_FILE_STMT" Or k = "INPUTF_STMT" Then
+            Dim fileArgc As Integer
+            fileArgc = SemChildCount(ps, i)
+            If fileArgc <= 1 Then
+                errText = "semantic: INPUT# kanal ve hedef gerektirir"
+                Return 0
+            End If
+
+            Dim j As Integer
+            For j = 1 To fileArgc - 1
+                Dim fileTarget As Integer
+                fileTarget = SemChildAt(ps, i, j)
+                If fileTarget = -1 Or UCase(ps.ast.nodes(fileTarget).kind) <> "IDENT" Then
+                    errText = "semantic: INPUT# hedefleri IDENT olmali"
+                    Return 0
+                End If
+            Next j
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateIfSelectNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "IF_STMT" Then
+            If SemChildAt(ps, i, 0) = -1 Then
+                errText = "semantic: IF kosulu eksik"
+                Return 0
+            End If
+        ElseIf k = "ELSEIF_PART" Then
+            If SemChildAt(ps, i, 0) = -1 Then
+                errText = "semantic: ELSEIF kosulu eksik"
+                Return 0
+            End If
+        ElseIf k = "SELECT_STMT" Then
+            Dim selector As Integer
+            selector = SemChildAt(ps, i, 0)
+            If selector = -1 Then
+                errText = "semantic: SELECT CASE selector ifadesi gerekli"
+                Return 0
+            End If
+
+            Dim selectorKind As String
+            selectorKind = UCase(ps.ast.nodes(selector).kind)
+            If selectorKind = "CASE_BLOCK" Or selectorKind = "CASE_ELSE" Then
+                errText = "semantic: SELECT CASE selector ifadesi gerekli"
+                Return 0
+            End If
+
+            Dim caseCount As Integer
+            Dim c As Integer
+            c = ps.ast.nodes(i).firstChild
+            Do While c <> -1
+                Dim ck As String
+                ck = UCase(ps.ast.nodes(c).kind)
+                If ck = "CASE_BLOCK" Or ck = "CASE_ELSE" Then caseCount += 1
+                c = ps.ast.nodes(c).nextSibling
+            Loop
+
+            If caseCount = 0 Then
+                errText = "semantic: SELECT CASE en az bir CASE blogu gerektirir"
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateRoutineNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "SUB_STMT" Or k = "FUNCTION_STMT" Or k = "DECLARE_SUB_STMT" Or k = "DECLARE_FUNCTION_STMT" Then
+            If Trim(ps.ast.nodes(i).value) = "" Then
+                errText = "semantic: prosedur/fonksiyon adi bos olamaz"
+                Return 0
+            End If
+
+            Dim seenParams As String
+            Dim hasReturnType As Integer
+            Dim ch As Integer
+
+            ch = ps.ast.nodes(i).firstChild
+            Do While ch <> -1
+                Dim ck As String
+                ck = UCase(ps.ast.nodes(ch).kind)
+
+                If ck = "PARAM_DECL" Then
+                    Dim pName As String
+                    pName = UCase(Trim(ps.ast.nodes(ch).value))
+                    If pName = "" Then
+                        errText = "semantic: parametre adi bos olamaz"
+                        Return 0
+                    End If
+
+                    If InStr(seenParams, "|" & pName & "|") <> 0 Then
+                        errText = "semantic: tekrarli parametre adi: " & pName
+                        Return 0
+                    End If
+                    seenParams &= "|" & pName & "|"
+                ElseIf ck = "RETURN_TYPE" Then
+                    hasReturnType = 1
+                    If Trim(ps.ast.nodes(ch).value) = "" Then
+                        errText = "semantic: FUNCTION donus tipi bos olamaz"
+                        Return 0
+                    End If
+                End If
+
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+
+            If k = "FUNCTION_STMT" Or k = "DECLARE_FUNCTION_STMT" Then
+                If hasReturnType = 0 Then
+                    errText = "semantic: FUNCTION icin donus tipi zorunlu"
+                    Return 0
+                End If
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateConstNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CONST_DECL" Then
+            If Trim(ps.ast.nodes(i).value) = "" Then
+                errText = "semantic: CONST adi bos olamaz"
+                Return 0
+            End If
+
+            If ps.ast.nodes(i).left = -1 Then
+                errText = "semantic: CONST ifadesi eksik"
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemHasClassName(ByRef ps As ParseState, ByRef classUpper As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = classUpper Then Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+Private Function SemIsMethodRoutineName(ByRef ps As ParseState, ByRef routineNameRaw As String) As Integer
+    Dim routineName As String
+    routineName = UCase(Trim(routineNameRaw))
+    If routineName = "" Then Return 0
+
+    Dim sepPos As Integer
+    sepPos = InStr(routineName, "_")
+    If sepPos <= 1 Then Return 0
+
+    Dim classPrefix As String
+    classPrefix = Left(routineName, sepPos - 1)
+    Return SemHasClassName(ps, classPrefix)
+End Function
+
+Private Function SemValidateThisMeNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal inMethodContext As Integer, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
+
+    Dim k As String
+    k = UCase(ps.ast.nodes(nodeIdx).kind)
+
+    If k = "IDENT" Then
+        Dim identText As String
+        identText = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+        If identText = "THIS" Or identText = "ME" Then
+            If inMethodContext = 0 Then
+                errText = "semantic: THIS/ME sadece method baglaminda kullanilabilir"
+                Return 0
+            End If
+        End If
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If SemValidateThisMeNode(ps, ps.ast.nodes(nodeIdx).left, inMethodContext, errText) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If SemValidateThisMeNode(ps, ps.ast.nodes(nodeIdx).right, inMethodContext, errText) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If SemValidateThisMeNode(ps, ch, inMethodContext, errText) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function SemValidateThisMeUsage(ByRef ps As ParseState, ByRef errText As String) As Integer
+    If ps.rootNode < 0 Or ps.rootNode >= ps.ast.count Then Return 1
+
+    Dim st As Integer
+    st = ps.ast.nodes(ps.rootNode).firstChild
+    Do While st <> -1
+        Dim kindText As String
+        kindText = UCase(ps.ast.nodes(st).kind)
+
+        If kindText = "SUB_STMT" Or kindText = "FUNCTION_STMT" Then
+            Dim isMethodContext As Integer
+            isMethodContext = SemIsMethodRoutineName(ps, ps.ast.nodes(st).value)
+            If SemValidateThisMeNode(ps, st, isMethodContext, errText) = 0 Then Return 0
+        Else
+            If SemValidateThisMeNode(ps, st, 0, errText) = 0 Then Return 0
+        End If
+
+        st = ps.ast.nodes(st).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function SemFindInterfaceNode(ByRef ps As ParseState, ByRef interfaceNameRaw As String) As Integer
+    Dim needle As String
+    needle = UCase(Trim(interfaceNameRaw))
+    If needle = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "INTERFACE_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = needle Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function SemHasRoutineByName(ByRef ps As ParseState, ByRef routineNameRaw As String) As Integer
+    Dim needle As String
+    needle = UCase(Trim(routineNameRaw))
+    If needle = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+        If k = "SUB_STMT" Or k = "FUNCTION_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = needle Then Return 1
+        End If
+    Next i
+
+    Return 0
+End Function
+
+Private Function SemValidateInterfaceContracts(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "CLASS_STMT" Then Continue For
+
+        Dim className As String
+        className = UCase(Trim(ps.ast.nodes(i).value))
+        If className = "" Then Continue For
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CLASS_IMPLEMENTS_REF" Then
+                Dim interfaceName As String
+                interfaceName = UCase(Trim(ps.ast.nodes(ch).value))
+
+                Dim interfaceNode As Integer
+                interfaceNode = SemFindInterfaceNode(ps, interfaceName)
+                If interfaceNode = -1 Then
+                    errText = "semantic: CLASS " & className & " implements unknown interface " & interfaceName
+                    Return 0
+                End If
+
+                Dim m As Integer
+                m = ps.ast.nodes(interfaceNode).firstChild
+                Do While m <> -1
+                    If UCase(ps.ast.nodes(m).kind) = "INTERFACE_METHOD_DECL" Then
+                        Dim methodName As String
+                        methodName = UCase(Trim(ps.ast.nodes(m).value))
+                        Dim expectedRoutine As String
+                        expectedRoutine = className & "_" & methodName
+
+                        If SemHasRoutineByName(ps, expectedRoutine) = 0 Then
+                            errText = "semantic: interface method not implemented " & expectedRoutine
+                            Return 0
+                        End If
+                    End If
+                    m = ps.ast.nodes(m).nextSibling
+                Loop
+            End If
+
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
+    Return 1
+End Function
+
+Function SemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Integer
+    errText = ""
+
+    If ps.rootNode = -1 Or ps.ast.count = 0 Then
+        errText = "semantic: bos AST"
+        Return 0
+    End If
+
+    If SemValidateTypeRefs(ps, errText) = 0 Then Return 0
+    If SemValidateCallNodes(ps, errText) = 0 Then Return 0
+    If SemValidateImportNodes(ps, errText) = 0 Then Return 0
+    If SemValidateInputNodes(ps, errText) = 0 Then Return 0
+    If SemValidateIfSelectNodes(ps, errText) = 0 Then Return 0
+    If SemValidateRoutineNodes(ps, errText) = 0 Then Return 0
+    If SemValidateConstNodes(ps, errText) = 0 Then Return 0
+    If SemValidateThisMeUsage(ps, errText) = 0 Then Return 0
+    If SemValidateInterfaceContracts(ps, errText) = 0 Then Return 0
+
+    Return 1
+End Function

@@ -331,3 +331,73 @@
 	- `tests/run_file_io_runtime.bas`
 	- `tests/run_file_io_exec_ast.bas`
 	- `tests/plan/command_compatibility_win11.csv`
+
+## PSRT-OK Programi
+
+Durum (2026-04-15): kismen tamamlandi. PSRT envanteri `reports/matrix_psrt_nonok_inventory.csv` icinde 0 satira indi; buna ragmen genel matriste R4/R5/R6 ve OOP-P0/P1/P2 kapsaminda acik satirlar devam ediyor.
+
+Kural:
+- D kolonu kapsam disi; tum tablolarda P/S/R/T kolonlari zorunlu OK.
+- R=N/A olan satirlarda R muaf, P/S/T zorunlu OK.
+
+Ilk 20 uygulanabilir gorev:
+
+1. Gorev: W1 acik hucre envanterini dondur.
+DoD: reports/uxbasic_operasyonel_eksiklik_matrisi.md icinde W1 kapsam satirlari etiketlenmis, degisim listesi yapilanlar.md'ye append edilmis.
+
+2. Gorev: INPUT satirinda semantic acigini kapat.
+DoD: INPUT satiri S=OK; dedicated test PASS; Faz A gate PASS.
+
+3. Gorev: IF/ELSEIF/ELSE/END IF satirinda semantic acigini kapat.
+DoD: ilgili satir S=OK; negatif/pozitif branch testleri PASS; Faz A gate PASS.
+
+4. Gorev: SELECT CASE/CASE ELSE satirinda semantic acigini kapat.
+DoD: ilgili satir S=OK; CASE branch testleri PASS; Faz A gate PASS.
+
+5. Gorev: SUB/FUNCTION satirinda semantic kapanisi tamamla.
+DoD: satir S=OK; scope + return contract testleri PASS; Faz A gate PASS.
+
+6. Gorev: CONST satirinda semantic kapanisi tamamla.
+DoD: satir S=OK; compile-time const contract testleri PASS; Faz A gate PASS.
+
+7. Gorev: END IF/END SELECT/END SUB/END FUNCTION satirinda S/R/T aciklarini kapat.
+DoD: satir S/R/T=OK; block-end fail-fast testleri PASS; Faz A gate PASS.
+
+8. Gorev: %%IFC/%%ENDCOMP/%%ERRORENDCOMP satirlarinda semantic hucreleri OK'a cek.
+DoD: bu satirlarda S=OK; preprocess dedicated testleri PASS; Faz A gate PASS.
+
+9. Gorev: NAMESPACE/MODULE/MAIN satirlarinda parser+semantic kapanisi tamamla.
+DoD: her satirda P/S/T=OK; block nesting ve duplicate fail-fast testleri PASS; gate PASS.
+
+10. Gorev: USING/ALIAS satirlarinda parser+semantic kapanisi tamamla.
+DoD: her satirda P/S/T=OK; conflict/cycle/ambiguous testleri PASS; gate PASS.
+
+11. Gorev: %%DESTOS ve %%PLATFORM satirlarinda parser+semantic kapanisi tamamla.
+DoD: her satirda P/S/T=OK; hedef secimi testleri PASS; gate PASS.
+
+12. Gorev: %%NOZEROVARS ve %%SECSTACK satirlarinda parser+semantic kapanisi tamamla.
+DoD: her satirda P/S/T=OK; bayrak davranis testleri PASS; gate PASS.
+
+13. Gorev: REDIM runtime kapsam acigini (multi-dim + preserve) kapat.
+DoD: REDIM satiri R=OK; run_dim_redim_exec_ast PASS; Faz A gate PASS.
+
+14. Gorev: Operator runtime kapanisi (carpma/bolme/mod + compound assignment) tamamla.
+DoD: operator tablosundaki ilgili R hucreleri OK; operator regression testleri PASS; gate PASS.
+
+15. Gorev: Veri tipi cekirdegi (I* + BOOLEAN + STRING + ARRAY) icin S/R/T kapanisi tamamla.
+DoD: ilgili satirlarda D haric hucre kalmaz; type/runtime regression PASS; gate PASS.
+
+16. Gorev: CLASS statement ve veri tipi satirlarinda S/R kapanisini tamamla.
+DoD: iki tabloda CLASS satirlari tam OK; class runtime test paketi PASS; gate PASS.
+
+17. Gorev: OOP cekirdegi (METHOD, THIS/ME, ctor/dtor, inheritance, END CLASS) kapanisini tamamla.
+DoD: ilgili OOP ve program yapisi satirlarinda P/S/R/T acigi kalmaz; oop regression PASS; gate PASS.
+
+18. Gorev: CALL(DLL, ...) ve IMPORT satirlarinda FFI semantic/runtime kapanisini tamamla.
+DoD: her iki satir tam OK; ENFORCE attestation testleri PASS; gate PASS.
+
+19. Gorev: INLINE ve LIST/DICT/SET satirlarinda kalan aciklari kapat.
+DoD: INLINE satiri S/T=OK, LIST/DICT/SET satiri S/R=OK; koleksiyon+inline testleri PASS; gate PASS.
+
+20. Gorev: Floating-point ve OOP ileri satirlari (VTable/Interface) icin final kapanis.
+DoD: FLOATING POINT + F32/F64/F80 + VTable/Polymorphism + Interface satirlarinda P/S/R/T=OK; strict gate PASS; final matrixte D haric acik hucre kalmaz.

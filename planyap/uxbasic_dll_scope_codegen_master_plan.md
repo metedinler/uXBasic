@@ -263,6 +263,122 @@ Kapsam siniri (durust not):
 1. Stub icindeki `__uxb_ffi_symptr_N` cozumlemesi (gercek adres baglama/loader) FFI-CORE/CG lane'inde ayrik kapanis kalemidir.
 2. FFI-CONV-2 bu turda Win64 stack/shadow/alignment ve call-shape kapanisi olarak tamamlandi.
 
+### 6.4) FFI-SCOPE-1 ve FFI-SCOPE-2 Kapanis (2026-04-15)
+
+Tamamlanan adimlar:
+
+1. Runtime CALL(DLL) yolu ortak cekirdege ayrildi:
+  - `ExecEvalDllCallCore(...)` ile policy + marshalling + byref guard tek noktada toplandi.
+2. Alias runtime dispatch eklendi:
+  - `ExecEvalCall(...)` non-builtin cagrilarda ALIAS adini cozmeye calisiyor.
+  - ALIAS hedefi `CALL(DLL,...)` ise runtime dogrudan DLL cekirdegine yonlendiriliyor.
+3. ALIAS hedef parser'i guclendirildi:
+  - `ExecTryParseAliasDllTarget(...)` unquoted `kernel32.dll` gibi hedefleri parse ediyor.
+4. Strongly-typed marshalling aktiflestirildi:
+  - `ExecValidateDllMarshalArg(...)` ile I32/U64/F64/PTR/STRPTR/BYREF/BYVAL arg dogrulamasi runtime fail-fast olarak calisiyor.
+5. Test kapsami genisletildi:
+  - `tests/run_call_dll_alias_exec_ast.bas` artik gercek alias dispatch (`CALL(Tick, a)`) kaniti veriyor.
+  - Ayni testte STRPTR ve U64 negatif marshalling senaryolari fail-fast dogrulaniyor.
+
+Kapanis kaniti (calisan testler):
+
+1. `tests/run_call_dll_alias_exec_ast.bas` -> PASS
+2. `tests/run_call_exec.bas` -> PASS (regresyon)
+3. `tests/run_call_dll_scope_exec_ast.bas` -> PASS (scope regresyon)
+
+### 6.5) FFI-CONV-3 Baslangic (2026-04-15)
+
+Tamamlanan ilk artis (MVP):
+
+1. x86 backend modulu eklendi:
+  - `src/codegen/x86/ffi_call_backend.fbs`
+2. x86 plan CSV cikisi:
+  - `line,dll,symbol,signature,convention,arg_count,arg_stack_bytes,abi,cleanup_type`
+  - cleanup_type kurali: `CDECL=CALLER`, `STDCALL=CALLEE`
+3. x86 asm stub plan cikisi eklendi:
+  - `__uxb_ffi_x86_symptr_N` uzerinden indirect call skeleton
+  - CDECL icin `add esp, arg_stack_bytes` caller cleanup
+4. Interop akisina baglandi:
+  - `src/main.bas` -> `FfiX86BackendEmitArtifacts(ps, "dist\\interop", ...)`
+5. Kanit testi:
+  - `tests/run_ffi_x86_call_backend.bas` -> PASS
+  - `tests/run_ffi_x86_resolver_exec_ast.bas` -> PASS
+  - regresyon: `tests/run_ffi_x64_call_backend.bas` -> PASS
+
+6. x86 resolver lane ilk entegrasyonu:
+  - `dist/interop/ffi_call_x86_resolver.csv` artifact uretimi aktif.
+  - Runtime'da resolver enforce/report mode kontrolu eklendi (plan missing -> fail-fast kodu; report-only -> warning + devam).
+  - Symbol varlik dogrulamasi icin `LoadLibraryA/GetProcAddress` yolu baglandi.
+
+Acik kalanlar (FFI-CONV-3 kapanisi icin):
+
+1. x86 runtime gercek dis cagrida caller/callee cleanup davranisinin icra kaniti.
+2. `__uxb_ffi_x86_symptr_N` etiketlerine runtime adres yazimi ve gercek dis cagrinin bu pointerlar uzerinden tamamlanmasi.
+
+### 6.6) ERR-1/ERR-2 Baslangic: Structured Error Model + Codegen Hazirligi (2026-04-15)
+
+Hedef:
+
+1. Dile `TRY/CATCH/FINALLY/END TRY`, `THROW`, `ASSERT` komutlarini eklemek.
+2. Compiler/runtime hata bilgisini uXBasic icinden ulasilabilir tek bir error nesnesinde toplamak.
+3. Bu yapinin MIR/codegen lane'ine indirgenebilir bir modelle tasarlanmasi.
+
+Mimari karar (kanonik):
+
+1. Global error nesnesi adi: `ERROR` (tek kaynak).
+2. `ERROR` alanlari (minimum):
+  - `code AS I32`
+  - `message AS STRING`
+  - `detail AS STRING`
+  - `module_name AS STRING`
+  - `source_file AS STRING`
+  - `line AS I32`
+  - `column AS I32`
+  - `phase AS STRING` (LEX/PARSE/SEMANTIC/RUNTIME/CODEGEN)
+3. Compiler'da uretilen hata mesaji ve kodlari runtime-visible `ERROR` nesnesine maplenecek.
+
+Soz dizimi (MVP taslak):
+
+1. TRY/CATCH:
+  - `TRY ... CATCH e ... [FINALLY ...] END TRY`
+2. THROW:
+  - `THROW code`
+  - `THROW code, message`
+  - `THROW code, message, detail`
+3. ASSERT:
+  - `ASSERT expr`
+  - `ASSERT expr, message`
+
+Fazlar:
+
+1. ERR-1 (Parser/Semantic/Runtime)
+  - Lexer tokenlari: TRY, CATCH, FINALLY, END TRY, THROW, ASSERT.
+  - AST node'lari: TRY_STMT, CATCH_CLAUSE, FINALLY_CLAUSE, THROW_STMT, ASSERT_STMT.
+  - Semantic kurallar: catch scope, throw arity/type, assert bool coercion.
+  - Runtime: stack-based handler kaydi + finally garanti calisma.
+2. ERR-2 (Compiler error bridge)
+  - Derleyici ic hata kodlari -> `ERROR` nesnesi alan esleme tablosu.
+  - Tum modullerde tek API: `RuntimeSetError(...)` ve `RuntimeClearError(...)`.
+  - Programci tarafinda hata denetim kaliplari icin test paketi.
+3. ERR-CG (MIR/Codegen)
+  - TRY/CATCH edge'leri icin MIR exception flow node'lari.
+  - THROW lowering: error object materialization + handler jump.
+  - ASSERT lowering: debug/release politika secimi.
+
+Kapanis kriteri:
+
+1. `reports/uxbasic_operasyonel_eksiklik_matrisi.md` satirlari:
+  - TRY/CATCH/FINALLY
+  - THROW
+  - ASSERT
+  - ERROR nesnesi/kopru notu
+  D/P/S/R/T kolonlarinda test kanitiyla en az KISMEN -> OK gecisi.
+2. Codegen izleme satirlari:
+  - TRY/CATCH unwinding emit
+  - THROW emit
+  - ASSERT emit
+  lane'lerinde artefakt + test kaniti.
+
 ## 7) Risk ve Koruma
 
 Riskler:

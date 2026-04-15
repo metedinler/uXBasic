@@ -27,3 +27,9 @@ Ajanlar naming standardina uymayan degisiklikleri bitmis kabul etmez.
 - Program bildirim metinleri Turkce yazilir.
 - Hata bildirimleri Turkce yazilir ve dosyaya loglanir.
 - Programin standart cikisi, komut sonucunun kendisi disinda ek bilgi basmaz.
+
+## Tum Ajanlara Zorunlu Aktarim
+
+- Ana ajan, baslattigi her alt ajana bu sozlesmeyi prompt icinde acikca aktarir.
+- Alt ajanlarin urettigi kod/mesaj bu kurallarla celisiyorsa sonuc kabul edilmez.
+- Runtime ve test kodunda yeni hata metinleri eklenirse Turkce yerellestirme kaydi zorunludur.

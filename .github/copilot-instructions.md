@@ -31,3 +31,9 @@ Bu workspace icinde calisan tum ajanlar (ana ajan + alt ajanlar):
 - Program bildirimleri Turkce yazilir.
 - Hata bildirimleri Turkce yazilir ve dosyaya yazilir.
 - Programin standart cikisi yalnizca komut sonucu olur; ekstra teknik gosterim log dosyasina gider.
+
+## Alt Ajan Aktarim Kurali
+
+- Ana ajan, tum subagent cagrilarinda bu dil/cikti sozlesmesini acik gereksinim olarak yazar.
+- Subagent tarafinda uretilen oneriler bu kurala uymuyorsa uygulanmaz.
+- Yeni eklenen runtime hata metinleri icin `src/runtime/error_localization.fbs` guncellemesi zorunludur.

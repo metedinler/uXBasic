@@ -247,8 +247,8 @@ Function ParseRedimStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Inte
     Dim firstDeclTok As Token
     firstDeclTok = CurToken(ps)
     If ((firstDeclTok.kind = "KEYWORD") Or (firstDeclTok.kind = "IDENT")) And UCase(firstDeclTok.lexeme) = "PRESERVE" Then
-        ps.lastError = "REDIM PRESERVE unsupported in R3.N"
-        Return -1
+        ps.ast.nodes(redimNode).op = "PRESERVE"
+        AdvanceTok ps
     End If
 
     Do
@@ -271,10 +271,136 @@ Private Function IsEndClassStart(ByRef ps As ParseState) As Integer
     Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "CLASS")
 End Function
 
+Private Function IsEndInterfaceStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "INTERFACE")
+End Function
+
 Private Function IsClassMemberTerminator(ByRef tk As Token) As Integer
     If tk.kind = "EOF" Or tk.kind = "EOL" Then Return 1
     If tk.kind = "OP" And tk.lexeme = ":" Then Return 1
     Return 0
+End Function
+
+Private Function IsClassNamedMemberKind(ByRef kindText As String) As Integer
+    Select Case UCase(kindText)
+    Case "CLASS_FIELD", "CLASS_METHOD_DECL"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function HasClassNamedMember(ByRef ps As ParseState, ByVal classNode As Integer, ByRef rawName As String) As Integer
+    Dim targetName As String
+    targetName = UCase(Trim(rawName))
+    If targetName = "" Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        Dim kindText As String
+        kindText = UCase(ps.ast.nodes(ch).kind)
+        If IsClassNamedMemberKind(kindText) Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = targetName Then Return 1
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function HasClassConstructorDecl(ByRef ps As ParseState, ByVal classNode As Integer) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_CONSTRUCTOR_DECL" Then Return 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function HasClassDestructorDecl(ByRef ps As ParseState, ByVal classNode As Integer) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_DESTRUCTOR_DECL" Then Return 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function ParseClassMemberParamDeclarator(ByRef ps As ParseState) As Integer
+    Dim modeText As String
+    modeText = ""
+
+    Dim modeTok As Token
+    modeTok = CurToken(ps)
+    If modeTok.kind = "KEYWORD" Then
+        Dim modeUpper As String
+        modeUpper = UCase(modeTok.lexeme)
+        If modeUpper = "BYREF" Or modeUpper = "BYVAL" Then
+            modeText = modeUpper
+            AdvanceTok ps
+        End If
+    End If
+
+    Dim identTok As Token
+    identTok = CurToken(ps)
+    If identTok.kind <> "IDENT" Then
+        ps.lastError = "CLASS: parameter identifier expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim paramNode As Integer
+    paramNode = MakeNodeFromToken(ps, "PARAM_DECL", identTok.lexeme, "", identTok)
+    If modeText <> "" Then
+        ps.ast.nodes(paramNode).op = modeText
+    End If
+
+    If MatchKeyword(ps, "AS") Then
+        Dim typeTok As Token
+        typeTok = CurToken(ps)
+        If ValidateTypeToken(ps, typeTok) = 0 Then
+            If ps.lastError = "" Then ps.lastError = "CLASS: parameter type expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim typeNode As Integer
+        typeNode = MakeNodeFromToken(ps, "TYPE_REF", typeTok.lexeme, "", typeTok)
+        ASTAddChild ps.ast, paramNode, typeNode
+    End If
+
+    Return paramNode
+End Function
+
+Private Function ParseClassMemberParamList(ByRef ps As ParseState, ByVal ownerNode As Integer, ByRef memberLabel As String) As Integer
+    If MatchOp(ps, "(") = 0 Then
+        ps.lastError = memberLabel & ": missing ( in signature"
+        Return 0
+    End If
+
+    If MatchOp(ps, ")") Then Return 1
+
+    Do
+        Dim paramNode As Integer
+        paramNode = ParseClassMemberParamDeclarator(ps)
+        If paramNode = -1 Then Return 0
+        ASTAddChild ps.ast, ownerNode, paramNode
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    If MatchOp(ps, ")") = 0 Then
+        ps.lastError = memberLabel & ": missing ) in signature"
+        Return 0
+    End If
+
+    Return 1
 End Function
 
 Private Function IsClassAccessKeyword(ByRef ps As ParseState, ByRef accessOut As String) As Integer
@@ -313,6 +439,275 @@ Private Function ParseFriendQualifiedName(ByRef ps As ParseState, ByRef nameOut 
         AdvanceTok ps
     Loop
 
+    Return 1
+End Function
+
+Private Function ParseClassAccessSection(ByRef ps As ParseState, ByRef currentAccess As String) As Integer
+    Dim accessName As String
+    If IsClassAccessKeyword(ps, accessName) = 0 Then
+        Return 0
+    End If
+
+    AdvanceTok ps
+    If MatchOp(ps, ":") Then
+        ' optional access section marker
+    End If
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = accessName & ": unexpected trailing tokens"
+        Return -1
+    End If
+
+    currentAccess = accessName
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassFriendStmt(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    If IsKw(ps, "FRIEND") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "FRIEND") Then
+        Return 0
+    End If
+
+    Dim friendTok As Token
+    friendTok = CurToken(ps)
+    AdvanceTok ps
+
+    Dim friendNode As Integer
+    friendNode = MakeNodeFromToken(ps, "CLASS_FRIEND_STMT", currentAccess, "", friendTok)
+
+    Do
+        Dim friendName As String
+        If ParseFriendQualifiedName(ps, friendName) = 0 Then
+            If ps.lastError = "" Then ps.lastError = "FRIEND: qualified module name expected"
+            Return -1
+        End If
+
+        Dim itemNode As Integer
+        itemNode = MakeNodeFromToken(ps, "FRIEND_ITEM", friendName, "", friendTok)
+        ASTAddChild ps.ast, friendNode, itemNode
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "FRIEND: unexpected trailing tokens"
+        Return -1
+    End If
+
+    ASTAddChild ps.ast, classNode, friendNode
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassMethodDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    If IsKw(ps, "METHOD") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "METHOD") Then
+        Return 0
+    End If
+
+    Dim methodTok As Token
+    methodTok = CurToken(ps)
+    AdvanceTok ps
+
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "METHOD: name expected"
+        Return -1
+    End If
+
+    If HasClassNamedMember(ps, classNode, nameTok.lexeme) Then
+        ps.lastError = "CLASS: duplicate member name: " & UCase(Trim(nameTok.lexeme))
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim methodNode As Integer
+    methodNode = MakeNodeFromToken(ps, "CLASS_METHOD_DECL", nameTok.lexeme, currentAccess, methodTok)
+
+    If ParseClassMemberParamList(ps, methodNode, "METHOD") = 0 Then Return -1
+
+    If MatchKeyword(ps, "AS") Then
+        Dim retTok As Token
+        retTok = CurToken(ps)
+        If ValidateTypeToken(ps, retTok) = 0 Then
+            ps.lastError = "METHOD: return type expected after AS"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim retNode As Integer
+        retNode = MakeNodeFromToken(ps, "RETURN_TYPE", retTok.lexeme, "", retTok)
+        ASTAddChild ps.ast, methodNode, retNode
+    End If
+
+    Dim accessNode As Integer
+    accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", methodTok)
+    ASTAddChild ps.ast, methodNode, accessNode
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "METHOD: unexpected trailing tokens"
+        Return -1
+    End If
+
+    ASTAddChild ps.ast, classNode, methodNode
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassConstructorDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    If IsKw(ps, "CONSTRUCTOR") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "CONSTRUCTOR") Then
+        Return 0
+    End If
+
+    If HasClassConstructorDecl(ps, classNode) Then
+        ps.lastError = "CLASS: duplicate CONSTRUCTOR declaration"
+        Return -1
+    End If
+
+    Dim ctorTok As Token
+    ctorTok = CurToken(ps)
+    AdvanceTok ps
+
+    If CurToken(ps).kind = "IDENT" Then
+        ps.lastError = "CONSTRUCTOR: name is not allowed"
+        Return -1
+    End If
+
+    Dim ctorNode As Integer
+    ctorNode = MakeNodeFromToken(ps, "CLASS_CONSTRUCTOR_DECL", "", currentAccess, ctorTok)
+
+    If ParseClassMemberParamList(ps, ctorNode, "CONSTRUCTOR") = 0 Then Return -1
+
+    If MatchKeyword(ps, "AS") Then
+        ps.lastError = "CONSTRUCTOR: return type is not allowed"
+        Return -1
+    End If
+
+    Dim accessNode As Integer
+    accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", ctorTok)
+    ASTAddChild ps.ast, ctorNode, accessNode
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "CONSTRUCTOR: unexpected trailing tokens"
+        Return -1
+    End If
+
+    ASTAddChild ps.ast, classNode, ctorNode
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassDestructorDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    If IsKw(ps, "DESTRUCTOR") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "DESTRUCTOR") Then
+        Return 0
+    End If
+
+    If HasClassDestructorDecl(ps, classNode) Then
+        ps.lastError = "CLASS: duplicate DESTRUCTOR declaration"
+        Return -1
+    End If
+
+    Dim dtorTok As Token
+    dtorTok = CurToken(ps)
+    AdvanceTok ps
+
+    If CurToken(ps).kind = "IDENT" Then
+        ps.lastError = "DESTRUCTOR: name is not allowed"
+        Return -1
+    End If
+
+    Dim dtorNode As Integer
+    dtorNode = MakeNodeFromToken(ps, "CLASS_DESTRUCTOR_DECL", "", currentAccess, dtorTok)
+
+    If ParseClassMemberParamList(ps, dtorNode, "DESTRUCTOR") = 0 Then Return -1
+
+    If ps.ast.nodes(dtorNode).firstChild <> -1 Then
+        ps.lastError = "DESTRUCTOR: parameters are not allowed"
+        Return -1
+    End If
+
+    If MatchKeyword(ps, "AS") Then
+        ps.lastError = "DESTRUCTOR: return type is not allowed"
+        Return -1
+    End If
+
+    Dim accessNode As Integer
+    accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", dtorTok)
+    ASTAddChild ps.ast, dtorNode, accessNode
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "DESTRUCTOR: unexpected trailing tokens"
+        Return -1
+    End If
+
+    ASTAddChild ps.ast, classNode, dtorNode
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassFieldDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    Dim fieldTok As Token
+    fieldTok = CurToken(ps)
+    If fieldTok.kind <> "IDENT" Then
+        ps.lastError = "CLASS: field identifier expected"
+        Return -1
+    End If
+
+    If HasClassNamedMember(ps, classNode, fieldTok.lexeme) Then
+        ps.lastError = "CLASS: duplicate member name: " & UCase(Trim(fieldTok.lexeme))
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim fieldBoundsNode As Integer
+    fieldBoundsNode = -1
+    If MatchOp(ps, "(") Then
+        fieldBoundsNode = ASTNewNode(ps.ast, "DIM_BOUNDS", "", "", fieldTok.lineNo, fieldTok.colNo)
+
+        Do
+            Dim fieldBoundExpr As Integer
+            fieldBoundExpr = ParseDimBound(ps)
+            If fieldBoundExpr = -1 Then
+                ps.lastError = "CLASS: invalid field array bound"
+                Return -1
+            End If
+            ASTAddChild ps.ast, fieldBoundsNode, fieldBoundExpr
+
+            If MatchOp(ps, ",") = 0 Then Exit Do
+        Loop
+
+        If MatchOp(ps, ")") = 0 Then
+            ps.lastError = "CLASS: missing ) in field bounds"
+            Return -1
+        End If
+    End If
+
+    If MatchKeyword(ps, "AS") = 0 Then
+        ps.lastError = "CLASS: missing AS in field declaration"
+        Return -1
+    End If
+
+    Dim fieldTypeTok As Token
+    fieldTypeTok = CurToken(ps)
+    If ValidateTypeToken(ps, fieldTypeTok) = 0 Then
+        If ps.lastError = "" Then ps.lastError = "CLASS: field type expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim fieldNode As Integer
+    fieldNode = MakeNodeFromToken(ps, "CLASS_FIELD", fieldTok.lexeme, "", fieldTok)
+
+    Dim fieldTypeNode As Integer
+    fieldTypeNode = MakeNodeFromToken(ps, "TYPE_REF", fieldTypeTok.lexeme, "", fieldTypeTok)
+    ASTAddChild ps.ast, fieldNode, fieldTypeNode
+    If fieldBoundsNode <> -1 Then ASTAddChild ps.ast, fieldNode, fieldBoundsNode
+
+    Dim accessNode As Integer
+    accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", fieldTok)
+    ASTAddChild ps.ast, fieldNode, accessNode
+
+    ASTAddChild ps.ast, classNode, fieldNode
+    SkipSeparators ps
     Return 1
 End Function
 
@@ -412,6 +807,45 @@ Function ParseClassStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Inte
     Dim classNode As Integer
     classNode = MakeNodeFromToken(ps, "CLASS_STMT", nameTok.lexeme, "", firstTok)
 
+    Dim baseClassName As String
+    baseClassName = ""
+    
+    If IsKw(ps, "EXTENDS") Or (CurToken(ps).kind = "IDENT" And UCase(CurToken(ps).lexeme) = "EXTENDS") Then
+        AdvanceTok ps
+        Dim baseTok As Token
+        baseTok = CurToken(ps)
+        If baseTok.kind <> "IDENT" Then
+            ps.lastError = "CLASS: base class name expected after EXTENDS"
+            Return -1
+        End If
+        baseClassName = baseTok.lexeme
+        AdvanceTok ps
+        
+        Dim baseRefNode As Integer
+        baseRefNode = MakeNodeFromToken(ps, "CLASS_BASE_REF", baseClassName, "", baseTok)
+        ASTAddChild ps.ast, classNode, baseRefNode
+    End If
+
+    If IsKw(ps, "IMPLEMENTS") Or (CurToken(ps).kind = "IDENT" And UCase(CurToken(ps).lexeme) = "IMPLEMENTS") Then
+        AdvanceTok ps
+
+        Do
+            Dim ifTok As Token
+            ifTok = CurToken(ps)
+            If ifTok.kind <> "IDENT" Then
+                ps.lastError = "CLASS: interface name expected after IMPLEMENTS"
+                Return -1
+            End If
+
+            Dim ifRefNode As Integer
+            ifRefNode = MakeNodeFromToken(ps, "CLASS_IMPLEMENTS_REF", ifTok.lexeme, "", ifTok)
+            ASTAddChild ps.ast, classNode, ifRefNode
+            AdvanceTok ps
+
+            If MatchOp(ps, ",") = 0 Then Exit Do
+        Loop
+    End If
+
     Dim currentAccess As String
     currentAccess = "PRIVATE"
 
@@ -419,113 +853,30 @@ Function ParseClassStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Inte
     Do While CurToken(ps).kind <> "EOF"
         If IsEndClassStart(ps) Then Exit Do
 
-        Dim accessName As String
-        If IsClassAccessKeyword(ps, accessName) Then
-            AdvanceTok ps
-            If MatchOp(ps, ":") Then
-                ' optional access section marker
-            End If
-            If IsClassMemberTerminator(CurToken(ps)) = 0 Then
-                ps.lastError = accessName & ": unexpected trailing tokens"
-                Return -1
-            End If
+        Dim parseResult As Integer
 
-            currentAccess = accessName
-            SkipSeparators ps
-            Continue Do
-        End If
+        parseResult = ParseClassAccessSection(ps, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
 
-        If IsKw(ps, "FRIEND") Or (CurToken(ps).kind = "IDENT" And UCase(CurToken(ps).lexeme) = "FRIEND") Then
-            Dim friendTok As Token
-            friendTok = CurToken(ps)
-            AdvanceTok ps
+        parseResult = ParseClassFriendStmt(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
 
-            Dim friendNode As Integer
-            friendNode = MakeNodeFromToken(ps, "CLASS_FRIEND_STMT", currentAccess, "", friendTok)
+        parseResult = ParseClassMethodDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
 
-            Do
-                Dim friendName As String
-                If ParseFriendQualifiedName(ps, friendName) = 0 Then
-                    If ps.lastError = "" Then ps.lastError = "FRIEND: qualified module name expected"
-                    Return -1
-                End If
+        parseResult = ParseClassConstructorDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
 
-                Dim itemNode As Integer
-                itemNode = MakeNodeFromToken(ps, "FRIEND_ITEM", friendName, "", friendTok)
-                ASTAddChild ps.ast, friendNode, itemNode
+        parseResult = ParseClassDestructorDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
 
-                If MatchOp(ps, ",") = 0 Then Exit Do
-            Loop
-
-            If IsClassMemberTerminator(CurToken(ps)) = 0 Then
-                ps.lastError = "FRIEND: unexpected trailing tokens"
-                Return -1
-            End If
-
-            ASTAddChild ps.ast, classNode, friendNode
-            SkipSeparators ps
-            Continue Do
-        End If
-
-        Dim fieldTok As Token
-        fieldTok = CurToken(ps)
-        If fieldTok.kind <> "IDENT" Then
-            ps.lastError = "CLASS: field identifier expected"
-            Return -1
-        End If
-        AdvanceTok ps
-
-        Dim fieldBoundsNode As Integer
-        fieldBoundsNode = -1
-        If MatchOp(ps, "(") Then
-            fieldBoundsNode = ASTNewNode(ps.ast, "DIM_BOUNDS", "", "", fieldTok.lineNo, fieldTok.colNo)
-
-            Do
-                Dim fieldBoundExpr As Integer
-                fieldBoundExpr = ParseDimBound(ps)
-                If fieldBoundExpr = -1 Then
-                    ps.lastError = "CLASS: invalid field array bound"
-                    Return -1
-                End If
-                ASTAddChild ps.ast, fieldBoundsNode, fieldBoundExpr
-
-                If MatchOp(ps, ",") = 0 Then Exit Do
-            Loop
-
-            If MatchOp(ps, ")") = 0 Then
-                ps.lastError = "CLASS: missing ) in field bounds"
-                Return -1
-            End If
-        End If
-
-        If MatchKeyword(ps, "AS") = 0 Then
-            ps.lastError = "CLASS: missing AS in field declaration"
-            Return -1
-        End If
-
-        Dim fieldTypeTok As Token
-        fieldTypeTok = CurToken(ps)
-        If ValidateTypeToken(ps, fieldTypeTok) = 0 Then
-            If ps.lastError = "" Then ps.lastError = "CLASS: field type expected"
-            Return -1
-        End If
-        AdvanceTok ps
-
-        Dim fieldNode As Integer
-        fieldNode = MakeNodeFromToken(ps, "CLASS_FIELD", fieldTok.lexeme, "", fieldTok)
-
-        Dim fieldTypeNode As Integer
-        fieldTypeNode = MakeNodeFromToken(ps, "TYPE_REF", fieldTypeTok.lexeme, "", fieldTypeTok)
-        ASTAddChild ps.ast, fieldNode, fieldTypeNode
-        If fieldBoundsNode <> -1 Then ASTAddChild ps.ast, fieldNode, fieldBoundsNode
-
-        Dim accessNode As Integer
-        accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", fieldTok)
-        ASTAddChild ps.ast, fieldNode, accessNode
-
-        ASTAddChild ps.ast, classNode, fieldNode
-
-        SkipSeparators ps
+        parseResult = ParseClassFieldDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
     Loop
 
     If IsEndClassStart(ps) = 0 Then
@@ -536,6 +887,90 @@ Function ParseClassStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Inte
     AdvanceTok ps
     AdvanceTok ps
     Return classNode
+End Function
+
+Function ParseInterfaceStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "INTERFACE: name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim interfaceNode As Integer
+    interfaceNode = MakeNodeFromToken(ps, "INTERFACE_STMT", nameTok.lexeme, "", firstTok)
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndInterfaceStart(ps) Then Exit Do
+
+        If IsKw(ps, "METHOD") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "METHOD") Then
+            ps.lastError = "INTERFACE: only METHOD declarations are allowed"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim methodNameTok As Token
+        methodNameTok = CurToken(ps)
+        If methodNameTok.kind <> "IDENT" Then
+            ps.lastError = "INTERFACE METHOD: name expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        If MatchOp(ps, "(") = 0 Then
+            ps.lastError = "INTERFACE METHOD: missing ("
+            Return -1
+        End If
+
+        Dim parenDepth As Integer
+        parenDepth = 1
+        Do While CurToken(ps).kind <> "EOF" And parenDepth > 0
+            If CurToken(ps).kind = "OP" Then
+                If CurToken(ps).lexeme = "(" Then
+                    parenDepth += 1
+                ElseIf CurToken(ps).lexeme = ")" Then
+                    parenDepth -= 1
+                End If
+            End If
+            AdvanceTok ps
+        Loop
+
+        If parenDepth <> 0 Then
+            ps.lastError = "INTERFACE METHOD: missing )"
+            Return -1
+        End If
+
+        If IsKw(ps, "AS") Then
+            AdvanceTok ps
+            If ValidateTypeToken(ps, CurToken(ps)) = 0 Then
+                If ps.lastError = "" Then ps.lastError = "INTERFACE METHOD: return type expected"
+                Return -1
+            End If
+            AdvanceTok ps
+        End If
+
+        If IsDeclStmtTerminator(CurToken(ps)) = 0 Then
+            ps.lastError = "INTERFACE METHOD: unexpected trailing tokens"
+            Return -1
+        End If
+
+        Dim methodNode As Integer
+        methodNode = MakeNodeFromToken(ps, "INTERFACE_METHOD_DECL", methodNameTok.lexeme, "", methodNameTok)
+        ASTAddChild ps.ast, interfaceNode, methodNode
+
+        SkipSeparators ps
+    Loop
+
+    If IsEndInterfaceStart(ps) = 0 Then
+        ps.lastError = "missing END INTERFACE"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    Return interfaceNode
 End Function
 
 Function ParseDefTypeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer

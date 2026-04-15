@@ -17,12 +17,12 @@ Private Sub Main()
         "NAMESPACE Core" & Chr(10) & _
         "MODULE Net" & Chr(10) & _
         "USING Core.IO" & Chr(10) & _
-        "ALIAS MsgBox = CALL ( DLL , ""user32.dll"" , ""MessageBoxA"" , I32, CDECL )" & Chr(10) & _
+        "ALIAS Tick = CALL ( DLL , ""kernel32.dll"" , ""GetTickCount"" , I32, STDCALL )" & Chr(10) & _
         "END MODULE" & Chr(10) & _
         "END NAMESPACE" & Chr(10) & _
         "MAIN" & Chr(10) & _
         "a = 33" & Chr(10) & _
-        "CALL(DLL, ""kernel32.dll"", ""GetTickCount"", I32, STDCALL, a)" & Chr(10) & _
+        "CALL(Tick, a)" & Chr(10) & _
         "POKED 4320, a" & Chr(10) & _
         "END MAIN"
 
@@ -46,6 +46,33 @@ Private Sub Main()
     Dim parseErr As String
     If RTParseExpectFail(srcBadConv, "invalid calling convention token", parseErr) = 0 Then
         Print "FAIL call_dll_alias invalid-conv parse | "; parseErr
+        End 1
+    End If
+
+    Dim srcAliasStrptrBad As String
+    srcAliasStrptrBad = _
+        "MAIN" & Chr(10) & _
+        "ALIAS ShowText = CALL ( DLL , ""user32.dll"" , ""MessageBoxA"" , STRPTR, CDECL )" & Chr(10) & _
+        "x = 42" & Chr(10) & _
+        "CALL(ShowText, x)" & Chr(10) & _
+        "END MAIN"
+
+    Dim execErr As String
+    If RTExecExpectFail(srcAliasStrptrBad, "STRPTR requires string argument", execErr) = 0 Then
+        Print "FAIL call_dll_alias strptr-marshalling | "; execErr
+        End 1
+    End If
+
+    Dim srcAliasU64Bad As String
+    srcAliasU64Bad = _
+        "MAIN" & Chr(10) & _
+        "ALIAS Counter = CALL ( DLL , ""kernel32.dll"" , ""GetTickCount"" , U64, CDECL )" & Chr(10) & _
+        "n = -1" & Chr(10) & _
+        "CALL(Counter, n)" & Chr(10) & _
+        "END MAIN"
+
+    If RTExecExpectFail(srcAliasU64Bad, "U64 argument cannot be negative", execErr) = 0 Then
+        Print "FAIL call_dll_alias u64-marshalling | "; execErr
         End 1
     End If
 

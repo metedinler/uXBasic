@@ -123,6 +123,11 @@ If interopMode Then
         End 4
     End If
 
+    If FfiX86BackendEmitArtifacts(ps, "dist\interop", interopErr) = 0 Then
+        DiagHata "FFI x86 codegen cikti yazimi basarisiz: " & LocalizeErrorMessage(interopErr)
+        End 4
+    End If
+
     If debugMode Then
         DiagBilgi "Interop include sayisi: " & Str(manifest.includeCount)
         DiagBilgi "Interop import sayisi: " & Str(manifest.importCount)

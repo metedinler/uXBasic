@@ -167,6 +167,69 @@ Private Function ExtractBoundRange(ByRef ps As ParseState, ByVal boundNode As In
     Return 1
 End Function
 
+Private Function BuildArrayFieldLayout(ByRef ps As ParseState, ByVal boundsNode As Integer, ByVal elemSize As Integer, ByVal elemAlign As Integer, ByRef isArrayFieldOut As Integer, ByRef firstDimOut As Integer, ByRef dimCountOut As Integer, ByRef elemStrideOut As Integer, ByRef fieldSizeOut As Integer, ByRef errOut As String) As Integer
+    Dim arrayElemCount As Integer
+
+    isArrayFieldOut = 0
+    firstDimOut = -1
+    dimCountOut = 0
+    elemStrideOut = LayoutAlignUp(elemSize, elemAlign)
+    arrayElemCount = 1
+
+    If boundsNode <> -1 Then
+        If UCase(ps.ast.nodes(boundsNode).kind) = "DIM_BOUNDS" Then
+            isArrayFieldOut = 1
+            firstDimOut = gTypeLayoutDimCount
+
+            Dim bNode As Integer
+            bNode = ps.ast.nodes(boundsNode).firstChild
+            Do While bNode <> -1
+                Dim lowerBound As Integer
+                Dim upperBound As Integer
+                If ExtractBoundRange(ps, bNode, lowerBound, upperBound) = 0 Then
+                    errOut = "layout: array bounds must be constant integers"
+                    Return 0
+                End If
+
+                Dim extent As Integer
+                extent = upperBound - lowerBound + 1
+                If extent <= 0 Then
+                    errOut = "layout: invalid array bounds"
+                    Return 0
+                End If
+
+                AddLayoutDim lowerBound, upperBound, extent
+                dimCountOut = dimCountOut + 1
+
+                If arrayElemCount > 2147483647 \ extent Then
+                    errOut = "layout: array extent overflow"
+                    Return 0
+                End If
+                arrayElemCount = arrayElemCount * extent
+
+                bNode = ps.ast.nodes(bNode).nextSibling
+            Loop
+
+            If dimCountOut = 0 Then
+                errOut = "layout: empty array bounds"
+                Return 0
+            End If
+        End If
+    End If
+
+    If isArrayFieldOut <> 0 Then
+        If elemStrideOut > 0 And arrayElemCount > 2147483647 \ elemStrideOut Then
+            errOut = "layout: array size overflow"
+            Return 0
+        End If
+        fieldSizeOut = elemStrideOut * arrayElemCount
+    Else
+        fieldSizeOut = elemSize
+    End If
+
+    Return 1
+End Function
+
 Private Function ResolveTypeLayout(ByRef ps As ParseState, ByRef rawTypeName As String, ByRef sizeOut As Integer, ByRef alignOut As Integer, ByRef errOut As String) As Integer
     Dim builtinSize As Integer
     Dim builtinAlign As Integer
@@ -233,7 +296,6 @@ Private Function ResolveTypeLayout(ByRef ps As ParseState, ByRef rawTypeName As 
             Dim firstDim As Integer
             Dim dimCount As Integer
             Dim elemStride As Integer
-            Dim arrayElemCount As Integer
 
             fieldTypeNode = LayoutChildAt(ps, fieldNode, 0)
             If fieldTypeNode = -1 Then
@@ -249,67 +311,9 @@ Private Function ResolveTypeLayout(ByRef ps As ParseState, ByRef rawTypeName As 
             End If
 
             boundsNode = LayoutChildAt(ps, fieldNode, 1)
-            isArrayField = 0
-            firstDim = -1
-            dimCount = 0
-            elemStride = LayoutAlignUp(elemSize, elemAlign)
-            arrayElemCount = 1
-
-            If boundsNode <> -1 Then
-                If UCase(ps.ast.nodes(boundsNode).kind) = "DIM_BOUNDS" Then
-                    isArrayField = 1
-                    firstDim = gTypeLayoutDimCount
-
-                    Dim d As Integer
-                    Dim bNode As Integer
-                    bNode = ps.ast.nodes(boundsNode).firstChild
-                    Do While bNode <> -1
-                        Dim lowerBound As Integer
-                        Dim upperBound As Integer
-                        If ExtractBoundRange(ps, bNode, lowerBound, upperBound) = 0 Then
-                            gTypeLayouts(typeIdx).visiting = 0
-                            errOut = "layout: array bounds must be constant integers"
-                            Return 0
-                        End If
-
-                        Dim extent As Integer
-                        extent = upperBound - lowerBound + 1
-                        If extent <= 0 Then
-                            gTypeLayouts(typeIdx).visiting = 0
-                            errOut = "layout: invalid array bounds"
-                            Return 0
-                        End If
-
-                        d = AddLayoutDim(lowerBound, upperBound, extent)
-                        dimCount = dimCount + 1
-
-                        If arrayElemCount > 2147483647 \ extent Then
-                            gTypeLayouts(typeIdx).visiting = 0
-                            errOut = "layout: array extent overflow"
-                            Return 0
-                        End If
-                        arrayElemCount = arrayElemCount * extent
-
-                        bNode = ps.ast.nodes(bNode).nextSibling
-                    Loop
-
-                    If dimCount = 0 Then
-                        gTypeLayouts(typeIdx).visiting = 0
-                        errOut = "layout: empty array bounds"
-                        Return 0
-                    End If
-                End If
-            End If
-
-            If isArrayField <> 0 Then
-                If elemStride > 0 And arrayElemCount > 2147483647 \ elemStride Then
-                    gTypeLayouts(typeIdx).visiting = 0
-                    errOut = "layout: array size overflow"
-                    Return 0
-                End If
-                fieldSize = elemStride * arrayElemCount
-            Else
-                fieldSize = elemSize
+            If BuildArrayFieldLayout(ps, boundsNode, elemSize, elemAlign, isArrayField, firstDim, dimCount, elemStride, fieldSize, errOut) = 0 Then
+                gTypeLayouts(typeIdx).visiting = 0
+                Return 0
             End If
 
             fieldOffset = LayoutAlignUp(curOffset, elemAlign)

@@ -85,6 +85,17 @@ Function ParseIfStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
     Return ifNode
 End Function
 
+Private Function IsCaseIsRelOp(ByRef tk As Token) As Integer
+    If tk.kind <> "OP" Then Return 0
+
+    Select Case tk.lexeme
+    Case "=", "<>", "<", ">", "<=", ">="
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
 Function ParseSelectStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
     Dim selNode As Integer
     selNode = MakeNodeFromToken(ps, "SELECT_STMT", "", "", firstTok)
@@ -122,13 +133,40 @@ Function ParseSelectStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Int
         Else
             caseNode = MakeNodeFromToken(ps, "CASE_BLOCK", "", "", caseTok)
 
-            Do
-                Dim caseExpr As Integer
-                caseExpr = ParseExpression(ps)
-                If caseExpr = -1 Then Return -1
-                ASTAddChild ps.ast, caseNode, caseExpr
-                If MatchOp(ps, ",") = 0 Then Exit Do
-            Loop
+            If MatchKeyword(ps, "IS") Then
+                Do
+                    Dim relTok As Token
+                    relTok = CurToken(ps)
+                    If IsCaseIsRelOp(relTok) = 0 Then
+                        ps.lastError = "CASE IS: relational operator expected"
+                        Return -1
+                    End If
+                    AdvanceTok ps
+
+                    Dim caseIsExpr As Integer
+                    caseIsExpr = ParseExpression(ps)
+                    If caseIsExpr = -1 Then
+                        ps.lastError = "CASE IS: expression expected"
+                        Return -1
+                    End If
+
+                    Dim caseIsNode As Integer
+                    caseIsNode = MakeNodeFromToken(ps, "CASE_IS_VALUE", "", relTok.lexeme, relTok)
+                    ps.ast.nodes(caseIsNode).left = caseIsExpr
+                    ASTAddChild ps.ast, caseNode, caseIsNode
+
+                    If MatchOp(ps, ",") = 0 Then Exit Do
+                    If IsKw(ps, "IS") Then AdvanceTok ps
+                Loop
+            Else
+                Do
+                    Dim caseExpr As Integer
+                    caseExpr = ParseExpression(ps)
+                    If caseExpr = -1 Then Return -1
+                    ASTAddChild ps.ast, caseNode, caseExpr
+                    If MatchOp(ps, ",") = 0 Then Exit Do
+                Loop
+            End If
         End If
 
         SkipSeparators ps
@@ -461,7 +499,7 @@ Function ParseExitStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integ
     If tk.kind = "KEYWORD" Then
         Dim modeText As String
         modeText = UCase(tk.lexeme)
-        If modeText = "FOR" Or modeText = "DO" Then
+        If modeText = "FOR" Or modeText = "DO" Or modeText = "IF" Then
             ps.ast.nodes(exitNode).op = modeText
             AdvanceTok ps
 
@@ -474,7 +512,7 @@ Function ParseExitStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integ
         End If
     End If
 
-    ps.lastError = "EXIT: expected FOR, DO, or statement end"
+    ps.lastError = "EXIT: expected FOR, DO, IF, or statement end"
     Return -1
 End Function
 

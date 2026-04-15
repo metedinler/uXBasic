@@ -1,3 +1,7 @@
+' uXBasic Interop Manifest Yönetimi
+' Bu dosya build sırasında include/import bilgilerini yönetir
+' Include/import ve set dizileri kapasiteye göre dinamik büyütülür
+
 Type InteropIncludeEntry
     sourceFile As String
     includePath As String
@@ -26,23 +30,31 @@ Type InteropStringSet
 End Type
 
 Private Sub InteropSetInit(ByRef st As InteropStringSet)
-    st.capacity = 8
-    ReDim st.items(st.capacity - 1)
+    st.capacity = 0
     st.count = 0
 End Sub
 
 Private Sub InteropSetEnsure(ByRef st As InteropStringSet, ByVal minSize As Integer)
+    If minSize <= 0 Then Exit Sub
     If st.capacity >= minSize Then Exit Sub
 
     Dim newCap As Integer
-    newCap = st.capacity
-    If newCap < 1 Then newCap = 1
+    If st.capacity <= 0 Then
+        newCap = 8
+    Else
+        newCap = st.capacity
+    End If
 
     Do While newCap < minSize
         newCap *= 2
     Loop
 
-    ReDim Preserve st.items(newCap - 1)
+    If st.capacity <= 0 Then
+        ReDim st.items(newCap - 1)
+    Else
+        ReDim Preserve st.items(newCap - 1)
+    End If
+
     st.capacity = newCap
 End Sub
 
@@ -62,42 +74,58 @@ Private Sub InteropSetAddCI(ByRef st As InteropStringSet, ByRef valueText As Str
 End Sub
 
 Sub InteropManifestInit(ByRef m As InteropManifest)
-    m.includeCapacity = 8
+    m.includeCapacity = 0
     m.includeCount = 0
-    ReDim m.includes(m.includeCapacity - 1)
 
-    m.importCapacity = 8
+    m.importCapacity = 0
     m.importCount = 0
-    ReDim m.imports(m.importCapacity - 1)
 End Sub
 
 Private Sub InteropManifestEnsureIncludes(ByRef m As InteropManifest, ByVal minSize As Integer)
+    If minSize <= 0 Then Exit Sub
     If m.includeCapacity >= minSize Then Exit Sub
 
     Dim newCap As Integer
-    newCap = m.includeCapacity
-    If newCap < 1 Then newCap = 1
+    If m.includeCapacity <= 0 Then
+        newCap = 8
+    Else
+        newCap = m.includeCapacity
+    End If
 
     Do While newCap < minSize
         newCap *= 2
     Loop
 
-    ReDim Preserve m.includes(newCap - 1)
+    If m.includeCapacity <= 0 Then
+        ReDim m.includes(newCap - 1)
+    Else
+        ReDim Preserve m.includes(newCap - 1)
+    End If
+
     m.includeCapacity = newCap
 End Sub
 
 Private Sub InteropManifestEnsureImports(ByRef m As InteropManifest, ByVal minSize As Integer)
+    If minSize <= 0 Then Exit Sub
     If m.importCapacity >= minSize Then Exit Sub
 
     Dim newCap As Integer
-    newCap = m.importCapacity
-    If newCap < 1 Then newCap = 1
+    If m.importCapacity <= 0 Then
+        newCap = 8
+    Else
+        newCap = m.importCapacity
+    End If
 
     Do While newCap < minSize
         newCap *= 2
     Loop
 
-    ReDim Preserve m.imports(newCap - 1)
+    If m.importCapacity <= 0 Then
+        ReDim m.imports(newCap - 1)
+    Else
+        ReDim Preserve m.imports(newCap - 1)
+    End If
+
     m.importCapacity = newCap
 End Sub
 
@@ -301,6 +329,47 @@ Private Function ReadAllTextFile(ByRef filePath As String, ByRef textOut As Stri
     Return 1
 End Function
 
+Private Function ResolveStmtPath(ByRef ps As ParseState, ByVal stmt As Integer, ByRef normalizedSource As String, ByRef rootDir As String, ByRef stmtName As String, ByRef pathOut As String, ByRef errText As String) As Integer
+    Dim pathNode As Integer
+    pathNode = ps.ast.nodes(stmt).firstChild
+    If pathNode = -1 Then
+        errText = "resolver: " & stmtName & " missing path node"
+        Return 0
+    End If
+
+    pathOut = PathResolveFromSource(normalizedSource, ps.ast.nodes(pathNode).value)
+
+    If PathStartsWithDir(pathOut, rootDir) = 0 Then
+        errText = "resolver: " & stmtName & " escapes root: " & pathOut
+        Return 0
+    End If
+
+    If FileExistsPath(pathOut) = 0 Then
+        errText = "resolver: " & stmtName & " file not found: " & pathOut
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function CollectImportStmt(ByRef ps As ParseState, ByVal stmt As Integer, ByRef normalizedSource As String, ByRef rootDir As String, ByRef manifest As InteropManifest, ByRef importOnce As InteropStringSet, ByRef errText As String) As Integer
+    Dim importPath As String
+    If ResolveStmtPath(ps, stmt, normalizedSource, rootDir, "IMPORT", importPath, errText) = 0 Then Return 0
+
+    Dim lang As String
+    lang = UCase(ps.ast.nodes(stmt).op)
+
+    Dim importKey As String
+    importKey = lang & "|" & importPath
+
+    If InteropSetContainsCI(importOnce, importKey) = 0 Then
+        InteropSetAddCI importOnce, importKey
+        InteropManifestAddImport manifest, normalizedSource, lang, importPath
+    End If
+
+    Return 1
+End Function
+
 Private Function CollectInteropRecursive(ByRef sourceFile As String, ByRef rootDir As String, ByRef manifest As InteropManifest, ByRef parsedFiles As InteropStringSet, ByRef includeOnce As InteropStringSet, ByRef importOnce As InteropStringSet, ByRef errText As String) As Integer
     Dim normalizedSource As String
     normalizedSource = PathNormalize(sourceFile)
@@ -333,25 +402,8 @@ Private Function CollectInteropRecursive(ByRef sourceFile As String, ByRef rootD
         nodeKind = UCase(ps.ast.nodes(stmt).kind)
 
         If nodeKind = "INCLUDE_STMT" Then
-            Dim pathNode As Integer
-            pathNode = ps.ast.nodes(stmt).firstChild
-            If pathNode = -1 Then
-                errText = "resolver: INCLUDE missing path node"
-                Return 0
-            End If
-
             Dim includePath As String
-            includePath = PathResolveFromSource(normalizedSource, ps.ast.nodes(pathNode).value)
-
-            If PathStartsWithDir(includePath, rootDir) = 0 Then
-                errText = "resolver: INCLUDE escapes root: " & includePath
-                Return 0
-            End If
-
-            If FileExistsPath(includePath) = 0 Then
-                errText = "resolver: INCLUDE file not found: " & includePath
-                Return 0
-            End If
+            If ResolveStmtPath(ps, stmt, normalizedSource, rootDir, "INCLUDE", includePath, errText) = 0 Then Return 0
 
             If InteropSetContainsCI(includeOnce, includePath) = 0 Then
                 InteropSetAddCI includeOnce, includePath
@@ -362,36 +414,7 @@ Private Function CollectInteropRecursive(ByRef sourceFile As String, ByRef rootD
                 Return 0
             End If
         ElseIf nodeKind = "IMPORT_STMT" Then
-            Dim importPathNode As Integer
-            importPathNode = ps.ast.nodes(stmt).firstChild
-            If importPathNode = -1 Then
-                errText = "resolver: IMPORT missing path node"
-                Return 0
-            End If
-
-            Dim lang As String
-            lang = UCase(ps.ast.nodes(stmt).op)
-
-            Dim importPath As String
-            importPath = PathResolveFromSource(normalizedSource, ps.ast.nodes(importPathNode).value)
-
-            If PathStartsWithDir(importPath, rootDir) = 0 Then
-                errText = "resolver: IMPORT escapes root: " & importPath
-                Return 0
-            End If
-
-            If FileExistsPath(importPath) = 0 Then
-                errText = "resolver: IMPORT file not found: " & importPath
-                Return 0
-            End If
-
-            Dim importKey As String
-            importKey = lang & "|" & importPath
-
-            If InteropSetContainsCI(importOnce, importKey) = 0 Then
-                InteropSetAddCI importOnce, importKey
-                InteropManifestAddImport manifest, normalizedSource, lang, importPath
-            End If
+            If CollectImportStmt(ps, stmt, normalizedSource, rootDir, manifest, importOnce, errText) = 0 Then Return 0
         End If
 
         stmt = ps.ast.nodes(stmt).nextSibling

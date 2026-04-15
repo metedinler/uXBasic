@@ -77,6 +77,9 @@ Sikilastirma hedefi:
 | RETURN | OK | OK | OK | OK | OK | GOSUB icinde donus + dengesiz RETURN fail-fast ve jump-context guard testleri ile semantik kapanis dogrulandi | R2 |
 | CALL | OK | OK | OK | OK | OK | Builtin + user-defined dispatch modeli ve arity fail-fast eklendi | R2 |
 | END | OK | OK | OK | OK | OK | END_STMT semantigi (dongu/if/select + user-call context propagation) ve parse fail-fast (argumanli END) dedicated test/gate kaniti ile kapatildi | R2.M |
+| TRY/CATCH/FINALLY/END TRY | OK | PLAN | PLAN | PLAN | PLAN | Structured exception handling lane acilacak. Catch tipi + finally garanti calisma sozlesmesi eklenecek. | ERR-1 |
+| THROW | OK | PLAN | PLAN | PLAN | PLAN | Runtime kontrolu: THROW code[, message[, detail]]. Parser/semantic arity/type guard ve stack unwinding lane'i acik. | ERR-1 |
+| ASSERT | OK | PLAN | PLAN | PLAN | PLAN | ASSERT expr[, message] fail-fast + test mode davranisi tanimlandi, kod uygulamasi acik. | ERR-2 |
 | DECLARE SUB/FUNCTION | OK | OK | OK | OK | OK | Runtime resolver declare/def ile uyumlu; ileri signature semantigi acik | R2 |
 | SUB / FUNCTION | OK | OK | OK | OK | OK | Parametre tekrar ve FUNCTION return-type semantik kontrati semantic pass ile zorunlu (tests/run_call_user_exec_ast.bas; tests/run_w1_semantic_pass.bas) | R2 |
 | CONST | OK | OK | OK | OK | OK | CONST isim/RHS semantik kontrati semantic pass ile fail-fast (tests/run_dim_const_test.bas; tests/run_w1_semantic_pass.bas) | R3 |
@@ -435,9 +438,9 @@ Durum etiketleri:
 | Anahtar | Durum | Gerekce |
 |---|---|---|
 | THIS | KODDA-OK | Method baglaminda semantic+runtime baglama, method-disi fail-fast var |
-| SUPER | KODDA-YOK | SUPER cagrisi parser/runtime modeli yok |
-| NEW / DELETE | KODDA-YOK | Acik NEW/DELETE token-semantigi yok; DIM tabanli yasam dongusu var |
-| INSTANCEOF | KODDA-YOK | Type-id tabanli runtime sorgu yok |
+| SUPER | KODDA-YOK | SUPER cagrisi parser/runtime modeli yok | (bu keyword su an gerekli mi ust hiyearsideki veriyi isaret etmesi gerekmiyormu?)
+| NEW / DELETE | KODDA-YOK | Acik NEW/DELETE token-semantigi yok; DIM tabanli yasam dongusu var | yasam dongusunu dim baslatiyorsa da constructor/destructor invoke'u tetikliyor, bu yuzden NEW/DELETE keyword'lerine simdilik gerek yok gibi duruyor??degilmi?
+ INSTANCEOF | KODDA-YOK | Type-id tabanli runtime sorgu yok |
 | EXTENDS | KODDA-OK | Parse + inheritance dispatch regression testleri aktif |
 | IMPLEMENTS / INTERFACE | KODDA-OK | Parse + semantic sozlesme + runtime no-op/dispatch modeli aktif |
 | OVERRIDE | KODDA-KISMEN | Keyword tanimi var; kesin signature override enforcement sinirli |
@@ -447,7 +450,7 @@ Durum etiketleri:
 | OPERATOR (overload) | KODDA-YOK | Overload resolver yok |
 | MIXIN | KODDA-YOK | Mixin kompozisyon semantigi yok |
 | DECORATOR | KODDA-YOK | Decorator modeli yok |
-| <SihirliMetot> | KODDA-YOK | Auto-bind magic method sozlesmesi yok |
+| <SihirliMetot> | KODDA-YOK | Auto-bind magic method sozlesmesi yok | buna ihtiyac var bence
 
 ### 11.3 Namespace ve Modul Anahtarlari (Kod Gerceklik)
 
@@ -478,11 +481,11 @@ Bu bolum istatistik fonksiyon isimlerinden bagimsiz olarak CALL(DLL)/IMPORT ve s
 | Calling convention: stdcall/cdecl secimi | OK | OK | OK | KISMEN | OK | Parser+runtime token destegi aktif (CDECL/STDCALL). Win64 policy lane'de cdecl/stdcall uyumlu eslestirme + ABI audit alani eklendi (tests/run_call_exec.bas, tests/run_call_dll_scope_exec_ast.bas, tests/run_call_dll_alias_exec_ast.bas). Runtime dis cagrida halen policy/no-op modunda oldugu icin R=KISMEN korunur. | FFI-CONV-1 |
 | DLL path policy (absolute/segments/invalid chars) | OK | OK | OK | OK | OK | Runtime fail-fast kodlari aktif | FFI-CORE |
 | Signature/arity/byref contract | OK | OK | OK | OK | OK | runtime exec_eval_builtin_categories kaniti mevcut | FFI-CORE |
-| NAMESPACE+MODULE+MAIN ile DLL cagrisi | OK | OK | OK | KISMEN | OK | Scope parse+exec kaniti PASS (tests/run_call_dll_scope_exec_ast.bas). MAIN global-scope kuralina uygun senaryo ile dogrulandi. Runtime dis cagrida policy/no-op modeli nedeniyle R=KISMEN korunur. | FFI-SCOPE-1 |
-| USING/ALIAS ile DLL cagrisi isim cozumleme | OK | OK | OK | KISMEN | OK | USING/ALIAS + CALL(DLL) entegrasyon kaniti PASS (tests/run_call_dll_alias_exec_ast.bas). Runtime dis cagrida policy/no-op modeli nedeniyle R=KISMEN korunur. | FFI-SCOPE-1 |
-| Strongly-typed marshalling (STRING/PTR/NUM) | OK | KISMEN | KISMEN | KISMEN | KISMEN | Signature token var; type-marshalling kapsam testleri genisletilecek | FFI-SCOPE-2 |
+| NAMESPACE+MODULE+MAIN ile DLL cagrisi | OK | OK | OK | OK | OK | Scope parse+exec kaniti PASS (tests/run_call_dll_scope_exec_ast.bas). MAIN global-scope kuralina uygun senaryo ile dogrulandi. | FFI-SCOPE-1 |
+| USING/ALIAS ile DLL cagrisi isim cozumleme | OK | OK | OK | OK | OK | Runtime alias dispatch aktif: `CALL(aliasName, ...)` -> ALIAS target `CALL(DLL,...)` cozumleme + policy/marshalling cekirdegine yonlendirme. Kanit: tests/run_call_dll_alias_exec_ast.bas. | FFI-SCOPE-1 |
+| Strongly-typed marshalling (STRING/PTR/NUM) | OK | OK | OK | OK | OK | Runtime marshalling dogrulama aktif (I32/U64/F64/PTR/STRPTR/BYREF/BYVAL). Kanit: tests/run_call_dll_alias_exec_ast.bas (STRPTR/U64 negatif), tests/run_call_exec.bas, tests/run_call_dll_scope_exec_ast.bas. | FFI-SCOPE-2 |
 | Win64 ABI uyumu (shadow space + alignment) | OK | OK | OK | OK | OK | x64 FFI codegen backend CALL(DLL) dugumlerinden plan+stub uretiyor: reserve hesaplamasi (40 + stackArg*8 + odd pad), register (RCX/RDX/R8/R9) ve stack arg slotlari ([rsp+32+]) emit ediliyor. Kanit: tests/run_ffi_x64_call_backend.bas, tests/tmp_ffi_conv2_codegen_smoke.uxb + `--interop` ile `dist/interop/ffi_call_x64_plan.csv` ve `dist/interop/ffi_call_x64_stubs.asm`. | FFI-CONV-2 |
-| x86 stdcall/cdecl ayristirma | OK | PLAN | PLAN | PLAN | PLAN | x86 lane acildiginda caller/callee stack temizleme farki icin ayrik test paketi zorunlu | FFI-CONV-3 |
+| x86 stdcall/cdecl ayristirma | OK | KISMEN | KISMEN | KISMEN | KISMEN | x86 lane guclendirildi: plan+stub + resolver artifact (`dist/interop/ffi_call_x86_resolver.csv`) uretiliyor; runtime resolver enforce/report + symbol binding cache/symptr map aktif (`ExecDebugGetFfiX86ResolvedCount`, `ExecDebugGetFfiX86SymptrMapCount`). Invoke-proof yolu I32 imza icin 0..4 arg pointer call'a genisletildi ve cleanup byte sayaçlari eklendi (`ExecDebugGetFfiX86InvokeCount`, `ExecDebugGetFfiX86CallerCleanupBytes`, `ExecDebugGetFfiX86CalleeCleanupBytes`). Cleanup contract gate'i aktif (`ExecX86FfiValidateCleanupContract`). Kanit: `tests/run_ffi_x86_call_backend.bas`, `tests/run_ffi_x86_resolver_exec_ast.bas`, `tests/run_ffi_x86_resolver_cleanup_proof.bas`, `tests/run_call_exec.bas`. Gercek x86-32 proses duzeyinde stack cleanup ve symptr label bellek patchleme kaniti halen acik. | FFI-CONV-3 |
 | Ilk resmi DLL: uXStat | OK | PLAN | PLAN | PLAN | PLAN | Ayrik planda is paketleri tanimlandi | UXSTAT-0 |
 
 ## 13) Codegen ve MIR Izleme Matrisi
@@ -496,4 +499,25 @@ Bu bolum istatistik fonksiyon isimlerinden bagimsiz olarak CALL(DLL)/IMPORT ve s
 | CALL [register] / stack arg passing | OK | OK | OK | KISMEN | OK | x64 FFI stub emitter `call qword [rel __uxb_ffi_symptr_N]` + RCX/RDX/R8/R9 ve `[rsp+32+]` stack slot yazimini uretiyor. Gercek symbol resolution baglama adimi ayrik lane'de ilerler. | CG-3 |
 | Win64 ABI (shadow space + alignment) | OK | OK | OK | KISMEN | OK | Reserve formulu `40 + stackArg*8 + odd pad` ile call-oncesi 16-byte hizalama ve 32-byte shadow space korunuyor; test ve smoke interop kaniti mevcut. | CG-3 |
 | Regression gate (interp vs compiled parity) | OK | KISMEN | KISMEN | KISMEN | KISMEN | Cift-mod parity test paketi acik | CG-QA |
+| TRY/CATCH unwinding emit (label table + finally trampoline) | OK | PLAN | PLAN | PLAN | PLAN | MIR exception edge ve x64/x86 backend unwind plan cikisi henuz acik. | ERR-CG-1 |
+| THROW emit (error object materialization + jump to handler) | OK | PLAN | PLAN | PLAN | PLAN | THROW statement icin MIR lowering ve handler dispatch emitter lane'i acik. | ERR-CG-2 |
+| ASSERT emit (debug/release policy) | OK | PLAN | PLAN | PLAN | PLAN | ASSERT'in release mod no-op veya guarded-trap stratejisi netlestirilecek. | ERR-CG-3 |
+
+## 14) Anahtar Kelime -> Sistem Codegen Takip Matrisi
+
+Bu bolum, tum uXBasic anahtar kelimelerinin parser/semantic/runtime/codegen izini tek tabloda takip etmek icin acilmistir.
+
+| Grup | Anahtar Kelimeler | Parser | Semantic | Runtime/Interp | Codegen | Not |
+|---|---|---|---|---|---|---|
+| Akis | IF, SELECT CASE, FOR, DO, EXIT, RETURN, GOTO/GOSUB | OK | OK | OK | KISMEN | CFG ve branch lowering ilerliyor |
+| Deklarasyon | DIM, REDIM, CONST, TYPE, CLASS, SUB/FUNCTION | OK | OK | OK | PLAN | UDT/class kod uretim lane'i acik |
+| I/O | PRINT, INPUT, OPEN/CLOSE/GET/PUT/SEEK | OK | OK | OK | PLAN | Ilk hedef parity, sonra native I/O call lowering |
+| Bellek | PEEK*/POKE*/MEMCOPY*/MEMFILL* | OK | OK | OK | PLAN | Safety guard korunarak backend emit tasarlanacak |
+| FFI | CALL(DLL), IMPORT, INLINE | OK | OK | KISMEN | KISMEN | x64 lane KISMEN/OK, x86 lane baslatildi |
+| Hata Yonetimi | TRY/CATCH/FINALLY, THROW, ASSERT, ERROR objesi | PLAN | PLAN | PLAN | PLAN | Bu turde plan ve dokuman acildi |
+
+Codegen kolon anahtari:
+- OK: Uretim + test kapanmis
+- KISMEN: Artefakt/stub veya sinirli yol var
+- PLAN: Tasarim var, kod yok
 
