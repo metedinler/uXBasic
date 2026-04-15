@@ -65,6 +65,11 @@ Private Sub Main()
     ok And= AssertTrue(ExecDebugGetFfiX86CallerCleanupBytes() >= 4, "cdecl caller cleanup bytes proof")
     ok And= AssertTrue(ExecDebugGetFfiX86CalleeCleanupBytes() >= 4, "stdcall callee cleanup bytes proof")
     ok And= AssertTrue(ExecDebugGetFfiX86LastInvokeStubId() > 0, "last invoke stub id should be tracked")
+    ok And= AssertTrue(ExecDebugGetFfiX86SymptrWriteCount() >= 2, "symptr write-through should track both stubs")
+    ok And= AssertTrue(ExecDebugGetFfiX86SymptrLabelByStubId(1) = "__uxb_ffi_x86_symptr_1", "stub1 symptr label mapping")
+    ok And= AssertTrue(ExecDebugGetFfiX86SymptrLabelByStubId(2) = "__uxb_ffi_x86_symptr_2", "stub2 symptr label mapping")
+    ok And= AssertTrue(ExecDebugGetFfiX86SymptrProcAddrByStubId(1) <> 0, "stub1 symptr proc address should be non-zero")
+    ok And= AssertTrue(ExecDebugGetFfiX86SymptrProcAddrByStubId(2) <> 0, "stub2 symptr proc address should be non-zero")
 
     Dim cleanupErr As String
     ok And= AssertTrue(ExecX86FfiValidateCleanupContract(cleanupErr), "cleanup contract must validate: " & cleanupErr)

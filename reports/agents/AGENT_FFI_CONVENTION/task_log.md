@@ -11,5 +11,6 @@
 - [DONE] x86 resolver cleanup-contract proof gate (tests/run_ffi_x86_resolver_cleanup_proof.bas)
 - [DONE] x86 runtime pointer invoke-proof (I32 signature, 0..4 arg) + caller/callee cleanup byte sayaç kaniti
 - [DONE] symptr map tabanli pointer call kapanisi (invoke stub id/conv/cleanup debug izleme)
+- [DONE] symptr write-through gozlemlenebilirlik kaniti (label/procAddr mapping + write counter)
 - [NEXT] gercek x86-32 assembly-level cleanup icra kaniti (proses/abi lane)
-- [NEXT] __uxb_ffi_x86_symptr_N label bellek patchleme (stub memory write-through)
+- [NEXT] __uxb_ffi_x86_symptr_N native bellek patchleme (gercek stub write-through)

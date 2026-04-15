@@ -8,5 +8,6 @@
 - [DONE] FFI-CONV-3 resolver/runtime gate artisiyla R kolonu PLAN->KISMEN
 - [DONE] FFI-CONV-3 invoke-proof lane: I32 imza icin 0..4 arg runtime pointer call yolu + cleanup sayaç kaniti
 - [DONE] FFI-CONV-3 symptr map uzerinden pointer call kapanisi (stub_id/symptr/procAddr izlenebilir)
+- [DONE] FFI-CONV-3 symptr write-through gozlemlenebilirlik kaniti (label/procAddr + write counter)
 - [NEXT] FFI-CONV-3 gercek x86-32 proses duzeyinde stack cleanup icra kaniti (assembly-level)
-- [NEXT] FFI-CONV-3 symptr label bellege yazim proof'u (gercek stub bellek patchleme lane'i)
+- [NEXT] FFI-CONV-3 native stub label bellek patchleme proof'u (gercek write-through lane'i)
