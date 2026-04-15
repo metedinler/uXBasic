@@ -14,3 +14,7 @@
 ## 2026-04-15 Validation Cycle-3
 - FFI-CONV-1 notu, Win64 policy lane conv-compat ve ABI audit kaniti ile guncellendi.
 - FFI-CONV-2 satiri PLAN durumda korundu; shadow-space/alignment codegen kriterleri acik.
+
+## 2026-04-15 Validation Cycle-4
+- FFI-CONV-2 satiri kanitli kapanisla OK/OK/OK/OK/OK olarak guncellendi.
+- CG-3 satirlarinda CALL [register]/stack arg passing ve Win64 ABI hucreleri parser/semantic/test boyutunda yukseltilip runtime kolonunda KISMEN korundu.

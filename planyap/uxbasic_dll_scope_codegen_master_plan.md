@@ -238,6 +238,31 @@ Acik kalanlar (FFI-CONV-2 kapanisi icin zorunlu):
 2. 16-byte stack alignment zorlamasi.
 3. CALL [register] / arg register mapping codegen adimlari.
 
+### 6.3) FFI-CONV-2 Kapanis (2026-04-15)
+
+Tamamlanan adimlar:
+
+1. Yeni x64 backend modulu eklendi:
+  - `src/codegen/x64/ffi_call_backend.fbs`
+2. CALL(DLL) AST dugumlerinden Win64 plan cikisi uretiliyor:
+  - `line,dll,symbol,signature,convention,arg_count,stack_args,reserve_bytes,abi,stack_align,shadow_space`
+3. NASM stub cikisi uretiliyor:
+  - `call qword [rel __uxb_ffi_symptr_N]`
+  - RCX/RDX/R8/R9 register arg yukleme
+  - `[rsp+32+]` stack arg slot yazimi
+  - reserve formulu: `40 + stackArg*8 + odd pad`
+4. CLI interop akisina entegre edildi:
+  - `src/main.bas` icinde `FfiX64BackendEmitArtifacts(ps, "dist\\interop", ...)`
+5. Kanit testleri:
+  - `tests/run_ffi_x64_call_backend.bas` (dedicated)
+  - `tests/run_call_exec.bas` (regresyon)
+  - smoke: `tests/tmp_ffi_conv2_codegen_smoke.uxb` + `--interop` -> `dist/interop/ffi_call_x64_plan.csv`
+
+Kapsam siniri (durust not):
+
+1. Stub icindeki `__uxb_ffi_symptr_N` cozumlemesi (gercek adres baglama/loader) FFI-CORE/CG lane'inde ayrik kapanis kalemidir.
+2. FFI-CONV-2 bu turda Win64 stack/shadow/alignment ve call-shape kapanisi olarak tamamlandi.
+
 ## 7) Risk ve Koruma
 
 Riskler:

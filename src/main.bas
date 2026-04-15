@@ -1,14 +1,5 @@
-#include "parser/token_kinds.fbs"
-#include "parser/lexer.fbs"
-#include "parser/ast.fbs"
-#include "parser/parser.fbs"
-#include "build/interop_manifest.fbs"
-#include "runtime/timer.fbs"
-#include "runtime/diagnostics.fbs"
-#include "runtime/error_localization.fbs"
-#include "runtime/memory_vm.fbs"
-#include "runtime/memory_exec.fbs"
-#include "legacy/get_commands_port.fbs"
+#include "build/main_frontend_include_bundle.fbs"
+#include "build/main_runtime_include_bundle.fbs"
 
 Private Function HasArg(ByRef keyText As String) As Integer
     Dim i As Integer
@@ -19,6 +10,17 @@ Private Function HasArg(ByRef keyText As String) As Integer
         If LCase(a) = LCase(keyText) Then Return 1
     Next i
     Return 0
+End Function
+
+Private Function LocalizeErrorMessage(ByRef rawText As String) As String
+    Dim localized As String
+    localized = UxbYerellestirHata(rawText)
+
+    If localized = "Isletim hatasi" Then
+        Return rawText
+    End If
+
+    Return localized & " | ham: " & rawText
 End Function
 
 Private Function LoadTextFile(ByRef filePath As String, ByRef textOut As String) As Integer
@@ -32,8 +34,7 @@ Private Function LoadTextFile(ByRef filePath As String, ByRef textOut As String)
     Do While Not Eof(f)
         Dim lineText As String
         Line Input #f, lineText
-        textOut &= lineText
-        If Not Eof(f) Then textOut &= Chr(10)
+        textOut &= lineText & Chr(13) & Chr(10)
     Loop
 
     Close #f
@@ -43,10 +44,16 @@ End Function
 Dim As String sourceText
 Dim As String sourcePath
 Dim As Integer debugMode
+Dim As Integer semanticMode
+Dim As Integer execMemMode
+Dim As Integer interopMode
 
 DiagInit
 
 debugMode = HasArg("--debug") Or HasArg("--ayikla")
+semanticMode = HasArg("--semantic") Or HasArg("--semantik")
+execMemMode = HasArg("--execmem")
+interopMode = HasArg("--interop")
 DiagBilgi "uXBasic calistirildi"
 
 sourcePath = Command(1)
@@ -61,7 +68,7 @@ Else
 End If
 
 Dim As LexerState st
-LexerInit st, sourceText
+LexerInit st, sourceText, sourcePath
 
 If debugMode Then
     DiagBilgi "Token sayisi: " & Str(st.tokens.count)
@@ -71,35 +78,48 @@ Dim As ParseState ps
 ParserInit ps, st
 
 If ParseProgram(ps) = 0 Then
-    DiagHata "Ayristirma basarisiz: " & UxbYerellestirHata(ps.lastError)
+    DiagHata "Ayristirma basarisiz: " & LocalizeErrorMessage(ps.lastError)
     End 1
+End If
+
+If semanticMode Then
+    Dim semanticErr As String
+    If SemanticAnalyze(ps, semanticErr) = 0 Then
+        DiagHata "Anlamsal analiz basarisiz: " & LocalizeErrorMessage(semanticErr)
+        End 1
+    End If
 End If
 
 If debugMode Then
     DiagBilgi "Ayristirma basarili. AST dugum sayisi: " & Str(ps.ast.count)
-    ASTDump ps.ast, ps.rootNode
+    'ASTDump ps.ast, ps.rootNode
 End If
 
-If LCase(Command(2)) = "--execmem" Then
+If execMemMode Then
     Dim execErr As String
     If ExecRunMemoryProgram(ps, execErr) = 0 Then
-        DiagHata "Bellek yurutme basarisiz: " & UxbYerellestirHata(execErr)
+        DiagHata "Bellek yurutme basarisiz: " & LocalizeErrorMessage(execErr)
         End 5
     End If
     DiagBilgi "Bellek yurutme basarili"
 End If
 
-If sourcePath <> "" Then
+If interopMode Then
     Dim manifest As InteropManifest
     Dim interopErr As String
 
     If ResolveInteropManifestForSource(sourcePath, manifest, interopErr) = 0 Then
-        DiagHata "Baglanti cozumleme basarisiz: " & UxbYerellestirHata(interopErr)
+        DiagHata "Baglanti cozumleme basarisiz: " & LocalizeErrorMessage(interopErr)
         End 3
     End If
 
     If EmitInteropArtifacts(manifest, "dist\interop", interopErr) = 0 Then
-        DiagHata "Baglanti cikti yazimi basarisiz: " & UxbYerellestirHata(interopErr)
+        DiagHata "Baglanti cikti yazimi basarisiz: " & LocalizeErrorMessage(interopErr)
+        End 4
+    End If
+
+    If FfiX64BackendEmitArtifacts(ps, "dist\interop", interopErr) = 0 Then
+        DiagHata "FFI x64 codegen cikti yazimi basarisiz: " & LocalizeErrorMessage(interopErr)
         End 4
     End If
 
@@ -115,7 +135,6 @@ n = LegacyGetCommands(sourceText, 0, selected)
 If debugMode Then
     DiagBilgi "Legacy ayrim sayisi: " & Str(n)
     DiagBilgi "Legacy parcasi[0]: " & selected
-    DiagBilgi "Zaman(ornek ms): " & Str(TimerNow("ms"))
 End If
 
 End 0

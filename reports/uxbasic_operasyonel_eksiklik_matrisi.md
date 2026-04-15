@@ -481,7 +481,7 @@ Bu bolum istatistik fonksiyon isimlerinden bagimsiz olarak CALL(DLL)/IMPORT ve s
 | NAMESPACE+MODULE+MAIN ile DLL cagrisi | OK | OK | OK | KISMEN | OK | Scope parse+exec kaniti PASS (tests/run_call_dll_scope_exec_ast.bas). MAIN global-scope kuralina uygun senaryo ile dogrulandi. Runtime dis cagrida policy/no-op modeli nedeniyle R=KISMEN korunur. | FFI-SCOPE-1 |
 | USING/ALIAS ile DLL cagrisi isim cozumleme | OK | OK | OK | KISMEN | OK | USING/ALIAS + CALL(DLL) entegrasyon kaniti PASS (tests/run_call_dll_alias_exec_ast.bas). Runtime dis cagrida policy/no-op modeli nedeniyle R=KISMEN korunur. | FFI-SCOPE-1 |
 | Strongly-typed marshalling (STRING/PTR/NUM) | OK | KISMEN | KISMEN | KISMEN | KISMEN | Signature token var; type-marshalling kapsam testleri genisletilecek | FFI-SCOPE-2 |
-| Win64 ABI uyumu (shadow space + alignment) | OK | PLAN | PLAN | PLAN | PLAN | DLL cagrilarinda stack alignment/shadow-space zorunlu kontrol lane'i (codegen ile birlikte kapanir). Not: Policy lane'de ABI metadata/audit ve convention uyumlulugu eklendi; bu satirin kapanis kriterini tek basina karsilamaz. | FFI-CONV-2 |
+| Win64 ABI uyumu (shadow space + alignment) | OK | OK | OK | OK | OK | x64 FFI codegen backend CALL(DLL) dugumlerinden plan+stub uretiyor: reserve hesaplamasi (40 + stackArg*8 + odd pad), register (RCX/RDX/R8/R9) ve stack arg slotlari ([rsp+32+]) emit ediliyor. Kanit: tests/run_ffi_x64_call_backend.bas, tests/tmp_ffi_conv2_codegen_smoke.uxb + `--interop` ile `dist/interop/ffi_call_x64_plan.csv` ve `dist/interop/ffi_call_x64_stubs.asm`. | FFI-CONV-2 |
 | x86 stdcall/cdecl ayristirma | OK | PLAN | PLAN | PLAN | PLAN | x86 lane acildiginda caller/callee stack temizleme farki icin ayrik test paketi zorunlu | FFI-CONV-3 |
 | Ilk resmi DLL: uXStat | OK | PLAN | PLAN | PLAN | PLAN | Ayrik planda is paketleri tanimlandi | UXSTAT-0 |
 
@@ -493,7 +493,7 @@ Bu bolum istatistik fonksiyon isimlerinden bagimsiz olarak CALL(DLL)/IMPORT ve s
 | MIR olusumu (CFG/basic block) | OK | KISMEN | KISMEN | KISMEN | KISMEN | semantic/mir.fbs ve memory_exec MIR notlari var, tam degil | CG-1 |
 | MIR interpreter dispatch | OK | KISMEN | KISMEN | KISMEN | KISMEN | runtime memory_exec ve exec alt modullerine parcali dagilim | CG-2 |
 | x64 emitter passthrough INLINE | OK | OK | OK | KISMEN | KISMEN | INLINE parse/runtime var, emitter kapsam kapanisi acik | CG-2 |
-| CALL [register] / stack arg passing | OK | PLAN | PLAN | PLAN | PLAN | DLL agir cagrilar icin codegen lane gereksinimi | CG-3 |
-| Win64 ABI (shadow space + alignment) | OK | PLAN | PLAN | PLAN | PLAN | codegen lane'e zorunlu kabul | CG-3 |
+| CALL [register] / stack arg passing | OK | OK | OK | KISMEN | OK | x64 FFI stub emitter `call qword [rel __uxb_ffi_symptr_N]` + RCX/RDX/R8/R9 ve `[rsp+32+]` stack slot yazimini uretiyor. Gercek symbol resolution baglama adimi ayrik lane'de ilerler. | CG-3 |
+| Win64 ABI (shadow space + alignment) | OK | OK | OK | KISMEN | OK | Reserve formulu `40 + stackArg*8 + odd pad` ile call-oncesi 16-byte hizalama ve 32-byte shadow space korunuyor; test ve smoke interop kaniti mevcut. | CG-3 |
 | Regression gate (interp vs compiled parity) | OK | KISMEN | KISMEN | KISMEN | KISMEN | Cift-mod parity test paketi acik | CG-QA |
 
