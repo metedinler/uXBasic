@@ -10,6 +10,7 @@ Bu plan, ozellikle su eksenlere odaklanir:
 3. Strongly-typed marshalling
 4. HIR/MIR/codegen izleme ve kapanis
 5. uXStat DLL'in minimum cekirdek kurulumu (istatistik fonksiyon sayisi degil, altyapi)
+6. stdcall/cdecl cift protokol uyumlulugu
 
 ## 1) Calisma Dizini Uyumlama
 
@@ -44,6 +45,7 @@ Acil kapanacaklar:
 
 - FFI scope entegrasyon testleri (namespace/module/alias icinden CALL(DLL)).
 - Strongly-typed marshalling kontrati (STRING/PTR/NUM).
+- stdcall/cdecl secimi ve cagri kontratinin acik protokolle izlenmesi.
 - Codegen lane'inde win64 ABI adimlari.
 
 ## 3) Fazlar
@@ -81,6 +83,7 @@ Tip kontratlari (MVP):
 - F32/F64
 - STR/STRING (null-terminated gecis kurali)
 - BYREF target kontrolu
+- CALLCONV (stdcall/cdecl)
 
 Is paketleri:
 
@@ -91,6 +94,11 @@ Is paketleri:
    - yanlis signature token
    - byref non-addressable
    - policy deny
+4. Calling convention testleri:
+  - stdcall deklarasyonu ile DLL cagrisi
+  - cdecl deklarasyonu ile DLL cagrisi
+  - x64 lane: ayni ABI altinda protokol metadata korunumu
+  - x86 lane: caller/callee stack temizleme farki (ayrik test paketi)
 
 Kapanis kriteri:
 
@@ -149,6 +157,7 @@ Is paketleri:
    - shadow space
    - 16-byte stack alignment
    - arg register kurallari
+  - calling convention metadata'sinin emitter yoluna tasinmasi
 4. CALL [register] ve arg gecisi emitter adimi.
 
 Kapanis kriteri:
@@ -179,6 +188,7 @@ Bu plana ait lane etiketleri:
 
 - FFI-SCOPE-1
 - FFI-SCOPE-2
+- FFI-CONV-1 / FFI-CONV-2 / FFI-CONV-3
 - UXSTAT-0
 - CG-1 / CG-2 / CG-3 / CG-QA
 
@@ -196,11 +206,27 @@ Her sprint sonunda:
 4. Matris Bolum 12 iki satiri KISMEN->OK cekmek icin test-gate kaniti bagla.
 5. extras/uxstat/include ve extras/uxstat/src icin bos iskelet dosyalari ac.
 
+### 6.1) Ilk Faz Tamamlananlar (2026-04-15)
+
+Tamamlanan adim (FFI-CONV-1):
+
+1. Lexer/Parser tarafinda `CDECL` ve `STDCALL` token kabul ve semantik dogrulama eklendi.
+2. Runtime CALL(DLL) yolunda opsiyonel calling-convention ayrisma ve audit alanina `conv=` bilgisi eklendi.
+3. Iki yeni test eklendi ve PASS aldi:
+  - tests/run_call_dll_scope_exec_ast.bas
+  - tests/run_call_dll_alias_exec_ast.bas
+
+Not:
+
+- Bu adim, protokol secim metadata'sini acmistir.
+- Gercek dis cagrinin ABI seviyesinde yurutulmesi (x64 emitter/x86 stack cleanup) FFI-CONV-2 ve FFI-CONV-3 lane'lerinde kapanacaktir.
+
 ## 7) Risk ve Koruma
 
 Riskler:
 
 - FFI marshalling'de sessiz tip bozulmasi.
+- Calling convention uyumsuzlugunda stack corruption riski.
 - Scope/alias zincirinde yanlis isim cozumleme.
 - Codegen lane erken karmasiklik.
 
@@ -209,3 +235,27 @@ Koruma:
 - Her adimda negatif test zorunlu.
 - Policy fail-fast kodlari korunacak (9201..9215).
 - Interpreter parity gecmeden codegen hucreleri OK'a cekilmeyecek.
+
+## 8) Python Kutuphaneleri (Elestirel Karar)
+
+Kisa cevap:
+
+- Bu planin ana ekseni icin Python zorunlu degil.
+- Plan disi degil ama bir sonraki faza alinmasi daha dogru.
+
+Neden:
+
+1. Ilk kritik hedef, genel DLL altyapisinin guvenli calismasi (CALL(DLL)+scope+alias+marshalling).
+2. Python entegrasyonu CPython runtime bagimliligi, GIL, packaging ve surum uyumlulugu gibi yeni riskler getirir.
+3. uXStat ilk DLL hedefi C ABI ile zaten acilabilir; Python bridge'i bunu tamamlayici ikinci dal olmali.
+
+Oncelik karari:
+
+1. Simdi: C/C++ DLL cekirdegi + stdcall/cdecl + Win64 ABI kapanisi.
+2. Sonra: Python bridge (ctypes veya CPython embedding) deneme lane'i.
+
+Python lane acilacaksa minimum kapsam:
+
+- FFI-PY-1: ctypes tabanli adapter (harici script seviyesinde)
+- FFI-PY-2: CPython embedding (Py_Initialize, GIL, hata kozuleri)
+- FFI-PY-3: dagitim/paketleme ve surum sabitleme

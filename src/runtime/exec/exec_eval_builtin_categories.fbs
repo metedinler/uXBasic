@@ -1,0 +1,894 @@
+Private Function ExecEvalBuiltinFfiCategory(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Select Case callName
+    Case "DLL"
+        Dim ffiArgCount As Integer
+        ffiArgCount = ExecChildCount(ps, callNodeIdx)
+        If ffiArgCount < 4 Then
+            errText = "exec: CALL(DLL) expects at least 4 arguments (" & LTrim(Str(UXB_FFI_ERR_BAD_ARITY)) & ")"
+            Return 0
+        End If
+
+        Dim dllNode As Integer
+        dllNode = ExecChildAt(ps, callNodeIdx, 0)
+        If dllNode = -1 Or UCase(ps.ast.nodes(dllNode).kind) <> "STRING" Then
+            errText = "exec: CALL(DLL) library must be string literal (" & LTrim(Str(UXB_FFI_ERR_BAD_LIB)) & ")"
+            Return 0
+        End If
+
+        Dim dllName As String
+        If ExecNormalizeDllName(ps.ast.nodes(dllNode).value, dllName, errText) = 0 Then
+            Return 0
+        End If
+
+        Dim symbolNode As Integer
+        symbolNode = ExecChildAt(ps, callNodeIdx, 1)
+        If symbolNode = -1 Or UCase(ps.ast.nodes(symbolNode).kind) <> "STRING" Then
+            errText = "exec: CALL(DLL) symbol must be string literal (" & LTrim(Str(UXB_FFI_ERR_BAD_SYMBOL)) & ")"
+            Return 0
+        End If
+
+        Dim symbolName As String
+        symbolName = Trim(ps.ast.nodes(symbolNode).value)
+        If symbolName = "" Then
+            errText = "exec: CALL(DLL) symbol cannot be empty (" & LTrim(Str(UXB_FFI_ERR_BAD_SYMBOL)) & ")"
+            Return 0
+        End If
+
+        Dim sigNode As Integer
+        sigNode = ExecChildAt(ps, callNodeIdx, 2)
+        If sigNode = -1 Or UCase(ps.ast.nodes(sigNode).kind) <> "KEYWORD_REF" Then
+            errText = "exec: CALL(DLL) signature token must be keyword (" & LTrim(Str(UXB_FFI_ERR_BAD_SIGNATURE)) & ")"
+            Return 0
+        End If
+
+        Dim signatureText As String
+        signatureText = UCase(Trim(ps.ast.nodes(sigNode).value))
+        If ExecIsAllowedDllSignature(signatureText) = 0 Then
+            errText = "exec: CALL(DLL) invalid signature token " & signatureText & " (" & LTrim(Str(UXB_FFI_ERR_BAD_SIGNATURE)) & ")"
+            Return 0
+        End If
+
+        Dim callingConventionText As String
+        callingConventionText = "CDECL"
+
+        Dim argStartPos As Integer
+        argStartPos = 3
+
+        If ffiArgCount >= 5 Then
+            Dim convNode As Integer
+            convNode = ExecChildAt(ps, callNodeIdx, 3)
+            If convNode <> -1 And UCase(ps.ast.nodes(convNode).kind) = "KEYWORD_REF" Then
+                Dim convCandidate As String
+                convCandidate = UCase(Trim(ps.ast.nodes(convNode).value))
+                If ExecIsDllCallingConvention(convCandidate) = 0 Then
+                    errText = "exec: CALL(DLL) invalid calling convention token " & convCandidate & " (" & LTrim(Str(UXB_FFI_ERR_BAD_SIGNATURE)) & ")"
+                    Return 0
+                End If
+                callingConventionText = convCandidate
+                argStartPos = 4
+            End If
+        End If
+
+        If signatureText = "BYREF" Then
+            Dim byrefNode As Integer
+            byrefNode = ExecChildAt(ps, callNodeIdx, argStartPos)
+            If byrefNode = -1 Or UCase(ps.ast.nodes(byrefNode).kind) <> "IDENT" Then
+                errText = "exec: CALL(DLL) BYREF requires addressable target argument (" & LTrim(Str(UXB_FFI_ERR_BYREF_TARGET)) & ")"
+                Return 0
+            End If
+        End If
+
+        Dim denyReason As String
+        Dim allowDecision As Integer
+        Dim requireAttestation As Integer
+        Dim ffiMode As String
+        ffiMode = ExecGetFfiPolicyMode()
+        requireAttestation = IIf(ffiMode = "ENFORCE", 1, 0)
+        allowDecision = ExecDllCallIsAllowlisted(dllName, symbolName, signatureText, callingConventionText, requireAttestation, denyReason)
+        ExecAuditDllPolicy dllName, symbolName, signatureText, callingConventionText, ffiMode, allowDecision, denyReason
+
+        If allowDecision = 0 And ffiMode = "ENFORCE" Then
+            If denyReason = "deny-policy-load-failed" Then
+                errText = "exec: CALL(DLL) denied by policy load failed (" & LTrim(Str(UXB_FFI_ERR_POLICY_LOAD_FAILED)) & ")"
+                Return 0
+            End If
+            If denyReason = "deny-attestation-required" Then
+                errText = "exec: CALL(DLL) denied by policy attestation required (" & LTrim(Str(UXB_FFI_ERR_POLICY_ATTEST_REQUIRED)) & ")"
+                Return 0
+            End If
+            If denyReason = "deny-hash-extract-failed" Then
+                errText = "exec: CALL(DLL) denied by policy hash extraction failed (" & LTrim(Str(UXB_FFI_ERR_POLICY_HASH_EXTRACT_FAILED)) & ")"
+                Return 0
+            End If
+            If denyReason = "deny-hash-mismatch" Then
+                errText = "exec: CALL(DLL) denied by policy hash mismatch (" & LTrim(Str(UXB_FFI_ERR_POLICY_HASH_MISMATCH)) & ")"
+                Return 0
+            End If
+            If denyReason = "deny-signer-extract-failed" Then
+                errText = "exec: CALL(DLL) denied by policy signer extraction failed (" & LTrim(Str(UXB_FFI_ERR_POLICY_SIGNER_EXTRACT_FAILED)) & ")"
+                Return 0
+            End If
+            If denyReason = "deny-signer-mismatch" Then
+                errText = "exec: CALL(DLL) denied by policy signer mismatch (" & LTrim(Str(UXB_FFI_ERR_POLICY_SIGNER_MISMATCH)) & ")"
+                Return 0
+            End If
+            errText = "exec: CALL(DLL) denied by policy (" & LTrim(Str(UXB_FFI_ERR_POLICY_DENY)) & ")"
+            Return 0
+        End If
+
+        ' FFI-1 report-only mode: do not execute external call yet, return deterministic no-op value.
+        Return 0
+    End Select
+
+    errText = "exec: unsupported call " & callName
+    Return 0
+End Function
+
+Private Function ExecCollectionGetHandleArg(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef callName As String, ByVal argPos As Integer, ByRef handleOut As Integer, ByRef errText As String) As Integer
+    Dim nodeIdx As Integer
+    nodeIdx = ExecChildAt(ps, callNodeIdx, argPos)
+    If nodeIdx = -1 Then
+        errText = "exec: " & callName & " handle arg missing"
+        Return 0
+    End If
+
+    handleOut = ExecEvalNode(ps, es, nodeIdx, errText)
+    If errText <> "" Then Return 0
+    Return 1
+End Function
+
+Private Function ExecCollectionGetIntArg(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef callName As String, ByVal argPos As Integer, ByRef intOut As Integer, ByRef errText As String) As Integer
+    Dim nodeIdx As Integer
+    nodeIdx = ExecChildAt(ps, callNodeIdx, argPos)
+    If nodeIdx = -1 Then
+        errText = "exec: " & callName & " integer arg missing"
+        Return 0
+    End If
+
+    intOut = ExecEvalNode(ps, es, nodeIdx, errText)
+    If errText <> "" Then Return 0
+    Return 1
+End Function
+
+Private Function ExecCollectionGetTextArg(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef callName As String, ByVal argPos As Integer, ByRef textOut As String, ByRef errText As String) As Integer
+    Dim nodeIdx As Integer
+    nodeIdx = ExecChildAt(ps, callNodeIdx, argPos)
+    If nodeIdx = -1 Then
+        errText = "exec: " & callName & " text arg missing"
+        Return 0
+    End If
+
+    If ExecEvalNodeAsText(ps, es, nodeIdx, textOut, errText) = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function ExecCollectionGetValueArg(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef callName As String, ByVal argPos As Integer, ByRef valueOut As ExecValue, ByRef errText As String) As Integer
+    Dim nodeIdx As Integer
+    nodeIdx = ExecChildAt(ps, callNodeIdx, argPos)
+    If nodeIdx = -1 Then
+        errText = "exec: " & callName & " value arg missing"
+        Return 0
+    End If
+
+    If ExecEvalExpression(ps, nodeIdx, es, valueOut, errText) = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function ExecEvalBuiltinCollectionList(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Dim argc As Integer
+    argc = ExecChildCount(ps, callNodeIdx)
+
+    Select Case callName
+    Case "LISTLEN"
+        If argc <> 1 Then
+            errText = "exec: LISTLEN expects 1 argument"
+            Return 0
+        End If
+
+        Dim listHandleLen As Integer
+        Dim listLen As Integer
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, listHandleLen, errText) = 0 Then Return 0
+        If ExecListLen(listHandleLen, listLen, errText) = 0 Then Return 0
+        Return listLen
+
+    Case "LISTGET"
+        If argc <> 2 Then
+            errText = "exec: LISTGET expects 2 arguments"
+            Return 0
+        End If
+
+        Dim listHandleGet As Integer
+        Dim listIndexGet As Integer
+        Dim listValue As ExecValue
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, listHandleGet, errText) = 0 Then Return 0
+        If ExecCollectionGetIntArg(ps, es, callNodeIdx, callName, 1, listIndexGet, errText) = 0 Then Return 0
+        If ExecListGet(listHandleGet, listIndexGet, listValue, errText) = 0 Then Return 0
+        Return ExecValueToInteger(listValue)
+
+    Case "LISTSET"
+        If argc <> 3 Then
+            errText = "exec: LISTSET expects 3 arguments"
+            Return 0
+        End If
+
+        Dim listHandleSet As Integer
+        Dim listIndexSet As Integer
+        Dim listValueSet As ExecValue
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, listHandleSet, errText) = 0 Then Return 0
+        If ExecCollectionGetIntArg(ps, es, callNodeIdx, callName, 1, listIndexSet, errText) = 0 Then Return 0
+        If ExecCollectionGetValueArg(ps, es, callNodeIdx, callName, 2, listValueSet, errText) = 0 Then Return 0
+        If ExecListSet(listHandleSet, listIndexSet, listValueSet, errText) = 0 Then Return 0
+        Return -1
+
+    Case "LISTADD"
+        If argc <> 2 Then
+            errText = "exec: LISTADD expects 2 arguments"
+            Return 0
+        End If
+
+        Dim listHandleAdd As Integer
+        Dim listValueAdd As ExecValue
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, listHandleAdd, errText) = 0 Then Return 0
+        If ExecCollectionGetValueArg(ps, es, callNodeIdx, callName, 1, listValueAdd, errText) = 0 Then Return 0
+        If ExecListAdd(listHandleAdd, listValueAdd, errText) = 0 Then Return 0
+        Return -1
+
+    Case "LISTREMOVE"
+        If argc <> 2 Then
+            errText = "exec: LISTREMOVE expects 2 arguments"
+            Return 0
+        End If
+
+        Dim listHandleRemove As Integer
+        Dim listIndexRemove As Integer
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, listHandleRemove, errText) = 0 Then Return 0
+        If ExecCollectionGetIntArg(ps, es, callNodeIdx, callName, 1, listIndexRemove, errText) = 0 Then Return 0
+        If ExecListRemove(listHandleRemove, listIndexRemove, errText) = 0 Then Return 0
+        Return -1
+
+    Case "LISTCLEAR"
+        If argc <> 1 Then
+            errText = "exec: LISTCLEAR expects 1 argument"
+            Return 0
+        End If
+
+        Dim listHandleClear As Integer
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, listHandleClear, errText) = 0 Then Return 0
+        If ExecListClear(listHandleClear, errText) = 0 Then Return 0
+        Return -1
+    End Select
+
+    Return -2
+End Function
+
+Private Function ExecEvalBuiltinCollectionDict(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Dim argc As Integer
+    argc = ExecChildCount(ps, callNodeIdx)
+
+    Select Case callName
+
+    Case "DICTLEN"
+        If argc <> 1 Then
+            errText = "exec: DICTLEN expects 1 argument"
+            Return 0
+        End If
+
+        Dim dictHandleLen As Integer
+        Dim dictLen As Integer
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, dictHandleLen, errText) = 0 Then Return 0
+        If ExecDictLen(dictHandleLen, dictLen, errText) = 0 Then Return 0
+        Return dictLen
+
+    Case "DICTHAS"
+        If argc <> 2 Then
+            errText = "exec: DICTHAS expects 2 arguments"
+            Return 0
+        End If
+
+        Dim dictHandleHas As Integer
+        Dim dictKeyHas As String
+        Dim dictHasValue As Integer
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, dictHandleHas, errText) = 0 Then Return 0
+        If ExecCollectionGetTextArg(ps, es, callNodeIdx, callName, 1, dictKeyHas, errText) = 0 Then Return 0
+        If ExecDictHas(dictHandleHas, dictKeyHas, dictHasValue, errText) = 0 Then Return 0
+        Return dictHasValue
+
+    Case "DICTGET"
+        If argc <> 2 Then
+            errText = "exec: DICTGET expects 2 arguments"
+            Return 0
+        End If
+
+        Dim dictHandleGet As Integer
+        Dim dictKeyGet As String
+        Dim dictValueGet As ExecValue
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, dictHandleGet, errText) = 0 Then Return 0
+        If ExecCollectionGetTextArg(ps, es, callNodeIdx, callName, 1, dictKeyGet, errText) = 0 Then Return 0
+        If ExecDictGet(dictHandleGet, dictKeyGet, dictValueGet, errText) = 0 Then Return 0
+        Return ExecValueToInteger(dictValueGet)
+
+    Case "DICTSET"
+        If argc <> 3 Then
+            errText = "exec: DICTSET expects 3 arguments"
+            Return 0
+        End If
+
+        Dim dictHandleSet As Integer
+        Dim dictKeySet As String
+        Dim dictValueSet As ExecValue
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, dictHandleSet, errText) = 0 Then Return 0
+        If ExecCollectionGetTextArg(ps, es, callNodeIdx, callName, 1, dictKeySet, errText) = 0 Then Return 0
+        If ExecCollectionGetValueArg(ps, es, callNodeIdx, callName, 2, dictValueSet, errText) = 0 Then Return 0
+        If ExecDictSet(dictHandleSet, dictKeySet, dictValueSet, errText) = 0 Then Return 0
+        Return -1
+
+    Case "DICTCLEAR"
+        If argc <> 1 Then
+            errText = "exec: DICTCLEAR expects 1 argument"
+            Return 0
+        End If
+
+        Dim dictHandleClear As Integer
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, dictHandleClear, errText) = 0 Then Return 0
+        If ExecDictClear(dictHandleClear, errText) = 0 Then Return 0
+        Return -1
+    End Select
+
+    Return -2
+End Function
+
+Private Function ExecEvalBuiltinCollectionSet(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Dim argc As Integer
+    argc = ExecChildCount(ps, callNodeIdx)
+
+    Select Case callName
+
+    Case "SETLEN"
+        If argc <> 1 Then
+            errText = "exec: SETLEN expects 1 argument"
+            Return 0
+        End If
+
+        Dim setHandleLen As Integer
+        Dim setLen As Integer
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, setHandleLen, errText) = 0 Then Return 0
+        If ExecSetLen(setHandleLen, setLen, errText) = 0 Then Return 0
+        Return setLen
+
+    Case "SETHAS"
+        If argc <> 2 Then
+            errText = "exec: SETHAS expects 2 arguments"
+            Return 0
+        End If
+
+        Dim setHandleHas As Integer
+        Dim setKeyHas As String
+        Dim setHasValue As Integer
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, setHandleHas, errText) = 0 Then Return 0
+        If ExecCollectionGetTextArg(ps, es, callNodeIdx, callName, 1, setKeyHas, errText) = 0 Then Return 0
+        If ExecSetHas(setHandleHas, setKeyHas, setHasValue, errText) = 0 Then Return 0
+        Return setHasValue
+
+    Case "SETADD"
+        If argc <> 2 Then
+            errText = "exec: SETADD expects 2 arguments"
+            Return 0
+        End If
+
+        Dim setHandleAdd As Integer
+        Dim setKeyAdd As String
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, setHandleAdd, errText) = 0 Then Return 0
+        If ExecCollectionGetTextArg(ps, es, callNodeIdx, callName, 1, setKeyAdd, errText) = 0 Then Return 0
+        If ExecSetAdd(setHandleAdd, setKeyAdd, errText) = 0 Then Return 0
+        Return -1
+
+    Case "SETREMOVE"
+        If argc <> 2 Then
+            errText = "exec: SETREMOVE expects 2 arguments"
+            Return 0
+        End If
+
+        Dim setHandleRemove As Integer
+        Dim setKeyRemove As String
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, setHandleRemove, errText) = 0 Then Return 0
+        If ExecCollectionGetTextArg(ps, es, callNodeIdx, callName, 1, setKeyRemove, errText) = 0 Then Return 0
+        If ExecSetRemove(setHandleRemove, setKeyRemove, errText) = 0 Then Return 0
+        Return -1
+
+    Case "SETCLEAR"
+        If argc <> 1 Then
+            errText = "exec: SETCLEAR expects 1 argument"
+            Return 0
+        End If
+
+        Dim setHandleClear As Integer
+        If ExecCollectionGetHandleArg(ps, es, callNodeIdx, callName, 0, setHandleClear, errText) = 0 Then Return 0
+        If ExecSetClear(setHandleClear, errText) = 0 Then Return 0
+        Return -1
+    End Select
+
+    Return -2
+End Function
+
+Private Function ExecEvalBuiltinCollectionCategory(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Dim resultValue As Integer
+
+    resultValue = ExecEvalBuiltinCollectionList(ps, es, callName, callNodeIdx, errText)
+    If resultValue <> -2 Then Return resultValue
+    If errText <> "" Then Return 0
+
+    resultValue = ExecEvalBuiltinCollectionDict(ps, es, callName, callNodeIdx, errText)
+    If resultValue <> -2 Then Return resultValue
+    If errText <> "" Then Return 0
+
+    resultValue = ExecEvalBuiltinCollectionSet(ps, es, callName, callNodeIdx, errText)
+    If resultValue <> -2 Then Return resultValue
+    If errText <> "" Then Return 0
+
+    errText = "exec: unsupported call " & callName
+    Return 0
+End Function
+
+Private Function ExecEvalBuiltinLayoutCategory(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Select Case callName
+    Case "SIZEOF"
+        Dim sizeofType As String
+        If ExecBuiltinArgAsTypeName(ps, callNodeIdx, callName, sizeofType, errText) = 0 Then Return 0
+
+        Dim sizeofOut As Integer
+        Dim sizeofErr As String
+        If TypeLayoutSizeOf(ps, sizeofType, sizeofOut, sizeofErr) = 0 Then
+            errText = "exec: SIZEOF failed " & sizeofErr
+            Return 0
+        End If
+        Return sizeofOut
+
+    Case "OFFSETOF"
+        Dim offsetofType As String
+        If ExecBuiltinArgAsTypeName(ps, callNodeIdx, callName, offsetofType, errText) = 0 Then Return 0
+
+        Dim p1 As Integer
+        p1 = ExecChildAt(ps, callNodeIdx, 1)
+        If p1 = -1 Or UCase(ps.ast.nodes(p1).kind) <> "STRING" Then
+            errText = "exec: OFFSETOF expects string path"
+            Return 0
+        End If
+
+        Dim offsetofOut As Integer
+        Dim offsetofErr As String
+        If TypeLayoutOffsetOf(ps, offsetofType, ps.ast.nodes(p1).value, offsetofOut, offsetofErr) = 0 Then
+            errText = "exec: OFFSETOF failed " & offsetofErr
+            Return 0
+        End If
+        Return offsetofOut
+    End Select
+
+    errText = "exec: unsupported call " & callName
+    Return 0
+End Function
+
+Private Function ExecEvalBuiltinScalarCategory(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Select Case callName
+    Case "LEN"
+        Dim lenText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, callName, lenText, errText) = 0 Then Return 0
+        Return Len(lenText)
+
+    Case "ABS"
+        Dim absValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, absValue, errText, 1) = 0 Then Return 0
+        Return Abs(absValue)
+
+    Case "INT"
+        Dim intValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, intValue, errText, 1) = 0 Then Return 0
+        Return CInt(Int(intValue))
+
+    Case "SGN"
+        Dim sgnValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, sgnValue, errText, 1) = 0 Then Return 0
+        If sgnValue < 0 Then Return -1
+        If sgnValue > 0 Then Return 1
+        Return 0
+
+    Case "VAL"
+        Dim valText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, callName, valText, errText) = 0 Then Return 0
+        Return ValInt(valText)
+
+    Case "ASC"
+        Dim ascText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, callName, ascText, errText) = 0 Then Return 0
+        If Len(ascText) = 0 Then
+            errText = "exec: ASC empty string"
+            Return 0
+        End If
+        Return Asc(Left(ascText, 1))
+
+    Case "CINT"
+        Dim cintValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, cintValue, errText, 1) = 0 Then Return 0
+        Return CInt(cintValue)
+
+    Case "CLNG"
+        Dim clngValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, clngValue, errText, 1) = 0 Then Return 0
+        Return CInt(CLng(clngValue))
+
+    Case "CDBL"
+        Dim cdblValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, cdblValue, errText, 1) = 0 Then Return 0
+        Return ExecClampI32(CDbl(cdblValue))
+
+    Case "CSNG"
+        Dim csngValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, csngValue, errText, 1) = 0 Then Return 0
+        Return ExecClampI32(CSng(csngValue))
+
+    Case "FIX"
+        Dim fixValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, fixValue, errText, 1) = 0 Then Return 0
+        Return ExecClampI32(Fix(CDbl(fixValue)))
+
+    Case "SQR"
+        Dim sqrValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, sqrValue, errText, 1) = 0 Then Return 0
+        If sqrValue < 0 Then
+            errText = "exec: SQR domain error"
+            Return 0
+        End If
+        Return ExecClampI32(Sqr(CDbl(sqrValue)))
+
+    Case "SIN"
+        Dim sinValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, sinValue, errText, 1) = 0 Then Return 0
+        Return ExecClampI32(Sin(CDbl(sinValue)))
+
+    Case "COS"
+        Dim cosValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, cosValue, errText, 1) = 0 Then Return 0
+        Return ExecClampI32(Cos(CDbl(cosValue)))
+
+    Case "TAN"
+        Dim tanValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, tanValue, errText, 1) = 0 Then Return 0
+        Return ExecClampI32(Tan(CDbl(tanValue)))
+
+    Case "ATN"
+        Dim atnValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, atnValue, errText, 1) = 0 Then Return 0
+        Return ExecClampI32(Atn(CDbl(atnValue)))
+
+    Case "EXP"
+        Dim expValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, expValue, errText, 1) = 0 Then Return 0
+        Return ExecClampI32(Exp(CDbl(expValue)))
+
+    Case "LOG"
+        Dim logValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, logValue, errText, 1) = 0 Then Return 0
+        If logValue <= 0 Then
+            errText = "exec: LOG domain error"
+            Return 0
+        End If
+        Return ExecClampI32(Log(CDbl(logValue)))
+    End Select
+
+    errText = "exec: unsupported call " & callName
+    Return 0
+End Function
+
+Private Function ExecEvalBuiltinTimeRandomCategory(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Select Case callName
+    Case "RND"
+        Dim rndArgc As Integer
+        rndArgc = ExecChildCount(ps, callNodeIdx)
+
+        Dim rndValue As Single
+        If rndArgc = 0 Then
+            rndValue = Rnd
+        Else
+            Dim rndSeedArg As Integer
+            If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, rndSeedArg, errText, 1) = 0 Then Return 0
+            rndValue = Rnd(rndSeedArg)
+        End If
+
+        Return ExecClampI32(CDbl(rndValue) * 2147483647#)
+
+    Case "TIMER"
+        Dim timerArgc As Integer
+        timerArgc = ExecChildCount(ps, callNodeIdx)
+
+        If timerArgc = 0 Then
+            Return ExecClampI32(Timer)
+        ElseIf timerArgc = 1 Then
+            Dim tu0 As Integer
+            tu0 = ExecChildAt(ps, callNodeIdx, 0)
+            If tu0 = -1 Or UCase(ps.ast.nodes(tu0).kind) <> "STRING" Then
+                errText = "exec: TIMER(unit) expects string unit"
+                Return 0
+            End If
+
+            Dim scale1 As Double
+            If ExecTimerUnitScale(ps.ast.nodes(tu0).value, scale1) = 0 Then
+                errText = "exec: invalid TIMER unit"
+                Return 0
+            End If
+
+            Return ExecClampI32(Timer * scale1)
+        ElseIf timerArgc = 3 Then
+            Dim t0 As Integer
+            Dim t1 As Integer
+            Dim t2 As Integer
+            t0 = ExecChildAt(ps, callNodeIdx, 0)
+            t1 = ExecChildAt(ps, callNodeIdx, 1)
+            t2 = ExecChildAt(ps, callNodeIdx, 2)
+            If t0 = -1 Or t1 = -1 Or t2 = -1 Then
+                errText = "exec: TIMER(start,end,unit) args missing"
+                Return 0
+            End If
+            If UCase(ps.ast.nodes(t2).kind) <> "STRING" Then
+                errText = "exec: TIMER(start,end,unit) expects string unit"
+                Return 0
+            End If
+
+            Dim startValue As Integer
+            Dim endValue As Integer
+            startValue = ExecEvalNode(ps, es, t0, errText)
+            If errText <> "" Then Return 0
+            endValue = ExecEvalNode(ps, es, t1, errText)
+            If errText <> "" Then Return 0
+
+            Dim scale3 As Double
+            If ExecTimerUnitScale(ps.ast.nodes(t2).value, scale3) = 0 Then
+                errText = "exec: invalid TIMER unit"
+                Return 0
+            End If
+
+            Return ExecClampI32((CDbl(endValue) - CDbl(startValue)) * scale3)
+        End If
+
+        errText = "exec: TIMER expects 0, 1 or 3 arguments"
+        Return 0
+    End Select
+
+    errText = "exec: unsupported call " & callName
+    Return 0
+End Function
+
+Private Function ExecEvalBuiltinFileCategory(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Select Case callName
+    Case "LOF"
+        Dim lofHandle As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, lofHandle, errText, 1) = 0 Then Return 0
+
+        If lofHandle < 1 Or lofHandle > 255 Or es.fileIo.channels(lofHandle).inUse = 0 Then
+            errText = "exec: LOF channel not open"
+            Return 0
+        End If
+
+        Err = 0
+        Dim lofOut As LongInt
+        lofOut = Lof(lofHandle)
+        If Err <> 0 Then
+            errText = "exec: LOF failed " & ExecFormatFileError(es.fileIo)
+            Return 0
+        End If
+
+        Return ExecClampI32(CDbl(lofOut))
+
+    Case "EOF"
+        Dim eofHandle As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, callName, eofHandle, errText, 1) = 0 Then Return 0
+
+        If eofHandle < 1 Or eofHandle > 255 Or es.fileIo.channels(eofHandle).inUse = 0 Then
+            errText = "exec: EOF channel not open"
+            Return 0
+        End If
+
+        If Eof(eofHandle) Then Return -1 Else Return 0
+    End Select
+
+    errText = "exec: unsupported call " & callName
+    Return 0
+End Function
+
+Private Function ExecEvalBuiltinKeyboardCategory(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Select Case callName
+    Case "INKEY", "GETKEY"
+        Dim keyArgc As Integer
+        keyArgc = ExecChildCount(ps, callNodeIdx)
+
+        If callName = "GETKEY" Then
+            If keyArgc <> 0 Then
+                errText = "exec: GETKEY expects 0 arguments"
+                Return 0
+            End If
+        Else
+            If keyArgc < 1 Or keyArgc > 2 Then
+                errText = "exec: INKEY expects 1 or 2 arguments"
+                Return 0
+            End If
+
+            Dim keyFlagsNode As Integer
+            keyFlagsNode = ExecChildAt(ps, callNodeIdx, 0)
+            If keyFlagsNode = -1 Then
+                errText = "exec: INKEY arg missing"
+                Return 0
+            End If
+
+            Dim keyFlags As Integer
+            keyFlags = ExecEvalNode(ps, es, keyFlagsNode, errText)
+            If errText <> "" Then Return 0
+        End If
+
+        Dim keyValue As Integer
+        keyValue = 0
+        If ExecDebugKeyQueuePop(keyValue) = 0 Then keyValue = 0
+
+        If callName = "INKEY" And keyArgc = 2 Then
+            Dim stateNode As Integer
+            stateNode = ExecChildAt(ps, callNodeIdx, 1)
+            If stateNode = -1 Then
+                errText = "exec: INKEY state arg missing"
+                Return 0
+            End If
+
+            If UCase(ps.ast.nodes(stateNode).kind) <> "IDENT" Then
+                errText = "exec: INKEY state target must be variable"
+                Return 0
+            End If
+
+            If keyValue <> 0 Then
+                ExecSetVar es, ps.ast.nodes(stateNode).value, 1
+            Else
+                ExecSetVar es, ps.ast.nodes(stateNode).value, 0
+            End If
+        End If
+
+        Return keyValue
+    End Select
+
+    errText = "exec: unsupported call " & callName
+    Return 0
+End Function
+
+Private Function ExecEvalBuiltinPeekCategory(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Select Case callName
+    Case "PEEKB"
+        Dim a0 As Integer
+        a0 = ExecChildAt(ps, callNodeIdx, 0)
+        If a0 = -1 Then
+            errText = "exec: PEEKB arg missing"
+            Return 0
+        End If
+        Dim addr As Integer
+        addr = ExecEvalNode(ps, es, a0, errText)
+        If errText <> "" Then Return 0
+        Return VMemPeekB(CUInt(addr))
+
+    Case "PEEKW"
+        Dim w0 As Integer
+        w0 = ExecChildAt(ps, callNodeIdx, 0)
+        If w0 = -1 Then
+            errText = "exec: PEEKW arg missing"
+            Return 0
+        End If
+        Dim addrW As Integer
+        addrW = ExecEvalNode(ps, es, w0, errText)
+        If errText <> "" Then Return 0
+        Return VMemPeekW(CUInt(addrW))
+
+    Case "PEEKD"
+        Dim d0 As Integer
+        d0 = ExecChildAt(ps, callNodeIdx, 0)
+        If d0 = -1 Then
+            errText = "exec: PEEKD arg missing"
+            Return 0
+        End If
+        Dim addrD As Integer
+        addrD = ExecEvalNode(ps, es, d0, errText)
+        If errText <> "" Then Return 0
+        Return VMemPeekD(CUInt(addrD))
+    End Select
+
+    errText = "exec: unsupported call " & callName
+    Return 0
+End Function
+
+Private Function ExecEvalBuiltinPointerCategory(ByRef ps As ParseState, ByRef es As ExecState, ByVal callName As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
+    Select Case callName
+    Case "VARPTR"
+        Dim v0 As Integer
+        v0 = ExecChildAt(ps, callNodeIdx, 0)
+        If v0 = -1 Then
+            errText = "exec: VARPTR arg missing"
+            Return 0
+        End If
+
+        Dim argNode As ASTNode
+        argNode = ps.ast.nodes(v0)
+        If UCase(argNode.kind) <> "IDENT" Then
+            errText = "exec: VARPTR requires identifier, got " & argNode.kind
+            Return 0
+        End If
+
+        Dim varAddr As UInteger
+        If ExecResolveThisMeIdentAddr(es, argNode.value, varAddr, errText) = 0 Then Return 0
+        Return CInt(varAddr)
+
+    Case "SADD"
+        Dim s0 As Integer
+        s0 = ExecChildAt(ps, callNodeIdx, 0)
+        If s0 = -1 Then
+            errText = "exec: SADD arg missing"
+            Return 0
+        End If
+
+        Dim sNode As ASTNode
+        sNode = ps.ast.nodes(s0)
+        Dim sKind As String
+        sKind = UCase(sNode.kind)
+        If sKind <> "STRING" And sKind <> "IDENT" Then
+            errText = "exec: SADD requires STRING or IDENT, got " & sNode.kind
+            Return 0
+        End If
+
+        Return CInt(&h20000000 Or (ExecHashText(sNode.value) And &h0FFFFFFF))
+
+    Case "LPTR"
+        Dim l0 As Integer
+        l0 = ExecChildAt(ps, callNodeIdx, 0)
+        If l0 = -1 Then
+            errText = "exec: LPTR arg missing"
+            Return 0
+        End If
+
+        Dim lNode As ASTNode
+        lNode = ps.ast.nodes(l0)
+        Dim lKind As String
+        lKind = UCase(lNode.kind)
+        If lKind <> "IDENT" And lKind <> "KEYWORD_REF" Then
+            errText = "exec: LPTR requires IDENT/KEYWORD_REF, got " & lNode.kind
+            Return 0
+        End If
+
+        Dim labelName As String
+        labelName = UCase(Trim(lNode.value))
+        If labelName = "" Then
+            errText = "exec: LPTR requires non-empty label"
+            Return 0
+        End If
+
+        Return CInt(&h30000000 Or (ExecHashText(labelName & ":" & lKind) And &h0FFFFFFF))
+
+    Case "CODEPTR"
+        Dim c0 As Integer
+        c0 = ExecChildAt(ps, callNodeIdx, 0)
+        If c0 = -1 Then
+            errText = "exec: CODEPTR arg missing"
+            Return 0
+        End If
+
+        Dim cNode As ASTNode
+        cNode = ps.ast.nodes(c0)
+        Dim cKind As String
+        cKind = UCase(cNode.kind)
+        If cKind <> "IDENT" And cKind <> "KEYWORD_REF" Then
+            errText = "exec: CODEPTR requires IDENT/KEYWORD_REF, got " & cNode.kind
+            Return 0
+        End If
+
+        Dim routineName As String
+        routineName = UCase(Trim(cNode.value))
+        If routineName = "" Then
+            errText = "exec: CODEPTR requires non-empty routine name"
+            Return 0
+        End If
+
+        Return CInt(&h40000000 Or (ExecHashText(routineName & ":" & cKind) And &h0FFFFFFF))
+    End Select
+
+    errText = "exec: unsupported call " & callName
+    Return 0
+End Function
