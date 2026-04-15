@@ -10,3 +10,7 @@
 ## 2026-04-15 Validation Cycle-2
 - FFI-SCOPE-1 satirlarinda T kolonu iki satir icin OK'a cekildi.
 - R kolonu policy/no-op dis cagrisi nedeniyle KISMEN olarak korundu.
+
+## 2026-04-15 Validation Cycle-3
+- FFI-CONV-1 notu, Win64 policy lane conv-compat ve ABI audit kaniti ile guncellendi.
+- FFI-CONV-2 satiri PLAN durumda korundu; shadow-space/alignment codegen kriterleri acik.

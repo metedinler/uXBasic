@@ -286,6 +286,48 @@ Private Sub Main()
         End 1
     End If
 
+    Dim convPolicyPath As String
+    convPolicyPath = "tests\\tmp_ffi_allowlist_conv.txt"
+    Kill convPolicyPath
+
+    Dim pconv As Integer
+    pconv = FreeFile
+    Open convPolicyPath For Output As #pconv
+    Print #pconv, "# UXB_FFI_ALLOWLIST_V1"
+    Print #pconv, "# dll|symbol|signature|calling_convention|sha256|signer"
+    Print #pconv, "kernel32.dll|GetTickCount|I32|CDECL|1111111111111111111111111111111111111111111111111111111111111111|CN=MICROSOFT WINDOWS"
+    Close #pconv
+
+    ExecSetFfiPolicyPath convPolicyPath
+
+    Dim srcDllConvCompatibility As String
+    srcDllConvCompatibility = _
+        "a = 66" & Chr(10) & _
+        "CALL(DLL, ""kernel32.dll"", ""GetTickCount"", I32, STDCALL, a)" & Chr(10) & _
+        "POKED 4220, a"
+
+    Dim convCompatErr As String
+    If RunProgramExpectOk(srcDllConvCompatibility, convCompatErr) = 0 Then
+        Print "FAIL call dll conv-compat allow | "; convCompatErr
+        End 1
+    End If
+
+    ok And= AssertEq(VMemPeekD(4220), 66, "call dll conv-compat continuation")
+
+    Dim logTextConvCompat As String
+    If ReadTextFile(logPath, logTextConvCompat) = 0 Then
+        Print "FAIL call dll conv-compat log read"
+        End 1
+    End If
+
+    If ContainsText(logTextConvCompat, "ABI=WIN64-MSABI") = 0 Then
+        Print "FAIL call dll conv-compat abi log | "; logTextConvCompat
+        End 1
+    End If
+
+    Kill convPolicyPath
+    ExecSetFfiPolicyPath enforcePolicyPath
+
     Dim policyPath As String
     policyPath = "tests\\tmp_ffi_allowlist.txt"
     Kill policyPath
@@ -607,6 +649,7 @@ Private Sub Main()
 
     ExecSetFfiPolicyPath defaultPolicyPath
     Kill enforcePolicyPath
+    Kill convPolicyPath
     Kill policyPath
 
     ExecSetFfiPolicyMode "REPORT_ONLY"

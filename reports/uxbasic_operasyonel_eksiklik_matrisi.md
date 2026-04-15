@@ -475,13 +475,13 @@ Bu bolum istatistik fonksiyon isimlerinden bagimsiz olarak CALL(DLL)/IMPORT ve s
 | Bilesen | D | P | S | R | T | Not | Hedef Faz |
 |---|---|---|---|---|---|---|---|
 | CALL(DLL, lib, symbol, signature, ...) | OK | OK | OK | OK | OK | Temel FFI cagrisi ve policy kodlari (9201..9215) aktif | FFI-CORE |
-| Calling convention: stdcall/cdecl secimi | OK | OK | OK | KISMEN | OK | Parser+runtime token destegi aktif (CDECL/STDCALL) ve ilk faz testleri PASS (tests/run_call_dll_scope_exec_ast.bas; tests/run_call_dll_alias_exec_ast.bas). Runtime dis cagrida halen policy/no-op modunda oldugu icin R=KISMEN korunur. | FFI-CONV-1 |
+| Calling convention: stdcall/cdecl secimi | OK | OK | OK | KISMEN | OK | Parser+runtime token destegi aktif (CDECL/STDCALL). Win64 policy lane'de cdecl/stdcall uyumlu eslestirme + ABI audit alani eklendi (tests/run_call_exec.bas, tests/run_call_dll_scope_exec_ast.bas, tests/run_call_dll_alias_exec_ast.bas). Runtime dis cagrida halen policy/no-op modunda oldugu icin R=KISMEN korunur. | FFI-CONV-1 |
 | DLL path policy (absolute/segments/invalid chars) | OK | OK | OK | OK | OK | Runtime fail-fast kodlari aktif | FFI-CORE |
 | Signature/arity/byref contract | OK | OK | OK | OK | OK | runtime exec_eval_builtin_categories kaniti mevcut | FFI-CORE |
 | NAMESPACE+MODULE+MAIN ile DLL cagrisi | OK | OK | OK | KISMEN | OK | Scope parse+exec kaniti PASS (tests/run_call_dll_scope_exec_ast.bas). MAIN global-scope kuralina uygun senaryo ile dogrulandi. Runtime dis cagrida policy/no-op modeli nedeniyle R=KISMEN korunur. | FFI-SCOPE-1 |
 | USING/ALIAS ile DLL cagrisi isim cozumleme | OK | OK | OK | KISMEN | OK | USING/ALIAS + CALL(DLL) entegrasyon kaniti PASS (tests/run_call_dll_alias_exec_ast.bas). Runtime dis cagrida policy/no-op modeli nedeniyle R=KISMEN korunur. | FFI-SCOPE-1 |
 | Strongly-typed marshalling (STRING/PTR/NUM) | OK | KISMEN | KISMEN | KISMEN | KISMEN | Signature token var; type-marshalling kapsam testleri genisletilecek | FFI-SCOPE-2 |
-| Win64 ABI uyumu (shadow space + alignment) | OK | PLAN | PLAN | PLAN | PLAN | DLL cagrilarinda stack alignment/shadow-space zorunlu kontrol lane'i (codegen ile birlikte kapanir) | FFI-CONV-2 |
+| Win64 ABI uyumu (shadow space + alignment) | OK | PLAN | PLAN | PLAN | PLAN | DLL cagrilarinda stack alignment/shadow-space zorunlu kontrol lane'i (codegen ile birlikte kapanir). Not: Policy lane'de ABI metadata/audit ve convention uyumlulugu eklendi; bu satirin kapanis kriterini tek basina karsilamaz. | FFI-CONV-2 |
 | x86 stdcall/cdecl ayristirma | OK | PLAN | PLAN | PLAN | PLAN | x86 lane acildiginda caller/callee stack temizleme farki icin ayrik test paketi zorunlu | FFI-CONV-3 |
 | Ilk resmi DLL: uXStat | OK | PLAN | PLAN | PLAN | PLAN | Ayrik planda is paketleri tanimlandi | UXSTAT-0 |
 

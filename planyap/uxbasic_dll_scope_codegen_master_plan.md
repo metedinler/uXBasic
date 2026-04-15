@@ -221,6 +221,23 @@ Not:
 - Bu adim, protokol secim metadata'sini acmistir.
 - Gercek dis cagrinin ABI seviyesinde yurutulmesi (x64 emitter/x86 stack cleanup) FFI-CONV-2 ve FFI-CONV-3 lane'lerinde kapanacaktir.
 
+### 6.2) FFI-CONV-2 Bootstrap (2026-04-15)
+
+Tamamlanan adim:
+
+1. CALL(DLL) allowlist satirinda opsiyonel calling convention kolonu destegi eklendi:
+  - `dll|symbol|signature|calling_convention|sha256|signer`
+2. Win64 lane'de (`x86_64`), policy eslestirmesinde `CDECL` ve `STDCALL` uyumlu kabul edilir hale getirildi.
+3. Audit kaydina aktif ABI bilgisi (`abi=WIN64-MSABI`) eklendi.
+4. Kanit testi:
+  - tests/run_call_exec.bas (conv-compat + ABI audit assertion)
+
+Acik kalanlar (FFI-CONV-2 kapanisi icin zorunlu):
+
+1. Gercek dis DLL cagrisi emitter yolunda shadow space ayrimi.
+2. 16-byte stack alignment zorlamasi.
+3. CALL [register] / arg register mapping codegen adimlari.
+
 ## 7) Risk ve Koruma
 
 Riskler:

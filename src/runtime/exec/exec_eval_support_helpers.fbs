@@ -433,6 +433,33 @@ Private Function ExecIsDllCallingConvention(ByRef conventionText As String) As I
     Return 0
 End Function
 
+Private Function ExecGetActiveFfiAbiName() As String
+#Ifdef __FB_64BIT__
+    Return "WIN64-MSABI"
+#Else
+    Return "X86-32"
+#EndIf
+End Function
+
+Private Function ExecAreDllCallingConventionsCompatible(ByRef requestedConventionText As String, ByRef allowedConventionText As String) As Integer
+    Dim req As String
+    Dim allow As String
+    req = UCase(Trim(requestedConventionText))
+    allow = UCase(Trim(allowedConventionText))
+
+    If req = "" Then req = "CDECL"
+    If allow = "" Or allow = "*" Then Return 1
+    If allow = req Then Return 1
+
+#Ifdef __FB_64BIT__
+    If (allow = "CDECL" Or allow = "STDCALL") And (req = "CDECL" Or req = "STDCALL") Then
+        Return 1
+    End If
+#EndIf
+
+    Return 0
+End Function
+
 Private Function ExecContainsInvalidDllChars(ByRef dllName As String) As Integer
     Dim i As Integer
     For i = 1 To Len(dllName)
@@ -585,6 +612,7 @@ Private Function ExecParseFfiAllowlistLine(ByRef lineText As String, ByRef dllOu
     Dim p2 As Integer
     Dim p3 As Integer
     Dim p4 As Integer
+    Dim p5 As Integer
     p1 = Instr(lineTrim, "|")
     If p1 <= 1 Then Return 0
 
@@ -593,10 +621,15 @@ Private Function ExecParseFfiAllowlistLine(ByRef lineText As String, ByRef dllOu
 
     p3 = Instr(p2 + 1, lineTrim, "|")
     p4 = 0
+    p5 = 0
     If p3 > 0 Then
         p4 = Instr(p3 + 1, lineTrim, "|")
         If p4 <= p3 + 1 Then Return 0
-        If Instr(p4 + 1, lineTrim, "|") > 0 Then Return 0
+        p5 = Instr(p4 + 1, lineTrim, "|")
+        If p5 > 0 Then
+            If p5 <= p4 + 1 Then Return 0
+            If Instr(p5 + 1, lineTrim, "|") > 0 Then Return 0
+        End If
     End If
 
     Dim dllCandidate As String
@@ -608,17 +641,31 @@ Private Function ExecParseFfiAllowlistLine(ByRef lineText As String, ByRef dllOu
         Dim hashCandidate As String
         Dim signerCandidate As String
         sigOut = UCase(Trim(Mid(lineTrim, p2 + 1, p3 - p2 - 1)))
-        hashCandidate = Mid(lineTrim, p3 + 1, p4 - p3 - 1)
-        signerCandidate = Mid(lineTrim, p4 + 1)
+
+        If p5 > 0 Then
+            Dim convCandidate As String
+            convCandidate = UCase(Trim(Mid(lineTrim, p3 + 1, p4 - p3 - 1)))
+            If convCandidate = "" Then
+                convOut = "*"
+            Else
+                convOut = convCandidate
+            End If
+            hashCandidate = Mid(lineTrim, p4 + 1, p5 - p4 - 1)
+            signerCandidate = Mid(lineTrim, p5 + 1)
+        Else
+            convOut = "*"
+            hashCandidate = Mid(lineTrim, p3 + 1, p4 - p3 - 1)
+            signerCandidate = Mid(lineTrim, p4 + 1)
+        End If
+
         If ExecNormalizeFfiHashToken(hashCandidate, hashOut) = 0 Then Return 0
         If ExecNormalizeFfiSignerToken(signerCandidate, signerOut) = 0 Then Return 0
     Else
         sigOut = UCase(Trim(Mid(lineTrim, p2 + 1)))
+        convOut = "*"
         hashOut = ""
         signerOut = ""
     End If
-
-    convOut = "*"
 
     Dim normalizeErr As String
     If ExecNormalizeDllName(dllCandidate, dllOut, normalizeErr) = 0 Then Return 0
@@ -808,7 +855,7 @@ Private Function ExecDllCallIsAllowlisted(ByRef dllName As String, ByRef symbolN
         If dllKey = gFfiAllowEntries(i).dllName And symbolKey = gFfiAllowEntries(i).symbolName And sigKey = gFfiAllowEntries(i).signatureText Then
             Dim allowConv As String
             allowConv = UCase(Trim(gFfiAllowEntries(i).callingConventionText))
-            If allowConv <> "" And allowConv <> "*" And allowConv <> convKey Then
+            If ExecAreDllCallingConventionsCompatible(convKey, allowConv) = 0 Then
                 GoTo NextAllowEntry
             End If
 
@@ -874,6 +921,7 @@ Private Sub ExecAuditDllPolicy(ByRef dllName As String, ByRef symbolName As Stri
     End If
 
     msgText &= " lib=" & dllName & " symbol=" & symbolName & " sig=" & signatureText & " conv=" & callingConventionText
+    msgText &= " abi=" & ExecGetActiveFfiAbiName()
     msgText &= " allow=" & LTrim(Str(allowDecision)) & " deny_code=" & LTrim(Str(denyCode))
     msgText &= " phase=" & phaseText
     If reasonText <> "" Then msgText &= " reason=" & reasonText
