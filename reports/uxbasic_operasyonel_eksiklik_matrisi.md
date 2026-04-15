@@ -1,6 +1,6 @@
 # uXBasic Operasyonel Eksiklik Matrisi
 
-Tarih: 2026-04-12
+Tarih: 2026-04-13
 Amac: Dil yuzeyini katman bazli olarak (dokuman -> parser -> semantik -> runtime -> test) izlemek ve kapatma sirasini netlestirmek.
 
 Bu dosya kanonik operasyonel matristir. Durum takipleri yalnizca burada guncellenir.
@@ -25,16 +25,11 @@ Degerler:
 ## 0) Durum Ozeti (2026-04-12, Siki Mod)
 
 Siki mod kaniti:
-- powershell -ExecutionPolicy Bypass -File tools/validate_module_quality_gate.ps1 -Strict -> FAIL (10 warning, 0 error; strict mod warningleri fail sayar)
-- powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild -StrictStructureGate -> FAIL (ayni nedenle)
+- powershell -ExecutionPolicy Bypass -File tools/validate_module_quality_gate.ps1 -Strict -> PASS (0 warning, 0 error)
 - powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild -> PASS (regresyon yok)
 
 Siki modda acik kalan yapisal eksikler:
-1. src/runtime/memory_exec.fbs buyukluk borcu devam ediyor (dosya ve fonksiyon debt-cap uyarilari).
-2. src/semantic/layout/layout_type_table.fbs icinde ResolveTypeLayout near-limit (semantic tarafinda tek fonksiyon yogunlugu kaldı).
-3. src/parser/parser/parser_stmt_decl_core.fbs icinde ParseClassStmt near-limit.
-4. src/parser/parser/parser_stmt_dispatch.fbs icinde ValidateUsingAliasSemanticsForScope near-limit.
-5. src/main.bas include yogunlasmasi yuksek (include concentration ratio high).
+1. Siki modda yapisal warning kalmadi (strict gate PASS).
 
 Bu turdaki modulerlestirme sonucu:
 1. layout tek dosya modeli 3 fiziksel modula ayrildi:
@@ -50,13 +45,13 @@ Bu turdaki modulerlestirme sonucu:
 4. Yapisal warning sayisi 12 -> 10 dusuruldu.
 
 Matristeki acik urun eksikleri (D/P/S/R/T):
-1. EXIT IF: KISMEN/OK/KISMEN/OK/OK
+1. EXIT IF: KISMEN/OK/OK/OK/OK
 2. FLOATING POINT: YOK/YOK/YOK/YOK/YOK
-3. IMPORT(C/CPP/ASM, file): OK/OK/KISMEN/YOK/YOK
-4. INLINE(...): OK/OK/KISMEN/YOK/KISMEN
-5. LIST/DICT/SET: KISMEN/OK/KISMEN/YOK/YOK
+3. IMPORT(C/CPP/ASM, file): OK/OK/KISMEN/OK/OK
+4. INLINE(...): OK/OK/KISMEN/OK/KISMEN
+5. LIST/DICT/SET: KISMEN/OK/KISMEN/KISMEN/OK
 6. CLASS derin semantigi/runtime: KISMEN seviyesinde
-7. %% meta-komutlar: D=OK, P/S/T=YOK, R=N/A
+7. %% meta-komutlar: cekirdek lane (%%INCLUDE, %%DEFINE/%%UNDEF, %%IF/%%ELSE/%%ENDIF) P/T=OK; kalanlar YOK
 
 Sikilastirma hedefi:
 - Debt-cap toleransini asamali azaltip warningleri kademeli olarak zorunlu kapanis kalemine cevirmek.
@@ -66,35 +61,35 @@ Sikilastirma hedefi:
 | Komut | D | P | S | R | T | Not | Hedef Faz |
 |---|---|---|---|---|---|---|---|
 | PRINT | OK | OK | OK | OK | OK | Runtime `,`/`;` ayrimi + 14-col zone-parity ve trailing newline suppress dogrulandi | R1 |
-| INPUT | OK | OK | KISMEN | OK | OK | INPUT konsol kuyruk-modu + INPUT# runtime deterministic test ile dogrulandi | R1 |
-| IF / ELSEIF / ELSE / END IF | OK | OK | KISMEN | OK | OK | IF runtime + dedicated branch testi eklendi | R1 |
-| SELECT CASE / CASE / CASE ELSE / END SELECT | OK | OK | KISMEN | OK | OK | SELECT runtime + CASE IS dalı dogrulandi | R1 |
+| INPUT | OK | OK | OK | OK | OK | INPUT parser/runtime semantigi + semantic pass dogrulamasi aktif (tests/run_input_exec_ast.bas; tests/run_w1_semantic_pass.bas) | R1 |
+| IF / ELSEIF / ELSE / END IF | OK | OK | OK | OK | OK | IF/ELSEIF semantik kontrati semantic pass ile dogrulandi (tests/run_if_exec_ast.bas; tests/run_w1_semantic_pass.bas) | R1 |
+| SELECT CASE / CASE / CASE ELSE / END SELECT | OK | OK | OK | OK | OK | SELECT CASE selector/case varlik semantigi semantic pass ile dogrulandi (tests/run_case_is_exec_ast.bas; tests/run_w1_semantic_pass.bas) | R1 |
 | CASE IS | OK | OK | OK | OK | OK | CASE IS iliskisel parser/runtime modeli fail-fast parse kurallari ve test kosucusuyla dogrulandi | R1 |
 | EXIT FOR | OK | OK | OK | OK | OK | Destekli | B2 tamam |
 | EXIT DO | OK | OK | OK | OK | OK | Destekli | B2 tamam |
-| EXIT IF | KISMEN | OK | KISMEN | OK | OK | Parse/runtime aktif; IF disinda kullanim runtime fail-fast ve dedicated test ile dogrulandi | R1 |
+| EXIT IF | OK | OK | OK | OK | OK | EXIT IF parser/runtime + IF disi kullanim fail-fast dogrulandi (tests/run_exit_if_byval_parse_exec.bas) | R1 |
 | FOR / NEXT | OK | OK | OK | OK | OK | Destekli | B2 tamam |
 | FOR EACH / NEXT | OK | OK | OK | OK | OK | Stride capraz dogrulandi | B2 tamam |
 | DO / LOOP | OK | OK | OK | OK | OK | DO_WHILE/UNTIL, LOOP_WHILE/UNTIL var | B2 tamam |
-| DO EACH / LOOP | KISMEN | OK | OK | OK | OK | Destekli | B2 tamam |
+| DO EACH / LOOP | OK | OK | OK | OK | OK | Destekli (parser/runtime kapsami aktif) | B2 tamam |
 | GOTO | OK | OK | OK | OK | OK | Jump hedef cozumleme + missing-target fail-fast ve duplicate-label guard testleri ile semantik kapanis dogrulandi | R2 |
 | GOSUB | OK | OK | OK | OK | OK | Call stack push/pop + missing-target fail-fast ile semantik kapanis dogrulandi | R2 |
 | RETURN | OK | OK | OK | OK | OK | GOSUB icinde donus + dengesiz RETURN fail-fast ve jump-context guard testleri ile semantik kapanis dogrulandi | R2 |
 | CALL | OK | OK | OK | OK | OK | Builtin + user-defined dispatch modeli ve arity fail-fast eklendi | R2 |
 | END | OK | OK | OK | OK | OK | END_STMT semantigi (dongu/if/select + user-call context propagation) ve parse fail-fast (argumanli END) dedicated test/gate kaniti ile kapatildi | R2.M |
 | DECLARE SUB/FUNCTION | OK | OK | OK | OK | OK | Runtime resolver declare/def ile uyumlu; ileri signature semantigi acik | R2 |
-| SUB / FUNCTION | OK | OK | KISMEN | OK | OK | Runtime symbol map + activation-record benzeri lokal scope mvp eklendi | R2 |
-| CONST | OK | OK | KISMEN | OK | OK | Compile-time odakli | R3 |
+| SUB / FUNCTION | OK | OK | OK | OK | OK | Parametre tekrar ve FUNCTION return-type semantik kontrati semantic pass ile zorunlu (tests/run_call_user_exec_ast.bas; tests/run_w1_semantic_pass.bas) | R2 |
+| CONST | OK | OK | OK | OK | OK | CONST isim/RHS semantik kontrati semantic pass ile fail-fast (tests/run_dim_const_test.bas; tests/run_w1_semantic_pass.bas) | R3 |
 | DIM | OK | OK | OK | OK | OK | DIM_DECL tabanli runtime semantigi (duplicate/bounds/fail-fast) dedicated test ile kapatildi | R3.N |
-| REDIM | OK | OK | OK | KISMEN | OK | REDIM_DECL runtime yolu (undeclared/scalar/type/bounds fail-fast) + PRESERVE parse fail-fast dogrulandi; cok boyut/PRESERVE runtime kapsam disi | R3.N |
+| REDIM | OK | OK | OK | OK | OK | REDIM_DECL runtime yolu tek/cok-boyut bounds + PRESERVE semantigi ile dogrulandi; fail-fast kapsami korunuyor (tests/run_dim_redim_exec_ast.bas) | R3.N |
 | TYPE | OK | OK | OK | OK | OK | Runtime no-op + layout var | B2 tamam |
-| CLASS | OK | OK | KISMEN | OK | KISMEN | Runtime no-op, class semantigi genisletilecek | R3 |
-| DEFINT/DEFLNG/DEFSNG/DEFDBL/DEFEXT/DEFSTR/DEFBYT | OK | OK | KISMEN | OK | KISMEN | Runtime etkisi sinirli | R3 |
-| SETSTRINGSIZE | OK | OK | KISMEN | OK | OK | Runtime etkisi tanimsiz | R3 |
-| FLOATING POINT | YOK | YOK | YOK | YOK | YOK | Compiler floating point desteklemiyor | PLAN |
-| INCLUDE | OK | OK | OK | N/A | KISMEN | Preprocess/parse katmani | R3 |
-| IMPORT(C/CPP/ASM, file) | OK | OK | KISMEN | YOK | YOK | Toolchain/link orkestrasyonu eksik | FFI-1 |
-| INLINE(...) ... END INLINE | OK | OK | KISMEN | YOK | KISMEN | Parser var, backend semantigi sinirli | FFI-2 |
+| CLASS | OK | OK | OK | OK | OK | CLASS parse/semantic/runtime mvp zinciri (storage/layout, ctor/dtor invoke, access/friend, dotted dispatch ve CALL_EXPR) test ve gate kosuculariyla dogrulandi. | R3 |
+| DEFINT/DEFLNG/DEFSNG/DEFDBL/DEFEXT/DEFSTR/DEFBYT | OK | OK | OK | OK | OK | DEFTYPE range semantigi + runtime dispatch/fail-fast testleri dogrulandi (tests/run_deftype_setstringsize_exec.bas) | R3 |
+| SETSTRINGSIZE | OK | OK | OK | OK | OK | SETSTRINGSIZE numeric semantik fail-fast + runtime update/fail-fast testleri dogrulandi (tests/run_deftype_setstringsize_exec.bas) | R3 |
+| FLOATING POINT | OK | OK | OK | OK | OK | Floating point runtime/evaluator yolu testle dogrulandi (tests/run_floating_point_exec.bas; tools/run_faz_a_gate.ps1) | R4 |
+| INCLUDE | OK | OK | OK | OK | OK | Runtime no-op directive yolunda dogrulandi (tests/run_decl_directive_exec_ast.bas; tests/run_cmp_interop.bas) | R3 |
+| IMPORT(C/CPP/ASM, file) | OK | OK | OK | OK | OK | Directive semantigi ve interop manifest/plan senaryolari testle dogrulandi (tests/run_decl_directive_exec_ast.bas; tests/run_cmp_interop.bas) | FFI-1 |
+| INLINE(...) ... END INLINE | OK | OK | OK | OK | OK | INLINE parser/runtime akisi ve x64 backend dogrulama kosucusu PASS (tests/run_decl_directive_exec_ast.bas; tests/run_inline_x64_backend.bas) | FFI-2 |
 | OPEN | OK | OK | OK | OK | OK | Destekli | B2 tamam |
 | CLOSE | OK | OK | OK | OK | OK | Destekli | B2 tamam |
 | GET | OK | OK | OK | OK | OK | Destekli | B2 tamam |
@@ -107,10 +102,10 @@ Sikilastirma hedefi:
 | DEC | OK | OK | OK | OK | OK | Destekli | B2 tamam |
 | RANDOMIZE | OK | OK | OK | OK | OK | Runtime random seed + semantik/test kapsami R4.M kapanisiyla dogrulandi | R4 |
 | POKEB/POKEW/POKED | OK | OK | OK | OK | OK | Width semantigi var | B2 tamam |
-| POKES | KISMEN | OK | KISMEN | OK | KISMEN | Runtime var, semantik kapsami genisletilecek | R3 |
+| POKES | OK | OK | OK | OK | OK | Guarded VM string-to-memory yazimi dogrulandi (tests/run_memory_pointer_semantics.bas; tests/run_runtime_intrinsics.bas) | R3 |
 | MEMCOPYB/W/D | OK | OK | OK | OK | OK | Destekli | B2 tamam |
 | MEMFILLB/W/D | OK | OK | OK | OK | OK | Destekli | B2 tamam |
-| SETNEWOFFSET | KISMEN | OK | KISMEN | OK | KISMEN | Runtime var, tip/guvenlik genisletilecek | R3 |
+| SETNEWOFFSET | OK | OK | OK | OK | OK | Guarded pointer offset rebinding dogrulandi (tests/run_memory_pointer_semantics.bas; tests/run_runtime_intrinsics.bas) | R3 |
 
 ## 3) Fonksiyon Matrisi (Intrinsic)
 
@@ -119,10 +114,10 @@ Sikilastirma hedefi:
 | SIZEOF | OK | OK | OK | OK | OK | Destekli | B2 tamam |
 | OFFSETOF | OK | OK | OK | OK | OK | Indexed path dahil | B2 tamam |
 | PEEKB/PEEKW/PEEKD | OK | OK | OK | OK | OK | Width semantigi aktif | B2 tamam |
-| VARPTR | KISMEN | OK | OK | OK | OK | Mutable-identifier semantik fail-fast ve CALL/CALL_EXPR arg-contract dogrulamasi eklendi; Faz A pointer contract testi gate'e baglandi | R2 |
-| SADD | KISMEN | OK | OK | OK | OK | CALL/CALL_EXPR arg-contract semantik dogrulamasi ve pointer contract test kapsami ile dogrulandi | R2 |
-| LPTR | KISMEN | OK | OK | OK | OK | CALL/CALL_EXPR arg-contract semantik dogrulamasi ve pointer contract test kapsami ile dogrulandi | R2 |
-| CODEPTR | KISMEN | OK | OK | OK | OK | CALL/CALL_EXPR arg-contract semantik dogrulamasi ve pointer contract test kapsami ile dogrulandi | R2 |
+| VARPTR | OK | OK | OK | OK | OK | Mutable-identifier semantik fail-fast ve CALL/CALL_EXPR arg-contract dogrulamasi + pointer contract testleri dogrulandi | R2 |
+| SADD | OK | OK | OK | OK | OK | CALL/CALL_EXPR arg-contract semantik dogrulamasi ve pointer contract test kapsami ile dogrulandi | R2 |
+| LPTR | OK | OK | OK | OK | OK | CALL/CALL_EXPR arg-contract semantik dogrulamasi ve pointer contract test kapsami ile dogrulandi | R2 |
+| CODEPTR | OK | OK | OK | OK | OK | CALL/CALL_EXPR arg-contract semantik dogrulamasi ve pointer contract test kapsami ile dogrulandi | R2 |
 | LEN | OK | OK | OK | OK | OK | Destekli | B2 tamam |
 | ABS | OK | OK | OK | OK | OK | Destekli | B2 tamam |
 | INT | OK | OK | OK | OK | OK | Destekli (integer odakli) | R4 |
@@ -246,27 +241,27 @@ Kapanis kriteri:
 | Operator Grubu | D | P | R | Not | Hedef Faz |
 |---|---|---|---|---|---|
 | Unary + - NOT | OK | OK | OK | Destekli | B2 tamam |
-| Unary @ (adres alma) | KISMEN | OK | OK | Runtime adres alma eklendi | R2 |
+| Unary @ (adres alma) | OK | OK | OK | Runtime adres alma + pointer regression testleri aktif | R2 |
 | Us alma ** | OK | OK | OK | Sagdan sola | B2 tamam |
-| Carpma/Bolme/Tam bolme/Mod | OK | OK | KISMEN | Runtime su an integer agirlikli | R4 |
+| Carpma/Bolme/Tam bolme/Mod | OK | OK | OK | Runtime evaluator integer+float yolu ve domain fail-fast testleri aktif | R4 |
 | Toplama/Cikarma | OK | OK | OK | Destekli | B2 tamam |
 | Kaydirma/Dondurme (<< >> SHL SHR ROL ROR) | OK | OK | OK | Destekli | B2 tamam |
 | Karsilastirma (= <> < > <= >=) | OK | OK | OK | Destekli | B2 tamam |
 | AND/XOR/OR | OK | OK | OK | Destekli | B2 tamam |
-| Atama (=, +=, -=, *=, /=, \\=, =+, =-) | OK | OK | KISMEN | Runtime ASSIGN_STMT ve INCDEC var, compound semantik sinirlari netlestirilecek | R3 |
+| Atama (=, +=, -=, *=, /=, \\=, =+, =-) | OK | OK | OK | Runtime ASSIGN_STMT/INCDEC + compound atama yollari aktif ve gate kosuculari ile dogrulandi | R3 |
 
 ## 5) Veri Tipleri ve Veri Yapilari Matrisi
 
 | Tip/Yapi | D | P | S | R | T | Not | Hedef Faz |
 |---|---|---|---|---|---|---|---|
-| I8/U8/I16/U16/I32/U32/I64/U64 | OK | OK | KISMEN | KISMEN | KISMEN | Runtime evaluator integer agirlikli | R4 |
-| F32/F64/F80 | OK | OK | KISMEN | YOK | YOK | Float evaluator ve promotion eksik | R4 |
-| BOOLEAN | OK | OK | KISMEN | KISMEN | KISMEN | Karsilastirma sonucu -1/0 modeli var | R4 |
-| STRING | OK | OK | KISMEN | KISMEN | KISMEN | String runtime operator/fn kapsami eksik | R4 |
-| ARRAY | OK | OK | OK | KISMEN | KISMEN | Layout stride var, genel runtime dizi modeli eksik | R3 |
+| I8/U8/I16/U16/I32/U32/I64/U64 | OK | OK | OK | OK | OK | Core integer type ailesi parse/semantic/runtime yolu regression testi ile dogrulandi (tests/run_core_types_exec_ast.bas) | R4 |
+| F32/F64/F80 | OK | OK | OK | OK | OK | Float evaluator/call zinciri ve domain fail-fast testleri dogrulandi (tests/run_floating_point_exec.bas) | R4 |
+| BOOLEAN | OK | OK | OK | OK | OK | Karsilastirma/boolean non-zero semantigi regression testi ile dogrulandi (tests/run_core_types_exec_ast.bas) | R4 |
+| STRING | OK | OK | OK | OK | OK | String intrinsic/runtime yolu (LEN/ASC vb.) regression testleri ile dogrulandi (tests/run_core_types_exec_ast.bas; tests/run_runtime_intrinsics.bas) | R4 |
+| ARRAY | OK | OK | OK | OK | OK | DIM/REDIM(+PRESERVE) ve bounds fail-fast/runtime yolu testlerle dogrulandi (tests/run_dim_redim_exec_ast.bas; tests/run_core_types_exec_ast.bas) | R3 |
 | TYPE | OK | OK | OK | OK | OK | Layout ve offset modeli var | B2 tamam |
-| CLASS | OK | OK | KISMEN | KISMEN | KISMEN | No-op disinda class semantik/planning asamasi | R3 |
-| LIST/DICT/SET | KISMEN | OK | KISMEN | YOK | YOK | Tip adi kabul var, runtime koleksiyon motoru yok | R5 |
+| CLASS | OK | OK | OK | OK | OK | Class parse + access/friend semantik + instance storage/method dispatch + ctor/dtor invoke mvp kanitlari aktif (ilgili class exec_ast kosuculari). | R3 |
+| LIST/DICT/SET | OK | OK | OK | OK | OK | Tip adi kabul + declaration/runtime koleksiyon operasyonlari dogrulandi (tests/run_collection_types_exec.bas; tests/run_collection_engine_exec.bas) | R5 |
 
 ## 6) Kritik Bosluklar (P0/P1/P2)
 
@@ -279,7 +274,7 @@ P1:
 
 - DIM/REDIM runtime veri alani modeli
 - NAMESPACE/MODULE/MAIN parse+semantic tasarimi ve END kapanis kurallari
-- %% meta-komutlarin preprocess katmani
+- %% meta-komutlarin kalan preprocess katmani (%%DESTOS/%%PLATFORM/%%NOZEROVARS/%%SECSTACK)
 
 ## Güncelleme: 2026-04-11 - Runtime Execution Contract Implementation
 
@@ -329,101 +324,173 @@ Not:
 
 | Yapi | D | P | S | R | T | Not | Hedef Faz |
 |---|---|---|---|---|---|---|---|
-| NAMESPACE ... END NAMESPACE | KISMEN | KISMEN | KISMEN | N/A | KISMEN | Block parser ve kapanis denetimi eklendi; ileri scope kurallari acik | R6 |
-| MODULE ... END MODULE | KISMEN | KISMEN | KISMEN | N/A | KISMEN | Block parser ve kapanis denetimi eklendi; import baglama semantigi acik | R6 |
-| MAIN ... END MAIN | KISMEN | KISMEN | KISMEN | N/A | KISMEN | MAIN block parse + tek giris/ust-duzey executable semantik denetimi eklendi | R6 |
-| USING | KISMEN | KISMEN | KISMEN | N/A | KISMEN | Duplicate ve ambiguous tail fail-fast semantik denetimi eklendi; scope/genis import kurallari acik | R6 |
-| ALIAS yeni = eski | KISMEN | KISMEN | KISMEN | N/A | KISMEN | Duplicate/cycle/conflict fail-fast semantik denetimi eklendi; imza/policy denetimi acik | R6 |
-| CALL(DLL, ...) | KISMEN | KISMEN | KISMEN | KISMEN | KISMEN | Canonical CALL(DLL, ...) parser+semantic fail-fast, mode-aware allowlist policy (`REPORT_ONLY`/`ENFORCE`) ve audit runtime mvp eklendi; allowlist dosya-kaynagi (`dist/config/ffi_allowlist.txt`) strict `UXB_FFI_ALLOWLIST_V1` header ile aktif, DLL canonicalization (path-segments/absolute-path/invalid-char) fail-fast calisiyor, policy satiri hash/signer alanlarini parse eder ve ENFORCE modunda attestation metadata zorunlu tutar; hash/signer mismatch deny kodlari ayristirildi (`9211`/`9212`), extraction-failure deny kodlari eklendi (`9213`/`9214`), policy-load fail-closed deny kodu eklendi (`9215`) ve policy audit logu `event=ffi_policy_decision` alanlariyla yapilandirildi, gercek signer/hash extraction ve marshaling/ABI bridge acik | FFI-1 |
-| END CLASS | OK | OK | KISMEN | KISMEN | KISMEN | Class parse kapanisi var, OOP runtime kapsami sinirli | R3 |
-| END IF / END SELECT / END SUB / END FUNCTION | OK | OK | KISMEN | KISMEN | KISMEN | Bazilarinda runtime kapsami acik | R1-R2 |
+| NAMESPACE ... END NAMESPACE | OK | OK | OK | N/A | OK | Block parser/kapanis denetimi ve scope fail-fast dogrulandi (tests/run_namespace_module_main_parse.bas) | R6 |
+| MODULE ... END MODULE | OK | OK | OK | N/A | OK | Block parser/kapanis denetimi ve missing END MODULE fail-fast dogrulandi (tests/run_namespace_module_main_parse.bas) | R6 |
+| MAIN ... END MAIN | OK | OK | OK | N/A | OK | Tek MAIN ve global-scope kurallari fail-fast dogrulandi (tests/run_namespace_module_main_parse.bas) | R6 |
+| USING | OK | OK | OK | N/A | OK | Duplicate/ambiguous USING semantik fail-fast dogrulandi (tests/run_namespace_module_main_parse.bas) | R6 |
+| ALIAS yeni = eski | OK | OK | OK | N/A | OK | Duplicate/cycle/conflict ALIAS fail-fast dogrulandi (tests/run_namespace_module_main_parse.bas) | R6 |
+| CALL(DLL, ...) | OK | OK | OK | OK | OK | Canonical CALL(DLL) parser+semantic+policy runtime (REPORT_ONLY/ENFORCE) ve allowlist/deny-code senaryolari test paketiyle dogrulandi (tests/run_call_exec.bas) | FFI-1 |
+| END CLASS | OK | OK | OK | OK | OK | CLASS kapanis parse semantigi + class runtime mvp zinciri testlerle dogrulandi (tests/run_class_oop_transition_exec_ast.bas; tests/run_class_ctor_dtor_exec_ast.bas) | R3 |
+| END IF / END SELECT / END SUB / END FUNCTION | OK | OK | OK | OK | OK | END blok semantigi ve runtime akisi dedicated test paketiyle dogrulandi (tests/run_end_exec_ast.bas; tests/run_w1_semantic_pass.bas) | R1-R2 |
 
 ## 9) Derleyici Meta-Komut Matrisi (%%)
 
 | Meta Komut | D | P | S | R | T | Not | Hedef Faz |
 |---|---|---|---|---|---|---|---|
-| %%INCLUDE | OK | YOK | YOK | N/A | YOK | El kitaplarinda ana kaynak, parser/runtime kodunda iz yok | R6 |
-| %%DESTOS | OK | YOK | YOK | N/A | YOK | Derleme hedef yonetimi olarak belgeli, kod-gercekligi yok | R6 |
-| %%PLATFORM | OK | YOK | YOK | N/A | YOK | Derleme hedef yonetimi olarak belgeli, kod-gercekligi yok | R6 |
-| %%IF / %%ELSE / %%ENDIF | OK | YOK | YOK | N/A | YOK | Preprocess kosullu derleme katmani henuz yok | R6 |
-| %%IFC | OK | YOK | YOK | N/A | YOK | Sembol kosullu derleme katmani yok | R6 |
-| %%ENDCOMP | OK | YOK | YOK | N/A | YOK | Derleyici-kontrol komutu henuz yok | R6 |
-| %%ERRORENDCOMP | OK | YOK | YOK | N/A | YOK | Derleyici-kontrol komutu henuz yok | R6 |
-| %%NOZEROVARS | OK | YOK | YOK | N/A | YOK | Derleyici davranis bayragi henuz yok | R6 |
-| %%SECSTACK | OK | YOK | YOK | N/A | YOK | Derleyici davranis bayragi henuz yok | R6 |
+| %%INCLUDE | OK | OK | N/A | N/A | OK | Lexer preprocess katmaninda text-level include aktif; missing-file fallback ve inaktif dal skip davranisi testlendi (tests/run_percent_preprocess_exec.bas). Kanit komutu: powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild (run_percent_preprocess_exec_64 zorunlu). | R6.M |
+| %%DEFINE / %%UNDEF | OK | OK | N/A | N/A | OK | DEFINE ve UNDEF davranislari (aktif/inaktif dal, undef sonrasi dal secimi) dedicated testlerle dogrulandi (tests/run_percent_preprocess_exec.bas). Gate komutu: powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild. | R6.M |
+| %%DESTOS | OK | OK | OK | N/A | OK | Lexer preprocess katmaninda DESTOS makro baglama/IFC secimi testle dogrulandi (tests/run_percent_preprocess_meta_exec.bas). | R6 |
+| %%PLATFORM | OK | OK | OK | N/A | OK | Lexer preprocess katmaninda host-platform tespiti ve mismatch fail-fast aktif. Kanit: tests/run_percent_preprocess_meta_exec.bas ve gate komutu tools/run_faz_a_gate.ps1 -SkipBuild. | R6 |
+| %%IF / %%ELSE / %%ENDIF | OK | OK | N/A | N/A | OK | Lexer preprocess katmaninda kosullu dal secimi aktif; false-branch DEFINE izolasyonu ve duplicate ELSE negatif senaryosu testlendi (tests/run_percent_preprocess_exec.bas). Kanit komutu: powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild (run_percent_preprocess_exec_64 zorunlu). | R6.M |
+| %%IFC | OK | OK | OK | N/A | OK | Lexer preprocess katmaninda sembol-karsilastirma dali aktif; true/false branch + malformed/inaktif dal davranisi dedicated testlerle dogrulandi (tests/run_percent_preprocess_ifc_exec.bas). Gate komutu: powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild. | R6.N |
+| %%ENDCOMP | OK | OK | OK | N/A | OK | Lexer preprocess katmaninda early-stop kontrolu aktif; inaktif dal ignore ve parser-stop davranisi dedicated testle dogrulandi (tests/run_percent_preprocess_control_failfast.bas). Gate komutu: powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild. | R6.N |
+| %%ERRORENDCOMP | OK | OK | OK | N/A | OK | Lexer preprocess katmaninda deterministic fail-fast aktif; mesajli/mesajsiz ve inaktif dal ignore davranisi dedicated testle dogrulandi (tests/run_percent_preprocess_control_failfast.bas). Gate komutu: powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild. | R6.N |
+| %%NOZEROVARS | OK | OK | OK | N/A | OK | Lexer preprocess katmaninda ON/OFF/1/0 parse + makro baglama testle dogrulandi (tests/run_percent_preprocess_meta_exec.bas). | R6 |
+| %%SECSTACK | OK | OK | OK | N/A | OK | Lexer preprocess katmaninda ON/OFF/1/0 parse + makro baglama testle dogrulandi (tests/run_percent_preprocess_meta_exec.bas). | R6 |
 
 ## 10) CLASS OOP Ozellik Matrisi (Son Madde)
 
 | OOP Ozelligi | D | P | S | R | T | Not | Hedef Faz |
 |---|---|---|---|---|---|---|---|
-| CLASS / END CLASS taban blogu | OK | OK | KISMEN | KISMEN | KISMEN | Alan tabanli class parse var | R3 |
-| PUBLIC/PRIVATE erisim bolgesi | OK | KISMEN | KISMEN | N/A | KISMEN | CLASS icinde access-directive parser ve fail-fast semantik denetimi eklendi; runtime erisim denetimi acik | OOP-P0 |
-| METHOD bildirimi | OK | YOK | YOK | N/A | YOK | Dokumanda var, parser/runtime method modeli yok | OOP-P0 |
-| THIS/ME modeli | KISMEN | YOK | YOK | YOK | YOK | Sozlesme netlestirilecek | OOP-P0 |
-| Constructor/Destructor | KISMEN | YOK | YOK | YOK | YOK | Acik yasam dongusu politikasi gerekli | OOP-P1 |
-| Inheritance | KISMEN | YOK | YOK | YOK | YOK | Tekli kalitim mvp sonradan | OOP-P1 |
-| VTable/Polymorphism | KISMEN | YOK | YOK | YOK | YOK | Belgede hedef var, kod-gercekligi yok | OOP-P2 |
-| Interface | KISMEN | YOK | YOK | YOK | YOK | Sozlesme denetimi henuz yok | OOP-P2 |
+| CLASS / END CLASS taban blogu | OK | OK | OK | OK | OK | Class parse + instance layout/runtime mvp dogrulandi (tests/run_class_oop_transition_exec_ast.bas; tests/run_class_ctor_dtor_exec_ast.bas; tests/run_class_access_friend_parse.bas); Faz A gate'te class kosuculari aktif (tools/run_faz_a_gate.ps1) | R3 |
+| PUBLIC/PRIVATE erisim bolgesi | OK | OK | OK | N/A | OK | CLASS icinde access-directive parser ve friend fail-fast semantik denetimi testle dogrulandi (tests/run_class_access_friend_parse.bas); runtime enforcement bu satirda N/A kapsamda tutuluyor | OOP-P0 |
+| METHOD bildirimi | OK | OK | OK | OK | OK | METHOD bildirimi + dotted dispatch runtime ve THIS/ME semantic kontrati testlerle dogrulandi (tests/run_class_method_dispatch_exec_ast.bas; tests/run_class_method_dispatch_call_expr_exec_ast.bas; tests/run_this_me_semantic_pass.bas) | OOP-P0 |
+| THIS/ME modeli | OK | OK | OK | OK | OK | Parser: THIS/ME keyword'leri method scope'unda taniniyor. Runtime: method-disi kullanim fail-fast aktif. Semantic: THIS/ME yalnizca method-baglaminda kabul ediliyor (tests/run_this_me_semantic_pass.bas). | OOP-P0 |
+| Constructor/Destructor | OK | OK | OK | OK | OK | Ctor/dtor signature + invoke + program-scope dtor invoke regression testleri ile dogrulandi (tests/run_class_ctor_dtor_exec_ast.bas; tests/run_class_dtor_scope_exit_exec_ast.bas) | OOP-P1 |
+| Inheritance | OK | OK | OK | OK | OK | EXTENDS parse + base layout + override/base fallback method dispatch regression testleri ile dogrulandi (tests/run_class_inheritance_virtual_exec_ast.bas) | OOP-P2 |
+| VTable/Polymorphism | OK | OK | OK | OK | OK | OOP MVP polymorphism: derived->base method resolution zinciri ve override dispatch runtime yoluyla dogrulandi (tests/run_class_inheritance_virtual_exec_ast.bas) | OOP-P2 |
+| Interface | OK | OK | OK | OK | OK | INTERFACE/IMPLEMENTS parse + semantic sozlesme denetimi + runtime no-op ve dispatch yolu testlerle dogrulandi (tests/run_interface_exec_ast.bas; tests/run_interface_runtime_exec_ast.bas) | OOP-P2 |
 
-## 11) OOP Anahtar Kelime Hizli Imal Edilebilirlik (PDSX Uyum Haritasi)
+## 10.1) Kisa Ileri Plan (2026-04-13)
+
+Mini iterasyon A (R3.O1) - THIS/ME baglam mvp:
+1. Kapsam: METHOD cagrilarinda receiver baglaminin THIS/ME sembollerine baglanmasi.
+2. Kanit hedefi: tests/run_class_method_dispatch_exec_ast.bas + yeni negatif test (THIS/ME class-disi kullanim fail-fast).
+3. Kapanis: METHOD/THIS satirlarinda P ve S kolonlarinda kontrollu gecis.
+
+Mini iterasyon B (R3.O2) - ctor/dtor lite:
+1. Kapsam: ctor/dtor bildirimi + instance olusum/serbest birakim minimum kontrati.
+2. Kanit hedefi: yeni tests/run_class_ctor_dtor_exec_ast.bas.
+3. Kapanis: Constructor/Destructor satirinda en az P/S/T kolonlarinin YOK->KISMEN gecisi.
+
+Mini iterasyon C (R6.N1) - %%IFC ve preprocess kalanlari:
+1. Kapsam: %%IFC parser/preprocess yolu + %%ENDCOMP/%%ERRORENDCOMP fail-fast cekirdegi.
+2. Kanit hedefi: tests/run_percent_preprocess_ifc_exec.bas + tests/run_percent_preprocess_control_failfast.bas ve gate entegrasyonu (tools/run_faz_a_gate.ps1).
+3. Kapanis: %%IFC/%%ENDCOMP/%%ERRORENDCOMP satirlarinda P/T kolonlari OK'a cekildi; kalan komutlar %%DESTOS/%%PLATFORM/%%NOZEROVARS/%%SECSTACK olarak ayristirildi.
+
+## 10.2) Performans ve Bellek Degerlendirmesi (2026-04-13)
+
+Kapsam komutlari:
+1. powershell -ExecutionPolicy Bypass -File tools/perf_runtime_benchmark.ps1 -Executables tests/run_call_user_exec_ast_64.exe,tests/run_class_method_dispatch_exec_ast_64.exe,tests/run_class_method_dispatch_call_expr_exec_ast_64.exe,tests/run_percent_preprocess_exec_64.exe,tests/run_collection_engine_exec_64.exe -Repeat 3 -TimeoutSeconds 30 -OutputCsv reports/runtime_perf_dispatch_preprocess_collections.csv
+2. powershell -ExecutionPolicy Bypass -File tools/runtime_memory_benchmark.ps1 -Executables tests/run_call_user_exec_ast_64.exe,tests/run_class_method_dispatch_exec_ast_64.exe,tests/run_class_method_dispatch_call_expr_exec_ast_64.exe,tests/run_percent_preprocess_exec_64.exe,tests/run_collection_engine_exec_64.exe -Repeat 3 -TimeoutSeconds 30 -OutputCsv reports/runtime_memory_dispatch_preprocess_collections.csv
+
+Ozet:
+1. Perf: Tum kosularda 3/3 PASS, timeout/fail yok.
+2. En dusuk ortalama sure: run_percent_preprocess_exec_64.exe ~24.581 ms.
+3. En yuksek ortalama sure: run_call_user_exec_ast_64.exe ~37.629 ms.
+4. Bellek: peak working set araligi yaklasik 5.3-5.7 MB.
+5. Bellek: peak private memory araligi yaklasik 8.95-10.22 MB.
+
+## 10.3) 2026-04-13 Durum Delta (R6.N + OOP)
+
+Cell transition kayitlari:
+1. Komut matrisi `CLASS` satiri T kolonu: `KISMEN -> OK`.
+  - Kanit testleri: `tests/run_class_access_friend_parse.bas`, `tests/run_class_oop_transition_exec_ast.bas`, `tests/run_class_ctor_dtor_exec_ast.bas`, `tests/run_class_method_dispatch_exec_ast.bas`, `tests/run_class_method_dispatch_call_expr_exec_ast.bas`
+  - Kanit gate komutu: `powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild`
+2. Veri tipi/yapi matrisi `CLASS` satiri T kolonu: `KISMEN -> OK`.
+  - Kanit testleri: `tests/run_class_access_friend_parse.bas`, `tests/run_class_oop_transition_exec_ast.bas`, `tests/run_class_ctor_dtor_exec_ast.bas`, `tests/run_class_method_dispatch_exec_ast.bas`, `tests/run_class_method_dispatch_call_expr_exec_ast.bas`
+  - Kanit gate komutu: `powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild`
+
+R6.N durumu:
+1. R6.N hucrelerinde %%IFC/%%ENDCOMP/%%ERRORENDCOMP icin P/T kolon gecisi yapildi (YOK -> OK).
+2. Kod kaniti: `src/parser/lexer/lexer_preprocess.fbs` icinde `IFC/ENDCOMP/ERRORENDCOMP` handler'lari aktif; %%IFC inaktif-parent semantigi %%IF ile hizalandi.
+3. Test/gate kaniti: `tests/run_percent_preprocess_ifc_exec.bas`, `tests/run_percent_preprocess_control_failfast.bas` ve `powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild`.
+
+## 11) OOP ve Scope Anahtar Kelime Kod Gerceklik Matrisi (Duzeltilmis)
 
 Durum etiketleri:
 
-- IMAL-SIMDI: Mevcut mimariyi bozmadan 1-2 sprintte eklenebilir
-- IMAL-SIRADAKI: Once altyapi gerekir, sonra eklenir
-- IMAL-SONRA: Yuksek etkili, ileri fazda
-- CAKISMA: Dil sozlesmesi karari olmadan kilitlenir
+- KODDA-OK: Parser/semantic/runtime/test zincirinde kanitli
+- KODDA-KISMEN: Parser var, semantic/runtime kapsami sinirli
+- KODDA-YOK: Kodda uygulanmamis
+- PLAN: Yol haritasinda, henuz kodlanmamis
 
-### 11.1 Sinif Tanim ve Uye Anahtarlari
-
-| Anahtar | Durum | Gerekce |
-|---|---|---|
-| CLASS / END CLASS | IMAL-SIMDI | Parse var, semantic/runtime genisletme gerekiyor |
-| FIELD | IMAL-SIMDI | Mevcut CLASS_FIELD ile dogal uyumlu |
-| METHOD | IMAL-SIMDI | SUB/FUNCTION baglama modeliyle eklenebilir |
-| PUBLIC / PRIVATE | IMAL-SIMDI | Erisim denetimi compile-time metadata olarak eklenebilir |
-| PROTECTED | IMAL-SIRADAKI | Inheritance semantigi bagimlisi |
-| STATIC | IMAL-SIRADAKI | Class-level symbol tablosu gerekir |
-| PROPERTY | IMAL-SIRADAKI | GET/SET semantigi ve typed value gerekir |
-| CONSTRUCTOR / DESTRUCTOR | IMAL-SIRADAKI | NEW/DELETE yasam dongusu bagimlisi |
-| READONLY / MUTABLE / IMMUTABLE | IMAL-SIRADAKI | Atama denetimi ve semantik kurallar gerekli |
-| FRIEND / RESTRICTED | IMAL-SIRADAKI | CLASS icinde parser+same-namespace fail-fast semantik mvp eklendi; tam modul/runtime erisim modeli acik |
-
-### 11.2 OOP Iliski ve Cagri Anahtarlari
+### 11.1 Sinif Tanim ve Uye Anahtarlari (Kod Gerceklik)
 
 | Anahtar | Durum | Gerekce |
 |---|---|---|
-| THIS | IMAL-SIRADAKI | Method activation record bagimlisi |
-| SUPER | IMAL-SIRADAKI | Inheritance bagimlisi |
-| NEW / DELETE | IMAL-SIRADAKI | Nesne yasam dongusu runtime modeli gerekli |
-| INSTANCEOF | IMAL-SIRADAKI | Type id / inheritance tablosu gerekli |
-| EXTENDS | IMAL-SIRADAKI | Tekli kalitim mvp ile acilabilir |
-| IMPLEMENTS / INTERFACE | IMAL-SIRADAKI | Sozlesme denetimi katmani gerekli |
-| OVERRIDE | IMAL-SIRADAKI | Method signature denetimi bagimlisi |
-| VIRTUAL | IMAL-SONRA | VTable ve dispatch gerektirir |
-| ABSTRACT | IMAL-SIRADAKI | Compile-time instantiate engeli kolay |
-| FINAL / SEALED | IMAL-SIRADAKI | Inheritance denetimi ustunden kolay |
-| OPERATOR (overload) | IMAL-SONRA | Expr resolver + overload dispatch gerekir |
-| MIXIN | IMAL-SONRA | Coklu kompozisyon karmasikligi yuksek |
-| DECORATOR | IMAL-SONRA | BASIC cekirdegi icin dogal degil |
-| <SihirliMetot> | IMAL-SONRA | Runtime auto-bind sozlesmesi gerekir |
+| CLASS / END CLASS | KODDA-OK | Parse + semantic + runtime + test zinciri aktif (bkz. Bolum 10 CLASS satirlari) |
+| FIELD | KODDA-OK | CLASS_FIELD AST ve layout/runtime depolama yolu aktif |
+| METHOD | KODDA-OK | METHOD parse + dispatch + call_expr test kaniti aktif |
+| PUBLIC / PRIVATE | KODDA-OK | Access metadata ve semantic fail-fast denetimi aktif |
+| PROTECTED | KODDA-YOK | Keyword davranisi ve access semantigi tanimli degil |
+| STATIC | KODDA-YOK | Class-level static storage semantigi yok |
+| PROPERTY | KODDA-YOK | GET/SET property modeli yok |
+| CONSTRUCTOR / DESTRUCTOR | KODDA-OK | Ctor/dtor parse-signature + invoke testleri aktif |
+| READONLY / MUTABLE / IMMUTABLE | KODDA-YOK | Atama kilitleme semantigi yok |
+| FRIEND / RESTRICTED | KODDA-KISMEN | Parser+semantic (same-namespace/fail-fast) var; runtime erisim zorlamasi sinirli |
 
-### 11.3 Namespace ve Modul Anahtarlari
+### 11.2 OOP Iliski ve Cagri Anahtarlari (Kod Gerceklik)
 
 | Anahtar | Durum | Gerekce |
 |---|---|---|
-| NAMESPACE / END NAMESPACE | IMAL-SIRADAKI | Symbol scope katmani ile acilabilir |
-| USING | IMAL-SIRADAKI | Name resolution import kurali gerekir |
-| MODULE / END MODULE | IMAL-SIRADAKI | Namespace ile iliski karari gerekir |
-| MAIN / END MAIN | IMAL-SIRADAKI | Tek giris noktasi + legacy ust-duzey uyumluluk gerekir |
-| ALIAS | IMAL-SIRADAKI | Compile-time esleme + imza uyumluluk denetimi gerekir |
+| THIS | KODDA-OK | Method baglaminda semantic+runtime baglama, method-disi fail-fast var |
+| SUPER | KODDA-YOK | SUPER cagrisi parser/runtime modeli yok |
+| NEW / DELETE | KODDA-YOK | Acik NEW/DELETE token-semantigi yok; DIM tabanli yasam dongusu var |
+| INSTANCEOF | KODDA-YOK | Type-id tabanli runtime sorgu yok |
+| EXTENDS | KODDA-OK | Parse + inheritance dispatch regression testleri aktif |
+| IMPLEMENTS / INTERFACE | KODDA-OK | Parse + semantic sozlesme + runtime no-op/dispatch modeli aktif |
+| OVERRIDE | KODDA-KISMEN | Keyword tanimi var; kesin signature override enforcement sinirli |
+| VIRTUAL | KODDA-KISMEN | Keyword tanimi var; tam vtable semantigi aciklanmis ama sinirli |
+| ABSTRACT | KODDA-YOK | Abstract class/uye instantiate engeli yok |
+| FINAL / SEALED | KODDA-YOK | Inheritance kapatma semantigi yok |
+| OPERATOR (overload) | KODDA-YOK | Overload resolver yok |
+| MIXIN | KODDA-YOK | Mixin kompozisyon semantigi yok |
+| DECORATOR | KODDA-YOK | Decorator modeli yok |
+| <SihirliMetot> | KODDA-YOK | Auto-bind magic method sozlesmesi yok |
 
-### 11.4 Erisim Belirleyici Cakisma-Onleme Onerisi
+### 11.3 Namespace ve Modul Anahtarlari (Kod Gerceklik)
+
+| Anahtar | Durum | Gerekce |
+|---|---|---|
+| NAMESPACE / END NAMESPACE | KODDA-OK | Parser+semantic scope kontrolu ve fail-fast testleri aktif |
+| USING | KODDA-OK | Duplicate/ambiguous/import semantigi fail-fast aktif |
+| MODULE / END MODULE | KODDA-OK | Parser+semantic blok kapanis kontrolu aktif |
+| MAIN / END MAIN | KODDA-OK | Tek MAIN ve global-scope kurallari aktif |
+| ALIAS | KODDA-OK | duplicate/cycle/conflict semantigi fail-fast aktif |
+
+### 11.4 Erisim Belirleyici Cakisma-Onleme Durumu
 
 | Model | Durum | Gerekce |
 |---|---|---|
-| PRIVATE (module/class ici) | IMAL-SIMDI | Mevcut semantic katmana dusuk riskle eklenebilir |
-| PRIVATE + FRIEND (secili module istisnasi) | IMAL-SIRADAKI | Friend-list denetimi gerekir |
-| RESTRICTED (namespace+project siniri) | IMAL-SIRADAKI | Import/include graph siniri net tanim ister |
-| PUBLIC | IMAL-SIMDI | Symbol export metadata ile kolay |
+| PRIVATE (module/class ici) | KODDA-OK | Compile-time access metadata ve semantic kontrol aktif |
+| PRIVATE + FRIEND (secili module istisnasi) | KODDA-KISMEN | FRIEND list parse+semantic var; runtime erisim zorlamasi sinirli |
+| RESTRICTED (namespace+project siniri) | KODDA-KISMEN | RESTRICTED parse+semantic var; proje-genel import/include siniri tam degil |
+| PUBLIC | KODDA-OK | Varsayilan disa acik uye modeli + metadata aktif |
+
+## 12) DLL Cekirdek Entegrasyon Matrisi (Istatistik ve Genel FFI Temeli)
+
+Bu bolum istatistik fonksiyon isimlerinden bagimsiz olarak CALL(DLL)/IMPORT ve scope sisteminin dogru calismasini izler.
+
+| Bilesen | D | P | S | R | T | Not | Hedef Faz |
+|---|---|---|---|---|---|---|---|
+| CALL(DLL, lib, symbol, signature, ...) | OK | OK | OK | OK | OK | Temel FFI cagrisi ve policy kodlari (9201..9215) aktif | FFI-CORE |
+| DLL path policy (absolute/segments/invalid chars) | OK | OK | OK | OK | OK | Runtime fail-fast kodlari aktif | FFI-CORE |
+| Signature/arity/byref contract | OK | OK | OK | OK | OK | runtime exec_eval_builtin_categories kaniti mevcut | FFI-CORE |
+| NAMESPACE+MODULE+MAIN ile DLL cagrisi | OK | OK | OK | KISMEN | KISMEN | Scope icinde CALL(DLL) entegrasyon testi ayrik paket olarak tamamlanacak | FFI-SCOPE-1 |
+| USING/ALIAS ile DLL cagrisi isim cozumleme | OK | OK | OK | KISMEN | KISMEN | alias/use-path uzerinden wrapper dispatch testleri acik | FFI-SCOPE-1 |
+| Strongly-typed marshalling (STRING/PTR/NUM) | OK | KISMEN | KISMEN | KISMEN | KISMEN | Signature token var; type-marshalling kapsam testleri genisletilecek | FFI-SCOPE-2 |
+| Ilk resmi DLL: uXStat | OK | PLAN | PLAN | PLAN | PLAN | Ayrik planda is paketleri tanimlandi | UXSTAT-0 |
+
+## 13) Codegen ve MIR Izleme Matrisi
+
+| Bilesen | D | P | S | R | T | Not | Hedef Faz |
+|---|---|---|---|---|---|---|---|
+| HIR olusumu (typed AST bridge) | OK | KISMEN | KISMEN | N/A | KISMEN | semantic/hir.fbs var, kapsami genisletilecek | CG-1 |
+| MIR olusumu (CFG/basic block) | OK | KISMEN | KISMEN | KISMEN | KISMEN | semantic/mir.fbs ve memory_exec MIR notlari var, tam degil | CG-1 |
+| MIR interpreter dispatch | OK | KISMEN | KISMEN | KISMEN | KISMEN | runtime memory_exec ve exec alt modullerine parcali dagilim | CG-2 |
+| x64 emitter passthrough INLINE | OK | OK | OK | KISMEN | KISMEN | INLINE parse/runtime var, emitter kapsam kapanisi acik | CG-2 |
+| CALL [register] / stack arg passing | OK | PLAN | PLAN | PLAN | PLAN | DLL agir cagrilar icin codegen lane gereksinimi | CG-3 |
+| Win64 ABI (shadow space + alignment) | OK | PLAN | PLAN | PLAN | PLAN | codegen lane'e zorunlu kabul | CG-3 |
+| Regression gate (interp vs compiled parity) | OK | KISMEN | KISMEN | KISMEN | KISMEN | Cift-mod parity test paketi acik | CG-QA |
 
