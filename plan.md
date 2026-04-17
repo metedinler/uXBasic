@@ -32,7 +32,7 @@ Bu bolum, "implementasyona basla" talebi icin gerekli somut giris paketini verir
    - `%%DESTOS` ve `%%PLATFORM` satirlari icin parser+semantic kapanisi (`reports/uxbasic_operasyonel_eksiklik_matrisi.md`, PSRT-OK gorev 11)
    - `%%NOZEROVARS` ve `%%SECSTACK` satirlari icin parser+semantic kapanisi (`reports/uxbasic_operasyonel_eksiklik_matrisi.md`, PSRT-OK gorev 12)
    - `INLINE` ve `LIST/DICT/SET` satirlarindaki acik hucrelerin kapanisi (`reports/uxbasic_operasyonel_eksiklik_matrisi.md`, PSRT-OK gorev 19)
-3. Ek baglam (ilk dogrulama adimlari):
+3. Ilk dogrulama kontrolleri:
    - test isimlendirme kontrolu: `tools/validate_test_naming.ps1`
    - Faz A gate: `tools/run_faz_a_gate.ps1`
    - Faz B.2 fail-fast: `tools/run_faz_b2_failfast.ps1`
