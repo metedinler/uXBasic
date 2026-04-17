@@ -247,6 +247,29 @@ Private Function FfiCallNasmStubText(entries() As FfiX64CallPlanEntry, ByVal ent
     Return 1
 End Function
 
+Private Function FfiCallResolverCsv(entries() As FfiX64CallPlanEntry, ByVal entryCount As Integer, ByRef csvOut As String) As Integer
+    csvOut = "stub_id,dll,symbol,signature,convention,arg_count,stack_args,reserve_bytes,abi,stack_align,shadow_space,symptr_label" & Chr(10)
+
+    Dim i As Integer
+    For i = 0 To entryCount - 1
+        Dim stackArgCount As Integer
+        stackArgCount = entries(i).argumentCount - 4
+        If stackArgCount < 0 Then stackArgCount = 0
+
+        Dim reserveBytes As Integer
+        reserveBytes = 40 + (stackArgCount * 8)
+        If (stackArgCount And 1) <> 0 Then reserveBytes += 8
+
+        Dim stubIdText As String
+        stubIdText = LTrim(Str(i + 1))
+
+        csvOut &= stubIdText & "," & entries(i).dllName & "," & entries(i).symbolName & "," & entries(i).signatureText & "," & entries(i).callingConventionText & "," & LTrim(Str(entries(i).argumentCount)) & "," & LTrim(Str(stackArgCount)) & "," & LTrim(Str(reserveBytes)) & ",WIN64-MSABI,16,32,__uxb_ffi_symptr_" & stubIdText
+        If i < entryCount - 1 Then csvOut &= Chr(10)
+    Next i
+
+    Return 1
+End Function
+
 Private Function FfiWriteTextFile(ByRef filePath As String, ByRef fileText As String, ByRef errText As String) As Integer
     Dim f As Integer
     f = FreeFile
@@ -296,6 +319,14 @@ Function FfiX64BackendEmitNasmStubs(ByRef ps As ParseState, ByRef asmText As Str
     Return FfiCallNasmStubText(entries(), entryCount, asmText)
 End Function
 
+Function FfiX64BackendEmitResolver(ByRef ps As ParseState, ByRef resolverCsv As String, ByRef errText As String) As Integer
+    Dim entries(Any) As FfiX64CallPlanEntry
+    Dim entryCount As Integer
+    If FfiCallCollectEntries(ps, entries(), entryCount, errText) = 0 Then Return 0
+
+    Return FfiCallResolverCsv(entries(), entryCount, resolverCsv)
+End Function
+
 Function FfiX64BackendEmitArtifacts(ByRef ps As ParseState, ByRef outputDir As String, ByRef errText As String) As Integer
     Dim entries(Any) As FfiX64CallPlanEntry
     Dim entryCount As Integer
@@ -303,8 +334,10 @@ Function FfiX64BackendEmitArtifacts(ByRef ps As ParseState, ByRef outputDir As S
 
     Dim planCsv As String
     Dim asmText As String
+    Dim resolverCsv As String
     FfiCallPlanCsv entries(), entryCount, planCsv
     FfiCallNasmStubText entries(), entryCount, asmText
+    FfiCallResolverCsv entries(), entryCount, resolverCsv
 
     MkDir outputDir
 
@@ -314,7 +347,11 @@ Function FfiX64BackendEmitArtifacts(ByRef ps As ParseState, ByRef outputDir As S
     Dim asmPath As String
     asmPath = outputDir & "\\ffi_call_x64_stubs.asm"
 
+    Dim resolverPath As String
+    resolverPath = outputDir & "\\ffi_call_x64_resolver.csv"
+
     If FfiWriteTextFile(planPath, planCsv, errText) = 0 Then Return 0
+    If FfiWriteTextFile(resolverPath, resolverCsv, errText) = 0 Then Return 0
     If entryCount > 0 Then
         If FfiWriteTextFile(asmPath, asmText, errText) = 0 Then Return 0
     End If

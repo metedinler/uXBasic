@@ -60,6 +60,13 @@ Private Sub Main()
     ok And= AssertTrue(InStr(1, asmText, "sub rsp, 56") > 0, "asm stack reserve with stack-arg")
     ok And= AssertTrue(InStr(1, asmText, "mov qword [rsp+32], rax") > 0, "asm stack arg store")
 
+    Dim resolverCsv As String
+    ok And= AssertTrue(FfiX64BackendEmitResolver(psGood, resolverCsv, backendErr), "ffi x64 emit resolver: " & backendErr)
+    ok And= AssertTrue(InStr(1, resolverCsv, "stub_id,dll,symbol,signature,convention,arg_count,stack_args,reserve_bytes,abi,stack_align,shadow_space,symptr_label") > 0, "resolver header")
+    ok And= AssertTrue(InStr(1, resolverCsv, "1,KERNEL32.DLL,GETTICKCOUNT,I32,CDECL,1,0,40,WIN64-MSABI,16,32,__uxb_ffi_symptr_1") > 0, "resolver stub1 mapping")
+    ok And= AssertTrue(InStr(1, resolverCsv, "2,KERNEL32.DLL,GETTICKCOUNT,I32,STDCALL,1,0,40,WIN64-MSABI,16,32,__uxb_ffi_symptr_2") > 0, "resolver stub2 mapping")
+    ok And= AssertTrue(InStr(1, resolverCsv, "3,KERNEL32.DLL,GETTICKCOUNT,I32,CDECL,5,1,56,WIN64-MSABI,16,32,__uxb_ffi_symptr_3") > 0, "resolver stack arg mapping")
+
     Dim srcNoDll As String
     srcNoDll = _
         "MAIN" & Chr(10) & _
