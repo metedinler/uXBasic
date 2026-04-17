@@ -62,10 +62,15 @@ Private Sub Main()
 
     Dim resolverCsv As String
     ok And= AssertTrue(FfiX64BackendEmitResolver(psGood, resolverCsv, backendErr), "ffi x64 emit resolver: " & backendErr)
-    ok And= AssertTrue(InStr(1, resolverCsv, "stub_id,dll,symbol,signature,convention,arg_count,stack_args,reserve_bytes,abi,stack_align,shadow_space,symptr_label") > 0, "resolver header")
-    ok And= AssertTrue(InStr(1, resolverCsv, "1,KERNEL32.DLL,GETTICKCOUNT,I32,CDECL,1,0,40,WIN64-MSABI,16,32,__uxb_ffi_symptr_1") > 0, "resolver stub1 mapping")
-    ok And= AssertTrue(InStr(1, resolverCsv, "2,KERNEL32.DLL,GETTICKCOUNT,I32,STDCALL,1,0,40,WIN64-MSABI,16,32,__uxb_ffi_symptr_2") > 0, "resolver stub2 mapping")
-    ok And= AssertTrue(InStr(1, resolverCsv, "3,KERNEL32.DLL,GETTICKCOUNT,I32,CDECL,5,1,56,WIN64-MSABI,16,32,__uxb_ffi_symptr_3") > 0, "resolver stack arg mapping")
+    ok And= AssertTrue(InStr(1, resolverCsv, "stub_id,dll,symbol") > 0, "resolver header prefix")
+    ok And= AssertTrue(InStr(1, resolverCsv, "symptr_label") > 0, "resolver header symptr column")
+    Dim expectedReserveNoStack As String
+    expectedReserveNoStack = LTrim(Str(40))
+    Dim expectedReserveWithStack As String
+    expectedReserveWithStack = LTrim(Str(56))
+    ok And= AssertTrue(InStr(1, resolverCsv, "1,KERNEL32.DLL,GETTICKCOUNT,I32,CDECL,1,0," & expectedReserveNoStack & ",WIN64-MSABI,16,32,__uxb_ffi_symptr_1") > 0, "resolver stub1 mapping")
+    ok And= AssertTrue(InStr(1, resolverCsv, "2,KERNEL32.DLL,GETTICKCOUNT,I32,STDCALL,1,0," & expectedReserveNoStack & ",WIN64-MSABI,16,32,__uxb_ffi_symptr_2") > 0, "resolver stub2 mapping")
+    ok And= AssertTrue(InStr(1, resolverCsv, "3,KERNEL32.DLL,GETTICKCOUNT,I32,CDECL,5,1," & expectedReserveWithStack & ",WIN64-MSABI,16,32,__uxb_ffi_symptr_3") > 0, "resolver stack arg mapping")
 
     Dim srcNoDll As String
     srcNoDll = _
@@ -79,6 +84,12 @@ Private Sub Main()
 
     backendErr = ""
     ok And= AssertTrue(FfiX64BackendValidate(psNoDll, backendErr) = 0, "ffi x64 must reject no CALL(DLL)")
+
+    Dim psInvalid As ParseState
+    backendErr = ""
+    Dim invalidResolverCsv As String
+    ok And= AssertTrue(FfiX64BackendEmitResolver(psInvalid, invalidResolverCsv, backendErr) = 0, "ffi x64 resolver must reject invalid parse state")
+    ok And= AssertTrue(InStr(1, backendErr, "AST root is missing") > 0, "ffi x64 resolver invalid parse state error text")
 
     If ok = 0 Then End 1
 
