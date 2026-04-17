@@ -34,3 +34,11 @@ Bu checklist, CI ciktilari ile birebir senkron olacak sekilde release/ci_outputs
 ## 6. Opsiyonel Yayin
 - Komut: tools\release_mini.bat vX.Y.Z-mini --publish
 - Not: Bu adim local git tag olusturur, origin'e push eder ve GitHub release acar.
+
+## 7. FFI-CONV-3 Kapanis Izi (2026-04-17)
+- Native lane raporu guncel ve PASS/PASS olmali: `reports/ffi_conv3_native_lanes_report.md`
+- Beklenen satirlar:
+  - `| native_cleanup | PASS | PASS | native lane verified |`
+  - `| native_symptr_patch | PASS | PASS | native lane verified (cmd fallback) |`
+- Tek komut dogrulama task'i: `validate_ffi_conv3_native_lanes_ps`
+- Matrix senkronu: `reports/uxbasic_operasyonel_eksiklik_matrisi.md` icinde `FFI-CONV-3` satiri `OK/OK/OK/OK/OK` olmali.

@@ -3,6 +3,22 @@
 Bu belge, PCK2 merkez alinarak hazirlandi.
 Hedef: yeni baslayandan compiler gelistiricisine net yol sunmak.
 
+## Karar Kilidi Notu (2026-04-16)
+
+Bu belgede CALL/DECLARE/ALIAS ile ilgili celiski olursa kanonik kaynak sirasini kullan:
+
+1. `reports/call_family_destek_politikasi_standardi.md`
+2. `plan.md` icindeki `2026-04-16 Karar Kilidi (CALL Familyasi)`
+3. `PCK3.MD`
+
+Sabit kararlar:
+
+- DECLARE: tek dosya ic cagri opsiyonel, cok modul ic cagri onerilir, FFI/API icin zorunluya yakin.
+- 4 syntax modeli gecerlidir (basit SUB/FUNCTION declare, FFI wrapper, scope modeli).
+- `CALL(API, ...)` future backlogdur ve en son madde olarak korunur.
+- `ALIAS yeni = eski` parser/semantic seviyede acik, runtime garantisi ALIAS->CALL(DLL, ...) yolunda verilir.
+- `DIM ... AS TYPE [= expr]` mevcut standarttir; koleksiyon/array toplu baslangic literal genisletmeleri R3 backlogundadir.
+
 ## Icindekiler
 
 1. Hedef, kapsam, yontem

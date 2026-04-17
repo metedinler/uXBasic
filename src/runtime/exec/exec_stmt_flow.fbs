@@ -609,6 +609,132 @@ Private Function ExecRunDoEachStmt(ByRef ps As ParseState, ByRef es As ExecState
     Return 1
 End Function
 
+Private Function ExecIsThrowRequest(ByRef exitReq As String) As Integer
+    If Len(exitReq) < 6 Then Return 0
+    Return Left(UCase(exitReq), 6) = "THROW:"
+End Function
+
+Private Function ExecRunTryPartChildren(ByRef ps As ParseState, ByRef es As ExecState, ByVal parentNode As Integer, ByRef thrownOut As Integer, ByRef thrownPayloadOut As String, ByRef errText As String) As Integer
+    Dim partCount As Integer
+    partCount = ExecChildCount(ps, parentNode)
+
+    Dim partPos As Integer
+    For partPos = 0 To partCount - 1
+        Dim childStmt As Integer
+        childStmt = ExecChildAt(ps, parentNode, partPos)
+        If childStmt = -1 Then
+            errText = "exec: TRY branch statement missing"
+            Return 0
+        End If
+
+        If ExecRunStmt(ps, es, childStmt, errText) = 0 Then Return 0
+
+        If gExitRequest <> "" Then
+            If ExecIsThrowRequest(gExitRequest) <> 0 Then
+                thrownOut = 1
+                thrownPayloadOut = Mid(gExitRequest, 7)
+                gExitRequest = ""
+                Return 1
+            End If
+
+            Return 1
+        End If
+    Next partPos
+
+    Return 1
+End Function
+
+Private Function ExecRunTryStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    Dim childCount As Integer
+    childCount = ExecChildCount(ps, stmtIdx)
+
+    Dim catchNode As Integer
+    Dim finallyNode As Integer
+    catchNode = -1
+    finallyNode = -1
+
+    Dim scanIdx As Integer
+    For scanIdx = 0 To childCount - 1
+        Dim ch As Integer
+        ch = ExecChildAt(ps, stmtIdx, scanIdx)
+        If ch = -1 Then
+            errText = "exec: TRY child missing"
+            Return 0
+        End If
+
+        Dim chKind As String
+        chKind = UCase(ps.ast.nodes(ch).kind)
+        If chKind = "CATCH_PART" Then
+            catchNode = ch
+        ElseIf chKind = "FINALLY_PART" Then
+            finallyNode = ch
+        End If
+    Next scanIdx
+
+    Dim tryBodyLimit As Integer
+    tryBodyLimit = childCount
+    If catchNode <> -1 Then
+        tryBodyLimit = 0
+        For scanIdx = 0 To childCount - 1
+            If ExecChildAt(ps, stmtIdx, scanIdx) = catchNode Then
+                tryBodyLimit = scanIdx
+                Exit For
+            End If
+        Next scanIdx
+    ElseIf finallyNode <> -1 Then
+        tryBodyLimit = 0
+        For scanIdx = 0 To childCount - 1
+            If ExecChildAt(ps, stmtIdx, scanIdx) = finallyNode Then
+                tryBodyLimit = scanIdx
+                Exit For
+            End If
+        Next scanIdx
+    End If
+
+    Dim thrown As Integer
+    Dim thrownPayload As String
+
+    Dim bodyIdx As Integer
+    For bodyIdx = 0 To tryBodyLimit - 1
+        Dim tryStmt As Integer
+        tryStmt = ExecChildAt(ps, stmtIdx, bodyIdx)
+        If tryStmt = -1 Then
+            errText = "exec: TRY body statement missing"
+            Return 0
+        End If
+
+        If ExecRunStmt(ps, es, tryStmt, errText) = 0 Then Return 0
+
+        If gExitRequest <> "" Then
+            If ExecIsThrowRequest(gExitRequest) <> 0 Then
+                thrown = 1
+                thrownPayload = Mid(gExitRequest, 7)
+                gExitRequest = ""
+                Exit For
+            End If
+
+            Exit For
+        End If
+    Next bodyIdx
+
+    If thrown <> 0 And catchNode <> -1 Then
+        thrown = 0
+        thrownPayload = ""
+        If ExecRunTryPartChildren(ps, es, catchNode, thrown, thrownPayload, errText) = 0 Then Return 0
+    End If
+
+    If finallyNode <> -1 Then
+        If ExecRunTryPartChildren(ps, es, finallyNode, thrown, thrownPayload, errText) = 0 Then Return 0
+    End If
+
+    If thrown <> 0 Then
+        gExitRequest = "THROW:" & thrownPayload
+        Return 1
+    End If
+
+    Return 1
+End Function
+
 Private Function ExecRunFlowStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
     Select Case UCase(st.kind)
     Case "IF_STMT"
@@ -628,6 +754,9 @@ Private Function ExecRunFlowStmt(ByRef ps As ParseState, ByRef es As ExecState, 
 
     Case "DO_EACH_STMT"
         Return ExecRunDoEachStmt(ps, es, stmtIdx, st, errText)
+
+    Case "TRY_STMT"
+        Return ExecRunTryStmt(ps, es, stmtIdx, errText)
     End Select
 
     Return -2

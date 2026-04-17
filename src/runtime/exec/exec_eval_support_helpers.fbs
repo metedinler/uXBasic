@@ -11,6 +11,31 @@ Private Function ExecChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, B
 
     Return -1
 End Function
+Private Function ExecCsvUnescape(ByRef rawValue As String) As String
+    Dim outValue As String
+    Dim i As Integer
+
+    outValue = ""
+    i = 1
+    While i <= Len(rawValue)
+        Dim ch As String
+        ch = Mid(rawValue, i, 1)
+        If ch = "\\" Then
+            If i < Len(rawValue) AndAlso Mid(rawValue, i + 1, 1) = "\\" Then
+                outValue &= "\\"
+                i += 2
+            Else
+                outValue &= ch
+                i += 1
+            End If
+        Else
+            outValue &= ch
+            i += 1
+        End If
+    Wend
+
+    Return outValue
+End Function
 
 Private Function ExecChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
     Dim total As Integer
@@ -344,6 +369,20 @@ Sub ExecSetFfiResolverPath(ByRef pathText As String)
     gFfiX86CallerCleanupBytes = 0
     gFfiX86CalleeCleanupBytes = 0
     gFfiX86SymptrWriteCount = 0
+
+    gFfiX64ResolverLoaded = 0
+    gFfiX64ResolverLoadFailed = 0
+    gFfiX64ResolverLoadFailReason = ""
+    gFfiX64ResolverEntryCount = 0
+    Erase gFfiX64ResolverEntries
+    gFfiX64ResolvedEntryCount = 0
+    Erase gFfiX64ResolvedEntries
+    gFfiX64SymptrMapEntryCount = 0
+    Erase gFfiX64SymptrMapEntries
+    gFfiX64InvokeCount = 0
+    gFfiX64LastInvokeStubId = 0
+    gFfiX64LastInvokeConv = ""
+    gFfiX64SymptrWriteCount = 0
 End Sub
 
 Sub ExecSetFfiResolverMode(ByRef modeText As String)
@@ -363,7 +402,11 @@ End Function
 
 Private Function ExecGetFfiResolverPath() As String
     If Trim(gFfiResolverPath) = "" Then
+#Ifdef __FB_64BIT__
+        gFfiResolverPath = "dist/interop/ffi_call_x64_resolver.csv"
+#Else
         gFfiResolverPath = "dist/interop/ffi_call_x86_resolver.csv"
+#EndIf
     End If
     Return gFfiResolverPath
 End Function
@@ -472,6 +515,102 @@ Function ExecDebugGetFfiX86SymptrProcAddrByStubId(ByVal stubId As Integer) As UI
     Return CUInt(gFfiX86SymptrMapEntries(idx).procAddr)
 End Function
 
+Private Function ExecFindX64ResolvedProc(ByVal stubId As Integer, ByRef procOut As Any Ptr) As Integer
+    Dim i As Integer
+    For i = 0 To gFfiX64ResolvedEntryCount - 1
+        If gFfiX64ResolvedEntries(i).stubId = stubId Then
+            procOut = gFfiX64ResolvedEntries(i).procAddr
+            If procOut <> 0 Then Return 1
+            Return 0
+        End If
+    Next i
+
+    procOut = 0
+    Return 0
+End Function
+
+Private Function ExecFindX64SymptrMapIndex(ByVal stubId As Integer) As Integer
+    Dim i As Integer
+    For i = 0 To gFfiX64SymptrMapEntryCount - 1
+        If gFfiX64SymptrMapEntries(i).stubId = stubId Then Return i
+    Next i
+
+    Return -1
+End Function
+
+Private Sub ExecUpsertX64SymptrMap(ByVal stubId As Integer, ByVal procAddr As Any Ptr)
+    Dim idx As Integer
+    idx = ExecFindX64SymptrMapIndex(stubId)
+
+    If idx <> -1 Then
+        gFfiX64SymptrMapEntries(idx).procAddr = procAddr
+        gFfiX64SymptrWriteCount += 1
+        Exit Sub
+    End If
+
+    If gFfiX64SymptrMapEntryCount = 0 Then
+        ReDim gFfiX64SymptrMapEntries(0)
+    Else
+        ReDim Preserve gFfiX64SymptrMapEntries(gFfiX64SymptrMapEntryCount)
+    End If
+
+    gFfiX64SymptrMapEntries(gFfiX64SymptrMapEntryCount).stubId = stubId
+    gFfiX64SymptrMapEntries(gFfiX64SymptrMapEntryCount).symptrLabel = "__uxb_ffi_symptr_" & LTrim(Str(stubId))
+    gFfiX64SymptrMapEntries(gFfiX64SymptrMapEntryCount).procAddr = procAddr
+    gFfiX64SymptrMapEntryCount += 1
+    gFfiX64SymptrWriteCount += 1
+End Sub
+
+Private Sub ExecAppendX64ResolvedProc(ByVal stubId As Integer, ByVal procAddr As Any Ptr)
+    If gFfiX64ResolvedEntryCount = 0 Then
+        ReDim gFfiX64ResolvedEntries(0)
+    Else
+        ReDim Preserve gFfiX64ResolvedEntries(gFfiX64ResolvedEntryCount)
+    End If
+
+    gFfiX64ResolvedEntries(gFfiX64ResolvedEntryCount).stubId = stubId
+    gFfiX64ResolvedEntries(gFfiX64ResolvedEntryCount).procAddr = procAddr
+    gFfiX64ResolvedEntryCount += 1
+End Sub
+
+Function ExecDebugGetFfiX64ResolvedCount() As Integer
+    Return gFfiX64ResolvedEntryCount
+End Function
+
+Function ExecDebugGetFfiX64SymptrMapCount() As Integer
+    Return gFfiX64SymptrMapEntryCount
+End Function
+
+Function ExecDebugGetFfiX64InvokeCount() As Integer
+    Return gFfiX64InvokeCount
+End Function
+
+Function ExecDebugGetFfiX64LastInvokeStubId() As Integer
+    Return gFfiX64LastInvokeStubId
+End Function
+
+Function ExecDebugGetFfiX64LastInvokeConv() As String
+    Return gFfiX64LastInvokeConv
+End Function
+
+Function ExecDebugGetFfiX64SymptrWriteCount() As Integer
+    Return gFfiX64SymptrWriteCount
+End Function
+
+Function ExecDebugGetFfiX64SymptrLabelByStubId(ByVal stubId As Integer) As String
+    Dim idx As Integer
+    idx = ExecFindX64SymptrMapIndex(stubId)
+    If idx = -1 Then Return ""
+    Return gFfiX64SymptrMapEntries(idx).symptrLabel
+End Function
+
+Function ExecDebugGetFfiX64SymptrProcAddrByStubId(ByVal stubId As Integer) As ULongInt
+    Dim idx As Integer
+    idx = ExecFindX64SymptrMapIndex(stubId)
+    If idx = -1 Then Return 0
+    Return CULngInt(gFfiX64SymptrMapEntries(idx).procAddr)
+End Function
+
 Private Function ExecFindX86ResolverEntryIndex(ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer) As Integer
     Dim dllKey As String
     Dim symbolKey As String
@@ -569,6 +708,11 @@ Type ExecFnArg1StdcallI32 As Function Stdcall (ByVal a0 As Integer) As Integer
 Type ExecFnArg2StdcallI32 As Function Stdcall (ByVal a0 As Integer, ByVal a1 As Integer) As Integer
 Type ExecFnArg3StdcallI32 As Function Stdcall (ByVal a0 As Integer, ByVal a1 As Integer, ByVal a2 As Integer) As Integer
 Type ExecFnArg4StdcallI32 As Function Stdcall (ByVal a0 As Integer, ByVal a1 As Integer, ByVal a2 As Integer, ByVal a3 As Integer) As Integer
+Type ExecFnNoArgX64I32 As Function () As Integer
+Type ExecFnArg1X64I32 As Function (ByVal a0 As Integer) As Integer
+Type ExecFnArg2X64I32 As Function (ByVal a0 As Integer, ByVal a1 As Integer) As Integer
+Type ExecFnArg3X64I32 As Function (ByVal a0 As Integer, ByVal a1 As Integer, ByVal a2 As Integer) As Integer
+Type ExecFnArg4X64I32 As Function (ByVal a0 As Integer, ByVal a1 As Integer, ByVal a2 As Integer, ByVal a3 As Integer) As Integer
 
 Private Sub ExecFfiX86ResolverAppend(ByVal stubId As Integer, ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer, ByVal argStackBytes As Integer, ByRef cleanupType As String, ByRef symptrLabel As String)
     If gFfiX86ResolverEntryCount = 0 Then
@@ -587,6 +731,25 @@ Private Sub ExecFfiX86ResolverAppend(ByVal stubId As Integer, ByRef dllName As S
     gFfiX86ResolverEntries(gFfiX86ResolverEntryCount).cleanupType = UCase(Trim(cleanupType))
     gFfiX86ResolverEntries(gFfiX86ResolverEntryCount).symptrLabel = Trim(symptrLabel)
     gFfiX86ResolverEntryCount += 1
+End Sub
+
+Private Sub ExecFfiX64ResolverAppend(ByVal stubId As Integer, ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer, ByVal argStackBytes As Integer, ByRef cleanupType As String, ByRef symptrLabel As String)
+    If gFfiX64ResolverEntryCount = 0 Then
+        ReDim gFfiX64ResolverEntries(0)
+    Else
+        ReDim Preserve gFfiX64ResolverEntries(gFfiX64ResolverEntryCount)
+    End If
+
+    gFfiX64ResolverEntries(gFfiX64ResolverEntryCount).stubId = stubId
+    gFfiX64ResolverEntries(gFfiX64ResolverEntryCount).dllName = UCase(Trim(dllName))
+    gFfiX64ResolverEntries(gFfiX64ResolverEntryCount).symbolName = UCase(Trim(symbolName))
+    gFfiX64ResolverEntries(gFfiX64ResolverEntryCount).signatureText = UCase(Trim(signatureText))
+    gFfiX64ResolverEntries(gFfiX64ResolverEntryCount).callingConventionText = UCase(Trim(callingConventionText))
+    gFfiX64ResolverEntries(gFfiX64ResolverEntryCount).argCount = argCount
+    gFfiX64ResolverEntries(gFfiX64ResolverEntryCount).argStackBytes = argStackBytes
+    gFfiX64ResolverEntries(gFfiX64ResolverEntryCount).cleanupType = UCase(Trim(cleanupType))
+    gFfiX64ResolverEntries(gFfiX64ResolverEntryCount).symptrLabel = Trim(symptrLabel)
+    gFfiX64ResolverEntryCount += 1
 End Sub
 
 Private Sub ExecLoadFfiX86ResolverIfNeeded()
@@ -681,7 +844,13 @@ Private Sub ExecLoadFfiX86ResolverIfNeeded()
                     argStackBytes = ValInt(c6)
 
                     If stubId > 0 And c1 <> "" And c2 <> "" And c3 <> "" Then
-                        ExecFfiX86ResolverAppend stubId, c1, c2, c3, c4, argCount, argStackBytes, c7, c8
+                            c1 = ExecCsvUnescape(c1)
+                            c2 = ExecCsvUnescape(c2)
+                            c3 = ExecCsvUnescape(c3)
+                            c4 = ExecCsvUnescape(c4)
+                            c7 = ExecCsvUnescape(c7)
+                            c8 = ExecCsvUnescape(c8)
+                            ExecFfiX86ResolverAppend stubId, c1, c2, c3, c4, argCount, argStackBytes, c7, c8
                     End If
                 End If
             End If
@@ -702,6 +871,258 @@ Private Sub ExecLoadFfiX86ResolverIfNeeded()
         Exit Sub
     End If
 End Sub
+
+Private Sub ExecLoadFfiX64ResolverIfNeeded()
+    If gFfiX64ResolverLoaded <> 0 Then Exit Sub
+
+    gFfiX64ResolverLoaded = 1
+    gFfiX64ResolverLoadFailed = 0
+    gFfiX64ResolverLoadFailReason = ""
+    gFfiX64ResolverEntryCount = 0
+    Erase gFfiX64ResolverEntries
+    gFfiX64ResolvedEntryCount = 0
+    Erase gFfiX64ResolvedEntries
+    gFfiX64SymptrMapEntryCount = 0
+    Erase gFfiX64SymptrMapEntries
+    gFfiX64InvokeCount = 0
+    gFfiX64LastInvokeStubId = 0
+    gFfiX64LastInvokeConv = ""
+    gFfiX64SymptrWriteCount = 0
+
+    Dim resolverPath As String
+    resolverPath = ExecGetFfiResolverPath()
+
+    If Dir(resolverPath) = "" Then
+        gFfiX64ResolverLoadFailed = 1
+        gFfiX64ResolverLoadFailReason = "file-not-found"
+        Exit Sub
+    End If
+
+    Dim f As Integer
+    f = FreeFile
+    Open resolverPath For Input As #f
+    If Err <> 0 Then
+        gFfiX64ResolverLoadFailed = 1
+        gFfiX64ResolverLoadFailReason = "open-failed"
+        Exit Sub
+    End If
+
+    Dim headerSeen As Integer
+    Dim headerValid As Integer
+    headerSeen = 0
+    headerValid = 0
+
+    Do While Not Eof(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        lineText = Trim(lineText)
+        If lineText <> "" Then
+            If headerSeen = 0 Then
+                headerSeen = 1
+                Dim headerText As String
+                headerText = UCase(lineText)
+                If headerText = "STUB_ID,DLL,SYMBOL,SIGNATURE,CONVENTION,ARG_COUNT,ARG_STACK_BYTES,CLEANUP_TYPE,SYMPTR_LABEL" Then
+                    headerValid = 1
+                Else
+                    Close #f
+                    gFfiX64ResolverLoadFailed = 1
+                    gFfiX64ResolverLoadFailReason = "header-invalid"
+                    Exit Sub
+                End If
+            Else
+                Dim p1 As Integer, p2 As Integer, p3 As Integer, p4 As Integer
+                Dim p5 As Integer, p6 As Integer, p7 As Integer, p8 As Integer
+                p1 = Instr(1, lineText, ",")
+                p2 = Instr(p1 + 1, lineText, ",")
+                p3 = Instr(p2 + 1, lineText, ",")
+                p4 = Instr(p3 + 1, lineText, ",")
+                p5 = Instr(p4 + 1, lineText, ",")
+                p6 = Instr(p5 + 1, lineText, ",")
+                p7 = Instr(p6 + 1, lineText, ",")
+                p8 = Instr(p7 + 1, lineText, ",")
+
+                If p1 > 0 And p2 > p1 And p3 > p2 And p4 > p3 And p5 > p4 And p6 > p5 And p7 > p6 And p8 > p7 Then
+                    Dim c0 As String, c1 As String, c2 As String, c3 As String, c4 As String
+                    Dim c5 As String, c6 As String, c7 As String, c8 As String
+                    c0 = Trim(Left(lineText, p1 - 1))
+                    c1 = Trim(Mid(lineText, p1 + 1, p2 - p1 - 1))
+                    c2 = Trim(Mid(lineText, p2 + 1, p3 - p2 - 1))
+                    c3 = Trim(Mid(lineText, p3 + 1, p4 - p3 - 1))
+                    c4 = Trim(Mid(lineText, p4 + 1, p5 - p4 - 1))
+                    c5 = Trim(Mid(lineText, p5 + 1, p6 - p5 - 1))
+                    c6 = Trim(Mid(lineText, p6 + 1, p7 - p6 - 1))
+                    c7 = Trim(Mid(lineText, p7 + 1, p8 - p7 - 1))
+                    c8 = Trim(Mid(lineText, p8 + 1))
+
+                    Dim stubId As Integer
+                    Dim argCount As Integer
+                    Dim argStackBytes As Integer
+                    stubId = ValInt(c0)
+                    argCount = ValInt(c5)
+                    argStackBytes = ValInt(c6)
+
+                    If stubId > 0 And c1 <> "" And c2 <> "" And c3 <> "" Then
+                            c1 = ExecCsvUnescape(c1)
+                            c2 = ExecCsvUnescape(c2)
+                            c3 = ExecCsvUnescape(c3)
+                            c4 = ExecCsvUnescape(c4)
+                            c7 = ExecCsvUnescape(c7)
+                            c8 = ExecCsvUnescape(c8)
+                            ExecFfiX64ResolverAppend stubId, c1, c2, c3, c4, argCount, argStackBytes, c7, c8
+                    End If
+                End If
+            End If
+        End If
+    Loop
+
+    Close #f
+
+    If headerValid = 0 Then
+        gFfiX64ResolverLoadFailed = 1
+        gFfiX64ResolverLoadFailReason = "header-missing"
+        Exit Sub
+    End If
+
+    If gFfiX64ResolverEntryCount = 0 Then
+        gFfiX64ResolverLoadFailed = 1
+        gFfiX64ResolverLoadFailReason = "no-valid-entries"
+        Exit Sub
+    End If
+End Sub
+
+Private Function ExecFindX64ResolverEntryIndex(ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer) As Integer
+    Dim dllKey As String
+    Dim symbolKey As String
+    Dim sigKey As String
+    Dim convKey As String
+    dllKey = UCase(Trim(dllName))
+    symbolKey = UCase(Trim(symbolName))
+    sigKey = UCase(Trim(signatureText))
+    convKey = UCase(Trim(callingConventionText))
+
+    If convKey = "" Then convKey = "CDECL"
+
+    Dim i As Integer
+    For i = 0 To gFfiX64ResolverEntryCount - 1
+        If gFfiX64ResolverEntries(i).dllName = dllKey AndAlso gFfiX64ResolverEntries(i).symbolName = symbolKey AndAlso gFfiX64ResolverEntries(i).signatureText = sigKey AndAlso gFfiX64ResolverEntries(i).argCount = argCount Then
+            Dim allowConv As String
+            allowConv = UCase(Trim(gFfiX64ResolverEntries(i).callingConventionText))
+            If allowConv = convKey Or allowConv = "" Or allowConv = "*" Or allowConv = "WIN64" Then Return i
+            If (allowConv = "CDECL" Or allowConv = "STDCALL") AndAlso (convKey = "CDECL" Or convKey = "STDCALL") Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function ExecResolveX64InteropTarget(ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer, ByRef errText As String) As Integer
+    ExecLoadFfiX64ResolverIfNeeded
+    If gFfiX64ResolverLoadFailed <> 0 Then
+        errText = "exec: CALL(DLL) x64 resolver plan missing/invalid (" & LTrim(Str(UXB_FFI_ERR_RESOLVER_PLAN_MISSING)) & ")"
+        Return 0
+    End If
+
+    Dim foundIdx As Integer
+    foundIdx = ExecFindX64ResolverEntryIndex(dllName, symbolName, signatureText, callingConventionText, argCount)
+    If foundIdx = -1 Then
+        errText = "exec: CALL(DLL) x64 resolver no matching entry (" & LTrim(Str(UXB_FFI_ERR_RESOLVER_NO_MATCH)) & ")"
+        Return 0
+    End If
+
+    Dim resolvedAddr As Any Ptr
+    If ExecFindX64ResolvedProc(gFfiX64ResolverEntries(foundIdx).stubId, resolvedAddr) <> 0 Then Return 1
+
+    Dim hModule As Any Ptr
+    hModule = LoadLibraryA(StrPtr(dllName))
+    If hModule = 0 Then
+        errText = "exec: CALL(DLL) x64 resolver LoadLibrary failed (" & LTrim(Str(UXB_FFI_ERR_DLL_LOAD_FAILED)) & ")"
+        Return 0
+    End If
+
+    Dim procAddr As Any Ptr
+    procAddr = GetProcAddress(hModule, StrPtr(symbolName))
+    If procAddr = 0 Then
+        errText = "exec: CALL(DLL) x64 resolver GetProcAddress failed (" & LTrim(Str(UXB_FFI_ERR_SYMBOL_RESOLVE_FAILED)) & ")"
+        Return 0
+    End If
+
+    ExecAppendX64ResolvedProc gFfiX64ResolverEntries(foundIdx).stubId, procAddr
+    ExecUpsertX64SymptrMap gFfiX64ResolverEntries(foundIdx).stubId, procAddr
+    Return 1
+End Function
+
+Private Function ExecTryInvokeResolvedX64I32(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByVal argStartPos As Integer, ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer, ByRef valueOut As Integer, ByRef invokedOut As Integer, ByRef errText As String) As Integer
+    invokedOut = 0
+    valueOut = 0
+
+    If UCase(Trim(signatureText)) <> "I32" Then Return 1
+    If argCount < 0 Or argCount > 4 Then Return 1
+
+    Dim resolverIdx As Integer
+    resolverIdx = ExecFindX64ResolverEntryIndex(dllName, symbolName, signatureText, callingConventionText, argCount)
+    If resolverIdx = -1 Then Return 1
+
+    Dim stubId As Integer
+    stubId = gFfiX64ResolverEntries(resolverIdx).stubId
+
+    Dim symMapIdx As Integer
+    symMapIdx = ExecFindX64SymptrMapIndex(stubId)
+    If symMapIdx = -1 Or gFfiX64SymptrMapEntries(symMapIdx).procAddr = 0 Then
+        errText = "exec: x64 symptr map entry missing for stub " & LTrim(Str(stubId))
+        Return 0
+    End If
+
+    Dim procAddr As Any Ptr
+    procAddr = gFfiX64SymptrMapEntries(symMapIdx).procAddr
+
+    Dim argValues(0 To 3) As Integer
+    Dim ai As Integer
+    For ai = 0 To argCount - 1
+        Dim argNode As Integer
+        argNode = ExecChildAt(ps, callNodeIdx, argStartPos + ai)
+        If argNode = -1 Then
+            errText = "exec: x64 invoke proof argument missing"
+            Return 0
+        End If
+
+        argValues(ai) = ExecEvalNode(ps, es, argNode, errText)
+        If errText <> "" Then
+            errText = "exec: x64 invoke proof argument eval failed: " & errText
+            Return 0
+        End If
+    Next ai
+
+    Select Case argCount
+    Case 0
+        Dim fn0 As ExecFnNoArgX64I32
+        fn0 = procAddr
+        valueOut = fn0()
+    Case 1
+        Dim fn1 As ExecFnArg1X64I32
+        fn1 = procAddr
+        valueOut = fn1(argValues(0))
+    Case 2
+        Dim fn2 As ExecFnArg2X64I32
+        fn2 = procAddr
+        valueOut = fn2(argValues(0), argValues(1))
+    Case 3
+        Dim fn3 As ExecFnArg3X64I32
+        fn3 = procAddr
+        valueOut = fn3(argValues(0), argValues(1), argValues(2))
+    Case 4
+        Dim fn4 As ExecFnArg4X64I32
+        fn4 = procAddr
+        valueOut = fn4(argValues(0), argValues(1), argValues(2), argValues(3))
+    End Select
+
+    gFfiX64InvokeCount += 1
+    gFfiX64LastInvokeStubId = stubId
+    gFfiX64LastInvokeConv = UCase(Trim(callingConventionText))
+    If gFfiX64LastInvokeConv = "" Then gFfiX64LastInvokeConv = "CDECL"
+
+    invokedOut = 1
+    Return 1
+End Function
 
 Private Function ExecResolveX86InteropTarget(ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer, ByRef cleanupTypeOut As String, ByRef errText As String) As Integer
     cleanupTypeOut = ""

@@ -3,12 +3,7 @@
 #include once "../src/parser/parser.fbs"
 #include once "../src/runtime/memory_vm.fbs"
 #include once "../src/runtime/memory_exec.fbs"
-#include once "../src/codegen/x86/ffi_call_backend.fbs"
-
-#ifdef __FB_64BIT__
-Print "SKIP ffi x86 resolver exec ast on x64 build"
-End 0
-#endif
+#include once "../src/codegen/x64/ffi_call_backend.fbs"
 
 Private Function AssertTrue(ByVal condValue As Integer, ByRef msg As String) As Integer
     If condValue = 0 Then
@@ -62,35 +57,34 @@ Private Sub Main()
     Dim ps As ParseState
     Dim errText As String
 
-    ok And= AssertTrue(ParseSource(src, ps, errText), "parse ffi x86 resolver sample: " & errText)
+    ok And= AssertTrue(ParseSource(src, ps, errText), "parse ffi x64 resolver sample: " & errText)
 
     Dim backendErr As String
-    ok And= AssertTrue(FfiX86BackendEmitArtifacts(ps, "dist\\interop", backendErr), "emit x86 artifacts: " & backendErr)
+    ok And= AssertTrue(FfiX64BackendEmitArtifacts(ps, "dist\\interop", backendErr), "emit x64 artifacts: " & backendErr)
 
     ExecSetFfiPolicyPath ""
     ExecSetFfiPolicyMode "REPORT_ONLY"
 
     ExecSetFfiResolverMode "ENFORCE"
-    ExecSetFfiResolverPath "dist\\interop\\ffi_call_x86_resolver.csv"
+    ExecSetFfiResolverPath "dist\\interop\\ffi_call_x64_resolver.csv"
 
     Dim runErr As String
-    ok And= AssertTrue(RunExecExpectOk(ps, runErr), "resolver enforce success path: " & runErr)
-    ok And= AssertTrue(ExecDebugGetFfiX86ResolvedCount() > 0, "resolver must cache at least one bound symbol")
-    ok And= AssertTrue(ExecDebugGetFfiX86SymptrMapCount() > 0, "resolver should populate symptr map")
-    ok And= AssertTrue(ExecDebugGetFfiX86InvokeCount() > 0, "resolver invoke proof should execute")
-    ok And= AssertTrue(ExecDebugGetFfiX86CallerCleanupBytes() >= 4, "cdecl caller cleanup proof should accumulate bytes")
-    ok And= AssertTrue(ExecDebugGetFfiX86LastInvokeStubId() > 0, "resolver invoke should record stub id")
+    ok And= AssertTrue(RunExecExpectOk(ps, runErr), "x64 resolver enforce success path: " & runErr)
+    ok And= AssertTrue(ExecDebugGetFfiX64ResolvedCount() > 0, "x64 resolver must cache at least one bound symbol")
+    ok And= AssertTrue(ExecDebugGetFfiX64SymptrMapCount() > 0, "x64 resolver should populate symptr map")
+    ok And= AssertTrue(ExecDebugGetFfiX64InvokeCount() > 0, "x64 resolver invoke proof should execute")
+    ok And= AssertTrue(ExecDebugGetFfiX64LastInvokeStubId() > 0, "x64 resolver invoke should record stub id")
 
-    ExecSetFfiResolverPath "dist\\interop\\missing_x86_resolver.csv"
-    ok And= AssertTrue(RunExecExpectFail(ps, runErr), "resolver enforce missing file must fail")
-    ok And= AssertTrue(InStr(1, runErr, "9216") > 0, "resolver missing code 9216")
+    ExecSetFfiResolverPath "dist\\interop\\missing_x64_resolver.csv"
+    ok And= AssertTrue(RunExecExpectFail(ps, runErr), "x64 resolver enforce missing file must fail")
+    ok And= AssertTrue(InStr(1, runErr, "9216") > 0, "x64 resolver missing code 9216")
 
     ExecSetFfiResolverMode "REPORT_ONLY"
-    ok And= AssertTrue(RunExecExpectOk(ps, runErr), "resolver report-only missing file should continue: " & runErr)
+    ok And= AssertTrue(RunExecExpectOk(ps, runErr), "x64 resolver report-only missing file should continue: " & runErr)
 
     If ok = 0 Then End 1
 
-    Print "PASS ffi x86 resolver exec ast"
+    Print "PASS ffi x64 resolver exec ast"
     End 0
 End Sub
 

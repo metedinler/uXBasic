@@ -85,6 +85,8 @@ Function ParseIfStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
     Return ifNode
 End Function
 
+Declare Function IsFlowStmtTerminator(ByRef tk As Token) As Integer
+
 Private Function IsCaseIsRelOp(ByRef tk As Token) As Integer
     If tk.kind <> "OP" Then Return 0
 
@@ -429,6 +431,134 @@ Function ParseDoEachStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Int
 
     ASTAddChild ps.ast, doEachNode, bodyNode
     Return doEachNode
+End Function
+
+Function ParseTryStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim tryNode As Integer
+    tryNode = MakeNodeFromToken(ps, "TRY_STMT", "", "", firstTok)
+
+    SkipSeparators ps
+
+    Do While CurToken(ps).kind <> "EOF"
+        If IsKw(ps, "CATCH") Or IsKw(ps, "FINALLY") Or IsEndTryStart(ps) Then Exit Do
+
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then Return -1
+        ASTAddChild ps.ast, tryNode, st
+        SkipSeparators ps
+    Loop
+
+    If IsKw(ps, "CATCH") Then
+        Dim catchTok As Token
+        catchTok = CurToken(ps)
+        AdvanceTok ps
+
+        Dim catchNode As Integer
+        catchNode = MakeNodeFromToken(ps, "CATCH_PART", "", "", catchTok)
+
+        SkipSeparators ps
+        Do While CurToken(ps).kind <> "EOF"
+            If IsKw(ps, "FINALLY") Or IsEndTryStart(ps) Then Exit Do
+
+            Dim catchStmt As Integer
+            catchStmt = ParseSimpleStatement(ps)
+            If catchStmt = -1 Then Return -1
+            ASTAddChild ps.ast, catchNode, catchStmt
+            SkipSeparators ps
+        Loop
+
+        ASTAddChild ps.ast, tryNode, catchNode
+    End If
+
+    If IsKw(ps, "FINALLY") Then
+        Dim finallyTok As Token
+        finallyTok = CurToken(ps)
+        AdvanceTok ps
+
+        Dim finallyNode As Integer
+        finallyNode = MakeNodeFromToken(ps, "FINALLY_PART", "", "", finallyTok)
+
+        SkipSeparators ps
+        Do While CurToken(ps).kind <> "EOF"
+            If IsEndTryStart(ps) Then Exit Do
+
+            Dim finallyStmt As Integer
+            finallyStmt = ParseSimpleStatement(ps)
+            If finallyStmt = -1 Then Return -1
+            ASTAddChild ps.ast, finallyNode, finallyStmt
+            SkipSeparators ps
+        Loop
+
+        ASTAddChild ps.ast, tryNode, finallyNode
+    End If
+
+    If IsEndTryStart(ps) = 0 Then
+        ps.lastError = "missing END TRY"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+
+    Return tryNode
+End Function
+
+Function ParseThrowStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim throwNode As Integer
+    throwNode = MakeNodeFromToken(ps, "THROW_STMT", "", "", firstTok)
+
+    If IsFlowStmtTerminator(CurToken(ps)) Then Return throwNode
+
+    Do
+        Dim exprNode As Integer
+        exprNode = ParseExpression(ps)
+        If exprNode = -1 Then
+            ps.lastError = "THROW: expression parse failed"
+            Return -1
+        End If
+
+        ASTAddChild ps.ast, throwNode, exprNode
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    If IsFlowStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "THROW: unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return throwNode
+End Function
+
+Function ParseAssertStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim assertNode As Integer
+    assertNode = MakeNodeFromToken(ps, "ASSERT_STMT", "", "", firstTok)
+
+    Dim condExpr As Integer
+    condExpr = ParseExpression(ps)
+    If condExpr = -1 Then
+        ps.lastError = "ASSERT: condition expression expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, assertNode, condExpr
+
+    If MatchOp(ps, ",") Then
+        Dim msgExpr As Integer
+        msgExpr = ParseExpression(ps)
+        If msgExpr = -1 Then
+            ps.lastError = "ASSERT: message expression expected"
+            Return -1
+        End If
+        ASTAddChild ps.ast, assertNode, msgExpr
+    End If
+
+    If IsFlowStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "ASSERT: unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return assertNode
 End Function
 
 Private Function IsFlowStmtTerminator(ByRef tk As Token) As Integer

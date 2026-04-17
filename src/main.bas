@@ -1,5 +1,9 @@
 #include "build/main_frontend_include_bundle.fbs"
 #include "build/main_runtime_include_bundle.fbs"
+#include "codegen/x64/ffi_call_backend.fbs"
+#include "codegen/x86/ffi_call_backend.fbs"
+#include "codegen/mir_err_lowering.fbs"
+#include "codegen/err_backend_hooks.fbs"
 
 Private Function HasArg(ByRef keyText As String) As Integer
     Dim i As Integer
@@ -125,6 +129,11 @@ If interopMode Then
 
     If FfiX86BackendEmitArtifacts(ps, "dist\interop", interopErr) = 0 Then
         DiagHata "FFI x86 codegen cikti yazimi basarisiz: " & LocalizeErrorMessage(interopErr)
+        End 4
+    End If
+
+    If ErrBackendEmitArtifacts(ps, "dist\interop", interopErr) = 0 Then
+        DiagHata "ERR backend codegen cikti yazimi basarisiz: " & LocalizeErrorMessage(interopErr)
         End 4
     End If
 

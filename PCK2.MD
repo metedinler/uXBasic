@@ -3,6 +3,25 @@
 Bu dokuman parser gercegi + test plani uzerinden standardize edilmis tek referanstir.
 Hedef profil: Windows 11 x64.
 
+## 0. Kanonik Karar Kilidi (2026-04-16)
+
+Bu dosyada tekrar eden tarihsel bolumler arasinda celiski olursa asagidaki sira uygulanir:
+
+1. `reports/call_family_destek_politikasi_standardi.md`
+2. `plan.md` icindeki `2026-04-16 Karar Kilidi (CALL Familyasi)`
+3. Bu belge (`PCK2.MD`)
+
+Karar ozeti:
+
+- DECLARE kirilmasiz politika ile ilerler:
+    - tek dosya/kucuk ic cagri: opsiyonel
+    - cok dosya/modul ic cagri: onerilir
+    - dis cagri FFI/API: zorunluya yakin standart
+- 4 syntax modeli gecerlidir: basit SUB DECLARE, basit FUNCTION DECLARE, FFI wrapper (DECLARE + ALIAS=CALL(DLL,...)), scope icinde NAMESPACE/MODULE/USING/ALIAS + MAIN/CALL.
+- `CALL(API, ...)` future backlogdur; en son madde olarak kalir.
+- `ALIAS yeni = eski` parser/semantic seviyede aciktir; runtime calisma garantisi ALIAS hedefi `CALL(DLL, ...)` oldugunda verilir.
+- `DIM name[(bounds)] AS TYPE [= expr]` gecerlidir; koleksiyon/array toplu baslangic literal genisletmeleri Faz R3 backlogundadir.
+
 ## 1. Amac
 
 - Belgedeki tum syntax kaliplari parser tarafinda gecerli olmalidir.

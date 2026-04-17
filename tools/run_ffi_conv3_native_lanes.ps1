@@ -14,6 +14,47 @@ $targets = @(
     @{ name = "native_symptr_patch"; src = "tests/probes/run_ffi_x86_native_symptr_patch_probe.bas"; exe = "tests/probes/run_ffi_x86_native_symptr_patch_probe_32.exe" }
 )
 
+function Invoke-CmdWithTimeout {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        [Parameter(Mandatory = $true)][string]$WorkingDir,
+        [int]$TimeoutMs = 15000
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "cmd.exe"
+    $psi.Arguments = '/d /c ""' + $ExePath + '""'
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.WorkingDirectory = $WorkingDir
+
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
+
+    [void]$p.Start()
+
+    if (-not $p.WaitForExit($TimeoutMs)) {
+        try { $p.Kill() } catch { }
+        return [PSCustomObject]@{
+            timedOut = $true
+            exitCode = -1
+            output = "cmd fallback timeout after " + $TimeoutMs + "ms"
+        }
+    }
+
+    $stdout = $p.StandardOutput.ReadToEnd()
+    $stderr = $p.StandardError.ReadToEnd()
+    $combined = ($stdout + [Environment]::NewLine + $stderr).Trim()
+
+    return [PSCustomObject]@{
+        timedOut = $false
+        exitCode = $p.ExitCode
+        output = $combined
+    }
+}
+
 $rows = @()
 
 foreach ($t in $targets) {
@@ -32,16 +73,49 @@ foreach ($t in $targets) {
         continue
     }
 
-    $runOutput = & $t.exe 2>&1 | Out-String
-    $runExit = $LASTEXITCODE
+    $runOutput = ""
+    $runExit = -1
+    $runStartFailed = $false
+    $usedCmdFallback = $false
+    try {
+        $runOutput = & $t.exe 2>&1 | Out-String
+        $runExit = $LASTEXITCODE
+    } catch {
+        $primaryErr = $_ | Out-String
+        try {
+            $cmdExe = ($t.exe -replace '/', '\\')
+            if (-not [System.IO.Path]::IsPathRooted($cmdExe)) {
+                if ($cmdExe.StartsWith(".\\")) {
+                    $cmdExe = $cmdExe.Substring(2)
+                }
+                $cmdExe = Join-Path $repoRoot $cmdExe
+            }
+
+            $cmdResult = Invoke-CmdWithTimeout -ExePath $cmdExe -WorkingDir $repoRoot -TimeoutMs 15000
+            if ($cmdResult.timedOut) {
+                $runStartFailed = $true
+                $runOutput = $primaryErr + [Environment]::NewLine + "[fallback=cmd timeout]" + [Environment]::NewLine + $cmdResult.output
+            } else {
+                $runOutput = "[fallback=cmd]" + [Environment]::NewLine + $cmdResult.output
+                $runExit = $cmdResult.exitCode
+                $usedCmdFallback = $true
+            }
+        } catch {
+            $runStartFailed = $true
+            $runOutput = $primaryErr + [Environment]::NewLine + "[fallback=cmd failed]" + [Environment]::NewLine + ($_ | Out-String)
+        }
+    }
+
+    $runText = $runOutput.Trim()
+    $isSkip = $runText -match "(?im)^SKIP\b"
 
     $rows += [PSCustomObject]@{
         Name = $t.name
         Build = "PASS"
-        Run = $(if ($runExit -eq 0) { "PASS" } else { "FAIL" })
-        Note = $(if ($runExit -eq 0) { "native lane verified" } else { "native lane runtime failure" })
+        Run = $(if ($runStartFailed) { "BLOCKED" } elseif ($isSkip) { "SKIP" } elseif ($runExit -eq 0) { "PASS" } else { "FAIL" })
+        Note = $(if ($runStartFailed) { "native lane launch blocked (elevation/policy)" } elseif ($isSkip) { "native lane not proven on this host" } elseif ($runExit -eq 0) { if ($usedCmdFallback) { "native lane verified (cmd fallback)" } else { "native lane verified" } } else { if ($usedCmdFallback) { "native lane runtime failure (cmd fallback)" } else { "native lane runtime failure" } })
         BuildOutput = $buildOutput.Trim()
-        RunOutput = $runOutput.Trim()
+        RunOutput = $runText
     }
 }
 

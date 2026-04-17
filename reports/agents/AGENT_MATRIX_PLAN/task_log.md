@@ -10,6 +10,6 @@
 - [DONE] FFI-CONV-3 symptr map uzerinden pointer call kapanisi (stub_id/symptr/procAddr izlenebilir)
 - [DONE] FFI-CONV-3 symptr write-through gozlemlenebilirlik kaniti (label/procAddr + write counter)
 - [DONE] FFI-CONV-3 native lane probe otomasyonu eklendi (`tools/run_ffi_conv3_native_lanes.ps1` + probes)
-- [NEXT] FFI-CONV-3 gercek x86-32 proses duzeyinde stack cleanup icra kaniti (host blocked: `bin/win32/as.exe` eksik)
-- [NEXT] FFI-CONV-3 native stub label bellek patchleme proof'u (host blocked: `bin/win32/as.exe` eksik)
+- [DONE] FFI-CONV-3 gercek x86-32 proses duzeyinde stack cleanup icra kaniti (`native_cleanup` PASS; win32 target guard `__FB_WIN32__` + `Not __FB_WIN64__`)
+- [DONE] FFI-CONV-3 native stub label bellek patchleme proof'u (`native_symptr_patch` PASS via cmd fallback)
 - [NEXT] STUB-DEBT: `CALL(API,...)` lane'i su an bilincli olarak unsupported (kanit testi: `tests/run_call_api_unsupported_exec_ast.bas`)

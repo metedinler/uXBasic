@@ -379,6 +379,27 @@ Kapanis kriteri:
   - ASSERT emit
   lane'lerinde artefakt + test kaniti.
 
+### 6.7) ERR-CG Parity Gate Kapanisi (2026-04-17)
+
+Tamamlanan adimlar:
+
+1. ERR codegen parity lane eklendi:
+  - `tests/run_err_codegen_parity_gate.bas`
+2. Gate scripti eklendi:
+  - `tools/run_err_codegen_parity_gate.ps1`
+  - Bu script asagidakileri tek kosuda dogrular:
+    - parity test binary PASS
+    - backend artifact test PASS
+    - `src/main_64.exe --interop` ile derlenmis yol artifact uretimi
+    - `err_mir_plan.csv`, `err_backend_hooks.csv`, `err_backend_stubs.asm` icinde zorunlu parity marker'lari
+3. VS Code task eklendi:
+  - `validate_err_codegen_parity_gate_ps`
+
+Kapanis etkisi:
+
+1. Matris Bolum 13 `CG-QA` satiri ERR codegen kapsami icin OK'a cekildi.
+2. Matris Bolum 14 `Hata Yonetimi` satiri parser/semantic/runtime/codegen ve parity gate kaniti ile OK'a guncellendi.
+
 ## 7) Risk ve Koruma
 
 Riskler:

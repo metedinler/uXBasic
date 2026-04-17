@@ -51,6 +51,7 @@ Type ExecState
     vars(0 to 255) As ExecVar
     count As Integer
     nextVarAddr As UInteger
+    assertReleaseMode As Integer
     fileIo As UxbFileRuntime
     ' arrays(Any) As ExecArray
     ' arrayCount As Integer
@@ -99,6 +100,29 @@ Type ExecFfiX86SymptrMapEntry
     procAddr As Any Ptr
 End Type
 
+Type ExecFfiX64ResolverEntry
+    stubId As Integer
+    dllName As String
+    symbolName As String
+    signatureText As String
+    callingConventionText As String
+    argCount As Integer
+    argStackBytes As Integer
+    cleanupType As String
+    symptrLabel As String
+End Type
+
+Type ExecFfiX64ResolvedEntry
+    stubId As Integer
+    procAddr As Any Ptr
+End Type
+
+Type ExecFfiX64SymptrMapEntry
+    symptrLabel As String
+    stubId As Integer
+    procAddr As Any Ptr
+End Type
+
 Type ExecRoutineDef
     nameText As String
     nodeIdx As Integer
@@ -130,6 +154,7 @@ Declare Function ExecEvalNodeAsText(ByRef ps As ParseState, ByRef es As ExecStat
 Declare Function ExecRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
 
 Private Dim Shared gExitRequest As String
+Private Const EXEC_THROW_SEP As String = Chr(31)
 Private Const EXEC_ERR_PREFIX As String = "exec: "
 Private Const UXB_FFI_ERR_BAD_ARITY As Integer = 9201
 Private Const UXB_FFI_ERR_BAD_LIB As Integer = 9202
@@ -176,6 +201,19 @@ Private Dim Shared gFfiX86LastInvokeConv As String
 Private Dim Shared gFfiX86CallerCleanupBytes As Integer
 Private Dim Shared gFfiX86CalleeCleanupBytes As Integer
 Private Dim Shared gFfiX86SymptrWriteCount As Integer
+Private Dim Shared gFfiX64ResolverEntries(Any) As ExecFfiX64ResolverEntry
+Private Dim Shared gFfiX64ResolverEntryCount As Integer
+Private Dim Shared gFfiX64ResolverLoaded As Integer
+Private Dim Shared gFfiX64ResolverLoadFailed As Integer
+Private Dim Shared gFfiX64ResolverLoadFailReason As String
+Private Dim Shared gFfiX64ResolvedEntries(Any) As ExecFfiX64ResolvedEntry
+Private Dim Shared gFfiX64ResolvedEntryCount As Integer
+Private Dim Shared gFfiX64SymptrMapEntries(Any) As ExecFfiX64SymptrMapEntry
+Private Dim Shared gFfiX64SymptrMapEntryCount As Integer
+Private Dim Shared gFfiX64InvokeCount As Integer
+Private Dim Shared gFfiX64LastInvokeStubId As Integer
+Private Dim Shared gFfiX64LastInvokeConv As String
+Private Dim Shared gFfiX64SymptrWriteCount As Integer
 Private Dim Shared gRoutineDefs(Any) As ExecRoutineDef
 Private Dim Shared gRoutineDefCount As Integer
 Private Dim Shared gCallContextDepth As Integer
@@ -195,9 +233,66 @@ Private Dim Shared gDebugInputQueueReadPos As Integer
 Private Dim Shared gDebugKeyQueue(Any) As Integer
 Private Dim Shared gDebugKeyQueueCount As Integer
 Private Dim Shared gDebugKeyQueueReadPos As Integer
+Private Dim Shared gAssertReleaseMode As Integer
 
 #include once "exec/exec_eval_support_helpers.fbs"
 #include once "exec/exec_eval_text_helpers.fbs"
+
+Sub ExecSetAssertReleaseMode(ByVal enabled As Integer)
+    gAssertReleaseMode = IIf(enabled <> 0, 1, 0)
+End Sub
+
+Function ExecGetAssertReleaseMode() As Integer
+    Return gAssertReleaseMode
+End Function
+
+Private Function ExecBuildThrowPayload(ByRef codeText As String, ByRef msgText As String, ByRef detailText As String) As String
+    Return Trim(codeText) & EXEC_THROW_SEP & Trim(msgText) & EXEC_THROW_SEP & Trim(detailText)
+End Function
+
+Private Sub ExecDecodeThrowPayload(ByRef payload As String, ByRef codeOut As String, ByRef msgOut As String, ByRef detailOut As String)
+    Dim p1 As Integer
+    Dim p2 As Integer
+
+    codeOut = ""
+    msgOut = ""
+    detailOut = ""
+
+    p1 = InStr(payload, EXEC_THROW_SEP)
+    If p1 <= 0 Then
+        msgOut = Trim(payload)
+        Exit Sub
+    End If
+
+    codeOut = Trim(Left(payload, p1 - 1))
+
+    p2 = InStr(p1 + Len(EXEC_THROW_SEP), payload, EXEC_THROW_SEP)
+    If p2 <= 0 Then
+        msgOut = Trim(Mid(payload, p1 + Len(EXEC_THROW_SEP)))
+        Exit Sub
+    End If
+
+    msgOut = Trim(Mid(payload, p1 + Len(EXEC_THROW_SEP), p2 - (p1 + Len(EXEC_THROW_SEP))))
+    detailOut = Trim(Mid(payload, p2 + Len(EXEC_THROW_SEP)))
+End Sub
+
+Private Function ExecFormatUnhandledThrow(ByRef payload As String) As String
+    Dim codeText As String
+    Dim msgText As String
+    Dim detailText As String
+    ExecDecodeThrowPayload payload, codeText, msgText, detailText
+
+    If codeText = "" And msgText = "" And detailText = "" Then
+        Return "exec: unhandled THROW"
+    End If
+
+    Dim outText As String
+    outText = "exec: unhandled THROW"
+    If codeText <> "" Then outText &= " code=" & codeText
+    If msgText <> "" Then outText &= " message=" & msgText
+    If detailText <> "" Then outText &= " detail=" & detailText
+    Return outText
+End Function
 
 ' MIR Evaluator functions
 Private Sub MIREvaluatorInit(ByRef mir As MIREvaluator)
@@ -1778,6 +1873,111 @@ Private Function ExecRunTailStmt(ByRef ps As ParseState, ByRef es As ExecState, 
         Dim ignoredCallResult As Integer
         If ExecEvalCall(ps, es, st.value, stmtIdx, 0, ignoredCallResult, errText) = 0 Then Return 0
         Return 1
+
+    Case "THROW_STMT"
+        Dim throwCode As String
+        Dim throwMsg As String
+        Dim throwDetail As String
+        throwCode = ""
+        throwMsg = ""
+        throwDetail = ""
+
+        Dim throwArgCount As Integer
+        throwArgCount = ExecChildCount(ps, stmtIdx)
+        If throwArgCount > 3 Then
+            errText = "exec: THROW argument count invalid"
+            Return 0
+        End If
+
+        If throwArgCount >= 1 Then
+            Dim throwExpr As Integer
+            throwExpr = ExecChildAt(ps, stmtIdx, 0)
+            If throwExpr = -1 Then
+                errText = "exec: THROW value missing"
+                Return 0
+            End If
+
+            Dim arg1Text As String
+            If ExecEvalNodeAsText(ps, es, throwExpr, arg1Text, errText) = 0 Then Return 0
+            arg1Text = Trim(arg1Text)
+
+            If throwArgCount = 1 Then
+                ' Backward compatibility: single THROW arg is treated as message.
+                throwMsg = arg1Text
+            Else
+                throwCode = arg1Text
+            End If
+        End If
+
+        If throwArgCount >= 2 Then
+            Dim throwMsgExpr As Integer
+            throwMsgExpr = ExecChildAt(ps, stmtIdx, 1)
+            If throwMsgExpr = -1 Then
+                errText = "exec: THROW message missing"
+                Return 0
+            End If
+
+            If ExecEvalNodeAsText(ps, es, throwMsgExpr, throwMsg, errText) = 0 Then Return 0
+            throwMsg = Trim(throwMsg)
+        End If
+
+        If throwArgCount = 3 Then
+            Dim throwDetailExpr As Integer
+            throwDetailExpr = ExecChildAt(ps, stmtIdx, 2)
+            If throwDetailExpr = -1 Then
+                errText = "exec: THROW detail missing"
+                Return 0
+            End If
+
+            If ExecEvalNodeAsText(ps, es, throwDetailExpr, throwDetail, errText) = 0 Then Return 0
+            throwDetail = Trim(throwDetail)
+        End If
+
+        gExitRequest = "THROW:" & ExecBuildThrowPayload(throwCode, throwMsg, throwDetail)
+        Return 1
+
+    Case "ASSERT_STMT"
+        Dim assertArgCount As Integer
+        assertArgCount = ExecChildCount(ps, stmtIdx)
+        If assertArgCount < 1 Or assertArgCount > 2 Then
+            errText = "exec: ASSERT argument count invalid"
+            Return 0
+        End If
+
+        Dim assertCondExpr As Integer
+        assertCondExpr = ExecChildAt(ps, stmtIdx, 0)
+        If assertCondExpr = -1 Then
+            errText = "exec: ASSERT condition missing"
+            Return 0
+        End If
+
+        Dim assertCondValue As Integer
+        assertCondValue = ExecEvalNode(ps, es, assertCondExpr, errText)
+        If errText <> "" Then Return 0
+
+        If assertCondValue = 0 Then
+            If es.assertReleaseMode <> 0 Then Return 1
+
+            Dim assertMsg As String
+            assertMsg = "assertion failed"
+
+            If assertArgCount = 2 Then
+                Dim assertMsgExpr As Integer
+                assertMsgExpr = ExecChildAt(ps, stmtIdx, 1)
+                If assertMsgExpr = -1 Then
+                    errText = "exec: ASSERT message missing"
+                    Return 0
+                End If
+
+                If ExecEvalNodeAsText(ps, es, assertMsgExpr, assertMsg, errText) = 0 Then Return 0
+                assertMsg = Trim(assertMsg)
+                If assertMsg = "" Then assertMsg = "assertion failed"
+            End If
+
+            gExitRequest = "THROW:" & ExecBuildThrowPayload("ASSERT", "ASSERT failed", assertMsg)
+        End If
+
+        Return 1
     End Select
 
     Return -2
@@ -1858,6 +2058,7 @@ End Function
 Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) As Integer
     Dim es As ExecState
     ExecStateInit es
+    es.assertReleaseMode = gAssertReleaseMode
     ExecCollectionsReset
     ExecDebugConsoleReset
     ExecContractInit  ' Execution contract'ları initialize et
@@ -1977,6 +2178,13 @@ Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) A
                 Continue Do
             ElseIf exitReq = "IF" Then
                 errText = "exec: EXIT IF used outside IF block"
+                ExecNormalizeError errText
+                UxbFileCloseAll es.fileIo
+                Return 0
+            ElseIf Left(exitReq, 6) = "THROW:" Then
+                Dim throwPayload As String
+                throwPayload = Trim(Mid(gExitRequest, 7))
+                errText = ExecFormatUnhandledThrow(throwPayload)
                 ExecNormalizeError errText
                 UxbFileCloseAll es.fileIo
                 Return 0

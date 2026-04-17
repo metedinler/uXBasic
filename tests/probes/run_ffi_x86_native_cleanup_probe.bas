@@ -1,4 +1,4 @@
-#ifdef __FB_32BIT__
+#if defined(__FB_WIN32__) AndAlso Not defined(__FB_WIN64__)
 Declare Function LoadLibraryA Lib "kernel32" Alias "LoadLibraryA" (ByVal lpLibFileName As ZString Ptr) As Any Ptr
 Declare Function GetProcAddress Lib "kernel32" Alias "GetProcAddress" (ByVal hModule As Any Ptr, ByVal lpProcName As ZString Ptr) As Any Ptr
 
@@ -77,6 +77,6 @@ End Sub
 
 Main32
 #else
-Print "SKIP native x86 cleanup probe: requires __FB_32BIT__"
-End 0
+Print "FAIL native-cleanup: requires win32 target"
+End 1
 #endif

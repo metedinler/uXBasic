@@ -29,3 +29,10 @@ Durum: Tamamlandi (kapanis-oncesi kalite sertlestirme)
 - [x] `tests/run_memory_stride_failfast_64.exe` -> PASS
 - [x] `tools/run_memory_stride_failfast.ps1` -> PASS
 - [x] `tools/run_faz_a_gate.ps1` -> PASS
+
+## 6) Sonradan Kapanan FFI-CONV-3 Izi (2026-04-17)
+- [x] Native lane raporu PASS/PASS'a cekildi: `reports/ffi_conv3_native_lanes_report.md`
+- [x] `native_cleanup` probe'u proses duzeyinde PASS dogrulandi.
+- [x] `native_symptr_patch` probe'u PASS dogrulandi (cmd fallback notu korunarak).
+- [x] Matrix satiri senkronlandi: `FFI-CONV-3` -> `OK/OK/OK/OK/OK`
+- [x] Tek-komut lane dogrulama task'i eklendi: `validate_ffi_conv3_native_lanes_ps`

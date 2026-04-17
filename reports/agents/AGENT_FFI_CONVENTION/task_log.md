@@ -13,6 +13,6 @@
 - [DONE] symptr map tabanli pointer call kapanisi (invoke stub id/conv/cleanup debug izleme)
 - [DONE] symptr write-through gozlemlenebilirlik kaniti (label/procAddr mapping + write counter)
 - [DONE] x86 native lane probe otomasyonu (`tools/run_ffi_conv3_native_lanes.ps1`) + probe testleri eklendi
-- [NEXT] gercek x86-32 assembly-level cleanup icra kaniti (host blocked: `bin/win32/as.exe` eksik)
-- [NEXT] __uxb_ffi_x86_symptr_N native bellek patchleme (host blocked: `bin/win32/as.exe` eksik)
+- [DONE] gercek x86-32 assembly-level cleanup icra kaniti (`native_cleanup` PASS; win32 target guard `__FB_WIN32__` + `Not __FB_WIN64__`)
+- [DONE] __uxb_ffi_x86_symptr_N native bellek patchleme (`native_symptr_patch` PASS via cmd fallback)
 - [NEXT] STUB-DEBT: CALL(API,...) lane'i bilincli unsupported; ileride API router tasarimi ile ele alinacak

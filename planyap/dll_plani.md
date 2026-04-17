@@ -1,5 +1,33 @@
 Anladım. uXBasic compiler yapısına ve syntax'ına uygun, **gerçekçi ve implemente edilebilir** bir istatistiksel veri yapısı tasarlayacağım. Önce mevcut dokümanları inceleyerek compiler'ın gerçek durumunu ve kabiliyetlerini anlamalıyım.
 
+## 2026-04-16 Plan Senkronu (CALL Familyasi Karar Kilidi)
+
+Bu planda bundan sonra asagidaki siralama uygulanir:
+
+1. `CALL(DLL, ...)` lane'i mevcut policy + resolver + audit cizgisinde ilerler.
+2. `ALIAS yeni = eski` parser/semantic acikligi korunur; runtime garantisi ALIAS hedefi `CALL(DLL, ...)` oldugunda verilir.
+3. DECLARE kirilmasiz model korunur:
+    - tek dosya ic cagri opsiyonel
+    - cok modul ic cagri onerilir
+    - FFI/API icin zorunluya yakin
+4. DIM baslangic degeri hattinda `DIM ... AS TYPE [= expr]` mevcut davranis korunur; koleksiyon/array toplu literal initialization ayri backlog kalemidir.
+5. `CALL(API, ...)` runtime uygulamasi en son madde olarak backlogda kalir.
+
+### En Son Madde Olarak CALL(API, ...) (Future)
+
+Bu lane ancak su kosullar tamamlaninca acilir:
+
+- CALL(DLL) x86/x64 lane'lerinde build+run green gate
+- allowlist + attestation + audit sozlesmesinin stabil kalmasi
+- parser/semantic tarafinda mevcut call ailesi regressionsuz PASS
+
+CALL(API, ...) kabul kriterleri (future):
+
+- parser acceptance: `CALL(API, lib, symbol, sig, [conv], args...)`
+- runtime policy gate: API lane de allowlist/attestation deny kodlarini kullanir
+- API resolver: deterministic error text + fail-fast
+- regression: mevcut `CALL(DLL, ...)` ve `CALL(alias)` testleri kirmadan PASS
+
 Mevcut analizinize göre şu kritik noktalar var:
 
 ## uXBasic Mevcut Durum Analizi

@@ -1,4 +1,4 @@
-#ifdef __FB_32BIT__
+#if defined(__FB_WIN32__) AndAlso Not defined(__FB_WIN64__)
 Dim Shared __uxb_ffi_x86_symptr_1 As Any Ptr
 Dim Shared gSymptrWriteCount As Integer
 
@@ -62,6 +62,6 @@ End Sub
 
 Main32
 #else
-Print "SKIP native x86 symptr patch probe: requires __FB_32BIT__"
+Print "SKIP native x86 symptr patch probe: requires win32 target"
 End 0
 #endif

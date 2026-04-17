@@ -1,0 +1,482 @@
+#include once "../parser/parser.fbs"
+#include once "mir_err_lowering.fbs"
+
+Private Sub ErrBackendCsvAppend(ByRef csvOut As String, ByRef lineText As String)
+    If csvOut <> "" Then csvOut &= Chr(10)
+    csvOut &= lineText
+End Sub
+
+Private Function ErrBackendFieldAt(ByRef rowText As String, ByVal fieldIndex As Integer) As String
+    Dim startPos As Integer
+    Dim commaPos As Integer
+    Dim i As Integer
+
+    If fieldIndex < 0 Then Return ""
+
+    startPos = 1
+    For i = 0 To fieldIndex - 1
+        commaPos = InStr(startPos, rowText, ",")
+        If commaPos = 0 Then Return ""
+        startPos = commaPos + 1
+    Next i
+
+    commaPos = InStr(startPos, rowText, ",")
+    If commaPos = 0 Then Return Mid(rowText, startPos)
+    Return Mid(rowText, startPos, commaPos - startPos)
+End Function
+
+Private Function ErrBackendNextLine(ByRef textIn As String, ByRef cursor As Integer, ByRef lineOut As String) As Integer
+    If cursor > Len(textIn) Then Return 0
+
+    Dim lfPos As Integer
+    lfPos = InStr(cursor, textIn, Chr(10))
+
+    If lfPos = 0 Then
+        lineOut = Mid(textIn, cursor)
+        cursor = Len(textIn) + 1
+    Else
+        lineOut = Mid(textIn, cursor, lfPos - cursor)
+        cursor = lfPos + 1
+    End If
+
+    If Len(lineOut) > 0 Then
+        If Right(lineOut, 1) = Chr(13) Then lineOut = Left(lineOut, Len(lineOut) - 1)
+    End If
+
+    Return 1
+End Function
+
+Private Function ErrBackendTagContains(ByRef tags As String, ByVal idx As Integer) As Integer
+    Dim marker As String
+    marker = "|" & LTrim(Str(idx)) & "|"
+    Return IIf(InStr(tags, marker) > 0, 1, 0)
+End Function
+
+Private Sub ErrBackendTagAdd(ByRef tags As String, ByVal idx As Integer)
+    If ErrBackendTagContains(tags, idx) <> 0 Then Exit Sub
+    tags &= "|" & LTrim(Str(idx)) & "|"
+End Sub
+
+Private Function ErrBackendSourceIdxFromMirRow(ByRef rowText As String) As Integer
+    Dim idxText As String
+    idxText = Trim(ErrBackendFieldAt(rowText, 0))
+    If idxText = "" Then Return -1
+    Return ValInt(idxText)
+End Function
+
+Function ErrBackendEmitStubCsv(ByRef mirCsv As String, ByRef backendCsv As String, ByRef errText As String) As Integer
+    backendCsv = "kind,source_op,target,label,emit_op"
+
+    If Trim(mirCsv) = "" Then
+        errText = "err backend: empty MIR csv"
+        Return 0
+    End If
+
+    Dim catchSourceTags As String
+    catchSourceTags = ""
+
+    Dim scanCursor As Integer
+    scanCursor = 1
+
+    Dim scanLine As String
+    Dim scanLineNo As Integer
+
+    Do While ErrBackendNextLine(mirCsv, scanCursor, scanLine) <> 0
+        scanLineNo += 1
+        If Trim(scanLine) = "" Then Continue Do
+        If scanLineNo = 1 Then Continue Do
+
+        Dim scanKind As String
+        Dim scanOp As String
+        scanKind = UCase(Trim(ErrBackendFieldAt(scanLine, 2)))
+        scanOp = UCase(Trim(ErrBackendFieldAt(scanLine, 3)))
+
+        If scanKind = "CATCH_PART" And scanOp = "CATCH_LABEL" Then
+            Dim catchSourceIdx As Integer
+            catchSourceIdx = ErrBackendSourceIdxFromMirRow(scanLine)
+            If catchSourceIdx >= 0 Then ErrBackendTagAdd catchSourceTags, catchSourceIdx
+        End If
+    Loop
+
+    Dim cursor As Integer
+    cursor = 1
+
+    Dim lineText As String
+    Dim lineNo As Integer
+
+    Do While ErrBackendNextLine(mirCsv, cursor, lineText) <> 0
+        lineNo += 1
+        If Trim(lineText) = "" Then Continue Do
+        If lineNo = 1 Then Continue Do
+
+        Dim kindText As String
+        Dim opText As String
+        Dim targetText As String
+        Dim sourceIdx As Integer
+        kindText = UCase(Trim(ErrBackendFieldAt(lineText, 2)))
+        opText = UCase(Trim(ErrBackendFieldAt(lineText, 3)))
+        targetText = UCase(Trim(ErrBackendFieldAt(lineText, 4)))
+        sourceIdx = ErrBackendSourceIdxFromMirRow(lineText)
+
+        If kindText = "TRY_STMT" And opText = "TRY_BEGIN" Then
+            Dim rowR As String
+            Dim rowRTarget As String
+            If sourceIdx >= 0 And ErrBackendTagContains(catchSourceTags, sourceIdx) <> 0 Then
+                rowRTarget = "ERR_CATCH_" & LTrim(Str(sourceIdx))
+            Else
+                rowRTarget = "ERR_HANDLER_DEFAULT"
+            End If
+            rowR = "TRY,TRY_BEGIN," & rowRTarget & ",ERR_TRY_REGION_" & LTrim(Str(sourceIdx)) & ",REGISTER_HANDLER_REGION"
+            ErrBackendCsvAppend backendCsv, rowR
+        ElseIf kindText = "TRY_STMT" And opText = "TRY_EDGE" Then
+            Dim edgeTarget As String
+            edgeTarget = ""
+
+            Select Case targetText
+            Case "TRY_THROW_TO_CATCH"
+                edgeTarget = "ERR_CATCH_" & LTrim(Str(sourceIdx))
+            Case "TRY_THROW_TO_FINALLY", "TRY_NORMAL_TO_FINALLY", "CATCH_TO_FINALLY"
+                edgeTarget = "ERR_FINALLY_" & LTrim(Str(sourceIdx))
+            Case "TRY_THROW_TO_END"
+                edgeTarget = "ERR_UNHANDLED_TRAP"
+            Case "TRY_NORMAL_TO_END", "CATCH_TO_END", "FINALLY_TO_END"
+                edgeTarget = "ERR_TRY_END_" & LTrim(Str(sourceIdx))
+            End Select
+
+            If edgeTarget <> "" Then
+                Dim rowE As String
+                rowE = "TRY,TRY_EDGE," & edgeTarget & ",ERR_TRY_EDGE_" & targetText & "_" & LTrim(Str(sourceIdx)) & ",JMP_TRAMPOLINE"
+                ErrBackendCsvAppend backendCsv, rowE
+            End If
+        ElseIf kindText = "TRY_STMT" And opText = "TRY_END" Then
+            Dim rowU As String
+            rowU = "TRY,TRY_END,TRY_REGION_END,ERR_TRY_END_" & LTrim(Str(sourceIdx)) & ",UNREGISTER_HANDLER_REGION"
+            ErrBackendCsvAppend backendCsv, rowU
+        ElseIf kindText = "CATCH_PART" And opText = "CATCH_LABEL" Then
+            Dim rowC As String
+            rowC = "TRY,CATCH_LABEL," & targetText & ",ERR_CATCH_" & LTrim(Str(sourceIdx)) & ",LABEL_CATCH_STUB"
+            ErrBackendCsvAppend backendCsv, rowC
+        ElseIf kindText = "FINALLY_PART" And opText = "FINALLY_LABEL" Then
+            Dim rowF As String
+            rowF = "TRY,FINALLY_LABEL," & targetText & ",ERR_FINALLY_" & LTrim(Str(sourceIdx)) & ",LABEL_FINALLY_STUB"
+            ErrBackendCsvAppend backendCsv, rowF
+        End If
+
+        If kindText = "THROW_STMT" And opText = "THROW_EDGE" Then
+            If targetText = "THROW_TO_HANDLER_SCAN" Then
+                Dim row1 As String
+                row1 = "THROW,THROW_EDGE,THROW_TO_HANDLER_SCAN,ERR_HANDLER_SCAN,JMP_HANDLER_SCAN_PLACEHOLDER"
+                ErrBackendCsvAppend backendCsv, row1
+            ElseIf targetText = "THROW_TO_UNHANDLED_TRAP" Then
+                Dim row2 As String
+                row2 = "THROW,THROW_EDGE,THROW_TO_UNHANDLED_TRAP,ERR_UNHANDLED_TRAP,TRAP_EXIT_STUB"
+                ErrBackendCsvAppend backendCsv, row2
+            End If
+        ElseIf kindText = "THROW_STMT" And opText = "THROW_MATERIALIZE" Then
+            Dim rowM As String
+            rowM = "THROW,THROW_MATERIALIZE,ERR_OBJECT,ERR_THROW_MATERIALIZE,BUILD_ERR_OBJECT_STUB"
+            ErrBackendCsvAppend backendCsv, rowM
+            ErrBackendCsvAppend backendCsv, "THROW,THROW_MATERIALIZE,ERR_ABI_LAYOUT,ERR_THROW_LAYOUT,DECLARE_ERR_ABI_LAYOUT"
+            ErrBackendCsvAppend backendCsv, "THROW,THROW_MATERIALIZE,ERR_FIELD_CODE,ERR_THROW_FIELD_CODE,STORE_ERR_CODE_PTR"
+            ErrBackendCsvAppend backendCsv, "THROW,THROW_MATERIALIZE,ERR_FIELD_MESSAGE,ERR_THROW_FIELD_MESSAGE,STORE_ERR_MESSAGE_PTR"
+            ErrBackendCsvAppend backendCsv, "THROW,THROW_MATERIALIZE,ERR_FIELD_DETAIL,ERR_THROW_FIELD_DETAIL,STORE_ERR_DETAIL_PTR"
+        ElseIf kindText = "ASSERT_STMT" And opText = "ASSERT_EDGE" Then
+            If targetText = "ASSERT_FAIL_TO_THROW" Then
+                Dim row3 As String
+                row3 = "ASSERT,ASSERT_EDGE,ASSERT_FAIL_TO_THROW,ASSERT_FAIL,JMP_THROW_PATH"
+                ErrBackendCsvAppend backendCsv, row3
+            ElseIf targetText = "ASSERT_PASS_CONTINUE" Then
+                Dim row4 As String
+                row4 = "ASSERT,ASSERT_EDGE,ASSERT_PASS_CONTINUE,ASSERT_PASS,JMP_CONTINUE"
+                ErrBackendCsvAppend backendCsv, row4
+            End If
+        ElseIf kindText = "ASSERT_STMT" And opText = "ASSERT_POLICY" Then
+            Dim rowP As String
+            rowP = "ASSERT,ASSERT_POLICY,ASSERT_DEBUG_ACTIVE,ASSERT_POLICY,CHECK_ASSERT_POLICY_STUB"
+            ErrBackendCsvAppend backendCsv, rowP
+        End If
+    Loop
+
+    Return 1
+End Function
+
+Function ErrBackendEmitStubAsm(ByRef backendCsv As String, ByRef asmOut As String, ByRef errText As String) As Integer
+    If Trim(backendCsv) = "" Then
+        errText = "err backend: empty hook csv"
+        Return 0
+    End If
+
+    asmOut = "; uXBasic ERR backend stubs" & Chr(10)
+    asmOut &= "bits 64" & Chr(10) & Chr(10)
+
+    Dim catchLabels() As String
+    Dim catchCount As Integer
+
+    Dim scanCursor As Integer
+    scanCursor = 1
+
+    Dim scanLine As String
+    Dim scanLineNo As Integer
+
+    Do While ErrBackendNextLine(backendCsv, scanCursor, scanLine) <> 0
+        scanLineNo += 1
+        If Trim(scanLine) = "" Then Continue Do
+        If scanLineNo = 1 Then Continue Do
+
+        Dim scanLabel As String
+        Dim scanEmit As String
+        scanLabel = UCase(Trim(ErrBackendFieldAt(scanLine, 3)))
+        scanEmit = UCase(Trim(ErrBackendFieldAt(scanLine, 4)))
+
+        If scanEmit = "LABEL_CATCH_STUB" And scanLabel <> "" Then
+            If catchCount = 0 Then
+                ReDim catchLabels(0)
+            Else
+                ReDim Preserve catchLabels(catchCount)
+            End If
+            catchLabels(catchCount) = "__uxb_" & LCase(scanLabel)
+            catchCount += 1
+        End If
+    Loop
+
+    asmOut &= "section .data" & Chr(10)
+    asmOut &= "global __uxb_err_handler_count" & Chr(10)
+    asmOut &= "__uxb_err_handler_count: dq " & LTrim(Str(catchCount)) & Chr(10)
+    asmOut &= "global __uxb_err_handler_capacity" & Chr(10)
+    asmOut &= "__uxb_err_handler_capacity: dq 64" & Chr(10)
+    asmOut &= "global __uxb_err_handler_top" & Chr(10)
+    asmOut &= "__uxb_err_handler_top: dq 0" & Chr(10)
+    asmOut &= "global __uxb_err_handler_index" & Chr(10)
+    asmOut &= "__uxb_err_handler_index: dq 0" & Chr(10)
+    asmOut &= "global __uxb_err_handler_table" & Chr(10)
+    asmOut &= "__uxb_err_handler_table:" & Chr(10)
+    asmOut &= "    times 64 dq __uxb_err_handler_default" & Chr(10)
+    asmOut &= "global __uxb_err_assert_release_mode" & Chr(10)
+    asmOut &= "__uxb_err_assert_release_mode: db 0" & Chr(10) & Chr(10)
+    asmOut &= "global __uxb_err_obj_magic" & Chr(10)
+    asmOut &= "__uxb_err_obj_magic: dd 0" & Chr(10)
+    asmOut &= "global __uxb_err_obj_version" & Chr(10)
+    asmOut &= "__uxb_err_obj_version: dd 1" & Chr(10)
+    asmOut &= "global __uxb_err_obj_code_ptr" & Chr(10)
+    asmOut &= "__uxb_err_obj_code_ptr: dq 0" & Chr(10)
+    asmOut &= "global __uxb_err_obj_message_ptr" & Chr(10)
+    asmOut &= "__uxb_err_obj_message_ptr: dq 0" & Chr(10)
+    asmOut &= "global __uxb_err_obj_detail_ptr" & Chr(10)
+    asmOut &= "__uxb_err_obj_detail_ptr: dq 0" & Chr(10)
+    asmOut &= "global __uxb_err_obj_payload_size" & Chr(10)
+    asmOut &= "__uxb_err_obj_payload_size: dq 32" & Chr(10) & Chr(10)
+    asmOut &= "global __uxb_err_pending_code_ptr" & Chr(10)
+    asmOut &= "__uxb_err_pending_code_ptr: dq 0" & Chr(10)
+    asmOut &= "global __uxb_err_pending_message_ptr" & Chr(10)
+    asmOut &= "__uxb_err_pending_message_ptr: dq 0" & Chr(10)
+    asmOut &= "global __uxb_err_pending_detail_ptr" & Chr(10)
+    asmOut &= "__uxb_err_pending_detail_ptr: dq 0" & Chr(10) & Chr(10)
+    asmOut &= "section .text" & Chr(10)
+
+    Dim cursor As Integer
+    cursor = 1
+
+    Dim lineText As String
+    Dim lineNo As Integer
+
+    Do While ErrBackendNextLine(backendCsv, cursor, lineText) <> 0
+        lineNo += 1
+        If Trim(lineText) = "" Then Continue Do
+        If lineNo = 1 Then Continue Do
+
+        Dim targetText As String
+        Dim labelText As String
+        Dim emitText As String
+        targetText = UCase(Trim(ErrBackendFieldAt(lineText, 2)))
+        labelText = UCase(Trim(ErrBackendFieldAt(lineText, 3)))
+        emitText = UCase(Trim(ErrBackendFieldAt(lineText, 4)))
+
+        If labelText = "" Then Continue Do
+
+        asmOut &= "global __uxb_" & LCase(labelText) & Chr(10)
+        asmOut &= "__uxb_" & LCase(labelText) & ":" & Chr(10)
+        asmOut &= "    ; target=" & targetText & " emit=" & emitText & Chr(10)
+
+        Select Case emitText
+        Case "JMP_HANDLER_SCAN_PLACEHOLDER"
+            asmOut &= "    mov rcx, qword [rel __uxb_err_handler_top]" & Chr(10)
+            asmOut &= "    test rcx, rcx" & Chr(10)
+            asmOut &= "    jz __uxb_err_unhandled_trap" & Chr(10)
+            asmOut &= "    dec rcx" & Chr(10)
+            asmOut &= "    mov qword [rel __uxb_err_handler_top], rcx" & Chr(10)
+            asmOut &= "    mov qword [rel __uxb_err_handler_index], rcx" & Chr(10)
+            asmOut &= "    lea rdx, [rel __uxb_err_handler_table]" & Chr(10)
+            asmOut &= "    mov rbx, qword [rdx + rcx*8]" & Chr(10)
+            asmOut &= "    jmp rbx" & Chr(10)
+        Case "JMP_TRAMPOLINE"
+            If targetText = "" Then
+                asmOut &= "    ret" & Chr(10)
+            Else
+                asmOut &= "    jmp __uxb_" & LCase(targetText) & Chr(10)
+            End If
+        Case "TRAP_EXIT_STUB"
+            asmOut &= "    ud2" & Chr(10)
+        Case "JMP_THROW_PATH"
+            asmOut &= "    jmp __uxb_err_throw_materialize" & Chr(10)
+        Case "JMP_CONTINUE"
+            asmOut &= "    ret" & Chr(10)
+        Case "BUILD_ERR_OBJECT_STUB"
+            asmOut &= "    mov dword [rel __uxb_err_obj_magic], 0x45525230" & Chr(10)
+            asmOut &= "    mov dword [rel __uxb_err_obj_version], 1" & Chr(10)
+            asmOut &= "    mov rax, qword [rel __uxb_err_pending_code_ptr]" & Chr(10)
+            asmOut &= "    mov qword [rel __uxb_err_obj_code_ptr], rax" & Chr(10)
+            asmOut &= "    mov rax, qword [rel __uxb_err_pending_message_ptr]" & Chr(10)
+            asmOut &= "    mov qword [rel __uxb_err_obj_message_ptr], rax" & Chr(10)
+            asmOut &= "    mov rax, qword [rel __uxb_err_pending_detail_ptr]" & Chr(10)
+            asmOut &= "    mov qword [rel __uxb_err_obj_detail_ptr], rax" & Chr(10)
+            asmOut &= "    jmp __uxb_err_handler_scan" & Chr(10)
+        Case "DECLARE_ERR_ABI_LAYOUT"
+            asmOut &= "    mov rax, qword [rel __uxb_err_obj_payload_size]" & Chr(10)
+            asmOut &= "    ret" & Chr(10)
+        Case "STORE_ERR_CODE_PTR"
+            asmOut &= "    mov qword [rel __uxb_err_pending_code_ptr], rax" & Chr(10)
+            asmOut &= "    ret" & Chr(10)
+        Case "STORE_ERR_MESSAGE_PTR"
+            asmOut &= "    mov qword [rel __uxb_err_pending_message_ptr], rax" & Chr(10)
+            asmOut &= "    ret" & Chr(10)
+        Case "STORE_ERR_DETAIL_PTR"
+            asmOut &= "    mov qword [rel __uxb_err_pending_detail_ptr], rax" & Chr(10)
+            asmOut &= "    ret" & Chr(10)
+        Case "CHECK_ASSERT_POLICY_STUB"
+            asmOut &= "    mov al, byte [rel __uxb_err_assert_release_mode]" & Chr(10)
+            asmOut &= "    ret" & Chr(10)
+        Case "LABEL_CATCH_STUB"
+            asmOut &= "    ; catch entry placeholder" & Chr(10)
+            asmOut &= "    jmp __uxb_err_try_end_" & LTrim(Str(ValInt(Right(labelText, Len(labelText) - InStrRev(labelText, "_")))) ) & Chr(10)
+        Case "LABEL_FINALLY_STUB"
+            asmOut &= "    ; finally entry placeholder" & Chr(10)
+            asmOut &= "    ret" & Chr(10)
+        Case "REGISTER_HANDLER_REGION"
+            asmOut &= "    mov rcx, qword [rel __uxb_err_handler_top]" & Chr(10)
+            asmOut &= "    cmp rcx, qword [rel __uxb_err_handler_capacity]" & Chr(10)
+            asmOut &= "    jae __uxb_err_unhandled_trap" & Chr(10)
+            asmOut &= "    lea rdx, [rel __uxb_err_handler_table]" & Chr(10)
+            If targetText = "" Then
+                asmOut &= "    lea rbx, [rel __uxb_err_handler_default]" & Chr(10)
+            Else
+                asmOut &= "    lea rbx, [rel __uxb_" & LCase(targetText) & "]" & Chr(10)
+            End If
+            asmOut &= "    mov qword [rdx + rcx*8], rbx" & Chr(10)
+            asmOut &= "    inc rcx" & Chr(10)
+            asmOut &= "    mov qword [rel __uxb_err_handler_top], rcx" & Chr(10)
+            asmOut &= "    mov qword [rel __uxb_err_handler_index], rcx" & Chr(10)
+            asmOut &= "    ret" & Chr(10)
+        Case "UNREGISTER_HANDLER_REGION"
+            asmOut &= "    mov rcx, qword [rel __uxb_err_handler_top]" & Chr(10)
+            asmOut &= "    test rcx, rcx" & Chr(10)
+            asmOut &= "    jz __uxb_err_handler_default" & Chr(10)
+            asmOut &= "    dec rcx" & Chr(10)
+            asmOut &= "    mov qword [rel __uxb_err_handler_top], rcx" & Chr(10)
+            asmOut &= "    mov qword [rel __uxb_err_handler_index], rcx" & Chr(10)
+            asmOut &= "    ret" & Chr(10)
+        Case Else
+            asmOut &= "    ret" & Chr(10)
+        End Select
+
+        asmOut &= Chr(10)
+    Loop
+
+    If InStr(UCase(asmOut), "__UXB_ERR_UNHANDLED_TRAP:") = 0 Then
+        asmOut &= "global __uxb_err_unhandled_trap" & Chr(10)
+        asmOut &= "__uxb_err_unhandled_trap:" & Chr(10)
+        asmOut &= "    ud2" & Chr(10)
+    End If
+
+    If InStr(UCase(asmOut), "__UXB_ERR_HANDLER_DEFAULT:") = 0 Then
+        asmOut &= "global __uxb_err_handler_default" & Chr(10)
+        asmOut &= "__uxb_err_handler_default:" & Chr(10)
+        asmOut &= "    ret" & Chr(10)
+    End If
+
+    If InStr(UCase(asmOut), "__UXB_ERR_SET_ASSERT_RELEASE_MODE:") = 0 Then
+        asmOut &= "global __uxb_err_set_assert_release_mode" & Chr(10)
+        asmOut &= "__uxb_err_set_assert_release_mode:" & Chr(10)
+        asmOut &= "    mov byte [rel __uxb_err_assert_release_mode], al" & Chr(10)
+        asmOut &= "    ret" & Chr(10)
+    End If
+
+    If InStr(UCase(asmOut), "__UXB_ERR_GET_ASSERT_RELEASE_MODE:") = 0 Then
+        asmOut &= "global __uxb_err_get_assert_release_mode" & Chr(10)
+        asmOut &= "__uxb_err_get_assert_release_mode:" & Chr(10)
+        asmOut &= "    mov al, byte [rel __uxb_err_assert_release_mode]" & Chr(10)
+        asmOut &= "    ret" & Chr(10)
+    End If
+
+    If InStr(UCase(asmOut), "__UXB_ERR_GET_THROW_OBJECT:") = 0 Then
+        asmOut &= "global __uxb_err_get_throw_object" & Chr(10)
+        asmOut &= "__uxb_err_get_throw_object:" & Chr(10)
+        asmOut &= "    lea rax, [rel __uxb_err_obj_magic]" & Chr(10)
+        asmOut &= "    ret" & Chr(10)
+    End If
+
+    If InStr(UCase(asmOut), "__UXB_ERR_GET_THROW_CODE_PTR:") = 0 Then
+        asmOut &= "global __uxb_err_get_throw_code_ptr" & Chr(10)
+        asmOut &= "__uxb_err_get_throw_code_ptr:" & Chr(10)
+        asmOut &= "    mov rax, qword [rel __uxb_err_obj_code_ptr]" & Chr(10)
+        asmOut &= "    ret" & Chr(10)
+    End If
+
+    If InStr(UCase(asmOut), "__UXB_ERR_GET_THROW_MESSAGE_PTR:") = 0 Then
+        asmOut &= "global __uxb_err_get_throw_message_ptr" & Chr(10)
+        asmOut &= "__uxb_err_get_throw_message_ptr:" & Chr(10)
+        asmOut &= "    mov rax, qword [rel __uxb_err_obj_message_ptr]" & Chr(10)
+        asmOut &= "    ret" & Chr(10)
+    End If
+
+    If InStr(UCase(asmOut), "__UXB_ERR_GET_THROW_DETAIL_PTR:") = 0 Then
+        asmOut &= "global __uxb_err_get_throw_detail_ptr" & Chr(10)
+        asmOut &= "__uxb_err_get_throw_detail_ptr:" & Chr(10)
+        asmOut &= "    mov rax, qword [rel __uxb_err_obj_detail_ptr]" & Chr(10)
+        asmOut &= "    ret" & Chr(10)
+    End If
+
+    Return 1
+End Function
+
+Private Function ErrBackendWriteTextFile(ByRef filePath As String, ByRef fileText As String, ByRef errText As String) As Integer
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Output As #f
+    If Err <> 0 Then
+        errText = "err backend: cannot write " & filePath
+        Return 0
+    End If
+
+    Print #f, fileText;
+    Close #f
+    Return 1
+End Function
+
+Function ErrBackendEmitArtifacts(ByRef ps As ParseState, ByRef outputDir As String, ByRef errText As String) As Integer
+    Dim mirCsv As String
+    If MirErrLoweringEmitCsv(ps, mirCsv, errText) = 0 Then Return 0
+
+    Dim hookCsv As String
+    If ErrBackendEmitStubCsv(mirCsv, hookCsv, errText) = 0 Then Return 0
+
+    Dim asmText As String
+    If ErrBackendEmitStubAsm(hookCsv, asmText, errText) = 0 Then Return 0
+
+    MkDir outputDir
+
+    Dim mirPath As String
+    mirPath = outputDir & "\\err_mir_plan.csv"
+
+    Dim hookPath As String
+    hookPath = outputDir & "\\err_backend_hooks.csv"
+
+    Dim asmPath As String
+    asmPath = outputDir & "\\err_backend_stubs.asm"
+
+    If ErrBackendWriteTextFile(mirPath, mirCsv, errText) = 0 Then Return 0
+    If ErrBackendWriteTextFile(hookPath, hookCsv, errText) = 0 Then Return 0
+    If ErrBackendWriteTextFile(asmPath, asmText, errText) = 0 Then Return 0
+
+    Return 1
+End Function

@@ -1,0 +1,126 @@
+Private Sub MirErrCsvAppend(ByRef csvOut As String, ByRef lineText As String)
+    If csvOut <> "" Then csvOut &= Chr(10)
+    csvOut &= lineText
+End Sub
+
+Private Function MirErrChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    Dim i As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function MirErrChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return cnt
+End Function
+
+Private Sub MirErrAppendRow(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef kindText As String, ByRef opText As String, ByRef targetText As String, ByRef csvOut As String)
+    Dim idxText As String
+    Dim lineText As String
+    Dim rowText As String
+
+    idxText = LTrim(Str(nodeIdx))
+    lineText = LTrim(Str(ps.ast.nodes(nodeIdx).lineNo))
+    rowText = idxText & "," & lineText & "," & kindText & "," & opText & "," & targetText
+    MirErrCsvAppend csvOut, rowText
+End Sub
+
+Function MirErrLoweringEmitCsv(ByRef ps As ParseState, ByRef csvOut As String, ByRef errText As String) As Integer
+    csvOut = "idx,line,kind,mir_op,target"
+
+    If ps.ast.count <= 0 Then
+        errText = "mir err lowering: empty AST"
+        Return 0
+    End If
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "TRY_STMT" Then
+            MirErrAppendRow ps, i, "TRY_STMT", "TRY_BEGIN", "", csvOut
+
+            Dim childCount As Integer
+            childCount = MirErrChildCount(ps, i)
+
+            Dim catchNode As Integer
+            Dim finallyNode As Integer
+            Dim c As Integer
+
+            For c = 0 To childCount - 1
+                Dim ch As Integer
+                ch = MirErrChildAt(ps, i, c)
+                If ch = -1 Then Exit For
+
+                Dim ck As String
+                ck = UCase(ps.ast.nodes(ch).kind)
+                If ck = "CATCH_PART" Then
+                    catchNode = ch
+                ElseIf ck = "FINALLY_PART" Then
+                    finallyNode = ch
+                End If
+            Next c
+
+            MirErrAppendRow ps, i, "TRY_STMT", "TRY_EDGE", "TRY_TO_BODY", csvOut
+            If catchNode <> -1 Then
+                MirErrAppendRow ps, i, "TRY_STMT", "TRY_EDGE", "TRY_THROW_TO_CATCH", csvOut
+                MirErrAppendRow ps, i, "CATCH_PART", "CATCH_LABEL", "TRY_CATCH", csvOut
+            ElseIf finallyNode <> -1 Then
+                MirErrAppendRow ps, i, "TRY_STMT", "TRY_EDGE", "TRY_THROW_TO_FINALLY", csvOut
+            Else
+                MirErrAppendRow ps, i, "TRY_STMT", "TRY_EDGE", "TRY_THROW_TO_END", csvOut
+            End If
+
+            If finallyNode <> -1 Then
+                MirErrAppendRow ps, i, "TRY_STMT", "TRY_EDGE", "TRY_NORMAL_TO_FINALLY", csvOut
+                MirErrAppendRow ps, i, "FINALLY_PART", "FINALLY_LABEL", "TRY_FINALLY", csvOut
+
+                If catchNode <> -1 Then
+                    MirErrAppendRow ps, i, "TRY_STMT", "TRY_EDGE", "CATCH_TO_FINALLY", csvOut
+                End If
+
+                MirErrAppendRow ps, i, "TRY_STMT", "TRY_EDGE", "FINALLY_TO_END", csvOut
+            Else
+                MirErrAppendRow ps, i, "TRY_STMT", "TRY_EDGE", "TRY_NORMAL_TO_END", csvOut
+                If catchNode <> -1 Then
+                    MirErrAppendRow ps, i, "TRY_STMT", "TRY_EDGE", "CATCH_TO_END", csvOut
+                End If
+            End If
+
+            MirErrAppendRow ps, i, "TRY_STMT", "TRY_END", "", csvOut
+        ElseIf k = "THROW_STMT" Then
+            MirErrAppendRow ps, i, "THROW_STMT", "THROW", "", csvOut
+            MirErrAppendRow ps, i, "THROW_STMT", "THROW_MATERIALIZE", "ERR_OBJECT", csvOut
+            MirErrAppendRow ps, i, "THROW_STMT", "THROW_EDGE", "THROW_TO_HANDLER_SCAN", csvOut
+            MirErrAppendRow ps, i, "THROW_STMT", "THROW_EDGE", "THROW_TO_UNHANDLED_TRAP", csvOut
+        ElseIf k = "ASSERT_STMT" Then
+            MirErrAppendRow ps, i, "ASSERT_STMT", "ASSERT", "", csvOut
+            MirErrAppendRow ps, i, "ASSERT_STMT", "ASSERT_POLICY", "ASSERT_DEBUG_ACTIVE", csvOut
+            MirErrAppendRow ps, i, "ASSERT_STMT", "ASSERT_EDGE", "ASSERT_PASS_CONTINUE", csvOut
+            MirErrAppendRow ps, i, "ASSERT_STMT", "ASSERT_EDGE", "ASSERT_FAIL_TO_THROW", csvOut
+        End If
+    Next i
+
+    Return 1
+End Function

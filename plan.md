@@ -126,3 +126,26 @@ Bu plan su sekilde otomatik yurur:
 2. Her tur sonunda durum yalnizca YOK/KISMEN/PLAN -> OK donusumu olarak raporlanir.
 3. Her turde en az bir kod imalati + bir test/gate adimi zorunludur.
 4. Bir lane riskli ise diger lane'ler paralel devam eder, ilerleme durmaz.
+
+## 6) 2026-04-16 Karar Kilidi (CALL Familyasi)
+
+Referans: `reports/call_family_destek_politikasi_standardi.md`
+
+Bu tarihten itibaren asagidaki kararlar sabittir:
+
+1. DECLARE kirilmasiz politika ile ilerler:
+- Tek dosya/kucuk ic cagri: opsiyonel.
+- Cok dosya/modul ic cagri: onerilir.
+- Dis cagri FFI/API: zorunluya yakin standart.
+
+2. Dort syntax modeli gecerli tutulur:
+- Basit ic SUB DECLARE
+- Basit ic FUNCTION DECLARE
+- FFI wrapper (DECLARE + ALIAS = CALL(DLL,...))
+- Scope icinde NAMESPACE/MODULE/USING/ALIAS + MAIN/CALL
+
+3. CALL(API, ...) runtime destegi future backlogdur ve en son madde olarak kalir.
+
+4. ALIAS yeni = eski yazimi parser/semantic seviyede acik tutulur; runtime calisma garantisi ALIAS->CALL(DLL, ...) yolunda korunur.
+
+5. DIM baslangic degeri syntaxi (DIM ... AS TYPE [= expr]) mevcut standarttir; koleksiyon/array toplu baslangic literal genisletmeleri Faz R3 backlogunda netlestirilir.
