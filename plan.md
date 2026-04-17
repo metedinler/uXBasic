@@ -19,6 +19,24 @@ Bu repo artik 3 dosyali kanonik modelle isletilir:
 
 Arsiv/ikincil dosyalar (`.plan.md`, `WORK_QUEUE.md`, faz release checklist dosyalari) referans amaclidir; yeni planlama bu dosyalara yazilmaz.
 
+## 1.2) Implementasyon Baslangic Paketi (Audit-Driven)
+
+Bu bolum, "implementasyona basla" talebi icin gerekli somut giris paketini verir.
+
+1. Specific code sections (ilk odak):
+   - `src/parser/parser/parser_stmt_decl_core.fbs`
+   - `src/parser/parser/parser_stmt_decl_scope.fbs`
+   - `src/runtime/memory_exec.fbs`
+   - `src/runtime/exec/exec_stmt_flow.fbs`
+2. Audit raporundan onceliklendirilen ilk gorevler:
+   - `%%DESTOS` ve `%%PLATFORM` satirlari icin parser+semantic kapanisi (`reports/uxbasic_operasyonel_eksiklik_matrisi.md`, PSRT-OK gorev 11)
+   - `%%NOZEROVARS` ve `%%SECSTACK` satirlari icin parser+semantic kapanisi (`reports/uxbasic_operasyonel_eksiklik_matrisi.md`, PSRT-OK gorev 12)
+   - `INLINE` ve `LIST/DICT/SET` satirlarindaki acik hucrelerin kapanisi (`reports/uxbasic_operasyonel_eksiklik_matrisi.md`, PSRT-OK gorev 19)
+3. Ilk dogrulama kontrolleri:
+   - test isimlendirme kontrolu: `tools/validate_test_naming.ps1`
+   - Faz A gate: `tools/run_faz_a_gate.ps1`
+   - Faz B.2 fail-fast: `tools/run_faz_b2_failfast.ps1`
+
 ## 2) Fazlar
 
 Fazlar her turde 5 lane ile paralel ilerler:
