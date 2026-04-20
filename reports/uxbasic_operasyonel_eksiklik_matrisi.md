@@ -513,7 +513,7 @@ Bu bolum, tum uXBasic anahtar kelimelerinin parser/semantic/runtime/codegen izin
 | Deklarasyon | DIM, REDIM, CONST, TYPE, CLASS, SUB/FUNCTION | OK | OK | OK | PLAN | UDT/class kod uretim lane'i acik |
 | I/O | PRINT, INPUT, OPEN/CLOSE/GET/PUT/SEEK | OK | OK | OK | PLAN | Ilk hedef parity, sonra native I/O call lowering |
 | Bellek | PEEK*/POKE*/MEMCOPY*/MEMFILL* | OK | OK | OK | PLAN | Safety guard korunarak backend emit tasarlanacak |
-| FFI | CALL(DLL), IMPORT, INLINE | OK | OK | KISMEN | KISMEN | x64 lane'de runtime invoke kapsami I32 disina genisletildi (U64/F64/PTR/STRPTR/BYREF/BYVAL, 0..4 arg) ve signature smoke eklendi; x86 native lane PASS/PASS raporlu fakat host-bagimli probe SKIP nedeniyle tam kapanis acik |
+| FFI | CALL(DLL), IMPORT, INLINE | OK | OK | KISMEN | KISMEN | x64 lane'de runtime invoke kapsami I32 disina genisletildi (U64/F64/PTR/STRPTR/BYREF/BYVAL, 0..4 arg) ve signature smoke eklendi; x86 native lane PASS/PASS raporlu fakat host-bagimli probe SKIP nedeniyle tam kapanis acik. Bu tur kanit artefaktlari: logs/report.csv, tests/output.log, reports/ffi_conv3_native_lanes_report.md |
 | Hata Yonetimi | TRY/CATCH/FINALLY, THROW, ASSERT, ERROR objesi | OK | OK | OK | KISMEN | Exec ve codegen smoke/parity kanitlariyla PLAN durumundan cikarildi; ERROR kopru nesnesi/codegen derinligi icin kalan adimlar ERR-CG lane'lerinde izleniyor |
 
 Codegen kolon anahtari:

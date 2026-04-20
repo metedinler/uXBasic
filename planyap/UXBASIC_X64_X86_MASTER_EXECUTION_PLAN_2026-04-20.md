@@ -17,10 +17,9 @@ Bu dokuman, tum plan dosyalari + matris + kod gerceginden uretilmis tek uygulama
    - dist/uxbasic-v0.1.999-mini-win32-win64.zip
 
 ### 1.2 Yapilmayanlar (acik)
-1. x64 CALL(DLL) runtime invoke kapsami yalniz I32 + <=4 arg baseline (tam kapsam degil).
-2. x86 native lane host bagimli kanitlar BLOCKED olabilir.
-3. FFI attestation hash/signer extraction tam kapanis degil.
-4. CG/HIR/MIR parity lane'lerinde KISMEN hucreler var.
+1. x86 native lane'de host-bagimli (32-bit probe) proses-duzeyi kapanis hala ortama bagli.
+2. FFI attestation hash/signer extraction tam kapanis degil.
+3. CG/HIR/MIR parity lane'lerinde KISMEN hucreler var.
 
 ### 1.3 Celiski/duzeltme notu
 1. Matristeki bazi satirlar "OK" olsa da codegen derinligi lane bazinda KISMEN.
@@ -66,6 +65,16 @@ x64 ve x86-64 icin calistirilabilir kod ureten derleyiciyi asamali olarak tamaml
 
 ## 6) Sonraki Isler (sirali)
 
-1. tests/run_call_dll_x64_runtime_smoke.bas eklenecek.
-2. x64 invoke icin U64/F64/PTR marshalling genisletmesi.
-3. x86 native lane host-conditional gate raporu standardize edilecek.
+1. x86 native lane host-conditional proses kanitini ortama bagli olmadan tekrar edilebilir hale getirme.
+2. FFI attestation hash/signer extraction lane'ini ENFORCE fail-closed seviyesine tasima.
+3. CG/HIR/MIR parity gate kapsam genisletmesi.
+
+## 7) Bu Tur Kapanis Kaniti (2026-04-20)
+
+1. Bagimsiz gate kirilimi hotfix ile kapatildi:
+   - src/parser/parser/parser_stmt_decl.fbs
+   - tests/run_layout_intrinsics.bas
+2. Faz A gate yeniden kosuldu ve PASS aldi.
+3. Kanit dosyalari uretildi:
+   - logs/report.csv
+   - tests/output.log
