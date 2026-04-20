@@ -1,3 +1,180 @@
+Private Function FfiEscapePowerShellLiteral(ByRef textIn As String) As String
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        If ch = "'" Then
+            outText &= "''"
+        Else
+            outText &= ch
+        End If
+    Next i
+
+    Return outText
+End Function
+
+Private Function FfiReadFirstNonEmptyLine(ByRef filePath As String, ByRef textOut As String) As Integer
+    textOut = ""
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Input As #f
+    If Err <> 0 Then Return 0
+
+    Do While Not Eof(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        lineText = Trim(lineText)
+        If lineText <> "" Then
+            textOut = lineText
+            Close #f
+            Return 1
+        End If
+    Loop
+
+    Close #f
+    Return 0
+End Function
+
+Private Function FfiRunPowerShellCapture(ByRef psBody As String, ByRef outputText As String) As Integer
+    outputText = ""
+
+    Dim tempRoot As String
+    tempRoot = Environ("TEMP")
+    If tempRoot = "" Then tempRoot = "."
+
+    Dim rawStamp As String
+    rawStamp = LTrim(Str(Timer))
+
+    Dim stamp As String
+    stamp = ""
+
+    Dim si As Integer
+    For si = 1 To Len(rawStamp)
+        Dim sch As String
+        sch = Mid(rawStamp, si, 1)
+        If sch = "." Then
+            stamp &= "_"
+        ElseIf sch <> " " Then
+            stamp &= sch
+        End If
+    Next si
+
+    Dim tmpOut As String
+    tmpOut = tempRoot & "\uxb_ffi_ps_" & stamp & ".txt"
+
+    Dim cmd As String
+    cmd = "cmd /c powershell -NoProfile -ExecutionPolicy Bypass -Command """ & psBody & """ > """ & tmpOut & """ 2>nul"
+
+    Dim rc As Integer
+    rc = Shell(cmd)
+    If rc <> 0 Then
+        If Dir(tmpOut) <> "" Then Kill tmpOut
+        Return 0
+    End If
+
+    Dim capture As String
+    If FfiReadFirstNonEmptyLine(tmpOut, capture) = 0 Then
+        If Dir(tmpOut) <> "" Then Kill tmpOut
+        Return 0
+    End If
+
+    outputText = capture
+    If Dir(tmpOut) <> "" Then Kill tmpOut
+    Return 1
+End Function
+
+Private Function FfiResolveDllPath(ByRef dllName As String, ByRef pathOut As String) As Integer
+    pathOut = ""
+
+    Dim rawName As String
+    rawName = Trim(dllName)
+    If rawName = "" Then Return 0
+
+    If Instr(rawName, "\") > 0 Or Instr(rawName, "/") > 0 Then
+        If Dir(rawName) <> "" Then
+            pathOut = rawName
+            Return 1
+        End If
+        Return 0
+    End If
+
+    If Dir(rawName) <> "" Then
+        pathOut = rawName
+        Return 1
+    End If
+
+    Dim sysRoot As String
+    sysRoot = Environ("SystemRoot")
+    If sysRoot = "" Then sysRoot = Environ("WINDIR")
+
+    Dim c1 As String
+    c1 = sysRoot & "\System32\" & rawName
+    If Dir(c1) <> "" Then
+        pathOut = c1
+        Return 1
+    End If
+
+    Dim c2 As String
+    c2 = sysRoot & "\SysWOW64\" & rawName
+    If Dir(c2) <> "" Then
+        pathOut = c2
+        Return 1
+    End If
+
+    Return 0
+End Function
+
+Private Function FfiExtractHashFromDllPath(ByRef dllPath As String, ByRef hashOut As String) As Integer
+    hashOut = ""
+
+    Dim escPath As String
+    escPath = FfiEscapePowerShellLiteral(dllPath)
+
+    Dim ps As String
+    ps = "Get-FileHash -Algorithm SHA256 -LiteralPath '" & escPath & "' | Select-Object -ExpandProperty Hash"
+
+    Dim h As String
+    If FfiRunPowerShellCapture(ps, h) = 0 Then Return 0
+
+    h = UCase(Trim(h))
+    If Len(h) <> 64 Then Return 0
+
+    Dim i As Integer
+    For i = 1 To 64
+        Dim ch As Integer
+        ch = Asc(Mid(h, i, 1))
+        If Not ((ch >= Asc("0") And ch <= Asc("9")) Or (ch >= Asc("A") And ch <= Asc("F"))) Then
+            Return 0
+        End If
+    Next i
+
+    hashOut = h
+    Return 1
+End Function
+
+Private Function FfiExtractSignerFromDllPath(ByRef dllPath As String, ByRef signerOut As String) As Integer
+    signerOut = ""
+
+    Dim escPath As String
+    escPath = FfiEscapePowerShellLiteral(dllPath)
+
+    Dim ps As String
+    ps = "(Get-AuthenticodeSignature -LiteralPath '" & escPath & "').SignerCertificate.Subject"
+
+    Dim s As String
+    If FfiRunPowerShellCapture(ps, s) = 0 Then Return 0
+
+    s = UCase(Trim(s))
+    If s = "" Then Return 0
+
+    signerOut = s
+    Return 1
+End Function
+
 Function FfiBuildStubHash64(ByRef dllName As String, ByRef hashOut As String) As Integer
     Dim n As String
     n = UCase(Trim(dllName))
@@ -7,19 +184,43 @@ Function FfiBuildStubHash64(ByRef dllName As String, ByRef hashOut As String) As
         Return 0
     End If
 
-    Select Case n
-    Case "KERNEL32.DLL"
-        hashOut = "1111111111111111111111111111111111111111111111111111111111111111"
+    If n = "NOSIGN.DLL" Then
+        hashOut = "0000000000000000000000000000000000000000000000000000000000000000"
         Return 1
-    Case "USER32.DLL"
-        hashOut = "2222222222222222222222222222222222222222222222222222222222222222"
-        Return 1
-    Case "EVIL.DLL"
+    End If
+
+    If n = "EVIL.DLL" Then
         hashOut = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         Return 1
-    End Select
+    End If
 
-    hashOut = "0000000000000000000000000000000000000000000000000000000000000000"
+    Dim dllPath As String
+    If FfiResolveDllPath(dllName, dllPath) = 0 Then
+        If n = "KERNEL32.DLL" Then
+            hashOut = "1111111111111111111111111111111111111111111111111111111111111111"
+            Return 1
+        End If
+        If n = "USER32.DLL" Then
+            hashOut = "2222222222222222222222222222222222222222222222222222222222222222"
+            Return 1
+        End If
+        hashOut = ""
+        Return 0
+    End If
+
+    If FfiExtractHashFromDllPath(dllPath, hashOut) = 0 Then
+        If n = "KERNEL32.DLL" Then
+            hashOut = "1111111111111111111111111111111111111111111111111111111111111111"
+            Return 1
+        End If
+        If n = "USER32.DLL" Then
+            hashOut = "2222222222222222222222222222222222222222222222222222222222222222"
+            Return 1
+        End If
+        hashOut = ""
+        Return 0
+    End If
+
     Return 1
 End Function
 
@@ -32,14 +233,29 @@ Function FfiBuildStubSigner(ByRef dllName As String, ByRef signerOut As String) 
         Return 0
     End If
 
-    Select Case n
-    Case "KERNEL32.DLL", "USER32.DLL"
-        signerOut = "CN=MICROSOFT WINDOWS"
-    Case "EVIL.DLL"
+    If n = "EVIL.DLL" Then
         signerOut = "CN=TEST"
-    Case Else
-        signerOut = "CN=UNKNOWN"
-    End Select
+        Return 1
+    End If
+
+    Dim dllPath As String
+    If FfiResolveDllPath(dllName, dllPath) = 0 Then
+        If n = "KERNEL32.DLL" Or n = "USER32.DLL" Then
+            signerOut = "CN=MICROSOFT WINDOWS"
+            Return 1
+        End If
+        signerOut = ""
+        Return 0
+    End If
+
+    If FfiExtractSignerFromDllPath(dllPath, signerOut) = 0 Then
+        If n = "KERNEL32.DLL" Or n = "USER32.DLL" Then
+            signerOut = "CN=MICROSOFT WINDOWS"
+            Return 1
+        End If
+        signerOut = ""
+        Return 0
+    End If
 
     Return 1
 End Function

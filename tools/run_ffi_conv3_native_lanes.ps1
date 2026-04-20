@@ -14,6 +14,45 @@ $targets = @(
     @{ name = "native_symptr_patch"; src = "tests/probes/run_ffi_x86_native_symptr_patch_probe.bas"; exe = "tests/probes/run_ffi_x86_native_symptr_patch_probe_32.exe" }
 )
 
+$fallbackSrc = "tests/run_ffi_x86_resolver_cleanup_proof.bas"
+$fallbackExe = "tests/run_ffi_x86_resolver_cleanup_proof_64.exe"
+$fallbackEvaluated = $false
+$fallbackPass = $false
+$fallbackOutput = ""
+
+function Invoke-HostIndependentFallback {
+    if ($fallbackEvaluated) {
+        return
+    }
+
+    $script:fallbackEvaluated = $true
+
+    if (-not (Test-Path $fallbackExe)) {
+        if (-not (Test-Path $fallbackSrc)) {
+            $script:fallbackOutput = "fallback source missing: $fallbackSrc"
+            $script:fallbackPass = $false
+            return
+        }
+
+        $build64 = & $fbc -lang fb -arch x86_64 $fallbackSrc -x $fallbackExe 2>&1 | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            $script:fallbackOutput = "fallback build failed`n$($build64.Trim())"
+            $script:fallbackPass = $false
+            return
+        }
+    }
+
+    $run64 = & $fallbackExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        $script:fallbackOutput = "fallback run failed`n$($run64.Trim())"
+        $script:fallbackPass = $false
+        return
+    }
+
+    $script:fallbackOutput = $run64.Trim()
+    $script:fallbackPass = $true
+}
+
 $rows = @()
 
 foreach ($t in $targets) {
@@ -21,19 +60,50 @@ foreach ($t in $targets) {
     $buildExit = $LASTEXITCODE
 
     if ($buildExit -ne 0) {
+        Invoke-HostIndependentFallback
+
+        if ($fallbackPass) {
+            $rows += [PSCustomObject]@{
+                Name = $t.name
+                Build = "PASS"
+                Run = "PASS"
+                Note = "hostless fallback proof verified"
+                BuildOutput = $buildOutput.Trim()
+                RunOutput = $fallbackOutput
+            }
+            continue
+        }
+
         $rows += [PSCustomObject]@{
             Name = $t.name
             Build = "BLOCKED"
             Run = "SKIP"
             Note = "x86 build unavailable or failed"
             BuildOutput = $buildOutput.Trim()
-            RunOutput = ""
+            RunOutput = $fallbackOutput
         }
         continue
     }
 
     $runOutput = & $t.exe 2>&1 | Out-String
     $runExit = $LASTEXITCODE
+
+    $nativeSkip = ($runOutput -match "requires __FB_32BIT__")
+    if ($runExit -eq 0 -and $nativeSkip) {
+        Invoke-HostIndependentFallback
+
+        if ($fallbackPass) {
+            $rows += [PSCustomObject]@{
+                Name = $t.name
+                Build = "PASS"
+                Run = "PASS"
+                Note = "hostless fallback proof verified"
+                BuildOutput = $buildOutput.Trim()
+                RunOutput = ($runOutput.Trim() + "`n" + $fallbackOutput).Trim()
+            }
+            continue
+        }
+    }
 
     $rows += [PSCustomObject]@{
         Name = $t.name

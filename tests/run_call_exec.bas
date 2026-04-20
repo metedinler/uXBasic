@@ -98,6 +98,24 @@ Private Function ReadTextFile(ByRef filePath As String, ByRef textOut As String)
     Return 1
 End Function
 
+Private Function ResolveDllAttestation(ByRef dllName As String, ByRef hashOut As String, ByRef signerOut As String, ByRef errOut As String) As Integer
+    errOut = ""
+    hashOut = ""
+    signerOut = ""
+
+    If FfiBuildStubHash64(dllName, hashOut) = 0 Then
+        errOut = "hash extraction failed: " & dllName
+        Return 0
+    End If
+
+    If FfiBuildStubSigner(dllName, signerOut) = 0 Then
+        errOut = "signer extraction failed: " & dllName
+        Return 0
+    End If
+
+    Return 1
+End Function
+
 Private Sub Main()
     Dim ok As Integer
     ok = 1
@@ -224,6 +242,14 @@ Private Sub Main()
         End 1
     End If
 
+    Dim kernelHash As String
+    Dim kernelSigner As String
+    Dim attestErr As String
+    If ResolveDllAttestation("kernel32.dll", kernelHash, kernelSigner, attestErr) = 0 Then
+        Print "FAIL call dll attestation extraction | "; attestErr
+        End 1
+    End If
+
     Dim enforcePolicyPath As String
     enforcePolicyPath = "tests\\tmp_ffi_allowlist_enforce_ok.txt"
     Kill enforcePolicyPath
@@ -233,7 +259,7 @@ Private Sub Main()
     Open enforcePolicyPath For Output As #pfe
     Print #pfe, "# UXB_FFI_ALLOWLIST_V1"
     Print #pfe, "# dll|symbol|signature|sha256|signer"
-    Print #pfe, "kernel32.dll|GetTickCount|I32|1111111111111111111111111111111111111111111111111111111111111111|CN=MICROSOFT WINDOWS"
+    Print #pfe, "kernel32.dll|GetTickCount|I32|" & kernelHash & "|" & kernelSigner
     Close #pfe
 
     ExecSetFfiPolicyPath enforcePolicyPath
@@ -295,7 +321,7 @@ Private Sub Main()
     Open convPolicyPath For Output As #pconv
     Print #pconv, "# UXB_FFI_ALLOWLIST_V1"
     Print #pconv, "# dll|symbol|signature|calling_convention|sha256|signer"
-    Print #pconv, "kernel32.dll|GetTickCount|I32|CDECL|1111111111111111111111111111111111111111111111111111111111111111|CN=MICROSOFT WINDOWS"
+    Print #pconv, "kernel32.dll|GetTickCount|I32|CDECL|" & kernelHash & "|" & kernelSigner
     Close #pconv
 
     ExecSetFfiPolicyPath convPolicyPath

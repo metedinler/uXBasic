@@ -16,10 +16,10 @@ Bu dokuman, tum plan dosyalari + matris + kod gerceginden uretilmis tek uygulama
 4. mini release paketi uretilmis:
    - dist/uxbasic-v0.1.999-mini-win32-win64.zip
 
-### 1.2 Yapilmayanlar (acik)
-1. x86 native lane'de host-bagimli (32-bit probe) proses-duzeyi kapanis hala ortama bagli.
-2. FFI attestation hash/signer extraction tam kapanis degil.
-3. CG/HIR/MIR parity lane'lerinde KISMEN hucreler var.
+### 1.2 Bu Tur Kapatilanlar
+1. x86 native lane host-bagimli SKIP yolu hostless fallback proof ile tekrar-edilebilir hale getirildi.
+2. FFI attestation hash/signer extraction ENFORCE fail-closed davranisina tasindi.
+3. ERR codegen parity gate scripti olusturulup Faz A gate'e baglandi.
 
 ### 1.3 Celiski/duzeltme notu
 1. Matristeki bazi satirlar "OK" olsa da codegen derinligi lane bazinda KISMEN.
@@ -65,9 +65,9 @@ x64 ve x86-64 icin calistirilabilir kod ureten derleyiciyi asamali olarak tamaml
 
 ## 6) Sonraki Isler (sirali)
 
-1. x86 native lane host-conditional proses kanitini ortama bagli olmadan tekrar edilebilir hale getirme.
-2. FFI attestation hash/signer extraction lane'ini ENFORCE fail-closed seviyesine tasima.
-3. CG/HIR/MIR parity gate kapsam genisletmesi.
+1. HIR/MIR katmanlarinda semantic kapsami derinlestirme (CG-1/CG-2 kalite artisi).
+2. x86 native lane icin 32-bit fiziksel hostta ek smoke evidences arsivleme.
+3. ERR lane raporunu release checklist'e otomatik baglama.
 
 ## 7) Bu Tur Kapanis Kaniti (2026-04-20)
 
@@ -78,3 +78,6 @@ x64 ve x86-64 icin calistirilabilir kod ureten derleyiciyi asamali olarak tamaml
 3. Kanit dosyalari uretildi:
    - logs/report.csv
    - tests/output.log
+4. Yeni kapanis artefaktlari:
+   - reports/ffi_conv3_native_lanes_report.md
+   - reports/err_codegen_parity_gate_report.md

@@ -144,6 +144,7 @@ Invoke-Step "Run run_percent_preprocess_control_failfast_64" { cmd /c tests\run_
 Invoke-Step "Run run_inline_x64_backend_64" { cmd /c tests\run_inline_x64_backend_64.exe }
 Invoke-Step "Run run_runtime_intrinsics_64" { cmd /c tests\run_runtime_intrinsics_64.exe }
 Invoke-Step "Run run_diagnostics_log_64" { cmd /c tests\run_diagnostics_log_64.exe }
+Invoke-Step "Run ERR codegen parity gate" { .\tools\run_err_codegen_parity_gate.ps1 }
 
 Write-Host "[DONE] Faz A quality gate passed."
 exit 0
