@@ -379,6 +379,24 @@ Kapanis kriteri:
   - ASSERT emit
   lane'lerinde artefakt + test kaniti.
 
+### 6.7) FFI-CONV-1/3 Checkpoint (2026-04-20)
+
+Tamamlanan adimlar:
+
+1. Win64 runtime invoke yardimcisi `I32` disina genisletildi:
+  - desteklenen imzalar: `U64`, `F64`, `PTR`, `STRPTR`, `BYREF`, `BYVAL` (0..4 arg)
+  - dosya: `src/runtime/exec/exec_eval_support_helpers.fbs`
+2. x64 signature smoke testi eklendi ve gate'e baglandi:
+  - `tests/run_call_dll_x64_signature_runtime_smoke.bas`
+  - `tools/run_faz_a_gate.ps1` build+run adimlari guncellendi.
+3. x86 native lane raporu tekrar dogrulandi:
+  - `tools/run_ffi_conv3_native_lanes.ps1`
+  - `reports/ffi_conv3_native_lanes_report.md` icinde `native_cleanup` ve `native_symptr_patch` satirlari `PASS | PASS`.
+
+Durust not:
+
+1. Mevcut hostta native probe ciktilari 32-bit gereksinim nedeniyle `SKIP` donmektedir; bu nedenle FFI-CONV-3 lane'i matris tarafinda host-bagimli kapanis notu ile `KISMEN` tutulur.
+
 2026-04-18 checkpoint (dogrulanmis durum):
 
 1. ERR exec lane dogrulandi:
@@ -395,6 +413,18 @@ Kapanis kriteri:
 4. Plan karari:
   - ERR lane bu checkpoint itibariyla PLAN durumundan cikmistir.
   - Kalan isler, tam unwind/emit derinligi ve ERROR kopru nesnesi kapsam genisletmesi olarak ERR-CG alt lane'lerinde izlenecektir.
+
+2026-04-20 x64 runtime invoke checkpoint:
+
+1. CALL(DLL) x64 runtime invoke baseline'i eklendi:
+  - Dosya: src/runtime/exec/exec_eval_support_helpers.fbs
+  - Fonksiyon: ExecTryInvokeResolvedX64I32(...)
+  - Kapsam: I32 imza, 0..4 arguman, LoadLibraryA/GetProcAddress + function pointer invoke
+2. Core dispatch entegrasyonu yapildi:
+  - Dosya: src/runtime/exec/exec_eval_builtin_categories.fbs
+  - x64 ABI yolunda invoke denemesi eklendi; ENFORCE modunda fail-closed, REPORT_ONLY modunda warning+no-op davranisi korundu.
+3. Not:
+  - Bu adim full FFI kapanisi degildir; U64/F64/PTR/STRPTR ve x86 native lane tamamlama adimlari acik backlog'dadir.
 
 ## 7) Risk ve Koruma
 

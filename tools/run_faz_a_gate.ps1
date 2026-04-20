@@ -41,6 +41,8 @@ if (-not $SkipBuild) {
     Invoke-Step "Build run_file_io_exec_ast_64" { cmd /c build_64.bat tests\run_file_io_exec_ast.bas }
     Invoke-Step "Build run_file_io_exec_ast_negative_64" { cmd /c build_64.bat tests\run_file_io_exec_ast_negative.bas }
     Invoke-Step "Build run_call_exec_64" { cmd /c build_64.bat tests\run_call_exec.bas }
+    Invoke-Step "Build run_call_dll_x64_runtime_smoke_64" { cmd /c build_64.bat tests\run_call_dll_x64_runtime_smoke.bas }
+    Invoke-Step "Build run_call_dll_x64_signature_runtime_smoke_64" { cmd /c build_64.bat tests\run_call_dll_x64_signature_runtime_smoke.bas }
     Invoke-Step "Build run_call_user_exec_ast_64" { cmd /c build_64.bat tests\run_call_user_exec_ast.bas }
     Invoke-Step "Build run_decl_directive_exec_ast_64" { cmd /c build_64.bat tests\run_decl_directive_exec_ast.bas }
     Invoke-Step "Build run_memory_vm_64" { cmd /c build_64.bat tests\run_memory_vm.bas }
@@ -94,6 +96,8 @@ Invoke-Step "Run run_file_io_runtime_64" { cmd /c tests\run_file_io_runtime_64.e
 Invoke-Step "Run run_file_io_exec_ast_64" { cmd /c tests\run_file_io_exec_ast_64.exe }
 Invoke-Step "Run run_file_io_exec_ast_negative_64" { cmd /c tests\run_file_io_exec_ast_negative_64.exe }
 Invoke-Step "Run run_call_exec_64" { cmd /c tests\run_call_exec_64.exe }
+Invoke-Step "Run run_call_dll_x64_runtime_smoke_64 (x64 runtime invoke baseline)" { cmd /c tests\run_call_dll_x64_runtime_smoke_64.exe }
+Invoke-Step "Run run_call_dll_x64_signature_runtime_smoke_64 (x64 signature invoke coverage)" { cmd /c tests\run_call_dll_x64_signature_runtime_smoke_64.exe }
 Invoke-Step "Run run_call_user_exec_ast_64 (user call + dotted dispatch)" { cmd /c tests\run_call_user_exec_ast_64.exe }
 Invoke-Step "Run run_decl_directive_exec_ast_64" { cmd /c tests\run_decl_directive_exec_ast_64.exe }
 Invoke-Step "Run run_memory_vm_64" { cmd /c tests\run_memory_vm_64.exe }

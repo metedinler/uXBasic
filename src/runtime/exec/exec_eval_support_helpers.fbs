@@ -569,6 +569,23 @@ Type ExecFnArg1StdcallI32 As Function Stdcall (ByVal a0 As Integer) As Integer
 Type ExecFnArg2StdcallI32 As Function Stdcall (ByVal a0 As Integer, ByVal a1 As Integer) As Integer
 Type ExecFnArg3StdcallI32 As Function Stdcall (ByVal a0 As Integer, ByVal a1 As Integer, ByVal a2 As Integer) As Integer
 Type ExecFnArg4StdcallI32 As Function Stdcall (ByVal a0 As Integer, ByVal a1 As Integer, ByVal a2 As Integer, ByVal a3 As Integer) As Integer
+Type ExecFnNoArgCdeclU64 As Function Cdecl () As ULongInt
+Type ExecFnArg1CdeclU64 As Function Cdecl (ByVal a0 As ULongInt) As ULongInt
+Type ExecFnArg2CdeclU64 As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt) As ULongInt
+Type ExecFnArg3CdeclU64 As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As ULongInt) As ULongInt
+Type ExecFnArg4CdeclU64 As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As ULongInt, ByVal a3 As ULongInt) As ULongInt
+Type ExecFnNoArgCdeclF64 As Function Cdecl () As Double
+Type ExecFnArg1CdeclF64 As Function Cdecl (ByVal a0 As Double) As Double
+Type ExecFnArg2CdeclF64 As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double) As Double
+Type ExecFnArg3CdeclF64 As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As Double) As Double
+Type ExecFnArg4CdeclF64 As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As Double, ByVal a3 As Double) As Double
+Type ExecFnNoArgCdeclStrPtr As Function Cdecl () As Integer
+Type ExecFnArg1CdeclStrPtr As Function Cdecl (ByVal a0 As ZString Ptr) As Integer
+Type ExecFnArg2CdeclStrPtr As Function Cdecl (ByVal a0 As ZString Ptr, ByVal a1 As ZString Ptr) As Integer
+Type ExecFnArg3CdeclStrPtr As Function Cdecl (ByVal a0 As ZString Ptr, ByVal a1 As ZString Ptr, ByVal a2 As ZString Ptr) As Integer
+Type ExecFnArg4CdeclStrPtr As Function Cdecl (ByVal a0 As ZString Ptr, ByVal a1 As ZString Ptr, ByVal a2 As ZString Ptr, ByVal a3 As ZString Ptr) As Integer
+Declare Function ExecGetActiveFfiAbiName() As String
+Declare Function ExecClampI32(ByVal valueIn As Double) As Integer
 
 Private Sub ExecFfiX86ResolverAppend(ByVal stubId As Integer, ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer, ByVal argStackBytes As Integer, ByRef cleanupType As String, ByRef symptrLabel As String)
     If gFfiX86ResolverEntryCount = 0 Then
@@ -848,6 +865,195 @@ Private Function ExecTryInvokeResolvedX86I32(ByRef ps As ParseState, ByRef es As
     Else
         gFfiX86CalleeCleanupBytes += gFfiX86ResolverEntries(resolverIdx).argStackBytes
     End If
+
+    invokedOut = 1
+    Return 1
+End Function
+
+Private Function ExecTryInvokeResolvedX64I32(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByVal argStartPos As Integer, ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer, ByRef valueOut As Integer, ByRef invokedOut As Integer, ByRef errText As String) As Integer
+    invokedOut = 0
+    valueOut = 0
+
+    If ExecGetActiveFfiAbiName() <> "WIN64-MSABI" Then Return 1
+
+    Dim sig As String
+    sig = UCase(Trim(signatureText))
+    If sig <> "I32" And sig <> "U64" And sig <> "F64" And sig <> "PTR" And sig <> "STRPTR" And sig <> "BYREF" And sig <> "BYVAL" Then Return 1
+    If argCount < 0 Or argCount > 4 Then Return 1
+
+    Dim hModule As Any Ptr
+    hModule = LoadLibraryA(StrPtr(dllName))
+    If hModule = 0 Then
+        errText = "exec: CALL(DLL) x64 LoadLibrary failed (" & LTrim(Str(UXB_FFI_ERR_DLL_LOAD_FAILED)) & ")"
+        Return 0
+    End If
+
+    Dim procAddr As Any Ptr
+    procAddr = GetProcAddress(hModule, StrPtr(symbolName))
+    If procAddr = 0 Then
+        errText = "exec: CALL(DLL) x64 GetProcAddress failed (" & LTrim(Str(UXB_FFI_ERR_SYMBOL_RESOLVE_FAILED)) & ")"
+        Return 0
+    End If
+
+    Dim argValuesI32(0 To 3) As Integer
+    Dim argValuesU64(0 To 3) As ULongInt
+    Dim argValuesF64(0 To 3) As Double
+    Dim argValuesStr(0 To 3) As String
+    Dim argValuesStrPtr(0 To 3) As ZString Ptr
+    Dim ai As Integer
+    For ai = 0 To argCount - 1
+        Dim argNode As Integer
+        argNode = ExecChildAt(ps, callNodeIdx, argStartPos + ai)
+        If argNode = -1 Then
+            errText = "exec: x64 invoke argument missing"
+            Return 0
+        End If
+
+        Select Case sig
+        Case "I32"
+            argValuesI32(ai) = ExecEvalNode(ps, es, argNode, errText)
+            If errText <> "" Then
+                errText = "exec: x64 invoke argument eval failed: " & errText
+                Return 0
+            End If
+
+        Case "F64"
+            Dim argValue As ExecValue
+            If ExecEvalExpression(ps, argNode, es, argValue, errText) = 0 Then
+                errText = "exec: x64 invoke argument eval failed: " & errText
+                Return 0
+            End If
+            If argValue.valueType = "STRING" Then
+                errText = "exec: CALL(DLL) F64 requires numeric argument"
+                Return 0
+            End If
+            If argValue.valueType = "DOUBLE" Then
+                argValuesF64(ai) = argValue.floatValue
+            Else
+                argValuesF64(ai) = CDbl(argValue.intValue)
+            End If
+
+        Case "STRPTR"
+            If ExecEvalNodeAsText(ps, es, argNode, argValuesStr(ai), errText) = 0 Then
+                errText = "exec: x64 invoke argument eval failed: " & errText
+                Return 0
+            End If
+            argValuesStrPtr(ai) = StrPtr(argValuesStr(ai))
+
+        Case Else
+            argValuesU64(ai) = CULngInt(ExecEvalNode(ps, es, argNode, errText))
+            If errText <> "" Then
+                errText = "exec: x64 invoke argument eval failed: " & errText
+                Return 0
+            End If
+        End Select
+    Next ai
+
+    Select Case sig
+    Case "I32"
+        Select Case argCount
+        Case 0
+            Dim fnI320 As ExecFnNoArgCdeclI32
+            fnI320 = procAddr
+            valueOut = fnI320()
+        Case 1
+            Dim fnI321 As ExecFnArg1CdeclI32
+            fnI321 = procAddr
+            valueOut = fnI321(argValuesI32(0))
+        Case 2
+            Dim fnI322 As ExecFnArg2CdeclI32
+            fnI322 = procAddr
+            valueOut = fnI322(argValuesI32(0), argValuesI32(1))
+        Case 3
+            Dim fnI323 As ExecFnArg3CdeclI32
+            fnI323 = procAddr
+            valueOut = fnI323(argValuesI32(0), argValuesI32(1), argValuesI32(2))
+        Case 4
+            Dim fnI324 As ExecFnArg4CdeclI32
+            fnI324 = procAddr
+            valueOut = fnI324(argValuesI32(0), argValuesI32(1), argValuesI32(2), argValuesI32(3))
+        End Select
+
+    Case "U64", "PTR", "BYREF", "BYVAL"
+        Dim rvU64 As ULongInt
+        Select Case argCount
+        Case 0
+            Dim fnU640 As ExecFnNoArgCdeclU64
+            fnU640 = procAddr
+            rvU64 = fnU640()
+        Case 1
+            Dim fnU641 As ExecFnArg1CdeclU64
+            fnU641 = procAddr
+            rvU64 = fnU641(argValuesU64(0))
+        Case 2
+            Dim fnU642 As ExecFnArg2CdeclU64
+            fnU642 = procAddr
+            rvU64 = fnU642(argValuesU64(0), argValuesU64(1))
+        Case 3
+            Dim fnU643 As ExecFnArg3CdeclU64
+            fnU643 = procAddr
+            rvU64 = fnU643(argValuesU64(0), argValuesU64(1), argValuesU64(2))
+        Case 4
+            Dim fnU644 As ExecFnArg4CdeclU64
+            fnU644 = procAddr
+            rvU64 = fnU644(argValuesU64(0), argValuesU64(1), argValuesU64(2), argValuesU64(3))
+        End Select
+        If rvU64 > CULngInt(2147483647) Then
+            valueOut = 2147483647
+        Else
+            valueOut = CInt(rvU64)
+        End If
+
+    Case "F64"
+        Dim rvF64 As Double
+        Select Case argCount
+        Case 0
+            Dim fnF640 As ExecFnNoArgCdeclF64
+            fnF640 = procAddr
+            rvF64 = fnF640()
+        Case 1
+            Dim fnF641 As ExecFnArg1CdeclF64
+            fnF641 = procAddr
+            rvF64 = fnF641(argValuesF64(0))
+        Case 2
+            Dim fnF642 As ExecFnArg2CdeclF64
+            fnF642 = procAddr
+            rvF64 = fnF642(argValuesF64(0), argValuesF64(1))
+        Case 3
+            Dim fnF643 As ExecFnArg3CdeclF64
+            fnF643 = procAddr
+            rvF64 = fnF643(argValuesF64(0), argValuesF64(1), argValuesF64(2))
+        Case 4
+            Dim fnF644 As ExecFnArg4CdeclF64
+            fnF644 = procAddr
+            rvF64 = fnF644(argValuesF64(0), argValuesF64(1), argValuesF64(2), argValuesF64(3))
+        End Select
+        valueOut = ExecClampI32(rvF64)
+
+    Case "STRPTR"
+        Select Case argCount
+        Case 0
+            Dim fnS0 As ExecFnNoArgCdeclStrPtr
+            fnS0 = procAddr
+            valueOut = fnS0()
+        Case 1
+            Dim fnS1 As ExecFnArg1CdeclStrPtr
+            fnS1 = procAddr
+            valueOut = fnS1(argValuesStrPtr(0))
+        Case 2
+            Dim fnS2 As ExecFnArg2CdeclStrPtr
+            fnS2 = procAddr
+            valueOut = fnS2(argValuesStrPtr(0), argValuesStrPtr(1))
+        Case 3
+            Dim fnS3 As ExecFnArg3CdeclStrPtr
+            fnS3 = procAddr
+            valueOut = fnS3(argValuesStrPtr(0), argValuesStrPtr(1), argValuesStrPtr(2))
+        Case 4
+            Dim fnS4 As ExecFnArg4CdeclStrPtr
+            fnS4 = procAddr
+            valueOut = fnS4(argValuesStrPtr(0), argValuesStrPtr(1), argValuesStrPtr(2), argValuesStrPtr(3))
+        End Select
+    End Select
 
     invokedOut = 1
     Return 1
