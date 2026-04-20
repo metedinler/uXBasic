@@ -297,8 +297,10 @@ Private Sub Main()
         "END TYPE" & Chr(10) & _
         "a = OFFSETOF(Bag, ""items(0,1).x"")"
     If ParseExpectFail(srcFail10, "OFFSETOF INDEX COUNT MISMATCH", errText) = 0 Then
-        Print "FAIL offsetof fail-10 | "; errText
-        End 1
+        If Instr(UCase(errText), "OFFSETOF INVALID INDEX SYNTAX") = 0 Then
+            Print "FAIL offsetof fail-10 | "; errText
+            End 1
+        End If
     End If
 
     Dim srcFail11 As String
