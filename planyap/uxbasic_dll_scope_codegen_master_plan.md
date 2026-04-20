@@ -379,6 +379,23 @@ Kapanis kriteri:
   - ASSERT emit
   lane'lerinde artefakt + test kaniti.
 
+2026-04-18 checkpoint (dogrulanmis durum):
+
+1. ERR exec lane dogrulandi:
+  - tests/run_err_try_throw_assert_exec_64.exe -> PASS
+  - tests/run_err_semantic_pass_64.exe -> PASS
+2. ERR codegen lane smoke/parity dogrulandi:
+  - tests/run_err_mir_lowering_64.exe -> PASS
+  - tests/run_err_backend_hooks_64.exe -> PASS
+  - tests/run_err_backend_artifacts_64.exe -> PASS
+  - tests/run_err_codegen_parity_gate_64.exe -> PASS
+3. Operasyonel sertlestirme tamamlandi:
+  - .vscode/tasks.json icinde ERR task'lari kaynak .bas yoksa mevcut _64.exe fallback modeliyle calisacak sekilde guclendirildi.
+  - Parity gate task'i script yoksa exe fallback ile deterministiklestirildi.
+4. Plan karari:
+  - ERR lane bu checkpoint itibariyla PLAN durumundan cikmistir.
+  - Kalan isler, tam unwind/emit derinligi ve ERROR kopru nesnesi kapsam genisletmesi olarak ERR-CG alt lane'lerinde izlenecektir.
+
 ## 7) Risk ve Koruma
 
 Riskler:

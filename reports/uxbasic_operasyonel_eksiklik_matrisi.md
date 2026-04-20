@@ -77,9 +77,9 @@ Sikilastirma hedefi:
 | RETURN | OK | OK | OK | OK | OK | GOSUB icinde donus + dengesiz RETURN fail-fast ve jump-context guard testleri ile semantik kapanis dogrulandi | R2 |
 | CALL | OK | OK | OK | OK | OK | Builtin + user-defined dispatch modeli ve arity fail-fast eklendi | R2 |
 | END | OK | OK | OK | OK | OK | END_STMT semantigi (dongu/if/select + user-call context propagation) ve parse fail-fast (argumanli END) dedicated test/gate kaniti ile kapatildi | R2.M |
-| TRY/CATCH/FINALLY/END TRY | OK | PLAN | PLAN | PLAN | PLAN | Structured exception handling lane acilacak. Catch tipi + finally garanti calisma sozlesmesi eklenecek. | ERR-1 |
-| THROW | OK | PLAN | PLAN | PLAN | PLAN | Runtime kontrolu: THROW code[, message[, detail]]. Parser/semantic arity/type guard ve stack unwinding lane'i acik. | ERR-1 |
-| ASSERT | OK | PLAN | PLAN | PLAN | PLAN | ASSERT expr[, message] fail-fast + test mode davranisi tanimlandi, kod uygulamasi acik. | ERR-2 |
+| TRY/CATCH/FINALLY/END TRY | OK | OK | OK | OK | OK | Runtime path ve exec testi dogrulandi (tests/run_err_try_throw_assert_exec_64.exe PASS). Task fallback modeli ile kaynak .bas yoksa mevcut exe calistirma deterministiklestirildi. | ERR-1 |
+| THROW | OK | OK | OK | OK | OK | THROW runtime/semantic davranisi exec testinde PASS (tests/run_err_try_throw_assert_exec_64.exe). | ERR-1 |
+| ASSERT | OK | OK | OK | OK | OK | ASSERT fail-fast yolu ve test davranisi exec testinde PASS (tests/run_err_try_throw_assert_exec_64.exe). | ERR-2 |
 | DECLARE SUB/FUNCTION | OK | OK | OK | OK | OK | Runtime resolver declare/def ile uyumlu; ileri signature semantigi acik | R2 |
 | SUB / FUNCTION | OK | OK | OK | OK | OK | Parametre tekrar ve FUNCTION return-type semantik kontrati semantic pass ile zorunlu (tests/run_call_user_exec_ast.bas; tests/run_w1_semantic_pass.bas) | R2 |
 | CONST | OK | OK | OK | OK | OK | CONST isim/RHS semantik kontrati semantic pass ile fail-fast (tests/run_dim_const_test.bas; tests/run_w1_semantic_pass.bas) | R3 |
@@ -499,9 +499,9 @@ Bu bolum istatistik fonksiyon isimlerinden bagimsiz olarak CALL(DLL)/IMPORT ve s
 | CALL [register] / stack arg passing | OK | OK | OK | KISMEN | OK | x64 FFI stub emitter `call qword [rel __uxb_ffi_symptr_N]` + RCX/RDX/R8/R9 ve `[rsp+32+]` stack slot yazimini uretiyor. Gercek symbol resolution baglama adimi ayrik lane'de ilerler. | CG-3 |
 | Win64 ABI (shadow space + alignment) | OK | OK | OK | KISMEN | OK | Reserve formulu `40 + stackArg*8 + odd pad` ile call-oncesi 16-byte hizalama ve 32-byte shadow space korunuyor; test ve smoke interop kaniti mevcut. | CG-3 |
 | Regression gate (interp vs compiled parity) | OK | KISMEN | KISMEN | KISMEN | KISMEN | Cift-mod parity test paketi acik | CG-QA |
-| TRY/CATCH unwinding emit (label table + finally trampoline) | OK | PLAN | PLAN | PLAN | PLAN | MIR exception edge ve x64/x86 backend unwind plan cikisi henuz acik. | ERR-CG-1 |
-| THROW emit (error object materialization + jump to handler) | OK | PLAN | PLAN | PLAN | PLAN | THROW statement icin MIR lowering ve handler dispatch emitter lane'i acik. | ERR-CG-2 |
-| ASSERT emit (debug/release policy) | OK | PLAN | PLAN | PLAN | PLAN | ASSERT'in release mod no-op veya guarded-trap stratejisi netlestirilecek. | ERR-CG-3 |
+| TRY/CATCH unwinding emit (label table + finally trampoline) | OK | KISMEN | KISMEN | KISMEN | OK | MIR lowering/backend hook/parity hat testleri PASS; tam unwind semantigi icin ileri lane korunuyor (run_err_mir_lowering_64.exe, run_err_backend_hooks_64.exe, run_err_codegen_parity_gate_64.exe). | ERR-CG-1 |
+| THROW emit (error object materialization + jump to handler) | OK | KISMEN | KISMEN | KISMEN | OK | THROW MIR/backend emit yolu mevcut test kosucularinda PASS; tam codegen kapanisi icin parity kapsami genisletilecek. | ERR-CG-2 |
+| ASSERT emit (debug/release policy) | OK | KISMEN | KISMEN | KISMEN | OK | ASSERT codegen lane smoke/parity dogrulamasi PASS; release politikasi detaylandirma lane'i acik. | ERR-CG-3 |
 
 ## 14) Anahtar Kelime -> Sistem Codegen Takip Matrisi
 
@@ -514,7 +514,7 @@ Bu bolum, tum uXBasic anahtar kelimelerinin parser/semantic/runtime/codegen izin
 | I/O | PRINT, INPUT, OPEN/CLOSE/GET/PUT/SEEK | OK | OK | OK | PLAN | Ilk hedef parity, sonra native I/O call lowering |
 | Bellek | PEEK*/POKE*/MEMCOPY*/MEMFILL* | OK | OK | OK | PLAN | Safety guard korunarak backend emit tasarlanacak |
 | FFI | CALL(DLL), IMPORT, INLINE | OK | OK | KISMEN | KISMEN | x64 lane KISMEN/OK, x86 lane baslatildi |
-| Hata Yonetimi | TRY/CATCH/FINALLY, THROW, ASSERT, ERROR objesi | PLAN | PLAN | PLAN | PLAN | Bu turde plan ve dokuman acildi |
+| Hata Yonetimi | TRY/CATCH/FINALLY, THROW, ASSERT, ERROR objesi | OK | OK | OK | KISMEN | Exec ve codegen smoke/parity kanitlariyla PLAN durumundan cikarildi; ERROR kopru nesnesi/codegen derinligi icin kalan adimlar ERR-CG lane'lerinde izleniyor |
 
 Codegen kolon anahtari:
 - OK: Uretim + test kapanmis

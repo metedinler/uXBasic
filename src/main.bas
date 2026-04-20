@@ -1,5 +1,7 @@
 #include "build/main_frontend_include_bundle.fbs"
 #include "build/main_runtime_include_bundle.fbs"
+#include "codegen/x64/ffi_call_backend.fbs"
+#include "codegen/x86/ffi_call_backend.fbs"
 
 Private Function HasArg(ByRef keyText As String) As Integer
     Dim i As Integer

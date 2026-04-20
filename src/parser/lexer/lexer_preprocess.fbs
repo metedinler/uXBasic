@@ -326,6 +326,132 @@ Private Sub LexerHandleInclude(ByRef restText As String, ByRef sourcePath As Str
     End If
 End Sub
 
+Private Function LexerProcessDirective(ByRef head As String, ByRef restText As String, ByRef sourcePath As String, ByVal depth As Integer, ByVal lineNo As Integer, ByRef hostPlatform As String, macros() As LexerMacro, ByRef macroCount As Integer, stackParent() As Integer, stackCond() As Integer, stackElseSeen() As Integer, ByRef stackCount As Integer, ByRef active As Integer, ByRef outputText As String) As Integer
+    Select Case head
+    Case "DEFINE"
+        If active <> 0 Then
+            LexerHandleDefine restText, macros(), macroCount
+        End If
+
+    Case "UNDEF"
+        If active <> 0 Then
+            LexerUnsetMacro restText, macros(), macroCount
+        End If
+
+    Case "IF"
+        Dim parentActive As Integer
+        parentActive = active
+
+        Dim condValue As Integer
+        condValue = 0
+        If parentActive <> 0 Then
+            condValue = LexerEvalDirectiveCond(restText, macros(), macroCount)
+        End If
+
+        LexerPushCondFrame parentActive, condValue, stackParent(), stackCond(), stackElseSeen(), stackCount
+        active = IIf(parentActive <> 0 And condValue <> 0, 1, 0)
+
+    Case "IFC"
+        Dim parentActiveIfc As Integer
+        parentActiveIfc = active
+
+        Dim ifcErr As String
+        Dim ifcCond As Integer
+        ifcCond = 0
+        If parentActiveIfc <> 0 Then
+            ifcCond = LexerEvalDirectiveIfc(restText, macros(), macroCount, ifcErr)
+            If ifcCond < 0 Then
+                LexerPreprocessFail sourcePath, lineNo, ifcErr
+                Return 0
+            End If
+        End If
+
+        LexerPushCondFrame parentActiveIfc, ifcCond, stackParent(), stackCond(), stackElseSeen(), stackCount
+        active = IIf(parentActiveIfc <> 0 And ifcCond <> 0, 1, 0)
+
+    Case "ELSE"
+        If stackCount > 0 Then
+            Dim top As Integer
+            top = stackCount - 1
+
+            If stackElseSeen(top) = 0 Then
+                stackElseSeen(top) = 1
+                active = IIf(stackParent(top) <> 0 And stackCond(top) = 0, 1, 0)
+            Else
+                active = 0
+            End If
+        End If
+
+    Case "ENDIF"
+        LexerPopCondFrame stackParent(), stackCond(), stackElseSeen(), stackCount, active
+
+    Case "INCLUDE"
+        If active <> 0 Then
+            LexerHandleInclude restText, sourcePath, depth, outputText
+        End If
+
+    Case "ENDCOMP"
+        If active <> 0 Then
+            gPreprocessStop = 1
+            Return 0
+        End If
+
+    Case "ERRORENDCOMP"
+        If active <> 0 Then
+            Dim msg As String
+            msg = Trim(restText)
+            If msg = "" Then
+                msg = "%%ERRORENDCOMP"
+            Else
+                msg = "%%ERRORENDCOMP " & msg
+            End If
+            LexerPreprocessFail sourcePath, lineNo, msg
+            Return 0
+        End If
+
+    Case "PLATFORM"
+        If active <> 0 Then
+            Dim requestedPlatform As String
+            requestedPlatform = UCase(Trim(restText))
+            If requestedPlatform <> "" And requestedPlatform <> hostPlatform Then
+                LexerPreprocessFail sourcePath, lineNo, "%%PLATFORM mismatch: host=" & hostPlatform & " requested=" & requestedPlatform
+                Return 0
+            End If
+            LexerSetMacro "PLATFORM", hostPlatform, macros(), macroCount
+        End If
+
+    Case "DESTOS"
+        If active <> 0 Then
+            Dim targetOs As String
+            targetOs = UCase(Trim(restText))
+            If targetOs = "" Then targetOs = hostPlatform
+            LexerSetMacro "DESTOS", targetOs, macros(), macroCount
+        End If
+
+    Case "NOZEROVARS"
+        If active <> 0 Then
+            Dim noZeroValue As String
+            If LexerParseOnOff(restText, noZeroValue) = 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "%%NOZEROVARS expects ON/OFF/1/0"
+                Return 0
+            End If
+            LexerSetMacro "NOZEROVARS", noZeroValue, macros(), macroCount
+        End If
+
+    Case "SECSTACK"
+        If active <> 0 Then
+            Dim secStackValue As String
+            If LexerParseOnOff(restText, secStackValue) = 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "%%SECSTACK expects ON/OFF/1/0"
+                Return 0
+            End If
+            LexerSetMacro "SECSTACK", secStackValue, macros(), macroCount
+        End If
+    End Select
+
+    Return 1
+End Function
+
 Private Function LexerPreprocessSourceImpl(ByRef src As String, ByRef sourcePath As String, ByVal depth As Integer) As String
     If depth > 8 Then Return src
 
@@ -386,128 +512,9 @@ Private Function LexerPreprocessSourceImpl(ByRef src As String, ByRef sourcePath
             Dim restText As String
             LexerSplitDirective directive, head, restText
 
-            Select Case head
-            Case "DEFINE"
-                If active <> 0 Then
-                    LexerHandleDefine restText, macros(), macroCount
-                End If
-
-            Case "UNDEF"
-                If active <> 0 Then
-                    LexerUnsetMacro restText, macros(), macroCount
-                End If
-
-            Case "IF"
-                Dim parentActive As Integer
-                parentActive = active
-
-                Dim condValue As Integer
-                condValue = 0
-                If parentActive <> 0 Then
-                    condValue = LexerEvalDirectiveCond(restText, macros(), macroCount)
-                End If
-
-                LexerPushCondFrame parentActive, condValue, stackParent(), stackCond(), stackElseSeen(), stackCount
-
-                active = IIf(parentActive <> 0 And condValue <> 0, 1, 0)
-
-            Case "IFC"
-                Dim parentActiveIfc As Integer
-                parentActiveIfc = active
-
-                Dim ifcErr As String
-                Dim ifcCond As Integer
-                ifcCond = 0
-                If parentActiveIfc <> 0 Then
-                    ifcCond = LexerEvalDirectiveIfc(restText, macros(), macroCount, ifcErr)
-                    If ifcCond < 0 Then
-                        LexerPreprocessFail sourcePath, lineNo, ifcErr
-                        Exit Do
-                    End If
-                End If
-
-                LexerPushCondFrame parentActiveIfc, ifcCond, stackParent(), stackCond(), stackElseSeen(), stackCount
-                active = IIf(parentActiveIfc <> 0 And ifcCond <> 0, 1, 0)
-
-            Case "ELSE"
-                If stackCount > 0 Then
-                    Dim top As Integer
-                    top = stackCount - 1
-
-                    If stackElseSeen(top) = 0 Then
-                        stackElseSeen(top) = 1
-                        active = IIf(stackParent(top) <> 0 And stackCond(top) = 0, 1, 0)
-                    Else
-                        active = 0
-                    End If
-                End If
-
-            Case "ENDIF"
-                LexerPopCondFrame stackParent(), stackCond(), stackElseSeen(), stackCount, active
-
-            Case "INCLUDE"
-                If active <> 0 Then
-                    LexerHandleInclude restText, sourcePath, depth, outputText
-                End If
-
-            Case "ENDCOMP"
-                If active <> 0 Then
-                    gPreprocessStop = 1
-                    Exit Do
-                End If
-
-            Case "ERRORENDCOMP"
-                If active <> 0 Then
-                    Dim msg As String
-                    msg = Trim(restText)
-                    If msg = "" Then
-                        msg = "%%ERRORENDCOMP"
-                    Else
-                        msg = "%%ERRORENDCOMP " & msg
-                    End If
-                    LexerPreprocessFail sourcePath, lineNo, msg
-                    Exit Do
-                End If
-
-            Case "PLATFORM"
-                If active <> 0 Then
-                    Dim requestedPlatform As String
-                    requestedPlatform = UCase(Trim(restText))
-                    If requestedPlatform <> "" And requestedPlatform <> hostPlatform Then
-                        LexerPreprocessFail sourcePath, lineNo, "%%PLATFORM mismatch: host=" & hostPlatform & " requested=" & requestedPlatform
-                        Exit Do
-                    End If
-                    LexerSetMacro "PLATFORM", hostPlatform, macros(), macroCount
-                End If
-
-            Case "DESTOS"
-                If active <> 0 Then
-                    Dim targetOs As String
-                    targetOs = UCase(Trim(restText))
-                    If targetOs = "" Then targetOs = hostPlatform
-                    LexerSetMacro "DESTOS", targetOs, macros(), macroCount
-                End If
-
-            Case "NOZEROVARS"
-                If active <> 0 Then
-                    Dim noZeroValue As String
-                    If LexerParseOnOff(restText, noZeroValue) = 0 Then
-                        LexerPreprocessFail sourcePath, lineNo, "%%NOZEROVARS expects ON/OFF/1/0"
-                        Exit Do
-                    End If
-                    LexerSetMacro "NOZEROVARS", noZeroValue, macros(), macroCount
-                End If
-
-            Case "SECSTACK"
-                If active <> 0 Then
-                    Dim secStackValue As String
-                    If LexerParseOnOff(restText, secStackValue) = 0 Then
-                        LexerPreprocessFail sourcePath, lineNo, "%%SECSTACK expects ON/OFF/1/0"
-                        Exit Do
-                    End If
-                    LexerSetMacro "SECSTACK", secStackValue, macros(), macroCount
-                End If
-            End Select
+            If LexerProcessDirective(head, restText, sourcePath, depth, lineNo, hostPlatform, macros(), macroCount, stackParent(), stackCond(), stackElseSeen(), stackCount, active, outputText) = 0 Then
+                Exit Do
+            End If
         Else
             If active <> 0 Then
                 outputText &= lineText & Chr(10)

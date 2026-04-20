@@ -19,6 +19,44 @@ Bu repo artik 3 dosyali kanonik modelle isletilir:
 
 Arsiv/ikincil dosyalar (`.plan.md`, `WORK_QUEUE.md`, faz release checklist dosyalari) referans amaclidir; yeni planlama bu dosyalara yazilmaz.
 
+## 1.2) Bugun Bitirme (2026-04-20) - Tek Kritik Yol
+
+Amaç:
+1. Bugun icinde derleyiciyi "release-candidate" seviyesine getirmek.
+2. Kapsami, gate ve release checklist ile olculebilir sekilde kapatmak.
+
+Bitmis sayma kriteri (hepsi zorunlu):
+1. `tools/run_faz_a_gate.ps1 -SkipBuild` PASS.
+2. `tools/validate_module_quality_gate.ps1` PASS.
+3. `tools/validate_matrix_psrt_ok.ps1` en az warning-seviyede temiz rapor + acik hucreler sahipli backlog'a yazilmis.
+4. `tools/release_mini.bat v0.1.X-mini` lokal paket cikartmis.
+
+20 Nisan anlik durum (faktik):
+1. Test naming PASS.
+2. Reference integrity PASS.
+3. Matrix validator PASS (strict degil), ancak 57 unresolved non-ok hucre var.
+4. Module quality gate FAIL (4 hata):
+	- `src/parser/lexer/lexer_preprocess.fbs::LexerPreprocessSourceImpl` function too long.
+	- `src/parser/parser/parser_stmt_decl.fbs` file too long.
+	- `src/build/main_frontend_include_bundle.fbs -> src/codegen/x64/ffi_call_backend.fbs` layer violation.
+	- `src/build/main_frontend_include_bundle.fbs -> src/codegen/x86/ffi_call_backend.fbs` layer violation.
+
+Bugun kapanacak is sirasi:
+1. P0-QG1: `LexerPreprocessSourceImpl` fonksiyonunu helper'lara bol ve gate limit altina indir.
+2. P0-QG2: `parser_stmt_decl.fbs` dosyasini konu-bazli parcala (decl core/dispatched helper) ve include orchestratoru koru.
+3. P0-ARCH: `main_frontend_include_bundle.fbs` icindeki codegen include bagimliligini kaldir; codegen baglantisini uygun katmana tası.
+4. P0-REG: `run_faz_a_gate.ps1 -SkipBuild` tekrar PASS al.
+5. P0-REL: `release_mini.bat` ile mini release paketini olustur.
+
+Bugun disina atilanlar (ama backlog'a sahipli yazilacak):
+1. FFI-CONV-3 native x86 host bagimli kanit tam kapanisi.
+2. UXSTAT-0 ilk resmi DLL.
+3. CG-1/CG-2 full MIR/HIR parity kapanisi.
+
+Operasyon notu:
+1. Bugun hedefi "tum planlari tamamen kapatmak" degil, "compileri release-candidate kalitesinde cikarmak"tir.
+2. Tum acik hucreler plan disina itilmez; sahip+komut+kanit formatinda backlog'a yazilir.
+
 ## 2) Fazlar
 
 Fazlar her turde 5 lane ile paralel ilerler:
