@@ -9,6 +9,14 @@ Type FfiX64CallPlanEntry
     argumentCount As Integer
 End Type
 
+Private Const FFI_X64_REG_ARG_COUNT As Integer = 4
+Private Const FFI_X64_ABI_NAME As String = "WIN64-MSABI"
+Private Const FFI_X64_STACK_ALIGN As Integer = 16
+Private Const FFI_X64_SHADOW_SPACE As Integer = 32
+Private Const FFI_X64_BASE_RESERVE As Integer = 40
+Private Const FFI_X64_PLAN_HEADER As String = "line,dll,symbol,signature,convention,arg_count,stack_args,reserve_bytes,abi,stack_align,shadow_space"
+Private Const FFI_X64_RESOLVER_HEADER As String = "stub_id,dll,symbol,signature,convention,arg_count,stack_args,reserve_bytes,abi,stack_align,shadow_space,symptr_label"
+
 Private Function FfiCallIsDllConvention(ByRef conventionText As String) As Integer
     Dim s As String
     s = UCase(Trim(conventionText))
@@ -51,6 +59,20 @@ Private Function FfiCallChildCount(ByRef ps As ParseState, ByVal nodeIdx As Inte
     Loop
 
     Return n
+End Function
+
+Private Function FfiX64StackArgCount(ByVal argumentCount As Integer) As Integer
+    Dim stackArgCount As Integer
+    stackArgCount = argumentCount - FFI_X64_REG_ARG_COUNT
+    If stackArgCount < 0 Then stackArgCount = 0
+    Return stackArgCount
+End Function
+
+Private Function FfiX64ReserveBytes(ByVal stackArgCount As Integer) As Integer
+    Dim reserveBytes As Integer
+    reserveBytes = FFI_X64_BASE_RESERVE + (stackArgCount * 8)
+    If (stackArgCount And 1) <> 0 Then reserveBytes += 8
+    Return reserveBytes
 End Function
 
 Private Sub FfiCallPushEntry(entries() As FfiX64CallPlanEntry, ByRef entryCount As Integer, ByRef entry As FfiX64CallPlanEntry)
@@ -168,19 +190,19 @@ Private Function FfiCallCollectEntries(ByRef ps As ParseState, entries() As FfiX
 End Function
 
 Private Function FfiCallPlanCsv(entries() As FfiX64CallPlanEntry, ByVal entryCount As Integer, ByRef csvOut As String) As Integer
-    csvOut = "line,dll,symbol,signature,convention,arg_count,stack_args,reserve_bytes,abi,stack_align,shadow_space" & Chr(10)
+    csvOut = FFI_X64_PLAN_HEADER & Chr(10)
 
     Dim i As Integer
     For i = 0 To entryCount - 1
         Dim stackArgCount As Integer
-        stackArgCount = entries(i).argumentCount - 4
-        If stackArgCount < 0 Then stackArgCount = 0
+        stackArgCount = FfiX64StackArgCount(entries(i).argumentCount)
 
         Dim reserveBytes As Integer
-        reserveBytes = 40 + (stackArgCount * 8)
-        If (stackArgCount And 1) <> 0 Then reserveBytes += 8
+        reserveBytes = FfiX64ReserveBytes(stackArgCount)
 
-        csvOut &= LTrim(Str(entries(i).lineNo)) & "," & entries(i).dllName & "," & entries(i).symbolName & "," & entries(i).signatureText & "," & entries(i).callingConventionText & "," & LTrim(Str(entries(i).argumentCount)) & "," & LTrim(Str(stackArgCount)) & "," & LTrim(Str(reserveBytes)) & ",WIN64-MSABI,16,32"
+        csvOut &= LTrim(Str(entries(i).lineNo)) & "," & entries(i).dllName & "," & entries(i).symbolName & "," & entries(i).signatureText & "," & _
+            entries(i).callingConventionText & "," & LTrim(Str(entries(i).argumentCount)) & "," & LTrim(Str(stackArgCount)) & "," & _
+            LTrim(Str(reserveBytes)) & "," & FFI_X64_ABI_NAME & "," & LTrim(Str(FFI_X64_STACK_ALIGN)) & "," & LTrim(Str(FFI_X64_SHADOW_SPACE))
         If i < entryCount - 1 Then csvOut &= Chr(10)
     Next i
 
@@ -202,19 +224,17 @@ Private Function FfiCallNasmStubText(entries() As FfiX64CallPlanEntry, ByVal ent
         asmOut &= "    ; line=" & LTrim(Str(entries(i).lineNo)) & " dll=" & entries(i).dllName & " symbol=" & entries(i).symbolName & " conv=" & entries(i).callingConventionText & Chr(10)
 
         Dim stackArgCount As Integer
-        stackArgCount = entries(i).argumentCount - 4
-        If stackArgCount < 0 Then stackArgCount = 0
+        stackArgCount = FfiX64StackArgCount(entries(i).argumentCount)
 
         Dim reserveBytes As Integer
-        reserveBytes = 40 + (stackArgCount * 8)
-        If (stackArgCount And 1) <> 0 Then reserveBytes += 8
+        reserveBytes = FfiX64ReserveBytes(stackArgCount)
 
         asmOut &= "    ; arg_count=" & LTrim(Str(entries(i).argumentCount)) & " stack_args=" & LTrim(Str(stackArgCount)) & " reserve=" & LTrim(Str(reserveBytes)) & Chr(10)
         asmOut &= "    sub rsp, " & LTrim(Str(reserveBytes)) & Chr(10)
 
         Dim regArgCount As Integer
         regArgCount = entries(i).argumentCount
-        If regArgCount > 4 Then regArgCount = 4
+        If regArgCount > FFI_X64_REG_ARG_COUNT Then regArgCount = FFI_X64_REG_ARG_COUNT
 
         If regArgCount >= 1 Then asmOut &= "    mov rcx, qword [rel __uxb_ffi_arg_" & stubId & "_1]" & Chr(10)
         If regArgCount >= 2 Then asmOut &= "    mov rdx, qword [rel __uxb_ffi_arg_" & stubId & "_2]" & Chr(10)
@@ -242,6 +262,30 @@ Private Function FfiCallNasmStubText(entries() As FfiX64CallPlanEntry, ByVal ent
         Next argIdx
 
         If i < entryCount - 1 Then asmOut &= Chr(10)
+    Next i
+
+    Return 1
+End Function
+
+Private Function FfiCallResolverCsv(entries() As FfiX64CallPlanEntry, ByVal entryCount As Integer, ByRef csvOut As String) As Integer
+    csvOut = FFI_X64_RESOLVER_HEADER & Chr(10)
+
+    Dim i As Integer
+    For i = 0 To entryCount - 1
+        Dim stackArgCount As Integer
+        stackArgCount = FfiX64StackArgCount(entries(i).argumentCount)
+
+        Dim reserveBytes As Integer
+        reserveBytes = FfiX64ReserveBytes(stackArgCount)
+
+        Dim stubIdText As String
+        stubIdText = LTrim(Str(i + 1))
+
+        csvOut &= stubIdText & "," & entries(i).dllName & "," & entries(i).symbolName & "," & entries(i).signatureText & "," & _
+            entries(i).callingConventionText & "," & LTrim(Str(entries(i).argumentCount)) & "," & LTrim(Str(stackArgCount)) & "," & _
+            LTrim(Str(reserveBytes)) & "," & FFI_X64_ABI_NAME & "," & LTrim(Str(FFI_X64_STACK_ALIGN)) & "," & _
+            LTrim(Str(FFI_X64_SHADOW_SPACE)) & ",__uxb_ffi_symptr_" & stubIdText
+        If i < entryCount - 1 Then csvOut &= Chr(10)
     Next i
 
     Return 1
@@ -296,6 +340,14 @@ Function FfiX64BackendEmitNasmStubs(ByRef ps As ParseState, ByRef asmText As Str
     Return FfiCallNasmStubText(entries(), entryCount, asmText)
 End Function
 
+Function FfiX64BackendEmitResolver(ByRef ps As ParseState, ByRef resolverCsv As String, ByRef errText As String) As Integer
+    Dim entries(Any) As FfiX64CallPlanEntry
+    Dim entryCount As Integer
+    If FfiCallCollectEntries(ps, entries(), entryCount, errText) = 0 Then Return 0
+
+    Return FfiCallResolverCsv(entries(), entryCount, resolverCsv)
+End Function
+
 Function FfiX64BackendEmitArtifacts(ByRef ps As ParseState, ByRef outputDir As String, ByRef errText As String) As Integer
     Dim entries(Any) As FfiX64CallPlanEntry
     Dim entryCount As Integer
@@ -303,8 +355,10 @@ Function FfiX64BackendEmitArtifacts(ByRef ps As ParseState, ByRef outputDir As S
 
     Dim planCsv As String
     Dim asmText As String
+    Dim resolverCsv As String
     FfiCallPlanCsv entries(), entryCount, planCsv
     FfiCallNasmStubText entries(), entryCount, asmText
+    FfiCallResolverCsv entries(), entryCount, resolverCsv
 
     MkDir outputDir
 
@@ -314,7 +368,11 @@ Function FfiX64BackendEmitArtifacts(ByRef ps As ParseState, ByRef outputDir As S
     Dim asmPath As String
     asmPath = outputDir & "\\ffi_call_x64_stubs.asm"
 
+    Dim resolverPath As String
+    resolverPath = outputDir & "\\ffi_call_x64_resolver.csv"
+
     If FfiWriteTextFile(planPath, planCsv, errText) = 0 Then Return 0
+    If FfiWriteTextFile(resolverPath, resolverCsv, errText) = 0 Then Return 0
     If entryCount > 0 Then
         If FfiWriteTextFile(asmPath, asmText, errText) = 0 Then Return 0
     End If

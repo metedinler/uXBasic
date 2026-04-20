@@ -496,7 +496,7 @@ Bu bolum istatistik fonksiyon isimlerinden bagimsiz olarak CALL(DLL)/IMPORT ve s
 | MIR olusumu (CFG/basic block) | OK | KISMEN | KISMEN | KISMEN | KISMEN | semantic/mir.fbs ve memory_exec MIR notlari var, tam degil | CG-1 |
 | MIR interpreter dispatch | OK | KISMEN | KISMEN | KISMEN | KISMEN | runtime memory_exec ve exec alt modullerine parcali dagilim | CG-2 |
 | x64 emitter passthrough INLINE | OK | OK | OK | KISMEN | KISMEN | INLINE parse/runtime var, emitter kapsam kapanisi acik | CG-2 |
-| CALL [register] / stack arg passing | OK | OK | OK | KISMEN | OK | x64 FFI stub emitter `call qword [rel __uxb_ffi_symptr_N]` + RCX/RDX/R8/R9 ve `[rsp+32+]` stack slot yazimini uretiyor. Gercek symbol resolution baglama adimi ayrik lane'de ilerler. | CG-3 |
+| CALL [register] / stack arg passing | OK | OK | OK | KISMEN | OK | x64 FFI stub emitter `call qword [rel __uxb_ffi_symptr_N]` + RCX/RDX/R8/R9 ve `[rsp+32+]` stack slot yazimini uretiyor. Resolver lane metadata cikisi (`dist/interop/ffi_call_x64_resolver.csv`) eklendi; runtime dis cagrida halen policy/no-op modunda oldugu icin R=KISMEN korunur. Kanit: `tests/run_ffi_x64_call_backend.bas`. | CG-3 |
 | Win64 ABI (shadow space + alignment) | OK | OK | OK | KISMEN | OK | Reserve formulu `40 + stackArg*8 + odd pad` ile call-oncesi 16-byte hizalama ve 32-byte shadow space korunuyor; test ve smoke interop kaniti mevcut. | CG-3 |
 | Regression gate (interp vs compiled parity) | OK | OK | OK | OK | OK | ERR parity kapisi script ile zorunlu hale getirildi; lane raporu uretiliyor ve Faz A gate icine baglandi (`tools/run_err_codegen_parity_gate.ps1`, `reports/err_codegen_parity_gate_report.md`, `tools/run_faz_a_gate.ps1`). | CG-QA |
 | TRY/CATCH unwinding emit (label table + finally trampoline) | OK | KISMEN | KISMEN | KISMEN | OK | MIR lowering/backend hook/parity hat testleri PASS; tam unwind semantigi icin ileri lane korunuyor (run_err_mir_lowering_64.exe, run_err_backend_hooks_64.exe, run_err_codegen_parity_gate_64.exe). | ERR-CG-1 |
@@ -520,4 +520,3 @@ Codegen kolon anahtari:
 - OK: Uretim + test kapanmis
 - KISMEN: Artefakt/stub veya sinirli yol var
 - PLAN: Tasarim var, kod yok
-
