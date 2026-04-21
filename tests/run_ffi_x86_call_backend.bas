@@ -24,6 +24,31 @@ Private Function AssertTrue(ByVal condValue As Integer, ByRef msg As String) As 
     Return 1
 End Function
 
+Private Function ChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    Dim ch As Integer
+    Dim i As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function FirstCallDllNode(ByRef ps As ParseState) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CALL_STMT" Or UCase(ps.ast.nodes(i).kind) = "CALL_EXPR" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = "DLL" Then Return i
+        End If
+    Next i
+    Return -1
+End Function
+
 Private Sub Main()
     Dim ok As Integer
     ok = 1
@@ -69,6 +94,24 @@ Private Sub Main()
 
     backendErr = ""
     ok And= AssertTrue(FfiX86BackendValidate(psNoDll, backendErr) = 0, "ffi x86 must reject no CALL(DLL)")
+
+    Dim psMut As ParseState
+    parseErr = ""
+    ok And= AssertTrue(ParseText(srcGood, psMut, parseErr), "parse mutate ffi x86 sample: " & parseErr)
+    Dim callNode As Integer
+    callNode = FirstCallDllNode(psMut)
+    ok And= AssertTrue(callNode <> -1, "mutate sample has CALL(DLL)")
+    If callNode <> -1 Then
+        Dim convNode As Integer
+        convNode = ChildAt(psMut, callNode, 3)
+        ok And= AssertTrue(convNode <> -1, "mutate sample has convention slot")
+        If convNode <> -1 Then
+            psMut.ast.nodes(convNode).kind = "KEYWORD_REF"
+            psMut.ast.nodes(convNode).value = "TIMER"
+            backendErr = ""
+            ok And= AssertTrue(FfiX86BackendValidate(psMut, backendErr) = 0, "ffi x86 backend invalid convention reject")
+        End If
+    End If
 
     If ok = 0 Then End 1
 
