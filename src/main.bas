@@ -35,6 +35,8 @@ Private Function IsValueArgKey(ByRef keyText As String) As Integer
 
     If k = "--emit-x64-nasm-out" Then Return 1
     If k = "--x64gen-out" Then Return 1
+    If k = "--ir-json-out" Then Return 1
+    If k = "--inventory-json-out" Then Return 1
     If k = "--source" Then Return 1
     If k = "-s" Then Return 1
 
@@ -50,16 +52,6 @@ Private Function IsOptionLike(ByRef argText As String) As Integer
 End Function
 
 Private Function TryGetSourcePath(ByRef sourcePathOut As String, ByRef errText As String) As Integer
-    Dim explicitSource As String
-    If GetArgValue("--source", explicitSource) <> 0 Or GetArgValue("-s", explicitSource) <> 0 Then
-        If Trim(explicitSource) = "" Then
-            errText = "source argument missing value"
-            Return 0
-        End If
-        sourcePathOut = Trim(explicitSource)
-        Return 1
-    End If
-
     Dim i As Integer
     i = 1
     Do While i <= 64
@@ -132,6 +124,7 @@ Dim As Integer x64EmitMode
 Dim As Integer codegenMode
 Dim As Integer runSemanticPass
 Dim As String x64OutPath
+Dim As String inventoryJsonOutPath
 
 DiagInit
 
@@ -153,6 +146,13 @@ If GetArgValue("--emit-x64-nasm-out", x64OutPath) = 0 Then
         Else
             x64OutPath = "dist\uxbasic_program.nasm"
         End If
+    End If
+End If
+
+inventoryJsonOutPath = ""
+If GetArgValue("--ir-json-out", inventoryJsonOutPath) = 0 Then
+    If GetArgValue("--inventory-json-out", inventoryJsonOutPath) = 0 Then
+        inventoryJsonOutPath = ""
     End If
 End If
 DiagBilgi "uXBasic calistirildi"
@@ -190,6 +190,8 @@ End If
 
 runSemanticPass = IIf(semanticMode <> 0 Or execMemMode <> 0 Or interopMode <> 0 Or x64EmitMode <> 0 Or codegenMode <> 0, 1, 0)
 
+If Trim(inventoryJsonOutPath) <> "" Then runSemanticPass = 1
+
 If runSemanticPass <> 0 Then
     Dim semanticErr As String
     If SemanticAnalyze(ps, semanticErr) = 0 Then
@@ -201,6 +203,21 @@ End If
 If debugMode Then
     DiagBilgi "Ayristirma basarili. AST dugum sayisi: " & Str(ps.ast.count)
     'ASTDump ps.ast, ps.rootNode
+End If
+
+If Trim(inventoryJsonOutPath) <> "" Then
+    Dim hirInv As HIRInventory
+    Dim jsonErr As String
+
+    HIRCollectInventory ps, hirInv
+    If HIRWriteInventoryJson(hirInv, inventoryJsonOutPath, jsonErr) = 0 Then
+        DiagHata "IR/MIR/HIR envanter JSON cikti yazimi basarisiz: " & LocalizeErrorMessage(jsonErr)
+        End 8
+    End If
+
+    If debugMode Then
+        DiagBilgi "IR/MIR/HIR envanter JSON yazildi: " & inventoryJsonOutPath
+    End If
 End If
 
 If execMemMode Then

@@ -65,8 +65,13 @@ Private Function ParsePathIdent(ByRef pathText As String, ByRef cursor As Intege
     Return 1
 End Function
 
-Private Function ParsePathIndexList(ByRef pathText As String, ByRef cursor As Integer, idxValues() As Integer, ByRef idxCount As Integer) As Integer
-    idxCount = 0
+Dim Shared gPathIdxValues(Any) As Integer
+Dim Shared gPathIdxCount As Integer
+
+Private Function ParsePathIndexList(ByRef pathText As String, ByRef cursor As Integer) As Integer
+    gPathIdxCount = 0
+    Erase gPathIdxValues
+
     If cursor > Len(pathText) Then Return 0
     If Mid(pathText, cursor, 1) <> "(" Then Return 0
 
@@ -102,13 +107,13 @@ Private Function ParsePathIndexList(ByRef pathText As String, ByRef cursor As In
         If hasDigit = 0 Then Return 0
         value = value * sign
 
-        If idxCount = 0 Then
-            ReDim idxValues(0)
+        If gPathIdxCount = 0 Then
+            ReDim gPathIdxValues(0)
         Else
-            ReDim Preserve idxValues(idxCount)
+            ReDim Preserve gPathIdxValues(gPathIdxCount)
         End If
-        idxValues(idxCount) = value
-        idxCount = idxCount + 1
+        gPathIdxValues(gPathIdxCount) = value
+        gPathIdxCount = gPathIdxCount + 1
 
         SkipPathSpaces pathText, cursor
         If cursor > Len(pathText) Then Return 0
@@ -121,7 +126,7 @@ Private Function ParsePathIndexList(ByRef pathText As String, ByRef cursor As In
         End If
     Loop
 
-    If idxCount = 0 Then Return 0
+    If gPathIdxCount = 0 Then Return 0
     If cursor > Len(pathText) Then Return 0
     If Mid(pathText, cursor, 1) <> ")" Then Return 0
     cursor = cursor + 1
@@ -129,14 +134,14 @@ Private Function ParsePathIndexList(ByRef pathText As String, ByRef cursor As In
     Return 1
 End Function
 
-Private Function ComputeArrayLinearOffset(ByVal fieldIdx As Integer, idxValues() As Integer, ByVal idxCount As Integer, ByRef byteOffsetOut As Integer, ByRef errOut As String) As Integer
+Private Function ComputeArrayLinearOffset(ByVal fieldIdx As Integer, ByRef byteOffsetOut As Integer, ByRef errOut As String) As Integer
     If fieldIdx < 0 Or fieldIdx >= gTypeLayoutFieldCount Then Return 0
     If gTypeLayoutFields(fieldIdx).isArray = 0 Then
         errOut = "OFFSETOF index applied to non-array field"
         Return 0
     End If
 
-    If idxCount <> gTypeLayoutFields(fieldIdx).dimCount Then
+    If gPathIdxCount <> gTypeLayoutFields(fieldIdx).dimCount Then
         errOut = "OFFSETOF index count mismatch"
         Return 0
     End If
@@ -149,7 +154,7 @@ Private Function ComputeArrayLinearOffset(ByVal fieldIdx As Integer, idxValues()
         Dim d As TypeLayoutDim
         d = gTypeLayoutDims(gTypeLayoutFields(fieldIdx).firstDim + k)
 
-        If idxValues(k) < d.lowerBound Or idxValues(k) > d.upperBound Then
+        If gPathIdxValues(k) < d.lowerBound Or gPathIdxValues(k) > d.upperBound Then
             errOut = "OFFSETOF index out of bounds"
             Return 0
         End If
@@ -162,7 +167,7 @@ Private Function ComputeArrayLinearOffset(ByVal fieldIdx As Integer, idxValues()
             stride = stride * gTypeLayoutDims(gTypeLayoutFields(fieldIdx).firstDim + j).extent
         Next j
 
-        linear = linear + (idxValues(k) - d.lowerBound) * stride
+        linear = linear + (gPathIdxValues(k) - d.lowerBound) * stride
     Next k
 
     byteOffsetOut = linear * gTypeLayoutFields(fieldIdx).elemStrideBytes
@@ -228,16 +233,14 @@ Function TypeLayoutResolvePath(ByRef ps As ParseState, ByRef rawTypeName As Stri
 
         SkipPathSpaces pathText, cursor
         If cursor <= Len(pathText) And Mid(pathText, cursor, 1) = "(" Then
-            Dim idxValues() As Integer
-            Dim idxCount As Integer
             Dim arrByteOffset As Integer
 
-            If ParsePathIndexList(pathText, cursor, idxValues(), idxCount) = 0 Then
+            If ParsePathIndexList(pathText, cursor) = 0 Then
                 errOut = "OFFSETOF invalid index syntax"
                 Return 0
             End If
 
-            If ComputeArrayLinearOffset(fieldIdx, idxValues(), idxCount, arrByteOffset, errOut) = 0 Then
+            If ComputeArrayLinearOffset(fieldIdx, arrByteOffset, errOut) = 0 Then
                 Return 0
             End If
 

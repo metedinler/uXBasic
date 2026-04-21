@@ -1,7 +1,6 @@
-' uXBasic HIR (High-Level Intermediate Representation) Semantic Analysis
-' Scope, symbol table ve type binding için semantic kontrol modülü
-' FreeBASIC uyumlu minimal implementasyon
-' uXBasic compiler icin uretilecektir
+' uXBasic HIR (High-Level Intermediate Representation)
+' Scope/symbol/type metadata katmani. semantic_pass.fbs ile cakismamasi
+' icin burada giris fonksiyonu HIRSemanticAnalyze olarak adlandirildi.
 
 Type SymbolEntry
     name As String
@@ -27,6 +26,19 @@ End Type
 Dim Shared gGlobalScope As SymbolTable
 Dim Shared gScopeStack As ScopeStack
 
+Type HIRInventory
+    commands(Any) As String
+    commandCount As Integer
+    functions(Any) As String
+    functionCount As Integer
+    operators(Any) As String
+    operatorCount As Integer
+    types(Any) As String
+    typeCount As Integer
+    dataStructures(Any) As String
+    dataStructureCount As Integer
+End Type
+
 Sub SymbolTableInit(ByRef st As SymbolTable)
     st.count = 0
 End Sub
@@ -40,10 +52,10 @@ Sub SymbolTableAdd(ByRef st As SymbolTable, ByRef entry As SymbolEntry)
     st.count += 1
 End Sub
 
-Function SymbolTableLookup(ByRef st As SymbolTable, ByRef name As String) As Integer
+Function SymbolTableLookup(ByRef st As SymbolTable, ByRef needleName As String) As Integer
     Dim i As Integer
     For i = 0 To st.count - 1
-        If UCase(st.entries(i).name) = UCase(name) Then Return i
+        If UCase(st.entries(i).name) = UCase(needleName) Then Return i
     Next
     Return -1
 End Function
@@ -67,19 +79,312 @@ Sub ScopePop(ByRef ss As ScopeStack)
     If ss.depth > 0 Then ss.depth -= 1
 End Sub
 
-Function ScopeLookup(ByRef ss As ScopeStack, ByRef name As String) As Integer
+Function ScopeLookup(ByRef ss As ScopeStack, ByRef needleName As String) As Integer
     Dim level As Integer
     For level = ss.depth To 0 Step -1
         Dim idx As Integer
-        idx = SymbolTableLookup(ss.scopes(level), name)
+        idx = SymbolTableLookup(ss.scopes(level), needleName)
         If idx <> -1 Then Return idx
     Next
     Return -1
 End Function
 
-' Ana semantic analiz fonksiyonu - minimal stub
-Function SemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Integer
-    ' Şimdilik her zaman başarılı - adım adım genişletilecek
+Private Sub HIRAddCommand(ByRef inv As HIRInventory, ByRef textRaw As String)
+    Dim t As String
+    t = UCase(Trim(textRaw))
+    If t = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To inv.commandCount - 1
+        If UCase(inv.commands(i)) = t Then Exit Sub
+    Next i
+
+    If inv.commandCount = 0 Then
+        ReDim inv.commands(0)
+    Else
+        ReDim Preserve inv.commands(inv.commandCount)
+    End If
+    inv.commands(inv.commandCount) = t
+    inv.commandCount += 1
+End Sub
+
+Private Sub HIRAddFunction(ByRef inv As HIRInventory, ByRef textRaw As String)
+    Dim t As String
+    t = UCase(Trim(textRaw))
+    If t = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To inv.functionCount - 1
+        If UCase(inv.functions(i)) = t Then Exit Sub
+    Next i
+
+    If inv.functionCount = 0 Then
+        ReDim inv.functions(0)
+    Else
+        ReDim Preserve inv.functions(inv.functionCount)
+    End If
+    inv.functions(inv.functionCount) = t
+    inv.functionCount += 1
+End Sub
+
+Private Sub HIRAddOperator(ByRef inv As HIRInventory, ByRef textRaw As String)
+    Dim t As String
+    t = UCase(Trim(textRaw))
+    If t = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To inv.operatorCount - 1
+        If UCase(inv.operators(i)) = t Then Exit Sub
+    Next i
+
+    If inv.operatorCount = 0 Then
+        ReDim inv.operators(0)
+    Else
+        ReDim Preserve inv.operators(inv.operatorCount)
+    End If
+    inv.operators(inv.operatorCount) = t
+    inv.operatorCount += 1
+End Sub
+
+Private Sub HIRAddTypeName(ByRef inv As HIRInventory, ByRef textRaw As String)
+    Dim t As String
+    t = UCase(Trim(textRaw))
+    If t = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To inv.typeCount - 1
+        If UCase(inv.types(i)) = t Then Exit Sub
+    Next i
+
+    If inv.typeCount = 0 Then
+        ReDim inv.types(0)
+    Else
+        ReDim Preserve inv.types(inv.typeCount)
+    End If
+    inv.types(inv.typeCount) = t
+    inv.typeCount += 1
+End Sub
+
+Private Sub HIRAddDataStructure(ByRef inv As HIRInventory, ByRef textRaw As String)
+    Dim t As String
+    t = UCase(Trim(textRaw))
+    If t = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To inv.dataStructureCount - 1
+        If UCase(inv.dataStructures(i)) = t Then Exit Sub
+    Next i
+
+    If inv.dataStructureCount = 0 Then
+        ReDim inv.dataStructures(0)
+    Else
+        ReDim Preserve inv.dataStructures(inv.dataStructureCount)
+    End If
+    inv.dataStructures(inv.dataStructureCount) = t
+    inv.dataStructureCount += 1
+End Sub
+
+Sub HIRInventoryInit(ByRef inv As HIRInventory)
+    inv.commandCount = 0
+    inv.functionCount = 0
+    inv.operatorCount = 0
+    inv.typeCount = 0
+    inv.dataStructureCount = 0
+    Erase inv.commands
+    Erase inv.functions
+    Erase inv.operators
+    Erase inv.types
+    Erase inv.dataStructures
+End Sub
+
+Private Sub HIRCollectNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef inv As HIRInventory)
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Exit Sub
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    Dim k As String
+    k = UCase(Trim(n.kind))
+
+    If Right(k, 5) = "_STMT" Then
+        HIRAddCommand inv, Left(k, Len(k) - 5)
+    End If
+
+    If k = "CALL_STMT" Or k = "CALL_EXPR" Or k = "FUNCTION_STMT" Or k = "SUB_STMT" Then
+        HIRAddFunction inv, n.value
+    End If
+
+    If k = "BINARY" Or k = "UNARY" Then
+        HIRAddOperator inv, n.op
+    End If
+
+    If k = "TYPE_REF" Then
+        HIRAddTypeName inv, n.value
+
+        Dim tv As String
+        tv = UCase(Trim(n.value))
+        If tv = "LIST" Or tv = "DICT" Or tv = "SET" Then
+            HIRAddDataStructure inv, tv
+        End If
+    End If
+
+    If k = "DIM_STMT" Or k = "REDIM_STMT" Then HIRAddDataStructure inv, "ARRAY"
+    If k = "CLASS_STMT" Then HIRAddDataStructure inv, "CLASS"
+    If k = "TYPE_STMT" Then HIRAddDataStructure inv, "TYPE"
+    If k = "INTERFACE_STMT" Then HIRAddDataStructure inv, "INTERFACE"
+
+    If n.left <> -1 Then HIRCollectNode ps, n.left, inv
+    If n.right <> -1 Then HIRCollectNode ps, n.right, inv
+
+    Dim ch As Integer
+    ch = n.firstChild
+    Do While ch <> -1
+        HIRCollectNode ps, ch, inv
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+End Sub
+
+Sub HIRCollectInventory(ByRef ps As ParseState, ByRef inv As HIRInventory)
+    HIRInventoryInit inv
+    If ps.rootNode = -1 Then Exit Sub
+    HIRCollectNode ps, ps.rootNode, inv
+End Sub
+
+Private Function HIREscapeJson(ByRef textIn As String) As String
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+
+        Select Case ch
+        Case "\"
+            outText &= "\\\\"
+        Case Chr(34)
+            outText &= "\" & Chr(34)
+        Case Chr(9)
+            outText &= "\t"
+        Case Chr(10)
+            outText &= "\n"
+        Case Chr(13)
+            outText &= "\r"
+        Case Else
+            outText &= ch
+        End Select
+    Next i
+
+    Return outText
+End Function
+
+Private Sub HIRAppendJsonArrayCommands(ByRef jsonOut As String, ByVal addComma As Integer, ByRef inv As HIRInventory)
+    Dim q As String
+    q = Chr(34)
+    jsonOut &= "  " & q & "commands" & q & ": ["
+    Dim i As Integer
+    For i = 0 To inv.commandCount - 1
+        If i > 0 Then jsonOut &= ", "
+        jsonOut &= q & HIREscapeJson(inv.commands(i)) & q
+    Next i
+    jsonOut &= "]"
+    If addComma <> 0 Then jsonOut &= ","
+    jsonOut &= Chr(10)
+End Sub
+
+Private Sub HIRAppendJsonArrayFunctions(ByRef jsonOut As String, ByVal addComma As Integer, ByRef inv As HIRInventory)
+    Dim q As String
+    q = Chr(34)
+    jsonOut &= "  " & q & "functions" & q & ": ["
+    Dim i As Integer
+    For i = 0 To inv.functionCount - 1
+        If i > 0 Then jsonOut &= ", "
+        jsonOut &= q & HIREscapeJson(inv.functions(i)) & q
+    Next i
+    jsonOut &= "]"
+    If addComma <> 0 Then jsonOut &= ","
+    jsonOut &= Chr(10)
+End Sub
+
+Private Sub HIRAppendJsonArrayOperators(ByRef jsonOut As String, ByVal addComma As Integer, ByRef inv As HIRInventory)
+    Dim q As String
+    q = Chr(34)
+    jsonOut &= "  " & q & "operators" & q & ": ["
+    Dim i As Integer
+    For i = 0 To inv.operatorCount - 1
+        If i > 0 Then jsonOut &= ", "
+        jsonOut &= q & HIREscapeJson(inv.operators(i)) & q
+    Next i
+    jsonOut &= "]"
+    If addComma <> 0 Then jsonOut &= ","
+    jsonOut &= Chr(10)
+End Sub
+
+Private Sub HIRAppendJsonArrayTypes(ByRef jsonOut As String, ByVal addComma As Integer, ByRef inv As HIRInventory)
+    Dim q As String
+    q = Chr(34)
+    jsonOut &= "  " & q & "types" & q & ": ["
+    Dim i As Integer
+    For i = 0 To inv.typeCount - 1
+        If i > 0 Then jsonOut &= ", "
+        jsonOut &= q & HIREscapeJson(inv.types(i)) & q
+    Next i
+    jsonOut &= "]"
+    If addComma <> 0 Then jsonOut &= ","
+    jsonOut &= Chr(10)
+End Sub
+
+Private Sub HIRAppendJsonArrayDataStructures(ByRef jsonOut As String, ByVal addComma As Integer, ByRef inv As HIRInventory)
+    Dim q As String
+    q = Chr(34)
+    jsonOut &= "  " & q & "data_structures" & q & ": ["
+    Dim i As Integer
+    For i = 0 To inv.dataStructureCount - 1
+        If i > 0 Then jsonOut &= ", "
+        jsonOut &= q & HIREscapeJson(inv.dataStructures(i)) & q
+    Next i
+    jsonOut &= "]"
+    If addComma <> 0 Then jsonOut &= ","
+    jsonOut &= Chr(10)
+End Sub
+
+Function HIRInventoryToJson(ByRef inv As HIRInventory, ByRef jsonOut As String) As Integer
+    jsonOut = "{" & Chr(10)
+    HIRAppendJsonArrayCommands jsonOut, 1, inv
+    HIRAppendJsonArrayFunctions jsonOut, 1, inv
+    HIRAppendJsonArrayOperators jsonOut, 1, inv
+    HIRAppendJsonArrayTypes jsonOut, 1, inv
+    HIRAppendJsonArrayDataStructures jsonOut, 0, inv
+    jsonOut &= "}" & Chr(10)
+    Return 1
+End Function
+
+Function HIRWriteInventoryJson(ByRef inv As HIRInventory, ByRef outPath As String, ByRef errText As String) As Integer
+    Dim jsonText As String
+    If HIRInventoryToJson(inv, jsonText) = 0 Then
+        errText = "hir: json conversion failed"
+        Return 0
+    End If
+
+    Dim f As Integer
+    f = FreeFile
+
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errText = "hir: json write open failed " & outPath
+        Return 0
+    End If
+
+    Print #f, jsonText;
+    Close #f
+
+    errText = ""
+    Return 1
+End Function
+
+Function HIRSemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Integer
+    ' semantic_pass.fbs ana semantic kapisidir; bu modulde su an inventory/scope
+    ' yardimcilari uretilir. Hata vermez.
     errText = ""
     Return 1
 End Function
