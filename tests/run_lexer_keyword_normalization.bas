@@ -92,6 +92,24 @@ Private Sub Main()
     Dim src3 As String
     src3 = "obj.then()" & Chr(10)
 
+    Dim lx3 As LexerState
+    LexerInit lx3, src3
+
+    If AssertToken(lx3, 0, "IDENT", "obj", errText) = 0 Then
+        Print "FAIL dotted member base token | "; errText
+        End 1
+    End If
+
+    If AssertToken(lx3, 1, "OP", ".", errText) = 0 Then
+        Print "FAIL dotted member dot token | "; errText
+        End 1
+    End If
+
+    If AssertToken(lx3, 2, "IDENT", "then", errText) = 0 Then
+        Print "FAIL keyword-like member should be IDENT | "; errText
+        End 1
+    End If
+
     If ParseExpectOk(src3, errText) = 0 Then
         Print "FAIL dotted keyword-like method parse | "; errText
         End 1
