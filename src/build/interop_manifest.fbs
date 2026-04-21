@@ -13,6 +13,18 @@ Type InteropImportEntry
     importPath As String
 End Type
 
+Type InteropToolchainConfig
+    cc As String
+    cxx As String
+    asmCompiler As String
+    linker As String
+    ccPath As String
+    cxxPath As String
+    asmPath As String
+    linkPath As String
+    sourceTag As String
+End Type
+
 Type InteropManifest
     includes(Any) As InteropIncludeEntry
     includeCount As Integer
@@ -21,6 +33,8 @@ Type InteropManifest
     imports(Any) As InteropImportEntry
     importCount As Integer
     importCapacity As Integer
+
+    toolchain As InteropToolchainConfig
 End Type
 
 Type InteropStringSet
@@ -79,6 +93,124 @@ Sub InteropManifestInit(ByRef m As InteropManifest)
 
     m.importCapacity = 0
     m.importCount = 0
+
+    m.toolchain.cc = "gcc"
+    m.toolchain.cxx = "g++"
+    m.toolchain.asmCompiler = "nasm"
+    m.toolchain.linker = "gcc"
+    m.toolchain.ccPath = ""
+    m.toolchain.cxxPath = ""
+    m.toolchain.asmPath = ""
+    m.toolchain.linkPath = ""
+    m.toolchain.sourceTag = "default"
+End Sub
+
+Private Function TrimQuotePair(ByRef textIn As String) As String
+    Dim outText As String
+    outText = Trim(textIn)
+    If Len(outText) >= 2 Then
+        If Left(outText, 1) = Chr(34) And Right(outText, 1) = Chr(34) Then
+            outText = Mid(outText, 2, Len(outText) - 2)
+        End If
+    End If
+    Return Trim(outText)
+End Function
+
+Private Sub ApplyToolchainKeyValue(ByRef tc As InteropToolchainConfig, ByRef keyText As String, ByRef valueText As String, ByRef sourceTag As String)
+    Dim k As String
+    Dim v As String
+    k = UCase(Trim(keyText))
+    v = TrimQuotePair(valueText)
+    If v = "" Then Exit Sub
+
+    Select Case k
+    Case "CC", "TOOLCHAIN_CC"
+        tc.cc = v
+    Case "CXX", "CPP", "TOOLCHAIN_CXX"
+        tc.cxx = v
+    Case "ASM", "ASM_COMPILER", "TOOLCHAIN_ASM"
+        tc.asmCompiler = v
+    Case "LINK", "LINKER", "LD", "TOOLCHAIN_LINK"
+        tc.linker = v
+    Case "CC_PATH", "TOOLCHAIN_CC_PATH"
+        tc.ccPath = v
+    Case "CXX_PATH", "CPP_PATH", "TOOLCHAIN_CXX_PATH"
+        tc.cxxPath = v
+    Case "ASM_PATH", "TOOLCHAIN_ASM_PATH"
+        tc.asmPath = v
+    Case "LINK_PATH", "LD_PATH", "TOOLCHAIN_LINK_PATH"
+        tc.linkPath = v
+    Case Else
+        Exit Sub
+    End Select
+
+    tc.sourceTag = sourceTag
+End Sub
+
+Private Sub InteropToolchainApplyEnv(ByRef tc As InteropToolchainConfig)
+    Dim keys(7) As String
+    Dim values(7) As String
+    Dim i As Integer
+
+    keys(0) = "CC"
+    keys(1) = "CXX"
+    keys(2) = "ASM"
+    keys(3) = "LINK"
+    keys(4) = "CC_PATH"
+    keys(5) = "CXX_PATH"
+    keys(6) = "ASM_PATH"
+    keys(7) = "LINK_PATH"
+
+    values(0) = Environ("UXB_CC")
+    values(1) = Environ("UXB_CXX")
+    values(2) = Environ("UXB_ASM")
+    values(3) = Environ("UXB_LINK")
+    values(4) = Environ("UXB_CC_PATH")
+    values(5) = Environ("UXB_CXX_PATH")
+    values(6) = Environ("UXB_ASM_PATH")
+    values(7) = Environ("UXB_LINK_PATH")
+
+    For i = 0 To 7
+        If Trim(values(i)) <> "" Then
+            ApplyToolchainKeyValue tc, keys(i), values(i), "env:UXB_*"
+        End If
+    Next i
+End Sub
+
+Private Sub InteropToolchainApplyPolicy(ByRef tc As InteropToolchainConfig, ByRef policyText As String, ByRef sourceTag As String)
+    Dim src As String
+    src = Trim(policyText)
+    If src = "" Then Exit Sub
+
+    Dim cursorPos As Integer
+    cursorPos = 1
+
+    Do While cursorPos <= Len(src)
+        Dim sepPos As Integer
+        sepPos = InStr(cursorPos, src, ";")
+
+        Dim segment As String
+        If sepPos = 0 Then
+            segment = Mid(src, cursorPos)
+            cursorPos = Len(src) + 1
+        Else
+            segment = Mid(src, cursorPos, sepPos - cursorPos)
+            cursorPos = sepPos + 1
+        End If
+
+        segment = Trim(segment)
+        If segment <> "" Then
+            Dim eqPos As Integer
+            eqPos = InStr(segment, "=")
+            If eqPos > 1 Then
+                Dim k As String
+                Dim v As String
+                k = Left(segment, eqPos - 1)
+                v = Mid(segment, eqPos + 1)
+                ApplyToolchainKeyValue tc, k, v, sourceTag
+            End If
+        End If
+    Loop
 End Sub
 
 Private Sub InteropManifestEnsureIncludes(ByRef m As InteropManifest, ByVal minSize As Integer)
@@ -365,6 +497,77 @@ Private Function ResolveStmtPath(ByRef ps As ParseState, ByVal stmt As Integer, 
     Return 1
 End Function
 
+Private Function InteropInlineIsOp(ByRef tk As Token, ByRef opText As String) As Integer
+    Return (tk.kind = "OP") And (tk.lexeme = opText)
+End Function
+
+Private Function InteropInlineIsKw(ByRef tk As Token, ByRef kwText As String) As Integer
+    Return (tk.kind = "KEYWORD") And (UCase(tk.lexeme) = UCase(kwText))
+End Function
+
+Private Function InteropInlineReadHeaderArg(ByRef ps As ParseState, ByRef i As Integer, ByRef argText As String) As Integer
+    If i >= ps.lx.tokens.count Then Return 0
+
+    Dim tk As Token
+    tk = ps.lx.tokens.items(i)
+
+    Select Case UCase(tk.kind)
+    Case "STRING", "IDENT", "KEYWORD", "NUMBER"
+        argText = tk.lexeme
+        i += 1
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Sub CollectInlineToolchainHints(ByRef ps As ParseState, ByRef sourceFile As String, ByRef tc As InteropToolchainConfig)
+    Dim i As Integer
+    i = 0
+
+    Do While i < ps.lx.tokens.count
+        Dim tk As Token
+        tk = ps.lx.tokens.items(i)
+
+        If InteropInlineIsKw(tk, "INLINE") Then
+            i += 1
+            If i < ps.lx.tokens.count AndAlso InteropInlineIsOp(ps.lx.tokens.items(i), "(") Then
+                i += 1
+
+                Dim args(3) As String
+                Dim okHeader As Integer
+                okHeader = 1
+
+                Dim argIdx As Integer
+                For argIdx = 0 To 3
+                    If InteropInlineReadHeaderArg(ps, i, args(argIdx)) = 0 Then
+                        okHeader = 0
+                        Exit For
+                    End If
+
+                    If argIdx < 3 Then
+                        If i >= ps.lx.tokens.count OrElse InteropInlineIsOp(ps.lx.tokens.items(i), ",") = 0 Then
+                            okHeader = 0
+                            Exit For
+                        End If
+                        i += 1
+                    End If
+                Next argIdx
+
+                If okHeader <> 0 Then
+                    If i < ps.lx.tokens.count AndAlso InteropInlineIsOp(ps.lx.tokens.items(i), ")") Then
+                        Dim sourceTag As String
+                        sourceTag = "inline:" & sourceFile & ":" & LTrim(Str(tk.lineNo))
+                        InteropToolchainApplyPolicy tc, args(3), sourceTag
+                    End If
+                End If
+            End If
+        End If
+
+        i += 1
+    Loop
+End Sub
+
 Private Function CollectImportStmt(ByRef ps As ParseState, ByVal stmt As Integer, ByRef normalizedSource As String, ByRef rootDir As String, ByRef manifest As InteropManifest, ByRef importOnce As InteropStringSet, ByRef errText As String) As Integer
     Dim importPath As String
     If ResolveStmtPath(ps, stmt, normalizedSource, rootDir, "IMPORT", importPath, errText) = 0 Then Return 0
@@ -407,6 +610,8 @@ Private Function CollectInteropRecursive(ByRef sourceFile As String, ByRef rootD
         Return 0
     End If
 
+    CollectInlineToolchainHints ps, normalizedSource, manifest.toolchain
+
     Dim stmt As Integer
     stmt = ps.ast.nodes(ps.rootNode).firstChild
 
@@ -438,6 +643,7 @@ End Function
 
 Function ResolveInteropManifestForSource(ByRef sourceFile As String, ByRef manifest As InteropManifest, ByRef errText As String) As Integer
     InteropManifestInit manifest
+    InteropToolchainApplyEnv manifest.toolchain
 
     Dim normalizedSource As String
     normalizedSource = PathNormalize(sourceFile)
@@ -526,11 +732,11 @@ End Function
 Private Function BuildCompileCommand(ByRef lang As String, ByRef importPath As String, ByRef objectPath As String) As String
     Select Case UCase(lang)
     Case "C"
-        Return "gcc -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+        Return "%UXB_CC_CMD% -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
     Case "CPP"
-        Return "g++ -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+        Return "%UXB_CXX_CMD% -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
     Case "ASM"
-        Return "nasm -f win64 " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+        Return "%UXB_ASM_CMD% -f win64 " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
     End Select
 
     Return ""
@@ -544,6 +750,9 @@ End Sub
 
 Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir As String, ByRef errText As String) As Integer
     EnsureOutputDirs outputDir
+
+    Dim outputDirNorm As String
+    outputDirNorm = PathNormalize(outputDir)
 
     Dim manifestPath As String
     manifestPath = PathNormalize(outputDir & "\import_build_manifest.csv")
@@ -563,12 +772,16 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
     Dim makefilePath As String
     makefilePath = PathNormalize(outputDir & "\makefile")
 
+    Dim toolchainEnvPath As String
+    toolchainEnvPath = PathNormalize(outputDir & "\toolchain.env.bat")
+
     Dim mf As Integer
     Dim rf As Integer
     Dim pf As Integer
     Dim bf As Integer
     Dim lf As Integer
     Dim kf As Integer
+    Dim tf As Integer
 
     mf = FreeFile
     Open manifestPath For Output As #mf
@@ -627,12 +840,46 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
         Return 0
     End If
 
-    Print #mf, "kind,language,source_file,resolved_path,object_path,compile_cmd,link_arg"
+    tf = FreeFile
+    Open toolchainEnvPath For Output As #tf
+    If Err <> 0 Then
+        Close #kf
+        Close #lf
+        Close #bf
+        Close #pf
+        Close #rf
+        Close #mf
+        errText = "interop emit: cannot write " & toolchainEnvPath
+        Return 0
+    End If
+
+    Print #mf, "kind,language,source_file,resolved_path,object_path,compile_cmd,link_arg,toolchain_source"
 
     Dim i As Integer
     For i = 0 To manifest.includeCount - 1
-        Print #mf, "INCLUDE,," & CsvEscape(manifest.includes(i).sourceFile) & "," & CsvEscape(manifest.includes(i).includePath) & ",,,"
+        Print #mf, "INCLUDE,," & CsvEscape(manifest.includes(i).sourceFile) & "," & CsvEscape(manifest.includes(i).includePath) & ",,,," & CsvEscape(manifest.toolchain.sourceTag)
     Next i
+
+    Print #mf, "TOOLCHAIN,,,,,,," & CsvEscape(manifest.toolchain.sourceTag)
+
+    Print #tf, "@echo off"
+    Print #tf, "set UXB_CC=" & manifest.toolchain.cc
+    Print #tf, "set UXB_CXX=" & manifest.toolchain.cxx
+    Print #tf, "set UXB_ASM=" & manifest.toolchain.asmCompiler
+    Print #tf, "set UXB_LINK=" & manifest.toolchain.linker
+    Print #tf, "set UXB_CC_PATH=" & manifest.toolchain.ccPath
+    Print #tf, "set UXB_CXX_PATH=" & manifest.toolchain.cxxPath
+    Print #tf, "set UXB_ASM_PATH=" & manifest.toolchain.asmPath
+    Print #tf, "set UXB_LINK_PATH=" & manifest.toolchain.linkPath
+    Print #tf, "set UXB_CC_CMD=%UXB_CC%"
+    Print #tf, "set UXB_CXX_CMD=%UXB_CXX%"
+    Print #tf, "set UXB_ASM_CMD=%UXB_ASM%"
+    Print #tf, "set UXB_LINK_CMD=%UXB_LINK%"
+    Print #tf, "if not ""%UXB_CC_PATH%""=="""" set UXB_CC_CMD=%UXB_CC_PATH%\%UXB_CC%"
+    Print #tf, "if not ""%UXB_CXX_PATH%""=="""" set UXB_CXX_CMD=%UXB_CXX_PATH%\%UXB_CXX%"
+    Print #tf, "if not ""%UXB_ASM_PATH%""=="""" set UXB_ASM_CMD=%UXB_ASM_PATH%\%UXB_ASM%"
+    Print #tf, "if not ""%UXB_LINK_PATH%""=="""" set UXB_LINK_CMD=%UXB_LINK_PATH%\%UXB_LINK%"
+    Print #tf, "exit /b 0"
 
     Print #pf, "# Import compile steps"
     Dim importCount As Integer
@@ -642,7 +889,11 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
     Print #bf, "setlocal EnableExtensions"
     Print #bf, "pushd ""%~dp0\..\.."""
     Print #bf, "if errorlevel 1 exit /b 1"
-    Print #bf, "if not exist ""dist\interop\import_objs"" mkdir ""dist\interop\import_objs"""
+    Print #bf, "call """ & outputDirNorm & "\toolchain.env.bat"""
+    Print #bf, "if errorlevel 1 exit /b 1"
+    Print #bf, "if not exist """ & outputDirNorm & "\import_objs"" mkdir """ & outputDirNorm & "\import_objs"""
+    Print #bf, "echo [interop] toolchain source: " & manifest.toolchain.sourceTag
+    Print #bf, "echo [interop] cc=%UXB_CC_CMD% cxx=%UXB_CXX_CMD% asm=%UXB_ASM_CMD% link=%UXB_LINK_CMD%"
     Print #bf, "echo [interop] compiling imports..."
 
     For i = 0 To manifest.importCount - 1
@@ -654,7 +905,7 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
         Dim compileCmd As String
         compileCmd = BuildCompileCommand(manifest.imports(i).language, manifest.imports(i).importPath, objPath)
 
-        Print #mf, "IMPORT," & CsvEscape(manifest.imports(i).language) & "," & CsvEscape(manifest.imports(i).sourceFile) & "," & CsvEscape(manifest.imports(i).importPath) & "," & CsvEscape(objPath) & "," & CsvEscape(compileCmd) & "," & CsvEscape(objPath)
+        Print #mf, "IMPORT," & CsvEscape(manifest.imports(i).language) & "," & CsvEscape(manifest.imports(i).sourceFile) & "," & CsvEscape(manifest.imports(i).importPath) & "," & CsvEscape(objPath) & "," & CsvEscape(compileCmd) & "," & CsvEscape(objPath) & "," & CsvEscape(manifest.toolchain.sourceTag)
         Print #rf, Chr(34) & objPath & Chr(34)
         Print #pf, compileCmd
 
@@ -684,17 +935,19 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
     Print #lf, "setlocal EnableExtensions"
     Print #lf, "pushd ""%~dp0\..\.."""
     Print #lf, "if errorlevel 1 exit /b 1"
-    Print #lf, "if not exist ""dist\interop\import_link_args.rsp"" ("
-    Print #lf, "  echo [interop] missing response file: dist\interop\import_link_args.rsp"
+    Print #lf, "call """ & outputDirNorm & "\toolchain.env.bat"""
+    Print #lf, "if errorlevel 1 exit /b 1"
+    Print #lf, "if not exist """ & outputDirNorm & "\import_link_args.rsp"" ("
+    Print #lf, "  echo [interop] missing response file: " & outputDirNorm & "\import_link_args.rsp"
     Print #lf, "  popd"
     Print #lf, "  exit /b 1"
     Print #lf, ")"
-    Print #lf, "gcc @""dist\interop\import_link_args.rsp"" -o ""dist\interop\interop_program.exe"""
+    Print #lf, "%UXB_LINK_CMD% @""" & outputDirNorm & "\import_link_args.rsp"" -o """ & outputDirNorm & "\interop_program.exe"""
     Print #lf, "if errorlevel 1 ("
     Print #lf, "  popd"
     Print #lf, "  exit /b 1"
     Print #lf, ")"
-    Print #lf, "echo [interop] link complete: dist\interop\interop_program.exe"
+    Print #lf, "echo [interop] link complete: " & outputDirNorm & "\interop_program.exe"
     Print #lf, "popd"
     Print #lf, "exit /b 0"
 
@@ -710,6 +963,7 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
     Print #kf, Chr(9) & "del /Q import_objs\*.o 2>nul"
     Print #kf, Chr(9) & "del /Q interop_program.exe 2>nul"
 
+    Close #tf
     Close #kf
     Close #lf
     Close #bf
