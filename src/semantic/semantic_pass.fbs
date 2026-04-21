@@ -631,6 +631,425 @@ Private Function SemValidateInterfaceContracts(ByRef ps As ParseState, ByRef err
     Return 1
 End Function
 
+Private Function SemCountRoutineParams(ByRef ps As ParseState, ByVal routineNode As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(routineNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "PARAM_DECL" Then cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return cnt
+End Function
+
+Private Function SemCountRoutineGenericParams(ByRef ps As ParseState, ByVal routineNode As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(routineNode).firstChild
+    Do While ch <> -1
+        Dim k As String
+        k = UCase(ps.ast.nodes(ch).kind)
+        If k = "GENERIC_PARAM" Or k = "TYPE_PARAM" Or k = "TYPE_PARAM_DECL" Then cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return cnt
+End Function
+
+Private Function SemCountCallArgs(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(callNode).firstChild
+    Do While ch <> -1
+        Dim k As String
+        k = UCase(ps.ast.nodes(ch).kind)
+        If k <> "GENERIC_ARG" And k <> "TYPE_ARG" Then cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return cnt
+End Function
+
+Private Function SemCountCallGenericArgs(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(callNode).firstChild
+    Do While ch <> -1
+        Dim k As String
+        k = UCase(ps.ast.nodes(ch).kind)
+        If k = "GENERIC_ARG" Or k = "TYPE_ARG" Then cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return cnt
+End Function
+
+Private Function SemValidateOverloadResolution(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim names() As String
+    Dim arities() As Integer
+    Dim genericArities() As Integer
+    Dim sigCount As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+        If k = "SUB_STMT" Or k = "FUNCTION_STMT" Or k = "DECLARE_SUB_STMT" Or k = "DECLARE_FUNCTION_STMT" Then
+            Dim nameKey As String
+            nameKey = UCase(Trim(ps.ast.nodes(i).value))
+
+            Dim argc As Integer
+            argc = SemCountRoutineParams(ps, i)
+            Dim gargc As Integer
+            gargc = SemCountRoutineGenericParams(ps, i)
+
+            Dim j As Integer
+            For j = 0 To sigCount - 1
+                If names(j) = nameKey And arities(j) = argc And genericArities(j) = gargc Then
+                    errText = "semantic: duplicate overload signature " & nameKey & "(" & Str(argc) & ")"
+                    Return 0
+                End If
+            Next j
+
+            If sigCount = 0 Then
+                ReDim names(0)
+                ReDim arities(0)
+                ReDim genericArities(0)
+            Else
+                ReDim Preserve names(sigCount)
+                ReDim Preserve arities(sigCount)
+                ReDim Preserve genericArities(sigCount)
+            End If
+
+            names(sigCount) = nameKey
+            arities(sigCount) = argc
+            genericArities(sigCount) = gargc
+            sigCount += 1
+        End If
+    Next i
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+        If k = "CALL_STMT" Or k = "CALL_EXPR" Then
+            Dim callName As String
+            callName = UCase(Trim(ps.ast.nodes(i).value))
+
+            Dim callArgc As Integer
+            callArgc = SemCountCallArgs(ps, i)
+            Dim callGenericArgc As Integer
+            callGenericArgc = SemCountCallGenericArgs(ps, i)
+
+            Dim seenByName As Integer
+            Dim matched As Integer
+            Dim j As Integer
+            For j = 0 To sigCount - 1
+                If names(j) = callName Then
+                    seenByName += 1
+
+                    If arities(j) = callArgc Then
+                        If callGenericArgc = 0 Or genericArities(j) = callGenericArgc Then
+                            matched += 1
+                        End If
+                    End If
+                End If
+            Next j
+
+            If seenByName = 0 Then Continue For
+
+            If matched = 0 Then
+                errText = "semantic: no matching overload for " & callName & " with " & Str(callArgc) & " argument(s)"
+                Return 0
+            End If
+
+            If matched > 1 Then
+                errText = "semantic: ambiguous overload call " & callName & " with " & Str(callArgc) & " argument(s)"
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemTryEvalConstNumber(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef valueOut As Double, ByRef isIntOut As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+    Dim k As String
+    k = UCase(n.kind)
+
+    If k = "NUMBER" Then
+        Dim t As String
+        t = Trim(n.value)
+        If t = "" Then Return 0
+
+        valueOut = Val(t)
+        isIntOut = IIf(InStr(t, ".") = 0 And InStr(UCase(t), "E") = 0, 1, 0)
+        Return 1
+    End If
+
+    If k = "UNARY" Then
+        Dim rv As Double
+        Dim ri As Integer
+        If SemTryEvalConstNumber(ps, n.right, rv, ri) = 0 Then Return 0
+
+        Dim opText As String
+        opText = UCase(Trim(n.op))
+        Select Case opText
+        Case "+"
+            valueOut = rv
+            isIntOut = ri
+            Return 1
+        Case "-"
+            valueOut = -rv
+            isIntOut = ri
+            Return 1
+        Case "NOT"
+            valueOut = Not CLng(rv)
+            isIntOut = 1
+            Return 1
+        End Select
+
+        Return 0
+    End If
+
+    If k = "BINARY" Then
+        Dim lv As Double
+        Dim li As Integer
+        Dim rv As Double
+        Dim ri As Integer
+        If SemTryEvalConstNumber(ps, n.left, lv, li) = 0 Then Return 0
+        If SemTryEvalConstNumber(ps, n.right, rv, ri) = 0 Then Return 0
+
+        Dim opText As String
+        opText = UCase(Trim(n.op))
+
+        Select Case opText
+        Case "+"
+            valueOut = lv + rv
+            isIntOut = li And ri
+            Return 1
+        Case "-"
+            valueOut = lv - rv
+            isIntOut = li And ri
+            Return 1
+        Case "*"
+            valueOut = lv * rv
+            isIntOut = li And ri
+            Return 1
+        Case "/"
+            If rv = 0 Then Return 0
+            valueOut = lv / rv
+            isIntOut = 0
+            Return 1
+        Case "\\", "%", "MOD"
+            If rv = 0 Then Return 0
+            If opText = "\\" Then
+                valueOut = CLng(lv) \ CLng(rv)
+            Else
+                valueOut = CLng(lv) Mod CLng(rv)
+            End If
+            isIntOut = 1
+            Return 1
+        Case "AND"
+            valueOut = CLng(lv) And CLng(rv)
+            isIntOut = 1
+            Return 1
+        Case "OR"
+            valueOut = CLng(lv) Or CLng(rv)
+            isIntOut = 1
+            Return 1
+        Case "XOR"
+            valueOut = CLng(lv) Xor CLng(rv)
+            isIntOut = 1
+            Return 1
+        Case "<<", "SHL"
+            valueOut = CLng(lv) Shl CLng(rv)
+            isIntOut = 1
+            Return 1
+        Case ">>", "SHR"
+            valueOut = CLng(lv) Shr CLng(rv)
+            isIntOut = 1
+            Return 1
+        Case "="
+            valueOut = IIf(lv = rv, 1, 0)
+            isIntOut = 1
+            Return 1
+        Case "<>"
+            valueOut = IIf(lv <> rv, 1, 0)
+            isIntOut = 1
+            Return 1
+        Case "<"
+            valueOut = IIf(lv < rv, 1, 0)
+            isIntOut = 1
+            Return 1
+        Case ">"
+            valueOut = IIf(lv > rv, 1, 0)
+            isIntOut = 1
+            Return 1
+        Case "<="
+            valueOut = IIf(lv <= rv, 1, 0)
+            isIntOut = 1
+            Return 1
+        Case ">="
+            valueOut = IIf(lv >= rv, 1, 0)
+            isIntOut = 1
+            Return 1
+        End Select
+
+        Return 0
+    End If
+
+    Return 0
+End Function
+
+Private Function SemConstNumberToText(ByVal valueIn As Double, ByVal asInt As Integer) As String
+    If asInt <> 0 Then
+        Return LTrim(Str(CLng(valueIn)))
+    End If
+    Return LTrim(Str(valueIn))
+End Function
+
+Private Sub SemFoldConstantsNode(ByRef ps As ParseState, ByVal nodeIdx As Integer)
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Exit Sub
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        SemFoldConstantsNode ps, ps.ast.nodes(nodeIdx).left
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        SemFoldConstantsNode ps, ps.ast.nodes(nodeIdx).right
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        SemFoldConstantsNode ps, ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Dim k As String
+    k = UCase(ps.ast.nodes(nodeIdx).kind)
+    If k = "BINARY" Or k = "UNARY" Then
+        Dim foldedValue As Double
+        Dim foldedInt As Integer
+        If SemTryEvalConstNumber(ps, nodeIdx, foldedValue, foldedInt) <> 0 Then
+            ps.ast.nodes(nodeIdx).kind = "NUMBER"
+            ps.ast.nodes(nodeIdx).value = SemConstNumberToText(foldedValue, foldedInt)
+            ps.ast.nodes(nodeIdx).op = ""
+            ps.ast.nodes(nodeIdx).left = -1
+            ps.ast.nodes(nodeIdx).right = -1
+            ps.ast.nodes(nodeIdx).firstChild = -1
+        End If
+    End If
+End Sub
+
+Private Function SemFoldConstants(ByRef ps As ParseState, ByRef errText As String) As Integer
+    If ps.rootNode < 0 Or ps.rootNode >= ps.ast.count Then
+        errText = "semantic: invalid AST root for constant folding"
+        Return 0
+    End If
+
+    SemFoldConstantsNode ps, ps.rootNode
+    Return 1
+End Function
+
+Private Function SemIsHardTerminatorKind(ByRef kindRaw As String) As Integer
+    Dim k As String
+    k = UCase(Trim(kindRaw))
+    Return IIf(k = "RETURN_STMT" Or k = "THROW_STMT" Or k = "END_STMT", 1, 0)
+End Function
+
+Private Function SemValidateReachabilityList(ByRef ps As ParseState, ByVal firstNode As Integer, ByRef errText As String) As Integer
+    Dim terminated As Integer
+    Dim termKind As String
+    Dim ch As Integer
+
+    ch = firstNode
+    Do While ch <> -1
+        Dim k As String
+        k = UCase(ps.ast.nodes(ch).kind)
+
+        If terminated <> 0 Then
+            errText = "semantic: unreachable statement after " & termKind
+            Return 0
+        End If
+
+        If SemIsHardTerminatorKind(k) <> 0 Then
+            terminated = 1
+            termKind = k
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function SemValidateReachability(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "SUB_STMT" Or k = "FUNCTION_STMT" Then
+            Dim ch As Integer
+            ch = ps.ast.nodes(i).firstChild
+            Do While ch <> -1
+                Dim ck As String
+                ck = UCase(ps.ast.nodes(ch).kind)
+                If ck <> "PARAM_DECL" And ck <> "RETURN_TYPE" Then Exit Do
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+
+            If ch <> -1 Then
+                If SemValidateReachabilityList(ps, ch, errText) = 0 Then Return 0
+            End If
+        ElseIf k = "TRY_BODY" Or k = "CATCH_PART" Or k = "FINALLY_PART" Or k = "ELSE_PART" Or k = "EACH_BODY" Then
+            Dim firstBody As Integer
+            firstBody = ps.ast.nodes(i).firstChild
+            If firstBody <> -1 Then
+                If SemValidateReachabilityList(ps, firstBody, errText) = 0 Then Return 0
+            End If
+        ElseIf k = "IF_STMT" Or k = "ELSEIF_PART" Then
+            Dim bodyStart As Integer
+            bodyStart = ps.ast.nodes(i).firstChild
+            If bodyStart <> -1 Then bodyStart = ps.ast.nodes(bodyStart).nextSibling
+
+            Dim terminated As Integer
+            Dim termKind As String
+            Dim st As Integer
+            st = bodyStart
+            Do While st <> -1
+                Dim sk As String
+                sk = UCase(ps.ast.nodes(st).kind)
+                If sk = "ELSEIF_PART" Or sk = "ELSE_PART" Then Exit Do
+
+                If terminated <> 0 Then
+                    errText = "semantic: unreachable statement after " & termKind
+                    Return 0
+                End If
+
+                If SemIsHardTerminatorKind(sk) <> 0 Then
+                    terminated = 1
+                    termKind = sk
+                End If
+
+                st = ps.ast.nodes(st).nextSibling
+            Loop
+        End If
+    Next i
+
+    Return 1
+End Function
+
 Function SemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Integer
     errText = ""
 
@@ -646,6 +1065,9 @@ Function SemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Int
     If SemValidateIfSelectNodes(ps, errText) = 0 Then Return 0
     If SemValidateRoutineNodes(ps, errText) = 0 Then Return 0
     If SemValidateConstNodes(ps, errText) = 0 Then Return 0
+    If SemFoldConstants(ps, errText) = 0 Then Return 0
+    If SemValidateOverloadResolution(ps, errText) = 0 Then Return 0
+    If SemValidateReachability(ps, errText) = 0 Then Return 0
     If SemValidateThisMeUsage(ps, errText) = 0 Then Return 0
     If SemValidateClassOverrideContracts(ps, errText) = 0 Then Return 0
     If SemValidateInterfaceContracts(ps, errText) = 0 Then Return 0
