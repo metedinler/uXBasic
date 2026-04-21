@@ -32,6 +32,7 @@ Dim Shared gX64ParamNames(0 To 255) As String
 Dim Shared gX64RoutineKeys(0 To 1023) As String
 Dim Shared gX64RoutineArgCounts(0 To 1023) As Integer
 Dim Shared gX64RoutineIsFunction(0 To 1023) As Integer
+Dim Shared gX64GlobalLabelCounter As Integer
 
 Declare Function X64EmitNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function GenerateStatement(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
@@ -39,6 +40,9 @@ Declare Function GenerateLocalDim(ByRef ps As ParseState, ByVal nodeIdx As Integ
 Declare Function GeneratePrint(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function GenerateCall(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function GenerateExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+Declare Sub EmitFunctionProlog(ByRef cg As X64CodegenContext, ByVal frameBytes As Integer)
+Declare Sub EmitFunctionEpilog(ByRef cg As X64CodegenContext)
+Declare Function GenerateRoutine(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String, ByVal isFunction As Integer, ByRef routineName As String) As Integer
 Declare Function X64EmitProgram(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function X64EmitSubStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function X64EmitFunctionStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
@@ -121,8 +125,9 @@ Private Sub X64EmitComment(ByRef cg As X64CodegenContext, ByRef commentText As S
 End Sub
 
 Private Function X64NextLabel(ByRef cg As X64CodegenContext, ByRef prefixText As String) As String
-    cg.labelSeed += 1
-    Return "__uxb_" & prefixText & "_" & LTrim(Str(cg.labelSeed))
+    gX64GlobalLabelCounter += 1
+    cg.labelSeed = gX64GlobalLabelCounter
+    Return "__uxb_" & prefixText & "_" & LTrim(Str(gX64GlobalLabelCounter))
 End Function
 
 Private Function X64MakeScopedKey(ByRef scopeText As String, ByRef symbolText As String) As String
@@ -788,6 +793,96 @@ Private Function GenerateExpression(ByRef ps As ParseState, ByVal nodeIdx As Int
     Return X64EmitExprToRax(ps, nodeIdx, cg, errText)
 End Function
 
+Private Sub EmitFunctionProlog(ByRef cg As X64CodegenContext, ByVal frameBytes As Integer)
+    X64EmitText cg, "    push rbp"
+    X64EmitText cg, "    mov rbp, rsp"
+    X64EmitText cg, "    sub rsp, " & X64ToStr(frameBytes)
+End Sub
+
+Private Sub EmitFunctionEpilog(ByRef cg As X64CodegenContext)
+    X64EmitText cg, "    leave"
+    X64EmitText cg, "    ret"
+End Sub
+
+Private Function GenerateRoutine(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String, ByVal isFunction As Integer, ByRef routineName As String) As Integer
+    cg.currentRoutineLabel = routineName
+    cg.localCount = 0
+    cg.localFrameBytes = 0
+    cg.paramCount = 0
+    cg.currentEpilogLabel = ""
+    cg.currentRoutineIsFunction = isFunction
+
+    X64RegisterProcedureParams ps, nodeIdx, cg
+
+    Dim scanNode As Integer
+    scanNode = ps.ast.nodes(nodeIdx).firstChild
+    Do While scanNode <> -1
+        X64CollectRoutineLocals(ps, scanNode, cg)
+        scanNode = ps.ast.nodes(scanNode).nextSibling
+    Loop
+
+    Dim frameBytes As Integer
+    frameBytes = X64Align16(cg.localFrameBytes)
+    cg.currentEpilogLabel = X64NextLabel(cg, "ret")
+
+    X64EmitText cg, "global " & routineName
+    X64EmitLabel cg, routineName
+    EmitFunctionProlog cg, frameBytes
+    If isFunction <> 0 Then
+        X64EmitText cg, "    xor rax, rax"
+    End If
+
+    Dim paramRegs(0 To 3) As String
+    paramRegs(0) = "rcx"
+    paramRegs(1) = "rdx"
+    paramRegs(2) = "r8"
+    paramRegs(3) = "r9"
+
+    Dim paramIndex As Integer
+    For paramIndex = 0 To cg.paramCount - 1
+        Dim paramOffset As Integer
+        If X64TryFindLocalOffset(cg, gX64ParamNames(paramIndex), paramOffset) <> 0 Then
+            If paramIndex <= 3 Then
+                X64EmitText cg, "    mov " & X64FormatRbpRef(paramOffset) & ", " & paramRegs(paramIndex)
+            Else
+                Dim stackOffset As Integer
+                stackOffset = 48 + ((paramIndex - 4) * 8)
+                X64EmitText cg, "    mov rax, [rbp + " & X64ToStr(stackOffset) & "]"
+                X64EmitText cg, "    mov " & X64FormatRbpRef(paramOffset) & ", rax"
+            End If
+        End If
+    Next paramIndex
+
+    Dim body As Integer
+    body = ps.ast.nodes(nodeIdx).firstChild
+    Do While body <> -1
+        Dim k As String
+        k = X64Upper(ps.ast.nodes(body).kind)
+
+        If k = "PARAM_DECL" Or k = "RETURN_TYPE" Then
+            ' metadata node
+        ElseIf k = "DIM_STMT" Or k = "DIM" Or k = "REDIM_STMT" Or k = "REDIM" Or _
+               k = "PRINT_STMT" Or k = "PRINT" Or k = "CALL_STMT" Or k = "CALL_EXPR" Or k = "CALL" Then
+            If GenerateStatement(ps, body, cg, errText) = 0 Then Return 0
+        Else
+            If X64EmitNode(ps, body, cg, errText) = 0 Then Return 0
+        End If
+
+        body = ps.ast.nodes(body).nextSibling
+    Loop
+
+    X64EmitLabel cg, cg.currentEpilogLabel
+    EmitFunctionEpilog cg
+
+    cg.currentRoutineLabel = ""
+    cg.localCount = 0
+    cg.localFrameBytes = 0
+    cg.paramCount = 0
+    cg.currentEpilogLabel = ""
+    cg.currentRoutineIsFunction = 0
+    Return 1
+End Function
+
 Private Function GenerateStatement(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
     If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
 
@@ -925,155 +1020,14 @@ Private Function X64EmitSubStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer
     Dim procName As String
     procName = Trim(ps.ast.nodes(nodeIdx).value)
     If procName = "" Then procName = X64NextLabel(cg, "sub")
-
-    cg.currentRoutineLabel = procName
-    cg.localCount = 0
-    cg.localFrameBytes = 0
-    cg.paramCount = 0
-    cg.currentEpilogLabel = ""
-    cg.currentRoutineIsFunction = 0
-
-    X64RegisterProcedureParams ps, nodeIdx, cg
-
-    Dim scanNode As Integer
-    scanNode = ps.ast.nodes(nodeIdx).firstChild
-    Do While scanNode <> -1
-        X64CollectRoutineLocals(ps, scanNode, cg)
-        scanNode = ps.ast.nodes(scanNode).nextSibling
-    Loop
-
-    Dim frameBytes As Integer
-    frameBytes = X64Align16(cg.localFrameBytes)
-    cg.currentEpilogLabel = X64NextLabel(cg, "ret")
-
-    X64EmitText cg, "global " & procName
-    X64EmitLabel cg, procName
-    X64EmitText cg, "    push rbp"
-    X64EmitText cg, "    mov rbp, rsp"
-    X64EmitText cg, "    sub rsp, " & X64ToStr(frameBytes)
-
-    Dim paramRegs(0 To 3) As String
-    paramRegs(0) = "rcx"
-    paramRegs(1) = "rdx"
-    paramRegs(2) = "r8"
-    paramRegs(3) = "r9"
-
-    Dim paramIndex As Integer
-    For paramIndex = 0 To cg.paramCount - 1
-        Dim paramOffset As Integer
-        If X64TryFindLocalOffset(cg, gX64ParamNames(paramIndex), paramOffset) <> 0 Then
-            If paramIndex <= 3 Then
-                X64EmitText cg, "    mov " & X64FormatRbpRef(paramOffset) & ", " & paramRegs(paramIndex)
-            Else
-                Dim stackOffset As Integer
-                stackOffset = 48 + ((paramIndex - 4) * 8)
-                X64EmitText cg, "    mov rax, [rbp + " & X64ToStr(stackOffset) & "]"
-                X64EmitText cg, "    mov " & X64FormatRbpRef(paramOffset) & ", rax"
-            End If
-        End If
-    Next paramIndex
-
-    Dim body As Integer
-    body = ps.ast.nodes(nodeIdx).firstChild
-    Do While body <> -1
-        Dim k As String
-        k = X64Upper(ps.ast.nodes(body).kind)
-        If k <> "PARAM_DECL" Then
-            If X64EmitNode(ps, body, cg, errText) = 0 Then Return 0
-        End If
-        body = ps.ast.nodes(body).nextSibling
-    Loop
-
-    X64EmitLabel cg, cg.currentEpilogLabel
-    X64EmitText cg, "    leave"
-    X64EmitText cg, "    ret"
-    cg.currentRoutineLabel = ""
-    cg.localCount = 0
-    cg.localFrameBytes = 0
-    cg.paramCount = 0
-    cg.currentEpilogLabel = ""
-    cg.currentRoutineIsFunction = 0
-    Return 1
+    Return GenerateRoutine(ps, nodeIdx, cg, errText, 0, procName)
 End Function
 
 Private Function X64EmitFunctionStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
     Dim fnName As String
     fnName = Trim(ps.ast.nodes(nodeIdx).value)
     If fnName = "" Then fnName = X64NextLabel(cg, "fn")
-
-    cg.currentRoutineLabel = fnName
-    cg.localCount = 0
-    cg.localFrameBytes = 0
-    cg.paramCount = 0
-    cg.currentEpilogLabel = ""
-    cg.currentRoutineIsFunction = 1
-
-    X64RegisterProcedureParams ps, nodeIdx, cg
-
-    Dim scanNode As Integer
-    scanNode = ps.ast.nodes(nodeIdx).firstChild
-    Do While scanNode <> -1
-        X64CollectRoutineLocals(ps, scanNode, cg)
-        scanNode = ps.ast.nodes(scanNode).nextSibling
-    Loop
-
-    Dim frameBytes As Integer
-    frameBytes = X64Align16(cg.localFrameBytes)
-    cg.currentEpilogLabel = X64NextLabel(cg, "ret")
-
-    X64EmitText cg, "global " & fnName
-    X64EmitLabel cg, fnName
-    X64EmitText cg, "    push rbp"
-    X64EmitText cg, "    mov rbp, rsp"
-    X64EmitText cg, "    sub rsp, " & X64ToStr(frameBytes)
-    X64EmitText cg, "    xor rax, rax"
-
-    Dim paramRegs(0 To 3) As String
-    paramRegs(0) = "rcx"
-    paramRegs(1) = "rdx"
-    paramRegs(2) = "r8"
-    paramRegs(3) = "r9"
-
-    Dim paramIndex As Integer
-    For paramIndex = 0 To cg.paramCount - 1
-        Dim paramOffset As Integer
-        If X64TryFindLocalOffset(cg, gX64ParamNames(paramIndex), paramOffset) <> 0 Then
-            If paramIndex <= 3 Then
-                X64EmitText cg, "    mov " & X64FormatRbpRef(paramOffset) & ", " & paramRegs(paramIndex)
-            Else
-                Dim stackOffset As Integer
-                stackOffset = 48 + ((paramIndex - 4) * 8)
-                X64EmitText cg, "    mov rax, [rbp + " & X64ToStr(stackOffset) & "]"
-                X64EmitText cg, "    mov " & X64FormatRbpRef(paramOffset) & ", rax"
-            End If
-        End If
-    Next paramIndex
-
-    Dim body As Integer
-    body = ps.ast.nodes(nodeIdx).firstChild
-    Do While body <> -1
-        Dim k As String
-        k = X64Upper(ps.ast.nodes(body).kind)
-        If k = "PARAM_DECL" Then
-            ' metadata node
-        ElseIf k = "RETURN_TYPE" Then
-            ' metadata node
-        Else
-            If X64EmitNode(ps, body, cg, errText) = 0 Then Return 0
-        End If
-        body = ps.ast.nodes(body).nextSibling
-    Loop
-
-    X64EmitLabel cg, cg.currentEpilogLabel
-    X64EmitText cg, "    leave"
-    X64EmitText cg, "    ret"
-    cg.currentRoutineLabel = ""
-    cg.localCount = 0
-    cg.localFrameBytes = 0
-    cg.paramCount = 0
-    cg.currentEpilogLabel = ""
-    cg.currentRoutineIsFunction = 0
-    Return 1
+    Return GenerateRoutine(ps, nodeIdx, cg, errText, 1, fnName)
 End Function
 
 Private Function X64EmitDimStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
@@ -1122,15 +1076,20 @@ Private Function X64EmitIfStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer,
         Return 0
     End If
 
+    Dim lblThen As String
+    Dim lblElse As String
     Dim lblEnd As String
-    lblEnd = X64NextLabel(cg, "if_end")
 
-    Dim lblNext As String
-    lblNext = X64NextLabel(cg, "if_else_chain")
+    lblThen = X64NextLabel(cg, "if_then")
+    lblElse = X64NextLabel(cg, "if_else")
+    lblEnd = X64NextLabel(cg, "if_end")
 
     If X64EmitExprToRax(ps, condNode, cg, errText) = 0 Then Return 0
     X64EmitText cg, "    cmp rax, 0"
-    X64EmitText cg, "    je " & lblNext
+    X64EmitText cg, "    je " & lblElse
+    X64EmitText cg, "    jmp " & lblThen
+
+    X64EmitLabel cg, lblThen
 
     Dim ch As Integer
     ch = ps.ast.nodes(nodeIdx).firstChild
@@ -1145,7 +1104,7 @@ Private Function X64EmitIfStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer,
     Loop
 
     X64EmitText cg, "    jmp " & lblEnd
-    X64EmitLabel cg, lblNext
+    X64EmitLabel cg, lblElse
 
     Do While ch <> -1
         Dim kindText As String
@@ -1159,12 +1118,17 @@ Private Function X64EmitIfStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer,
                 Return 0
             End If
 
+            Dim lblElseIfThen As String
             Dim lblElseIfNext As String
+            lblElseIfThen = X64NextLabel(cg, "elseif_then")
             lblElseIfNext = X64NextLabel(cg, "elseif_next")
 
             If X64EmitExprToRax(ps, elseifCond, cg, errText) = 0 Then Return 0
             X64EmitText cg, "    cmp rax, 0"
             X64EmitText cg, "    je " & lblElseIfNext
+            X64EmitText cg, "    jmp " & lblElseIfThen
+
+            X64EmitLabel cg, lblElseIfThen
 
             Dim partChild As Integer
             partChild = ps.ast.nodes(ch).firstChild
