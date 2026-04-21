@@ -181,6 +181,8 @@ Private Dim Shared gRoutineDefCount As Integer
 Private Dim Shared gCallContextDepth As Integer
 Private Dim Shared gCallReturnValue As Integer
 Private Dim Shared gCallReturnHasValue As Integer
+Private Dim Shared gCurrentRoutineName As String
+Private Dim Shared gCurrentRoutineNodeIdx As Integer
 Private Dim Shared gDebugLocateRow As Integer
 Private Dim Shared gDebugLocateCol As Integer
 Private Dim Shared gDebugColorFg As Integer
@@ -306,288 +308,67 @@ Private Sub ExecContractInit()
     gExecStringSize = 255  ' Default string size
 End Sub
 
-Private Function ExecFindClassDeclNode(ByRef ps As ParseState, ByRef classTypeName As String) As Integer
-    Dim targetName As String
-    targetName = UCase(Trim(classTypeName))
-    If targetName = "" Then Return -1
-
-    Dim i As Integer
-    For i = 0 To ps.ast.count - 1
-        If UCase(ps.ast.nodes(i).kind) = "CLASS_STMT" Then
-            If UCase(Trim(ps.ast.nodes(i).value)) = targetName Then Return i
-        End If
-    Next i
-
-    Return -1
-End Function
-
-Private Function ExecIsCtorSelfTypeSupported(ByRef typeNameRaw As String) As Integer
-    Dim typeUpper As String
-    typeUpper = UCase(Trim(typeNameRaw))
-
-    Select Case typeUpper
-    Case "I32", "U32", "INTEGER", "LONG", "UINTEGER", "ULONG"
-        Return 1
-    End Select
-
-    Return 0
-End Function
-
-Private Function ExecParamDeclTypeName(ByRef ps As ParseState, ByVal paramNode As Integer, ByRef typeNameOut As String) As Integer
-    typeNameOut = ""
-
-    Dim ch As Integer
-    ch = ps.ast.nodes(paramNode).firstChild
-    Do While ch <> -1
-        If UCase(ps.ast.nodes(ch).kind) = "TYPE_REF" Then
-            typeNameOut = UCase(Trim(ps.ast.nodes(ch).value))
-            Return IIf(typeNameOut <> "", 1, 0)
-        End If
-        ch = ps.ast.nodes(ch).nextSibling
-    Loop
-
-    Return 0
-End Function
-
-Private Function ExecValidateClassCtorSignature(ByRef ps As ParseState, ByVal routineIdx As Integer, ByRef classTypeName As String, ByRef errText As String) As Integer
-    Dim routineName As String
-    routineName = UCase(Trim(classTypeName)) & "_CTOR"
-
-    If gRoutineDefs(routineIdx).routineKind <> "SUB_STMT" Then
-        errText = "DIM: constructor must be SUB " & routineName
-        Return 0
-    End If
-
-    Dim routineNodeIdx As Integer
-    routineNodeIdx = gRoutineDefs(routineIdx).nodeIdx
-
-    Dim paramCount As Integer
-    Dim firstParamNode As Integer
-
-    Dim ch As Integer
-    ch = ps.ast.nodes(routineNodeIdx).firstChild
-    Do While ch <> -1
-        Dim childKind As String
-        childKind = UCase(ps.ast.nodes(ch).kind)
-        If childKind <> "PARAM_DECL" Then Exit Do
-
-        paramCount += 1
-        If paramCount = 1 Then firstParamNode = ch
-        ch = ps.ast.nodes(ch).nextSibling
-    Loop
-
-    If paramCount <> 1 Then
-        errText = "DIM: constructor arity mismatch " & routineName & " expected=1 actual=" & LTrim(Str(paramCount))
-        Return 0
-    End If
-
-    Dim selfType As String
-    If ExecParamDeclTypeName(ps, firstParamNode, selfType) = 0 Then
-        errText = "DIM: constructor signature mismatch " & routineName & " first parameter must declare type"
-        Return 0
-    End If
-
-    If ExecIsCtorSelfTypeSupported(selfType) = 0 Then
-        errText = "DIM: constructor signature mismatch " & routineName & " first parameter type unsupported " & selfType
-        Return 0
-    End If
-
-    Return 1
-End Function
-
-Private Function ExecInvokeClassCtorIfPresent(ByRef ps As ParseState, ByRef es As ExecState, ByRef classTypeName As String, ByVal instanceAddr As UInteger, ByRef errText As String) As Integer
-    Dim classUpper As String
-    classUpper = UCase(Trim(classTypeName))
-    If classUpper = "" Then Return 1
-
-    Dim ctorName As String
-    ctorName = classUpper & "_CTOR"
-
-    Dim routineIdx As Integer
-    routineIdx = ExecRoutineIndexOf(ctorName)
-    If routineIdx = -1 Then Return 1
-
-    If ExecValidateClassCtorSignature(ps, routineIdx, classUpper, errText) = 0 Then Return 0
-
-    Dim ctorResult As Integer
-    If ExecInvokeRoutineByIndex(ps, es, routineIdx, -1, 0, 1, CInt(instanceAddr), ctorResult, errText) = 0 Then
-        If errText = "" Then errText = "DIM: constructor invoke failed " & ctorName
-        Return 0
-    End If
-
-    Return 1
-End Function
-
-Private Function ExecValidateClassDtorSignature(ByRef ps As ParseState, ByVal routineIdx As Integer, ByRef classTypeName As String, ByRef errText As String) As Integer
-    Dim routineName As String
-    routineName = UCase(Trim(classTypeName)) & "_DTOR"
-
-    If gRoutineDefs(routineIdx).routineKind <> "SUB_STMT" Then
-        errText = "destructor must be SUB " & routineName
-        Return 0
-    End If
-
-    Dim routineNodeIdx As Integer
-    routineNodeIdx = gRoutineDefs(routineIdx).nodeIdx
-
-    Dim paramCount As Integer
-    Dim firstParamNode As Integer
-
-    Dim ch As Integer
-    ch = ps.ast.nodes(routineNodeIdx).firstChild
-    Do While ch <> -1
-        Dim childKind As String
-        childKind = UCase(ps.ast.nodes(ch).kind)
-        If childKind <> "PARAM_DECL" Then Exit Do
-
-        paramCount += 1
-        If paramCount = 1 Then firstParamNode = ch
-        ch = ps.ast.nodes(ch).nextSibling
-    Loop
-
-    If paramCount <> 1 Then
-        errText = "destructor arity mismatch " & routineName & " expected=1 actual=" & LTrim(Str(paramCount))
-        Return 0
-    End If
-
-    Dim selfType As String
-    If ExecParamDeclTypeName(ps, firstParamNode, selfType) = 0 Then
-        errText = "destructor signature mismatch " & routineName & " first parameter must declare type"
-        Return 0
-    End If
-
-    If ExecIsCtorSelfTypeSupported(selfType) = 0 Then
-        errText = "destructor signature mismatch " & routineName & " first parameter type unsupported " & selfType
-        Return 0
-    End If
-
-    Return 1
-End Function
-
-Private Function ExecInvokeClassDtorIfPresent(ByRef ps As ParseState, ByRef es As ExecState, ByRef classTypeName As String, ByVal instanceAddr As UInteger, ByRef errText As String) As Integer
-    Dim classUpper As String
-    classUpper = UCase(Trim(classTypeName))
-    If classUpper = "" Then Return 1
-
-    Dim dtorName As String
-    dtorName = classUpper & "_DTOR"
-
-    Dim routineIdx As Integer
-    routineIdx = ExecRoutineIndexOf(dtorName)
-    If routineIdx = -1 Then Return 1
-
-    If ExecValidateClassDtorSignature(ps, routineIdx, classUpper, errText) = 0 Then Return 0
-
-    Dim dtorResult As Integer
-    If ExecInvokeRoutineByIndex(ps, es, routineIdx, -1, 0, 1, CInt(instanceAddr), dtorResult, errText) = 0 Then
-        If errText = "" Then errText = "destructor invoke failed " & dtorName
-        Return 0
-    End If
-
-    Return 1
-End Function
-
-Private Function ExecConfigureClassStorage(ByRef ps As ParseState, ByRef es As ExecState, ByRef varName As String, ByRef classTypeName As String, ByRef errText As String) As Integer
-    Dim classNode As Integer
-    classNode = ExecFindClassDeclNode(ps, classTypeName)
-    If classNode = -1 Then Return 1
-
-    Dim classSize As Integer
-    Dim classLayoutErr As String
-    If TypeLayoutSizeOf(ps, classTypeName, classSize, classLayoutErr) = 0 Then
-        errText = "DIM: class layout resolve failed " & classLayoutErr
-        Return 0
-    End If
-
-    If classSize <= 0 Then
-        errText = "DIM: invalid class size for " & UCase(classTypeName)
-        Return 0
-    End If
-
-    Dim varIdx As Integer
-    varIdx = ExecFindVar(es, varName)
-    If varIdx = -1 Then
-        errText = "DIM: class variable allocation failed " & UCase(varName)
-        Return 0
-    End If
-
-    Dim objectBase As UInteger
-    objectBase = es.vars(varIdx).addr
-    If objectBase > &h7FFFFFFF - CUInt(classSize) + 1 Then
-        errText = "DIM: class allocation overflow"
-        Return 0
-    End If
-
-    If VMemFillB(objectBase, 0, CUInt(classSize)) = 0 Then
-        errText = "DIM: class allocation out of range"
-        Return 0
-    End If
-
-    Dim objectEnd As UInteger
-    objectEnd = objectBase + CUInt(classSize)
-    If objectEnd > es.nextVarAddr Then es.nextVarAddr = objectEnd
-
-    If ExecInvokeClassCtorIfPresent(ps, es, classTypeName, objectBase, errText) = 0 Then Return 0
-
-    Return 1
-End Function
+#include once "exec/exec_class_layout_helpers.fbs"
 
 ' CONST execution contract
 Function ExecEvalCONST(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es As ExecState, ByRef errText As String) As Integer
-    ' CONST name = value
-    Dim childCount As Integer
-    childCount = ExecChildCount(ps, nodeIdx)
-    If childCount < 2 Then
+    ' Parser emits CONST_STMT with one or more CONST_DECL children.
+    Dim declCount As Integer
+    declCount = ExecChildCount(ps, nodeIdx)
+    If declCount < 1 Then
         errText = "CONST: İsim ve değer gerekli"
         Return 0
     End If
 
-    Dim nameNode As Integer
-    nameNode = ExecChildAt(ps, nodeIdx, 0)
-    If nameNode = -1 Then
-        errText = "CONST: İsim düğümü bulunamadı"
-        Return 0
-    End If
-
-    Dim valueNode As Integer
-    valueNode = ExecChildAt(ps, nodeIdx, 1)
-    If valueNode = -1 Then
-        errText = "CONST: Değer düğümü bulunamadı"
-        Return 0
-    End If
-
-    Dim constName As String
-    constName = UCase(Trim(ps.ast.nodes(nameNode).value))
-    If constName = "" Then
-        errText = "CONST: Geçersiz sabit adı"
-        Return 0
-    End If
-
-    ' Check if already defined
-    Dim i As Integer
-    For i = 0 To gExecConstCount - 1
-        If UCase(gExecConsts(i).nameText) = constName Then
-            errText = "CONST: Sabit zaten tanımlanmış: " & constName
+    Dim declPos As Integer
+    For declPos = 0 To declCount - 1
+        Dim declNode As Integer
+        declNode = ExecChildAt(ps, nodeIdx, declPos)
+        If declNode = -1 Or UCase(ps.ast.nodes(declNode).kind) <> "CONST_DECL" Then
+            errText = "CONST: Geçersiz sabit bildirimi"
             Return 0
         End If
+
+        Dim constName As String
+        constName = UCase(Trim(ps.ast.nodes(declNode).value))
+        If constName = "" Then
+            errText = "CONST: Geçersiz sabit adı"
+            Return 0
+        End If
+
+        Dim valueNode As Integer
+        valueNode = ps.ast.nodes(declNode).left
+        If valueNode = -1 Then
+            errText = "CONST: Değer düğümü bulunamadı"
+            Return 0
+        End If
+
+        ' Check if already defined
+        Dim i As Integer
+        For i = 0 To gExecConstCount - 1
+            If UCase(gExecConsts(i).nameText) = constName Then
+                errText = "CONST: Sabit zaten tanımlanmış: " & constName
+                Return 0
+            End If
+        Next
+
+        ' Evaluate value
+        Dim constValue As ExecValue
+        If ExecEvalExpression(ps, valueNode, es, constValue, errText) = 0 Then
+            Return 0
+        End If
+
+        ' Add to const table
+        If gExecConstCount = 0 Then
+            ReDim gExecConsts(0)
+        Else
+            ReDim Preserve gExecConsts(gExecConstCount)
+        End If
+
+        gExecConsts(gExecConstCount).nameText = constName
+        gExecConsts(gExecConstCount).value = constValue
+        gExecConstCount += 1
     Next
-
-    ' Evaluate value
-    Dim constValue As ExecValue
-    If ExecEvalExpression(ps, valueNode, es, constValue, errText) = 0 Then
-        Return 0
-    End If
-
-    ' Add to const table
-    If gExecConstCount = 0 Then
-        ReDim gExecConsts(0)
-    Else
-        ReDim Preserve gExecConsts(gExecConstCount)
-    End If
-
-    gExecConsts(gExecConstCount).nameText = constName
-    gExecConsts(gExecConstCount).value = constValue
-    gExecConstCount += 1
 
     Return 1
 End Function
@@ -1290,7 +1071,7 @@ End Function
 
 Private Function ExecIsBuiltinCallName(ByRef callName As String) As Integer
     Select Case UCase(callName)
-    Case "DLL", "SIZEOF", "OFFSETOF", "LEN", "ABS", "INT", "SGN", "VAL", "ASC", "CINT", "CLNG", "CDBL", "CSNG", "FIX", "SQR", "SIN", "COS", "TAN", "ATN", "EXP", "LOG", "RND", "TIMER", "LOF", "EOF", "INKEY", "GETKEY", "PEEKB", "PEEKW", "PEEKD", "VARPTR", "SADD", "LPTR", "CODEPTR", _
+    Case "DLL", "API", "SIZEOF", "OFFSETOF", "LEN", "ABS", "INT", "SGN", "VAL", "ASC", "CINT", "CLNG", "CDBL", "CSNG", "FIX", "SQR", "SIN", "COS", "TAN", "ATN", "EXP", "LOG", "RND", "TIMER", "LOF", "EOF", "INKEY", "GETKEY", "PEEKB", "PEEKW", "PEEKD", "VARPTR", "SADD", "LPTR", "CODEPTR", _
          "LISTLEN", "LISTGET", "LISTSET", "LISTADD", "LISTREMOVE", "LISTCLEAR", "DICTLEN", "DICTHAS", "DICTGET", "DICTSET", "DICTCLEAR", "SETLEN", "SETHAS", "SETADD", "SETREMOVE", "SETCLEAR"
         Return 1
     End Select
@@ -1380,10 +1161,10 @@ End Function
 
 Private Function ExecEvalBuiltinCall(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNameRaw As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
     Dim callName As String
-    callName = UCase(callNameRaw)
+    callName = UCase(Trim(callNameRaw))
 
     Select Case callName
-    Case "DLL"
+    Case "DLL", "API"
         Return ExecEvalBuiltinFfiCategory(ps, es, callName, callNodeIdx, errText)
 
     Case "SIZEOF", "OFFSETOF"
@@ -1865,6 +1646,8 @@ Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) A
     gCallContextDepth = 0
     gCallReturnValue = 0
     gCallReturnHasValue = 0
+    gCurrentRoutineName = ""
+    gCurrentRoutineNodeIdx = -1
 
     If ps.rootNode = -1 Then
         errText = "exec: no AST root"

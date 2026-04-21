@@ -399,6 +399,190 @@ Private Function SemHasRoutineByName(ByRef ps As ParseState, ByRef routineNameRa
     Return 0
 End Function
 
+Private Function SemFindClassNode(ByRef ps As ParseState, ByRef classNameRaw As String) As Integer
+    Dim classUpper As String
+    classUpper = UCase(Trim(classNameRaw))
+    If classUpper = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = classUpper Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function SemClassBaseName(ByRef ps As ParseState, ByVal classNode As Integer, ByRef baseNameOut As String) As Integer
+    baseNameOut = ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_BASE_REF" Then
+            baseNameOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(baseNameOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function SemClassMethodNode(ByRef ps As ParseState, ByVal classNode As Integer, ByRef methodNameRaw As String) As Integer
+    Dim methodUpper As String
+    methodUpper = UCase(Trim(methodNameRaw))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = methodUpper Then Return ch
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function SemClassMethodHasFlag(ByRef ps As ParseState, ByVal methodNode As Integer, ByRef flagRaw As String) As Integer
+    Dim flagUpper As String
+    flagUpper = UCase(Trim(flagRaw))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_FLAG" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = flagUpper Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function SemClassMethodSignature(ByRef ps As ParseState, ByVal methodNode As Integer) As String
+    Dim sig As String
+    sig = ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        Dim childKind As String
+        childKind = UCase(ps.ast.nodes(ch).kind)
+
+        If childKind = "PARAM_DECL" Then
+            Dim paramType As String
+            paramType = ""
+
+            Dim pch As Integer
+            pch = ps.ast.nodes(ch).firstChild
+            Do While pch <> -1
+                If UCase(ps.ast.nodes(pch).kind) = "TYPE_REF" Then
+                    paramType = UCase(Trim(ps.ast.nodes(pch).value))
+                    Exit Do
+                End If
+                pch = ps.ast.nodes(pch).nextSibling
+            Loop
+
+            sig &= "P:" & paramType & ";"
+        ElseIf childKind = "RETURN_TYPE" Then
+            sig &= "R:" & UCase(Trim(ps.ast.nodes(ch).value)) & ";"
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return sig
+End Function
+
+Private Function SemFindBaseMethod(ByRef ps As ParseState, ByRef baseNameRaw As String, ByRef methodNameRaw As String, ByRef methodOut As Integer) As Integer
+    methodOut = -1
+
+    Dim curClass As String
+    curClass = UCase(Trim(baseNameRaw))
+
+    Dim hop As Integer
+    Do While curClass <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+
+        Dim classNode As Integer
+        classNode = SemFindClassNode(ps, curClass)
+        If classNode = -1 Then Exit Do
+
+        methodOut = SemClassMethodNode(ps, classNode, methodNameRaw)
+        If methodOut <> -1 Then Return 1
+
+        Dim nextBase As String
+        If SemClassBaseName(ps, classNode, nextBase) = 0 Then Exit Do
+        curClass = nextBase
+    Loop
+
+    methodOut = -1
+    Return 0
+End Function
+
+Private Function SemValidateClassOverrideContracts(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "CLASS_STMT" Then Continue For
+
+        Dim className As String
+        className = UCase(Trim(ps.ast.nodes(i).value))
+
+        Dim baseName As String
+        SemClassBaseName ps, i, baseName
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+                Dim methodName As String
+                methodName = UCase(Trim(ps.ast.nodes(ch).value))
+
+                Dim hasVirtual As Integer
+                Dim hasOverride As Integer
+                hasVirtual = SemClassMethodHasFlag(ps, ch, "VIRTUAL")
+                hasOverride = SemClassMethodHasFlag(ps, ch, "OVERRIDE")
+
+                If hasVirtual <> 0 And hasOverride <> 0 Then
+                    errText = "semantic: CLASS METHOD cannot be both VIRTUAL and OVERRIDE " & className & "." & methodName
+                    Return 0
+                End If
+
+                If hasOverride <> 0 Then
+                    If baseName = "" Then
+                        errText = "semantic: CLASS OVERRIDE requires base class " & className & "." & methodName
+                        Return 0
+                    End If
+
+                    Dim baseMethodNode As Integer
+                    If SemFindBaseMethod(ps, baseName, methodName, baseMethodNode) = 0 Then
+                        errText = "semantic: CLASS OVERRIDE base method missing " & className & "." & methodName
+                        Return 0
+                    End If
+
+                    If SemClassMethodHasFlag(ps, baseMethodNode, "VIRTUAL") = 0 And SemClassMethodHasFlag(ps, baseMethodNode, "OVERRIDE") = 0 Then
+                        errText = "semantic: CLASS OVERRIDE base method is not virtual " & className & "." & methodName
+                        Return 0
+                    End If
+
+                    If SemClassMethodSignature(ps, ch) <> SemClassMethodSignature(ps, baseMethodNode) Then
+                        errText = "semantic: CLASS OVERRIDE signature mismatch " & className & "." & methodName
+                        Return 0
+                    End If
+                End If
+            End If
+
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
+    Return 1
+End Function
+
 Private Function SemValidateInterfaceContracts(ByRef ps As ParseState, ByRef errText As String) As Integer
     Dim i As Integer
     For i = 0 To ps.ast.count - 1
@@ -463,6 +647,7 @@ Function SemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Int
     If SemValidateRoutineNodes(ps, errText) = 0 Then Return 0
     If SemValidateConstNodes(ps, errText) = 0 Then Return 0
     If SemValidateThisMeUsage(ps, errText) = 0 Then Return 0
+    If SemValidateClassOverrideContracts(ps, errText) = 0 Then Return 0
     If SemValidateInterfaceContracts(ps, errText) = 0 Then Return 0
 
     Return 1

@@ -22,39 +22,44 @@ Degerler:
 - YOK: Uygulama yok
 - PLAN: Planlandi, henuz kodlanmadi
 
-## 0) Durum Ozeti (2026-04-12, Siki Mod)
+## 0) Durum Ozeti (2026-04-20, Strict Borc Kapanisi)
 
-Siki mod kaniti:
-- powershell -ExecutionPolicy Bypass -File tools/validate_module_quality_gate.ps1 -Strict -> PASS (0 warning, 0 error)
-- powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild -> PASS (regresyon yok)
+Kanit komutlari:
+- powershell -ExecutionPolicy Bypass -File tools/validate_module_quality_gate.ps1 -Strict -> PASS (warnings: 0, errors: 0)
+- powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild -> PASS (180/180)
 
-Siki modda acik kalan yapisal eksikler:
-1. Siki modda yapisal warning kalmadi (strict gate PASS).
-
-Bu turdaki modulerlestirme sonucu:
-1. layout tek dosya modeli 3 fiziksel modula ayrildi:
-  - src/semantic/layout/layout_type_table.fbs
-  - src/semantic/layout/layout_path_resolution.fbs
-  - src/semantic/layout/layout_intrinsic_validation.fbs
-2. declaration parser tek dosya modeli 3 fiziksel modula ayrildi:
+Bu turdaki yapisal kapanis:
+1. Parser declaration/sinif akisinda buyuk bloklar include-modullere ayrildi:
   - src/parser/parser/parser_stmt_decl_core.fbs
-  - src/parser/parser/parser_stmt_decl_scope.fbs
-  - src/parser/parser/parser_stmt_decl_proc.fbs
-3. declaration dispatch registry baglanti noktasi ayrildi:
-  - src/parser/parser/parser_stmt_decl_dispatch.fbs
-4. Yapisal warning sayisi 12 -> 10 dusuruldu.
+  - src/parser/parser/parser_stmt_decl_dim_redim.fbs
+  - src/parser/parser/parser_stmt_dispatch_class_access.fbs
+  - src/parser/parser/parser_stmt_decl_class_method.fbs
+2. Semantic layout dosyasi debt-cap altina indirildi:
+  - src/semantic/layout.fbs
+  - src/semantic/layout/layout_path_and_intrinsic.fbs
+3. Runtime execute yardimcilari parcali yapida tasindi:
+  - src/runtime/memory_exec.fbs
+  - src/runtime/exec/exec_class_layout_helpers.fbs
+  - src/runtime/exec/exec_eval_support_helpers.fbs
+  - src/runtime/exec/exec_ffi_x64_invoke_helpers.fbs
+4. Lexer preprocess host-directive yolu fonksiyonel olarak ayrildi:
+  - src/parser/lexer/lexer_preprocess.fbs
+
+Not:
+1. Module quality gate strict modda tam PASS aldi; yapisal warning backlog'u bu tur sonunda sifirlandi.
+2. Acik kalan KISMEN hucreleri yapisal borc degil, CG/MIR derinligi lane'lerinde planli kapsamdir.
 
 Matristeki acik urun eksikleri (D/P/S/R/T):
-1. EXIT IF: KISMEN/OK/OK/OK/OK
-2. FLOATING POINT: YOK/YOK/YOK/YOK/YOK
-3. IMPORT(C/CPP/ASM, file): OK/OK/KISMEN/OK/OK
-4. INLINE(...): OK/OK/KISMEN/OK/KISMEN
-5. LIST/DICT/SET: KISMEN/OK/KISMEN/KISMEN/OK
-6. CLASS derin semantigi/runtime: KISMEN seviyesinde
-7. %% meta-komutlar: cekirdek lane (%%INCLUDE, %%DEFINE/%%UNDEF, %%IF/%%ELSE/%%ENDIF) P/T=OK; kalanlar YOK
+1. HIR olusumu (typed AST bridge): OK/KISMEN/KISMEN/N/A/KISMEN
+2. MIR olusumu (CFG/basic block): OK/KISMEN/KISMEN/KISMEN/KISMEN
+3. MIR interpreter dispatch: OK/KISMEN/KISMEN/KISMEN/KISMEN
+4. x64 emitter passthrough INLINE: OK/OK/OK/KISMEN/KISMEN
+5. TRY/CATCH unwinding emit (label table + finally trampoline): OK/KISMEN/KISMEN/KISMEN/OK
+6. THROW emit (error object materialization + jump to handler): OK/KISMEN/KISMEN/KISMEN/OK
+7. ASSERT emit (debug/release policy): OK/KISMEN/KISMEN/KISMEN/OK
 
 Sikilastirma hedefi:
-- Debt-cap toleransini asamali azaltip warningleri kademeli olarak zorunlu kapanis kalemine cevirmek.
+- CG/MIR lane'lerinde KISMEN hucrelerini plan sirasina gore test-gate kaniti ile asamali OK'a cekmek.
 
 ## 2) Komut Matrisi (Statement)
 
@@ -431,7 +436,7 @@ Durum etiketleri:
 | PROPERTY | KODDA-YOK | GET/SET property modeli yok |
 | CONSTRUCTOR / DESTRUCTOR | KODDA-OK | Ctor/dtor parse-signature + invoke testleri aktif |
 | READONLY / MUTABLE / IMMUTABLE | KODDA-YOK | Atama kilitleme semantigi yok |
-| FRIEND / RESTRICTED | KODDA-KISMEN | Parser+semantic (same-namespace/fail-fast) var; runtime erisim zorlamasi sinirli |
+| FRIEND / RESTRICTED | KODDA-OK | Parser+semantic fail-fast + runtime method access enforcement (PUBLIC/PRIVATE/RESTRICTED + FRIEND istisnasi) aktif; kanit: tests/run_class_access_override_virtual_exec_ast.bas |
 
 ### 11.2 OOP Iliski ve Cagri Anahtarlari (Kod Gerceklik)
 
@@ -443,8 +448,8 @@ Durum etiketleri:
  INSTANCEOF | KODDA-YOK | Type-id tabanli runtime sorgu yok |
 | EXTENDS | KODDA-OK | Parse + inheritance dispatch regression testleri aktif |
 | IMPLEMENTS / INTERFACE | KODDA-OK | Parse + semantic sozlesme + runtime no-op/dispatch modeli aktif |
-| OVERRIDE | KODDA-KISMEN | Keyword tanimi var; kesin signature override enforcement sinirli |
-| VIRTUAL | KODDA-KISMEN | Keyword tanimi var; tam vtable semantigi aciklanmis ama sinirli |
+| OVERRIDE | KODDA-OK | CLASS method metadata + base method varligi + virtual-chain + signature enforcement fail-fast aktif; kanit: tests/run_class_access_override_virtual_exec_ast.bas |
+| VIRTUAL | KODDA-OK | VIRTUAL method metadata parse/semantic zinciri ve declaration-temelli hierarchy dispatch (non-virtual base dispatch guard) runtime'da aktif; kanit: tests/run_class_access_override_virtual_exec_ast.bas |
 | ABSTRACT | KODDA-YOK | Abstract class/uye instantiate engeli yok |
 | FINAL / SEALED | KODDA-YOK | Inheritance kapatma semantigi yok |
 | OPERATOR (overload) | KODDA-YOK | Overload resolver yok |
@@ -467,8 +472,8 @@ Durum etiketleri:
 | Model | Durum | Gerekce |
 |---|---|---|
 | PRIVATE (module/class ici) | KODDA-OK | Compile-time access metadata ve semantic kontrol aktif |
-| PRIVATE + FRIEND (secili module istisnasi) | KODDA-KISMEN | FRIEND list parse+semantic var; runtime erisim zorlamasi sinirli |
-| RESTRICTED (namespace+project siniri) | KODDA-KISMEN | RESTRICTED parse+semantic var; proje-genel import/include siniri tam degil |
+| PRIVATE + FRIEND (secili module istisnasi) | KODDA-OK | Runtime call-site access kontrolu + FRIEND hedef eslesmesi (module/routine prefix) aktif; kanit: tests/run_class_access_override_virtual_exec_ast.bas |
+| RESTRICTED (namespace+project siniri) | KODDA-OK | Runtime RESTRICTED method access enforcement aktif; class/method/friend baglamina gore fail-fast davranisi testle dogrulandi (tests/run_class_access_override_virtual_exec_ast.bas) |
 | PUBLIC | KODDA-OK | Varsayilan disa acik uye modeli + metadata aktif |
 
 ## 12) DLL Cekirdek Entegrasyon Matrisi (Istatistik ve Genel FFI Temeli)

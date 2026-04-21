@@ -1,0 +1,129 @@
+Private Function LastQualifiedNamespace(ByRef qualifiedName As String) As String
+    Dim q As String
+    q = UCase(Trim(qualifiedName))
+    Dim p As Integer
+    p = InStrRev(q, ".")
+    If p <= 0 Then Return ""
+    Return Left(q, p - 1)
+End Function
+
+Private Function IsValidClassAccessValue(ByRef accessText As String) As Integer
+    Dim a As String
+    a = UCase(Trim(accessText))
+    If a = "PUBLIC" Or a = "PRIVATE" Or a = "RESTRICTED" Then Return 1
+    Return 0
+End Function
+
+Private Function ValidateClassAccessFriendForClass(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentNamespace As String) As Integer
+    Dim hasRestricted As Integer
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        Dim kindText As String
+        kindText = UCase(ps.ast.nodes(ch).kind)
+
+        If kindText = "CLASS_FIELD" Then
+            Dim accessNode As Integer
+            accessNode = ps.ast.nodes(ch).firstChild
+            Do While accessNode <> -1
+                If UCase(ps.ast.nodes(accessNode).kind) = "CLASS_ACCESS" Then Exit Do
+                accessNode = ps.ast.nodes(accessNode).nextSibling
+            Loop
+
+            If accessNode = -1 Then
+                ps.lastError = "CLASS: missing CLASS_ACCESS metadata"
+                Return 0
+            End If
+
+            Dim accessText As String
+            accessText = UCase(Trim(ps.ast.nodes(accessNode).value))
+            If IsValidClassAccessValue(accessText) = 0 Then
+                ps.lastError = "CLASS: invalid access specifier: " & accessText
+                Return 0
+            End If
+
+            If accessText = "RESTRICTED" Then hasRestricted = 1
+        ElseIf kindText = "CLASS_FRIEND_STMT" Then
+            Dim friendAccess As String
+            friendAccess = UCase(Trim(ps.ast.nodes(ch).value))
+
+            If friendAccess = "PUBLIC" Then
+                ps.lastError = "FRIEND: PUBLIC access cannot declare friend list"
+                Return 0
+            End If
+
+            If friendAccess <> "PRIVATE" And friendAccess <> "RESTRICTED" Then
+                ps.lastError = "FRIEND: only PRIVATE or RESTRICTED access can declare friend list"
+                Return 0
+            End If
+
+            Dim item As Integer
+            item = ps.ast.nodes(ch).firstChild
+            If item = -1 Then
+                ps.lastError = "FRIEND: at least one target is required"
+                Return 0
+            End If
+
+            Do While item <> -1
+                If UCase(ps.ast.nodes(item).kind) <> "FRIEND_ITEM" Then
+                    ps.lastError = "FRIEND: invalid item node"
+                    Return 0
+                End If
+
+                Dim targetName As String
+                targetName = UCase(Trim(ps.ast.nodes(item).value))
+                If targetName = "" Then
+                    ps.lastError = "FRIEND: empty target is not allowed"
+                    Return 0
+                End If
+
+                If currentNamespace <> "" Then
+                    Dim targetNs As String
+                    targetNs = LastQualifiedNamespace(targetName)
+                    If targetNs <> "" And targetNs <> currentNamespace Then
+                        ps.lastError = "FRIEND: target must stay in same namespace: " & targetName
+                        Return 0
+                    End If
+                End If
+
+                item = ps.ast.nodes(item).nextSibling
+            Loop
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidateClassAccessFriendNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef currentNamespace As String) As Integer
+    Dim nodeKind As String
+    nodeKind = UCase(ps.ast.nodes(nodeIdx).kind)
+
+    Dim nsForChildren As String
+    nsForChildren = currentNamespace
+    If nodeKind = "NAMESPACE_STMT" Then
+        nsForChildren = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+    End If
+
+    If nodeKind = "CLASS_STMT" Then
+        If ValidateClassAccessFriendForClass(ps, nodeIdx, nsForChildren) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ValidateClassAccessFriendNode(ps, ch, nsForChildren) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidateClassAccessFriendSemantics(ByRef ps As ParseState) As Integer
+    If ps.rootNode = -1 Then Return 1
+    Dim rootNs As String
+    rootNs = ""
+    Return ValidateClassAccessFriendNode(ps, ps.rootNode, rootNs)
+End Function

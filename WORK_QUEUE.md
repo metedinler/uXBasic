@@ -1,5 +1,9 @@
 # uXbasic Work Queue (Plan-Aligned)
 
+## Capraz Not (Plan Uyum)
+- Kanonik kural plan.md dosyasindadir: Her teslim/yanit sonunda Son oneriler bolumu zorunludur.
+- Bu bolumde, mevcut prompt istek durumu ve onceki promptlardan kalan eksikler birlikte raporlanir.
+
 ## Sira 1 - Parser Cekirdegi
 - Durum: tamamlandi
 - Gorev: lexer operator seti genisletmesi (`++`, `--`, `+=`, `-=`, `=+`, `=-`, `**`, `@`)

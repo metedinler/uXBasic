@@ -1,0 +1,220 @@
+Function ParseDimBound(ByRef ps As ParseState) As Integer
+    Dim lowerExpr As Integer
+    lowerExpr = ParseExpression(ps)
+    If lowerExpr = -1 Then Return -1
+
+    If MatchKeyword(ps, "TO") Then
+        Dim toTok As Token
+        toTok = LookToken(ps, -1)
+
+        Dim upperExpr As Integer
+        upperExpr = ParseExpression(ps)
+        If upperExpr = -1 Then
+            ps.lastError = "DIM: upper bound expected after TO"
+            Return -1
+        End If
+
+        Dim rangeNode As Integer
+        rangeNode = MakeNodeFromToken(ps, "RANGE_EXPR", "", "TO", toTok)
+        ps.ast.nodes(rangeNode).left = lowerExpr
+        ps.ast.nodes(rangeNode).right = upperExpr
+        Return rangeNode
+    End If
+
+    Return lowerExpr
+End Function
+
+Function ParseDimDeclarator(ByRef ps As ParseState) As Integer
+    Dim identTok As Token
+    identTok = CurToken(ps)
+    If identTok.kind <> "IDENT" Then
+        ps.lastError = "DIM: identifier expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim declNode As Integer
+    declNode = MakeNodeFromToken(ps, "DIM_DECL", identTok.lexeme, "", identTok)
+
+    If MatchOp(ps, "(") Then
+        Dim boundsNode As Integer
+        boundsNode = ASTNewNode(ps.ast, "DIM_BOUNDS", "", "", identTok.lineNo, identTok.colNo)
+
+        Do
+            Dim boundExpr As Integer
+            boundExpr = ParseDimBound(ps)
+            If boundExpr = -1 Then Return -1
+            ASTAddChild ps.ast, boundsNode, boundExpr
+
+            If MatchOp(ps, ",") = 0 Then Exit Do
+        Loop
+
+        If MatchOp(ps, ")") = 0 Then
+            ps.lastError = "DIM: missing ) in array bounds"
+            Return -1
+        End If
+
+        ASTAddChild ps.ast, declNode, boundsNode
+    End If
+
+    If MatchKeyword(ps, "AS") = 0 Then
+        ps.lastError = "DIM: AS expected"
+        Return -1
+    End If
+
+    Dim typeTok As Token
+    typeTok = CurToken(ps)
+    If ValidateTypeToken(ps, typeTok) = 0 Then
+        If ps.lastError = "" Then ps.lastError = "DIM: type expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim typeNode As Integer
+    typeNode = MakeNodeFromToken(ps, "TYPE_REF", typeTok.lexeme, "", typeTok)
+    ASTAddChild ps.ast, declNode, typeNode
+
+    If MatchOp(ps, "=") Then
+        Dim initExpr As Integer
+        initExpr = ParseExpression(ps)
+        If initExpr = -1 Then
+            ps.lastError = "DIM: invalid initializer"
+            Return -1
+        End If
+
+        Dim initNode As Integer
+        initNode = ASTNewNode(ps.ast, "INIT_EXPR", "", "", typeTok.lineNo, typeTok.colNo)
+        ps.ast.nodes(initNode).left = initExpr
+        ASTAddChild ps.ast, declNode, initNode
+    End If
+
+    Return declNode
+End Function
+
+Function ParseDimStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim dimNode As Integer
+    dimNode = MakeNodeFromToken(ps, "DIM_STMT", "", "", firstTok)
+
+    Do
+        Dim declNode As Integer
+        declNode = ParseDimDeclarator(ps)
+        If declNode = -1 Then Return -1
+        ASTAddChild ps.ast, dimNode, declNode
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    Return dimNode
+End Function
+
+Function ParseConstStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim constNode As Integer
+    constNode = MakeNodeFromToken(ps, "CONST_STMT", "", "", firstTok)
+
+    Do
+        Dim nameTok As Token
+        nameTok = CurToken(ps)
+        If nameTok.kind <> "IDENT" Then
+            ps.lastError = "CONST: identifier expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        If MatchOp(ps, "=") = 0 Then
+            ps.lastError = "CONST: missing ="
+            Return -1
+        End If
+
+        Dim valueExpr As Integer
+        valueExpr = ParseExpression(ps)
+        If valueExpr = -1 Then
+            ps.lastError = "CONST: value expression expected"
+            Return -1
+        End If
+
+        Dim declNode As Integer
+        declNode = MakeNodeFromToken(ps, "CONST_DECL", nameTok.lexeme, "", nameTok)
+        ps.ast.nodes(declNode).left = valueExpr
+        ASTAddChild ps.ast, constNode, declNode
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    Return constNode
+End Function
+
+Private Function ParseRedimDeclarator(ByRef ps As ParseState) As Integer
+    Dim identTok As Token
+    identTok = CurToken(ps)
+    If identTok.kind <> "IDENT" Then
+        ps.lastError = "REDIM: identifier expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim declNode As Integer
+    declNode = MakeNodeFromToken(ps, "REDIM_DECL", identTok.lexeme, "", identTok)
+
+    If MatchOp(ps, "(") Then
+        Dim boundsNode As Integer
+        boundsNode = ASTNewNode(ps.ast, "DIM_BOUNDS", "", "", identTok.lineNo, identTok.colNo)
+
+        Do
+            Dim boundExpr As Integer
+            boundExpr = ParseDimBound(ps)
+            If boundExpr = -1 Then Return -1
+            ASTAddChild ps.ast, boundsNode, boundExpr
+
+            If MatchOp(ps, ",") = 0 Then Exit Do
+        Loop
+
+        If MatchOp(ps, ")") = 0 Then
+            ps.lastError = "REDIM: missing ) in array bounds"
+            Return -1
+        End If
+
+        ASTAddChild ps.ast, declNode, boundsNode
+    End If
+
+    If MatchKeyword(ps, "AS") = 0 Then
+        ps.lastError = "REDIM: AS expected"
+        Return -1
+    End If
+
+    Dim typeTok As Token
+    typeTok = CurToken(ps)
+    If ValidateTypeToken(ps, typeTok) = 0 Then
+        If ps.lastError = "" Then ps.lastError = "REDIM: type expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim typeNode As Integer
+    typeNode = MakeNodeFromToken(ps, "TYPE_REF", typeTok.lexeme, "", typeTok)
+    ASTAddChild ps.ast, declNode, typeNode
+
+    Return declNode
+End Function
+
+Function ParseRedimStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim redimNode As Integer
+    redimNode = MakeNodeFromToken(ps, "REDIM_STMT", "", "", firstTok)
+
+    Dim firstDeclTok As Token
+    firstDeclTok = CurToken(ps)
+    If ((firstDeclTok.kind = "KEYWORD") Or (firstDeclTok.kind = "IDENT")) And UCase(firstDeclTok.lexeme) = "PRESERVE" Then
+        ps.ast.nodes(redimNode).op = "PRESERVE"
+        AdvanceTok ps
+    End If
+
+    Do
+        Dim declNode As Integer
+        declNode = ParseRedimDeclarator(ps)
+        If declNode = -1 Then Return -1
+        ASTAddChild ps.ast, redimNode, declNode
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    Return redimNode
+End Function

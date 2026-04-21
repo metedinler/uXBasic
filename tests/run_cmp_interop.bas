@@ -64,6 +64,15 @@ Private Sub Main()
     Dim rspPath As String
     rspPath = "dist\cmp_interop\import_link_args.rsp"
 
+    Dim buildBatPath As String
+    buildBatPath = "dist\cmp_interop\build_import.bat"
+
+    Dim linkBatPath As String
+    linkBatPath = "dist\cmp_interop\link_command.bat"
+
+    Dim makefilePath As String
+    makefilePath = "dist\cmp_interop\makefile"
+
     If LocalFileExistsPath(manifestPath) = 0 Then
         Print "FAIL CMP-IMP-WIN11 | missing import_build_manifest.csv"
         End 1
@@ -71,6 +80,21 @@ Private Sub Main()
 
     If LocalFileExistsPath(rspPath) = 0 Then
         Print "FAIL CMP-IMP-WIN11 | missing import_link_args.rsp"
+        End 1
+    End If
+
+    If LocalFileExistsPath(buildBatPath) = 0 Then
+        Print "FAIL CMP-IMP-WIN11 | missing build_import.bat"
+        End 1
+    End If
+
+    If LocalFileExistsPath(linkBatPath) = 0 Then
+        Print "FAIL CMP-IMP-WIN11 | missing link_command.bat"
+        End 1
+    End If
+
+    If LocalFileExistsPath(makefilePath) = 0 Then
+        Print "FAIL CMP-IMP-WIN11 | missing makefile"
         End 1
     End If
 

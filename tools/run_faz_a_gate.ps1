@@ -74,6 +74,7 @@ if (-not $SkipBuild) {
     Invoke-Step "Build run_class_ctor_dtor_exec_ast_64" { cmd /c build_64.bat tests\run_class_ctor_dtor_exec_ast.bas }
     Invoke-Step "Build run_class_dtor_scope_exit_exec_ast_64" { cmd /c build_64.bat tests\run_class_dtor_scope_exit_exec_ast.bas }
     Invoke-Step "Build run_class_inheritance_virtual_exec_ast_64" { cmd /c build_64.bat tests\run_class_inheritance_virtual_exec_ast.bas }
+    Invoke-Step "Build run_class_access_override_virtual_exec_ast_64" { cmd /c build_64.bat tests\run_class_access_override_virtual_exec_ast.bas }
     Invoke-Step "Build run_each_exec_64" { cmd /c build_64.bat tests\run_each_exec.bas }
     Invoke-Step "Build run_layout_intrinsics_64" { cmd /c build_64.bat tests\run_layout_intrinsics.bas }
     Invoke-Step "Build run_memory_width_semantics_64" { cmd /c build_64.bat tests\run_memory_width_semantics.bas }
@@ -129,6 +130,7 @@ Invoke-Step "Run run_class_oop_transition_exec_ast_64 (class oop transition + fa
 Invoke-Step "Run run_class_ctor_dtor_exec_ast_64 (class ctor/dtor keyword + invoke)" { cmd /c tests\run_class_ctor_dtor_exec_ast_64.exe }
 Invoke-Step "Run run_class_dtor_scope_exit_exec_ast_64 (class dtor scope-exit invoke)" { cmd /c tests\run_class_dtor_scope_exit_exec_ast_64.exe }
 Invoke-Step "Run run_class_inheritance_virtual_exec_ast_64 (class inheritance + virtual dispatch)" { cmd /c tests\run_class_inheritance_virtual_exec_ast_64.exe }
+Invoke-Step "Run run_class_access_override_virtual_exec_ast_64 (class access + override + virtual contracts)" { cmd /c tests\run_class_access_override_virtual_exec_ast_64.exe }
 Invoke-Step "Run run_each_exec_64" { cmd /c tests\run_each_exec_64.exe }
 Invoke-Step "Run run_layout_intrinsics_64" { cmd /c tests\run_layout_intrinsics_64.exe }
 Invoke-Step "Run run_memory_width_semantics_64" { cmd /c tests\run_memory_width_semantics_64.exe }

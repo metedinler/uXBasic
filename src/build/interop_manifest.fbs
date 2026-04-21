@@ -337,9 +337,25 @@ Private Function ResolveStmtPath(ByRef ps As ParseState, ByVal stmt As Integer, 
         Return 0
     End If
 
-    pathOut = PathResolveFromSource(normalizedSource, ps.ast.nodes(pathNode).value)
+    Dim rawPath As String
+    rawPath = ps.ast.nodes(pathNode).value
 
-    If PathStartsWithDir(pathOut, rootDir) = 0 Then
+    pathOut = PathResolveFromSource(normalizedSource, rawPath)
+
+    ' Fallback: also allow process working directory as resolution base.
+    ' This keeps source-relative behavior while enabling repo-root style imports.
+    If FileExistsPath(pathOut) = 0 Then
+        Dim cwdResolved As String
+        cwdResolved = PathNormalize(CurDir & "\\" & rawPath)
+        If FileExistsPath(cwdResolved) <> 0 Then
+            pathOut = cwdResolved
+        End If
+    End If
+
+    Dim cwdRoot As String
+    cwdRoot = PathNormalize(CurDir)
+
+    If PathStartsWithDir(pathOut, rootDir) = 0 And PathStartsWithDir(pathOut, cwdRoot) = 0 Then
         errText = "resolver: " & stmtName & " escapes root: " & pathOut
         Return 0
     End If
@@ -541,9 +557,21 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
     Dim linkPlanPath As String
     linkPlanPath = PathNormalize(outputDir & "\import_link_plan_win11.txt")
 
+    Dim buildBatPath As String
+    buildBatPath = PathNormalize(outputDir & "\build_import.bat")
+
+    Dim linkBatPath As String
+    linkBatPath = PathNormalize(outputDir & "\link_command.bat")
+
+    Dim makefilePath As String
+    makefilePath = PathNormalize(outputDir & "\makefile")
+
     Dim mf As Integer
     Dim rf As Integer
     Dim pf As Integer
+    Dim bf As Integer
+    Dim lf As Integer
+    Dim kf As Integer
 
     mf = FreeFile
     Open manifestPath For Output As #mf
@@ -569,6 +597,39 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
         Return 0
     End If
 
+    bf = FreeFile
+    Open buildBatPath For Output As #bf
+    If Err <> 0 Then
+        Close #pf
+        Close #rf
+        Close #mf
+        errText = "interop emit: cannot write " & buildBatPath
+        Return 0
+    End If
+
+    lf = FreeFile
+    Open linkBatPath For Output As #lf
+    If Err <> 0 Then
+        Close #bf
+        Close #pf
+        Close #rf
+        Close #mf
+        errText = "interop emit: cannot write " & linkBatPath
+        Return 0
+    End If
+
+    kf = FreeFile
+    Open makefilePath For Output As #kf
+    If Err <> 0 Then
+        Close #lf
+        Close #bf
+        Close #pf
+        Close #rf
+        Close #mf
+        errText = "interop emit: cannot write " & makefilePath
+        Return 0
+    End If
+
     Print #mf, "kind,language,source_file,resolved_path,object_path,compile_cmd,link_arg"
 
     Dim i As Integer
@@ -579,6 +640,13 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
     Print #pf, "# Import compile steps"
     Dim importCount As Integer
     importCount = 0
+
+    Print #bf, "@echo off"
+    Print #bf, "setlocal EnableExtensions"
+    Print #bf, "pushd ""%~dp0\..\.."""
+    Print #bf, "if errorlevel 1 exit /b 1"
+    Print #bf, "if not exist ""dist\interop\import_objs"" mkdir ""dist\interop\import_objs"""
+    Print #bf, "echo [interop] compiling imports..."
 
     For i = 0 To manifest.importCount - 1
         importCount += 1
@@ -592,12 +660,62 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
         Print #mf, "IMPORT," & CsvEscape(manifest.imports(i).language) & "," & CsvEscape(manifest.imports(i).sourceFile) & "," & CsvEscape(manifest.imports(i).importPath) & "," & CsvEscape(objPath) & "," & CsvEscape(compileCmd) & "," & CsvEscape(objPath)
         Print #rf, objPath
         Print #pf, compileCmd
+
+        If compileCmd <> "" Then
+            Print #bf, compileCmd
+            Print #bf, "if errorlevel 1 ("
+            Print #bf, "  echo [interop] compile failed at step " & LTrim(Str(importCount))
+            Print #bf, "  popd"
+            Print #bf, "  exit /b 1"
+            Print #bf, ")"
+        Else
+            Print #bf, "echo [interop] unsupported import language at step " & LTrim(Str(importCount))
+            Print #bf, "popd"
+            Print #bf, "exit /b 1"
+        End If
     Next i
 
     Print #pf, ""
     Print #pf, "# Link response file"
     Print #pf, linkRspPath
 
+    Print #bf, "echo [interop] import compile complete."
+    Print #bf, "popd"
+    Print #bf, "exit /b 0"
+
+    Print #lf, "@echo off"
+    Print #lf, "setlocal EnableExtensions"
+    Print #lf, "pushd ""%~dp0\..\.."""
+    Print #lf, "if errorlevel 1 exit /b 1"
+    Print #lf, "if not exist ""dist\interop\import_link_args.rsp"" ("
+    Print #lf, "  echo [interop] missing response file: dist\interop\import_link_args.rsp"
+    Print #lf, "  popd"
+    Print #lf, "  exit /b 1"
+    Print #lf, ")"
+    Print #lf, "gcc @""dist\interop\import_link_args.rsp"" -o ""dist\interop\interop_program.exe"""
+    Print #lf, "if errorlevel 1 ("
+    Print #lf, "  popd"
+    Print #lf, "  exit /b 1"
+    Print #lf, ")"
+    Print #lf, "echo [interop] link complete: dist\interop\interop_program.exe"
+    Print #lf, "popd"
+    Print #lf, "exit /b 0"
+
+    Print #kf, "all: imports link"
+    Print #kf, ""
+    Print #kf, "imports:"
+    Print #kf, Chr(9) & "cmd /c build_import.bat"
+    Print #kf, ""
+    Print #kf, "link:"
+    Print #kf, Chr(9) & "cmd /c link_command.bat"
+    Print #kf, ""
+    Print #kf, "clean:"
+    Print #kf, Chr(9) & "del /Q import_objs\*.o 2>nul"
+    Print #kf, Chr(9) & "del /Q interop_program.exe 2>nul"
+
+    Close #kf
+    Close #lf
+    Close #bf
     Close #pf
     Close #rf
     Close #mf

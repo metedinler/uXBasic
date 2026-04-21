@@ -437,6 +437,10 @@ Private Function IsFlowStmtTerminator(ByRef tk As Token) As Integer
     Return 0
 End Function
 
+Private Function IsEndTryStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "TRY")
+End Function
+
 Function ParseGotoStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
     Dim targetTok As Token
     targetTok = CurToken(ps)
@@ -528,4 +532,149 @@ Function ParseEndStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Intege
     End If
 
     Return endNode
+End Function
+
+Function ParseTryStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim tryNode As Integer
+    tryNode = MakeNodeFromToken(ps, "TRY_STMT", "", "", firstTok)
+
+    Dim tryBodyNode As Integer
+    tryBodyNode = MakeNodeFromToken(ps, "TRY_BODY", "", "", firstTok)
+
+    SkipSeparators ps
+
+    Do While CurToken(ps).kind <> "EOF"
+        If IsKw(ps, "CATCH") Or IsKw(ps, "FINALLY") Or IsEndTryStart(ps) Then Exit Do
+
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then Return -1
+        ASTAddChild ps.ast, tryBodyNode, st
+        SkipSeparators ps
+    Loop
+
+    ASTAddChild ps.ast, tryNode, tryBodyNode
+
+    Do While IsKw(ps, "CATCH")
+        Dim catchTok As Token
+        catchTok = CurToken(ps)
+        AdvanceTok ps
+
+        Dim catchNode As Integer
+        catchNode = MakeNodeFromToken(ps, "CATCH_PART", "", "", catchTok)
+
+        If CurToken(ps).kind = "IDENT" Then
+            ps.ast.nodes(catchNode).value = CurToken(ps).lexeme
+            AdvanceTok ps
+        End If
+
+        SkipSeparators ps
+
+        Do While CurToken(ps).kind <> "EOF"
+            If IsKw(ps, "CATCH") Or IsKw(ps, "FINALLY") Or IsEndTryStart(ps) Then Exit Do
+
+            Dim st2 As Integer
+            st2 = ParseSimpleStatement(ps)
+            If st2 = -1 Then Return -1
+            ASTAddChild ps.ast, catchNode, st2
+            SkipSeparators ps
+        Loop
+
+        ASTAddChild ps.ast, tryNode, catchNode
+    Loop
+
+    If IsKw(ps, "FINALLY") Then
+        Dim finallyTok As Token
+        finallyTok = CurToken(ps)
+        AdvanceTok ps
+
+        Dim finallyNode As Integer
+        finallyNode = MakeNodeFromToken(ps, "FINALLY_PART", "", "", finallyTok)
+
+        SkipSeparators ps
+
+        Do While CurToken(ps).kind <> "EOF"
+            If IsEndTryStart(ps) Then Exit Do
+
+            Dim st3 As Integer
+            st3 = ParseSimpleStatement(ps)
+            If st3 = -1 Then Return -1
+            ASTAddChild ps.ast, finallyNode, st3
+            SkipSeparators ps
+        Loop
+
+        ASTAddChild ps.ast, tryNode, finallyNode
+    End If
+
+    Dim tryChildCount As Integer
+    tryChildCount = ASTChildCount(ps, tryNode)
+    If tryChildCount < 2 Then
+        ps.lastError = "TRY: CATCH or FINALLY is required"
+        Return -1
+    End If
+
+    If IsEndTryStart(ps) = 0 Then
+        ps.lastError = "missing END TRY"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+
+    Return tryNode
+End Function
+
+Function ParseThrowStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim throwNode As Integer
+    throwNode = MakeNodeFromToken(ps, "THROW_STMT", "", "", firstTok)
+
+    Dim tk As Token
+    tk = CurToken(ps)
+    If IsFlowStmtTerminator(tk) Then
+        ps.lastError = "THROW: expression expected"
+        Return -1
+    End If
+
+    Dim exprNode As Integer
+    exprNode = ParseExpression(ps)
+    If exprNode = -1 Then
+        ps.lastError = "THROW: expression expected"
+        Return -1
+    End If
+
+    ASTAddChild ps.ast, throwNode, exprNode
+    Return throwNode
+End Function
+
+Function ParseAssertStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim assertNode As Integer
+    assertNode = MakeNodeFromToken(ps, "ASSERT_STMT", "", "", firstTok)
+
+    Dim tk As Token
+    tk = CurToken(ps)
+    If IsFlowStmtTerminator(tk) Then
+        ps.lastError = "ASSERT: condition expression expected"
+        Return -1
+    End If
+
+    Dim condExpr As Integer
+    condExpr = ParseExpression(ps)
+    If condExpr = -1 Then
+        ps.lastError = "ASSERT: condition expression expected"
+        Return -1
+    End If
+
+    ASTAddChild ps.ast, assertNode, condExpr
+
+    If MatchOp(ps, ",") Then
+        Dim msgExpr As Integer
+        msgExpr = ParseExpression(ps)
+        If msgExpr = -1 Then
+            ps.lastError = "ASSERT: message expression expected"
+            Return -1
+        End If
+        ASTAddChild ps.ast, assertNode, msgExpr
+    End If
+
+    Return assertNode
 End Function

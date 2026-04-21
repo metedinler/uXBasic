@@ -83,6 +83,100 @@ Private Function X64ToStr(ByVal n As Integer) As String
     Return LTrim(Str(n))
 End Function
 
+Private Function X64NormalizeTextLine(ByRef lineText As String) As String
+    Dim raw As String
+    raw = RTrim(lineText)
+
+    Dim t As String
+    t = Trim(raw)
+    If t = "" Then Return ""
+
+    Dim k As String
+    k = X64Upper(t)
+
+    If Left(k, 5) = "BITS " Then Return "bits " & Trim(Mid(t, 6))
+    If Left(k, 8) = "DEFAULT " Then Return "default " & Trim(Mid(t, 9))
+    If Left(k, 8) = "SECTION " Then Return "section " & Trim(Mid(t, 9))
+    If Left(k, 7) = "GLOBAL " Then Return "global " & Trim(Mid(t, 8))
+    If Left(k, 7) = "EXTERN " Then Return "extern " & Trim(Mid(t, 8))
+
+    If Right(t, 1) = ":" Then Return t
+
+    If Left(t, 1) = ";" Then Return "    ; " & Trim(Mid(t, 2))
+
+    Dim p As Integer
+    p = InStr(t, " ")
+    If p = 0 Then Return "    " & LCase(t)
+
+    Dim opText As String
+    Dim argText As String
+    opText = LCase(Left(t, p - 1))
+    argText = Trim(Mid(t, p + 1))
+
+    If argText = "" Then Return "    " & opText
+    Return "    " & opText & " " & argText
+End Function
+
+Private Function X64NormalizeDataLine(ByRef lineText As String) As String
+    Dim t As String
+    t = Trim(RTrim(lineText))
+    If t = "" Then Return ""
+
+    If Left(t, 1) = ";" Then Return "    ; " & Trim(Mid(t, 2))
+
+    Dim p As Integer
+    p = InStr(t, ":")
+    If p > 0 Then
+        Dim labelText As String
+        Dim restText As String
+        labelText = Trim(Left(t, p))
+        restText = Trim(Mid(t, p + 1))
+        If restText = "" Then Return labelText
+        Return labelText & " " & restText
+    End If
+
+    Return t
+End Function
+
+Private Function X64CompactBlankLines(ByRef textIn As String) As String
+    Dim outText As String
+    Dim prevBlank As Integer
+    prevBlank = 0
+
+    Dim i As Integer
+    i = 1
+    Do While i <= Len(textIn)
+        Dim j As Integer
+        j = InStr(i, textIn, Chr(10))
+
+        Dim lineText As String
+        If j = 0 Then
+            lineText = Mid(textIn, i)
+            i = Len(textIn) + 1
+        Else
+            lineText = Mid(textIn, i, j - i)
+            i = j + 1
+        End If
+
+        lineText = RTrim(lineText)
+        If Trim(lineText) = "" Then
+            If prevBlank = 0 Then
+                outText &= Chr(10)
+                prevBlank = 1
+            End If
+        Else
+            outText &= lineText & Chr(10)
+            prevBlank = 0
+        End If
+    Loop
+
+    Do While Len(outText) > 1 And Right(outText, 2) = Chr(10) & Chr(10)
+        outText = Left(outText, Len(outText) - 1)
+    Loop
+
+    Return outText
+End Function
+
 Private Function X64Align16(ByVal n As Integer) As Integer
     If n <= 0 Then Return 0
     Return ((n + 15) \ 16) * 16
@@ -116,11 +210,11 @@ Private Function X64SanitizeSymbol(ByRef rawText As String) As String
 End Function
 
 Private Sub X64EmitText(ByRef cg As X64CodegenContext, ByRef lineText As String)
-    cg.textSection &= lineText & Chr(10)
+    cg.textSection &= X64NormalizeTextLine(lineText) & Chr(10)
 End Sub
 
 Private Sub X64EmitData(ByRef cg As X64CodegenContext, ByRef lineText As String)
-    cg.dataSection &= lineText & Chr(10)
+    cg.dataSection &= X64NormalizeDataLine(lineText) & Chr(10)
 End Sub
 
 Private Sub X64EmitBss(ByRef cg As X64CodegenContext, ByRef lineText As String)
@@ -128,7 +222,7 @@ Private Sub X64EmitBss(ByRef cg As X64CodegenContext, ByRef lineText As String)
 End Sub
 
 Private Sub X64EmitComment(ByRef cg As X64CodegenContext, ByRef commentText As String)
-    X64EmitText cg, "    ; " & commentText
+    X64EmitText cg, "; " & commentText
 End Sub
 
 Private Function X64NextLabel(ByRef cg As X64CodegenContext, ByRef prefixText As String) As String
@@ -294,7 +388,7 @@ Private Function X64EnsureSymbol(ByRef cg As X64CodegenContext, ByRef scopeText 
     gX64SymbolLabels(cg.symbolCount) = labelText
     cg.symbolCount += 1
 
-    X64EmitBss cg, labelText & ": resq " & X64ToStr(slotCount)
+    X64EmitData cg, labelText & ": times " & X64ToStr(slotCount) & " dq 0"
     Return labelText
 End Function
 
@@ -951,10 +1045,12 @@ Private Function GenerateStatement(ByRef ps As ParseState, ByVal nodeIdx As Inte
 End Function
 
 Private Function GenerateLocalDim(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: DIM"
     Return X64EmitDimStmt(ps, nodeIdx, cg, errText)
 End Function
 
 Private Function GeneratePrint(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: PRINT"
     X64EmitComment cg, "legacy marker: call __uxb_runtime_print"
 
     Dim itemNode As Integer
@@ -990,11 +1086,12 @@ Private Function GeneratePrint(ByRef ps As ParseState, ByVal nodeIdx As Integer,
 End Function
 
 Private Function GenerateCall(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
-    X64EmitComment cg, "TODO: GenerateCall placeholder (detailed emit path active)"
+    X64EmitComment cg, "stmt: CALL"
     Return X64EmitCallStmt(ps, nodeIdx, cg, errText)
 End Function
 
 Private Function GenerateIf(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: IF"
     Dim condNode As Integer
     condNode = X64ChildAt(ps, nodeIdx, 0)
     If condNode = -1 Then
@@ -1083,7 +1180,7 @@ Private Function GenerateIf(ByRef ps As ParseState, ByVal nodeIdx As Integer, By
 End Function
 
 Private Function GenerateFor(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
-    X64EmitComment cg, "TODO: GenerateFor placeholder canonical loop"
+    X64EmitComment cg, "stmt: FOR"
 
     Dim loopVar As String
     loopVar = Trim(ps.ast.nodes(nodeIdx).value)
@@ -1230,10 +1327,17 @@ Private Function X64EmitProgram(ByRef ps As ParseState, ByVal nodeIdx As Integer
     Dim mainLabel As String
     mainLabel = "__uxb_main"
 
-    X64EmitText cg, "global " & mainLabel
+    cg.currentRoutineLabel = ""
+    cg.localCount = 0
+    cg.localFrameBytes = 0
+    cg.paramCount = 0
+    cg.currentRoutineIsFunction = 1
+    cg.currentEpilogLabel = X64NextLabel(cg, "ret")
+
+    X64EmitText cg, "global __uxb_main"
     X64EmitLabel cg, mainLabel
-    X64EmitText cg, "    push rbp"
-    X64EmitText cg, "    mov rbp, rsp"
+    EmitFunctionProlog cg, 0
+    X64EmitText cg, "    xor rax, rax"
 
     Dim ch As Integer
     ch = ps.ast.nodes(nodeIdx).firstChild
@@ -1246,11 +1350,16 @@ Private Function X64EmitProgram(ByRef ps As ParseState, ByVal nodeIdx As Integer
         ch = ps.ast.nodes(ch).nextSibling
     Loop
 
-    X64EmitText cg, "    xor rax, rax"
-    X64EmitText cg, "    mov rsp, rbp"
-    X64EmitText cg, "    pop rbp"
-    X64EmitText cg, "    ret"
+    X64EmitLabel cg, cg.currentEpilogLabel
+    EmitFunctionEpilog cg
     X64EmitText cg, ""
+
+    cg.currentRoutineLabel = ""
+    cg.localCount = 0
+    cg.localFrameBytes = 0
+    cg.paramCount = 0
+    cg.currentRoutineIsFunction = 0
+    cg.currentEpilogLabel = ""
 
     ch = ps.ast.nodes(nodeIdx).firstChild
     Do While ch <> -1
@@ -1447,6 +1556,7 @@ Private Function X64EmitPrintStmt(ByRef ps As ParseState, ByVal nodeIdx As Integ
 End Function
 
 Private Function X64EmitReturnStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: RETURN"
     Dim retExpr As Integer
     retExpr = X64ChildAt(ps, nodeIdx, 0)
 
@@ -1478,6 +1588,7 @@ Private Function X64EmitBlockStmt(ByRef ps As ParseState, ByVal nodeIdx As Integ
 End Function
 
 Private Function X64EmitExprStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: EXPR"
     Dim exprNode As Integer
     exprNode = ps.ast.nodes(nodeIdx).left
     If exprNode = -1 Then exprNode = X64ChildAt(ps, nodeIdx, 0)
@@ -1490,6 +1601,7 @@ Private Function X64EmitExprStmt(ByRef ps As ParseState, ByVal nodeIdx As Intege
 End Function
 
 Private Function X64EmitAssignStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: ASSIGN"
     Dim lhs As Integer
     Dim rhs As Integer
     lhs = ps.ast.nodes(nodeIdx).left
@@ -1579,6 +1691,7 @@ Private Function X64EmitAssignStmt(ByRef ps As ParseState, ByVal nodeIdx As Inte
 End Function
 
 Private Function X64EmitIncDecStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: INCDEC"
     Dim lhs As Integer
     lhs = ps.ast.nodes(nodeIdx).left
     If lhs = -1 Then
@@ -1623,9 +1736,7 @@ Private Function X64CodegenAssembleOutput(ByRef cg As X64CodegenContext, ByRef a
         asmText &= Chr(10) & "section .data" & Chr(10) & cg.dataSection
     End If
 
-    If Len(cg.bssSection) > 0 Then
-        asmText &= Chr(10) & "section .bss" & Chr(10) & cg.bssSection
-    End If
+    asmText = X64CompactBlankLines(asmText)
 
     Return 1
 End Function
@@ -1691,12 +1802,9 @@ Private Function GenerateX64Code(ByRef ps As ParseState, ByRef outputText As Str
 
     If X64EmitNode(ps, ps.rootNode, cg, errText) = 0 Then Return 0
 
-    outputText = cg.textSection
-    If Len(cg.dataSection) > 0 Then
-        outputText &= Chr(10) & "section .data" & Chr(10) & cg.dataSection
-    End If
-    If Len(cg.bssSection) > 0 Then
-        outputText &= Chr(10) & "section .bss" & Chr(10) & cg.bssSection
+    If X64CodegenAssembleOutput(cg, outputText) = 0 Then
+        errText = "x64-codegen: output assembly failed"
+        Return 0
     End If
 
     Return 1

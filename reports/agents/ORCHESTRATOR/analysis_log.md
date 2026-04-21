@@ -32,3 +32,13 @@
 - `tools/run_err_codegen_parity_gate.ps1` -> `ERR_CODEGEN_PARITY_GATE_OK`
 - `tools/run_ffi_conv3_native_lanes.ps1` -> report guncellendi (`reports/ffi_conv3_native_lanes_report.md`)
 - `tools/run_faz_a_gate.ps1 -SkipBuild` -> PASS
+
+## 2026-04-20 Delta-3
+- Yapisal debt-paydown turu strict quality gate ile dogrulandi: parser/semantic/runtime buyuk dosyalar include-modul ayrisimi ile warning sinirinin altina indirildi.
+- `validate_module_quality_gate.ps1 -Strict` sonucunda warning=0, error=0 elde edildi.
+- `run_faz_a_gate.ps1 -SkipBuild` tekrar calistirilarak fonksiyonel regresyon olmadigi (180/180 PASS) teyit edildi.
+- uXBasic operasyonel matrisin Durum Ozeti bolumu strict kapanis kaniti ile guncellendi; acik KISMEN hucreleri yapisal borctan ayrilip CG/MIR lane kapsaminda netlestirildi.
+
+## 2026-04-20 Delta-3 Kanit
+- `powershell -ExecutionPolicy Bypass -File tools/validate_module_quality_gate.ps1 -Strict` -> PASS
+- `powershell -ExecutionPolicy Bypass -File tools/run_faz_a_gate.ps1 -SkipBuild` -> PASS (180/180)

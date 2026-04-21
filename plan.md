@@ -39,6 +39,7 @@ Bitmis sayma kriteri (hepsi zorunlu):
 	- `src/parser/lexer/lexer_preprocess.fbs::LexerPreprocessSourceImpl` function too long.
 	- `src/parser/parser/parser_stmt_decl.fbs` file too long.
 	- `src/build/main_frontend_include_bundle.fbs -> src/codegen/x64/ffi_call_backend.fbs` layer violation.
+basla
 	- `src/build/main_frontend_include_bundle.fbs -> src/codegen/x86/ffi_call_backend.fbs` layer violation.
 
 Bugun kapanacak is sirasi:
@@ -155,6 +156,13 @@ Her faz kapanisinda asagidaki uc adim zorunludur:
 1. Matris guncellemesi
 2. Test runner ekleme ve gate entegrasyonu
 3. yapilanlar.md append-only kaydi
+
+## 4.1) Son Oneriler Zorunlu Raporlama Kurali
+
+1. Her teslim/yanit sonunda Son oneriler bolumu zorunludur.
+2. Son oneriler madde-1: Bu promptta istenenlerin durum ozeti.
+3. Son oneriler madde-2: Onceki promptlarda tamamlanamayan eksikliklerin guncel durumu.
+4. Denetim: Madde-1 veya Madde-2 yoksa teslim raporu eksik sayilir.
 
 ## 5) Otonom Cok Ajanli Paralel Isletim
 

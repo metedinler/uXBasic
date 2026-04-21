@@ -1,0 +1,256 @@
+Private Function ParseClassMethodHasFlag(ByRef ps As ParseState, ByVal methodNode As Integer, ByRef flagRaw As String) As Integer
+    Dim target As String
+    target = UCase(Trim(flagRaw))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_FLAG" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = target Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function ParseClassMethodSignature(ByRef ps As ParseState, ByVal methodNode As Integer) As String
+    Dim sig As String
+    sig = ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        Dim kindText As String
+        kindText = UCase(ps.ast.nodes(ch).kind)
+
+        If kindText = "PARAM_DECL" Then
+            Dim paramType As String
+            paramType = ""
+
+            Dim pch As Integer
+            pch = ps.ast.nodes(ch).firstChild
+            Do While pch <> -1
+                If UCase(ps.ast.nodes(pch).kind) = "TYPE_REF" Then
+                    paramType = UCase(Trim(ps.ast.nodes(pch).value))
+                    Exit Do
+                End If
+                pch = ps.ast.nodes(pch).nextSibling
+            Loop
+
+            sig &= "P:" & paramType & ";"
+        ElseIf kindText = "RETURN_TYPE" Then
+            sig &= "R:" & UCase(Trim(ps.ast.nodes(ch).value)) & ";"
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return sig
+End Function
+
+Private Function ParseGetClassBaseName(ByRef ps As ParseState, ByVal classNode As Integer, ByRef baseOut As String) As Integer
+    baseOut = ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_BASE_REF" Then
+            baseOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(baseOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function ParseFindClassNode(ByRef ps As ParseState, ByRef classNameRaw As String) As Integer
+    Dim className As String
+    className = UCase(Trim(classNameRaw))
+    If className = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = className Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function ParseFindClassMethodNode(ByRef ps As ParseState, ByVal classNode As Integer, ByRef methodNameRaw As String) As Integer
+    Dim methodName As String
+    methodName = UCase(Trim(methodNameRaw))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = methodName Then Return ch
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function ParseFindMethodInBaseHierarchy(ByRef ps As ParseState, ByRef baseNameRaw As String, ByRef methodNameRaw As String, ByRef methodNodeOut As Integer) As Integer
+    methodNodeOut = -1
+
+    Dim curClass As String
+    curClass = UCase(Trim(baseNameRaw))
+
+    Dim hop As Integer
+    Do While curClass <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+
+        Dim classNode As Integer
+        classNode = ParseFindClassNode(ps, curClass)
+        If classNode = -1 Then Exit Do
+
+        methodNodeOut = ParseFindClassMethodNode(ps, classNode, methodNameRaw)
+        If methodNodeOut <> -1 Then Return 1
+
+        Dim nextBase As String
+        If ParseGetClassBaseName(ps, classNode, nextBase) = 0 Then Exit Do
+        curClass = nextBase
+    Loop
+
+    methodNodeOut = -1
+    Return 0
+End Function
+
+Private Function ParseValidateOverrideContract(ByRef ps As ParseState, ByVal classNode As Integer, ByVal methodNode As Integer, ByRef methodNameRaw As String, ByRef errText As String) As Integer
+    Dim baseName As String
+    If ParseGetClassBaseName(ps, classNode, baseName) = 0 Then
+        errText = "METHOD: OVERRIDE requires base class"
+        Return 0
+    End If
+
+    Dim baseMethodNode As Integer
+    If ParseFindMethodInBaseHierarchy(ps, baseName, methodNameRaw, baseMethodNode) = 0 Then
+        errText = "METHOD: OVERRIDE base method missing"
+        Return 0
+    End If
+
+    If ParseClassMethodHasFlag(ps, baseMethodNode, "VIRTUAL") = 0 And ParseClassMethodHasFlag(ps, baseMethodNode, "OVERRIDE") = 0 Then
+        errText = "METHOD: base method is not VIRTUAL"
+        Return 0
+    End If
+
+    If ParseClassMethodSignature(ps, methodNode) <> ParseClassMethodSignature(ps, baseMethodNode) Then
+        errText = "METHOD: OVERRIDE signature mismatch"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ParseClassMethodDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    Dim hasVirtualFlag As Integer
+    Dim hasOverrideFlag As Integer
+    Dim modifierTok As Token
+    modifierTok = CurToken(ps)
+    Do
+        Dim curUpper As String
+        curUpper = UCase(CurToken(ps).lexeme)
+        If curUpper = "VIRTUAL" Then
+            If hasVirtualFlag <> 0 Then
+                ps.lastError = "METHOD: duplicate VIRTUAL modifier"
+                Return -1
+            End If
+            hasVirtualFlag = 1
+            AdvanceTok ps
+            Continue Do
+        End If
+        If curUpper = "OVERRIDE" Then
+            If hasOverrideFlag <> 0 Then
+                ps.lastError = "METHOD: duplicate OVERRIDE modifier"
+                Return -1
+            End If
+            hasOverrideFlag = 1
+            AdvanceTok ps
+            Continue Do
+        End If
+        Exit Do
+    Loop
+    If hasVirtualFlag <> 0 And hasOverrideFlag <> 0 Then
+        ps.lastError = "METHOD: VIRTUAL and OVERRIDE cannot be combined"
+        Return -1
+    End If
+    If UCase(CurToken(ps).lexeme) <> "METHOD" Then
+        If hasVirtualFlag <> 0 Or hasOverrideFlag <> 0 Then
+            ps.lastError = "METHOD: METHOD keyword expected after modifier"
+            Return -1
+        End If
+        Return 0
+    End If
+    Dim methodTok As Token
+    methodTok = CurToken(ps)
+    AdvanceTok ps
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "METHOD: name expected"
+        Return -1
+    End If
+    If HasClassNamedMember(ps, classNode, nameTok.lexeme) Then
+        ps.lastError = "CLASS: duplicate member name: " & UCase(Trim(nameTok.lexeme))
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim methodNode As Integer
+    methodNode = MakeNodeFromToken(ps, "CLASS_METHOD_DECL", nameTok.lexeme, currentAccess, methodTok)
+
+    If ParseClassMemberParamList(ps, methodNode, "METHOD") = 0 Then Return -1
+
+    If MatchKeyword(ps, "AS") Then
+        Dim retTok As Token
+        retTok = CurToken(ps)
+        If ValidateTypeToken(ps, retTok) = 0 Then
+            ps.lastError = "METHOD: return type expected after AS"
+            Return -1
+        End If
+        AdvanceTok ps
+        Dim retNode As Integer
+        retNode = MakeNodeFromToken(ps, "RETURN_TYPE", retTok.lexeme, "", retTok)
+        ASTAddChild ps.ast, methodNode, retNode
+    End If
+
+    If hasVirtualFlag <> 0 Then
+        Dim virtualFlagNode As Integer
+        virtualFlagNode = MakeNodeFromToken(ps, "CLASS_METHOD_FLAG", "VIRTUAL", "", modifierTok)
+        ASTAddChild ps.ast, methodNode, virtualFlagNode
+    End If
+
+    If hasOverrideFlag <> 0 Then
+        Dim overrideFlagNode As Integer
+        overrideFlagNode = MakeNodeFromToken(ps, "CLASS_METHOD_FLAG", "OVERRIDE", "", modifierTok)
+        ASTAddChild ps.ast, methodNode, overrideFlagNode
+    End If
+
+    If hasOverrideFlag <> 0 Then
+        Dim overrideErr As String
+        If ParseValidateOverrideContract(ps, classNode, methodNode, nameTok.lexeme, overrideErr) = 0 Then
+            ps.lastError = overrideErr
+            Return -1
+        End If
+    End If
+
+    Dim accessNode As Integer
+    accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", methodTok)
+    ASTAddChild ps.ast, methodNode, accessNode
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "METHOD: unexpected trailing tokens"
+        Return -1
+    End If
+
+    ASTAddChild ps.ast, classNode, methodNode
+    SkipSeparators ps
+    Return 1
+End Function

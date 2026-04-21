@@ -34,27 +34,192 @@ Private Function ExecGetClassBaseTypeName(ByRef ps As ParseState, ByRef classTyp
     Return 0
 End Function
 
-Private Function ExecResolveMethodRoutineInHierarchy(ByRef ps As ParseState, ByRef startTypeName As String, ByRef methodUpper As String, ByRef routineIdxOut As Integer) As Integer
+Private Function ExecFindClassMethodDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef methodUpper As String) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = methodUpper Then Return ch
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function ExecClassMethodHasFlag(ByRef ps As ParseState, ByVal methodNode As Integer, ByRef flagNameRaw As String) As Integer
+    Dim flagUpper As String
+    flagUpper = UCase(Trim(flagNameRaw))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_FLAG" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = flagUpper Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function ExecClassMethodAccessText(ByRef ps As ParseState, ByVal methodNode As Integer) As String
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_ACCESS" Then
+            Dim accessText As String
+            accessText = UCase(Trim(ps.ast.nodes(ch).value))
+            If accessText <> "" Then Return accessText
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return "PRIVATE"
+End Function
+
+Private Function ExecFindNodeNamespaceRec(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal targetNode As Integer, ByRef currentNs As String, ByRef nsOut As String) As Integer
+    If nodeIdx = targetNode Then
+        nsOut = currentNs
+        Return 1
+    End If
+
+    Dim childNs As String
+    childNs = currentNs
+    If UCase(ps.ast.nodes(nodeIdx).kind) = "NAMESPACE_STMT" Then
+        childNs = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ExecFindNodeNamespaceRec(ps, ch, targetNode, childNs, nsOut) <> 0 Then Return 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function ExecFindNodeNamespace(ByRef ps As ParseState, ByVal targetNode As Integer, ByRef nsOut As String) As Integer
+    nsOut = ""
+    If ps.rootNode = -1 Then Return 0
+    Return ExecFindNodeNamespaceRec(ps, ps.rootNode, targetNode, "", nsOut)
+End Function
+
+Private Function ExecClassAllowsFriendCaller(ByRef ps As ParseState, ByVal classNode As Integer, ByRef callerRoutineUpper As String) As Integer
+    If callerRoutineUpper = "" Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_FRIEND_STMT" Then
+            Dim item As Integer
+            item = ps.ast.nodes(ch).firstChild
+            Do While item <> -1
+                If UCase(ps.ast.nodes(item).kind) = "FRIEND_ITEM" Then
+                    Dim friendName As String
+                    friendName = UCase(Trim(ps.ast.nodes(item).value))
+                    Dim dotPos As Integer
+                    dotPos = InStr(friendName, ".")
+                    Do While dotPos > 0
+                        friendName = Left(friendName, dotPos - 1) & "_" & Mid(friendName, dotPos + 1)
+                        dotPos = InStr(friendName, ".")
+                    Loop
+                    If friendName <> "" Then
+                        If callerRoutineUpper = friendName Then Return 1
+                        If Left(callerRoutineUpper, Len(friendName) + 1) = friendName & "_" Then Return 1
+                    End If
+                End If
+                item = ps.ast.nodes(item).nextSibling
+            Loop
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function ExecCanAccessMethod(ByRef ps As ParseState, ByVal classNode As Integer, ByRef declaringClass As String, ByVal methodNode As Integer, ByRef errText As String) As Integer
+    Dim accessText As String
+    accessText = ExecClassMethodAccessText(ps, methodNode)
+
+    If accessText = "PUBLIC" Then Return 1
+
+    Dim callerRoutine As String
+    callerRoutine = UCase(Trim(gCurrentRoutineName))
+
+    If callerRoutine <> "" Then
+        If callerRoutine = declaringClass Or Left(callerRoutine, Len(declaringClass) + 1) = declaringClass & "_" Then Return 1
+    End If
+
+    If ExecClassAllowsFriendCaller(ps, classNode, callerRoutine) <> 0 Then Return 1
+
+    If accessText = "RESTRICTED" Then
+        Dim classNs As String
+        Dim callerNs As String
+        classNs = ""
+        callerNs = ""
+        If ExecFindNodeNamespace(ps, classNode, classNs) <> 0 And ExecFindNodeNamespace(ps, gCurrentRoutineNodeIdx, callerNs) <> 0 Then
+            If classNs <> "" And classNs = callerNs Then Return 1
+        End If
+    End If
+
+    errText = "exec: access denied " & declaringClass & "." & UCase(Trim(ps.ast.nodes(methodNode).value)) & " (" & accessText & ")"
+    Return 0
+End Function
+
+Private Function ExecResolveMethodRoutineInHierarchy(ByRef ps As ParseState, ByRef startTypeName As String, ByRef methodUpper As String, ByRef routineIdxOut As Integer, ByRef declaringClassOut As String, ByRef methodDeclOut As Integer, ByVal requireVirtualChain As Integer, ByRef errText As String) As Integer
     Dim curType As String
     curType = UCase(Trim(startTypeName))
+    Dim inheritedLookup As Integer
+    inheritedLookup = 0
+
+    declaringClassOut = ""
+    methodDeclOut = -1
 
     Dim hopGuard As Integer
     Do While curType <> ""
         hopGuard += 1
         If hopGuard > 64 Then Exit Do
 
-        Dim routineName As String
-        routineName = curType & "_" & methodUpper
+        Dim classNode As Integer
+        classNode = ExecFindClassDeclNode(ps, curType)
+        If classNode = -1 Then Exit Do
 
-        routineIdxOut = ExecRoutineIndexOf(routineName)
-        If routineIdxOut <> -1 Then Return 1
+        Dim methodNode As Integer
+        methodNode = ExecFindClassMethodDecl(ps, classNode, methodUpper)
+
+        If methodNode <> -1 Then
+            If inheritedLookup <> 0 And requireVirtualChain <> 0 Then
+                If ExecClassMethodHasFlag(ps, methodNode, "VIRTUAL") = 0 And ExecClassMethodHasFlag(ps, methodNode, "OVERRIDE") = 0 Then
+                    errText = "exec: non-virtual base dispatch blocked " & curType & "." & methodUpper
+                    Return 0
+                End If
+            End If
+
+            Dim routineName As String
+            routineName = curType & "_" & methodUpper
+
+            routineIdxOut = ExecRoutineIndexOf(routineName)
+            If routineIdxOut = -1 Then
+                errText = "exec: method body missing " & routineName
+                Return 0
+            End If
+
+            declaringClassOut = curType
+            methodDeclOut = methodNode
+            Return 1
+        End If
 
         Dim nextBase As String
         If ExecGetClassBaseTypeName(ps, curType, nextBase) = 0 Then Exit Do
         curType = nextBase
+        inheritedLookup = 1
     Loop
 
     routineIdxOut = -1
+    methodDeclOut = -1
+    declaringClassOut = ""
     Return 0
 End Function
 
@@ -68,11 +233,24 @@ Private Function ExecResolveMethodRoutineIndex(ByRef ps As ParseState, ByRef es 
     prependReceiverOut = 0
     receiverAddrOut = 0
 
+    Dim declaringClass As String
+    Dim methodDecl As Integer
+    Dim classNode As Integer
+    classNode = -1
+
     If ExecFindClassDeclNode(ps, ownerUpper) <> -1 Then
-        If ExecResolveMethodRoutineInHierarchy(ps, ownerUpper, methodUpper, routineIdxOut) = 0 Then
-            errText = "exec: unsupported call " & ownerUpper & "_" & methodUpper
+        If ExecResolveMethodRoutineInHierarchy(ps, ownerUpper, methodUpper, routineIdxOut, declaringClass, methodDecl, 0, errText) = 0 Then
+            If errText = "" Then errText = "exec: unsupported call " & ownerUpper & "_" & methodUpper
             Return 0
         End If
+
+        classNode = ExecFindClassDeclNode(ps, declaringClass)
+        If classNode = -1 Then
+            errText = "exec: class metadata missing " & declaringClass
+            Return 0
+        End If
+
+        If ExecCanAccessMethod(ps, classNode, declaringClass, methodDecl, errText) = 0 Then Return 0
     Else
         Dim receiverIdx As Integer
         receiverIdx = ExecFindVar(es, ownerName)
@@ -92,10 +270,18 @@ Private Function ExecResolveMethodRoutineIndex(ByRef ps As ParseState, ByRef es 
         prependReceiverOut = 1
         receiverAddrOut = CInt(es.vars(receiverIdx).addr)
 
-        If ExecResolveMethodRoutineInHierarchy(ps, receiverType, methodUpper, routineIdxOut) = 0 Then
-            errText = "exec: unsupported call " & routineName
+        If ExecResolveMethodRoutineInHierarchy(ps, receiverType, methodUpper, routineIdxOut, declaringClass, methodDecl, 1, errText) = 0 Then
+            If errText = "" Then errText = "exec: unsupported call " & routineName
             Return 0
         End If
+
+        classNode = ExecFindClassDeclNode(ps, declaringClass)
+        If classNode = -1 Then
+            errText = "exec: class metadata missing " & declaringClass
+            Return 0
+        End If
+
+        If ExecCanAccessMethod(ps, classNode, declaringClass, methodDecl, errText) = 0 Then Return 0
     End If
 
     Return 1
@@ -200,10 +386,16 @@ Private Function ExecInvokeRoutineByIndex(ByRef ps As ParseState, ByRef es As Ex
 
     Dim savedReturnValue As Integer
     Dim savedReturnHasValue As Integer
+    Dim savedRoutineName As String
+    Dim savedRoutineNodeIdx As Integer
     savedReturnValue = gCallReturnValue
     savedReturnHasValue = gCallReturnHasValue
+    savedRoutineName = gCurrentRoutineName
+    savedRoutineNodeIdx = gCurrentRoutineNodeIdx
     gCallReturnValue = 0
     gCallReturnHasValue = 0
+    gCurrentRoutineName = callName
+    gCurrentRoutineNodeIdx = routineNodeIdx
     gCallContextDepth += 1
 
     Dim bodyNode As Integer
@@ -213,6 +405,8 @@ Private Function ExecInvokeRoutineByIndex(ByRef ps As ParseState, ByRef es As Ex
             gCallContextDepth -= 1
             gCallReturnValue = savedReturnValue
             gCallReturnHasValue = savedReturnHasValue
+            gCurrentRoutineName = savedRoutineName
+            gCurrentRoutineNodeIdx = savedRoutineNodeIdx
             ExecRestoreVars es, snapshotVars(), snapshotCount, snapshotNextAddr
             Return 0
         End If
@@ -231,6 +425,8 @@ Private Function ExecInvokeRoutineByIndex(ByRef ps As ParseState, ByRef es As Ex
                 gCallContextDepth -= 1
                 gCallReturnValue = savedReturnValue
                 gCallReturnHasValue = savedReturnHasValue
+                gCurrentRoutineName = savedRoutineName
+                gCurrentRoutineNodeIdx = savedRoutineNodeIdx
                 ExecRestoreVars es, snapshotVars(), snapshotCount, snapshotNextAddr
                 Return 0
             End If
@@ -254,6 +450,8 @@ Private Function ExecInvokeRoutineByIndex(ByRef ps As ParseState, ByRef es As Ex
     gCallContextDepth -= 1
     gCallReturnValue = savedReturnValue
     gCallReturnHasValue = savedReturnHasValue
+    gCurrentRoutineName = savedRoutineName
+    gCurrentRoutineNodeIdx = savedRoutineNodeIdx
     ExecRestoreVars es, snapshotVars(), snapshotCount, snapshotNextAddr
     Return 1
 End Function
