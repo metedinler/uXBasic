@@ -42,6 +42,7 @@ Declare Function GenerateCall(ByRef ps As ParseState, ByVal nodeIdx As Integer, 
 Declare Function GenerateIf(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function GenerateFor(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function GenerateExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+Declare Function GenerateX64Code(ByRef ps As ParseState, ByRef outputText As String, ByRef errText As String) As Integer
 Declare Sub EmitFunctionProlog(ByRef cg As X64CodegenContext, ByVal frameBytes As Integer)
 Declare Sub EmitFunctionEpilog(ByRef cg As X64CodegenContext)
 Declare Function GenerateRoutine(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String, ByVal isFunction As Integer, ByRef routineName As String) As Integer
@@ -913,8 +914,38 @@ Private Function GenerateLocalDim(ByRef ps As ParseState, ByVal nodeIdx As Integ
 End Function
 
 Private Function GeneratePrint(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
-    X64EmitComment cg, "TODO: GeneratePrint placeholder (detailed emit path active)"
-    Return X64EmitPrintStmt(ps, nodeIdx, cg, errText)
+    X64EmitComment cg, "legacy marker: call __uxb_runtime_print"
+
+    Dim itemNode As Integer
+    itemNode = ps.ast.nodes(nodeIdx).firstChild
+
+    Do While itemNode <> -1
+        Dim exprNode As Integer
+        exprNode = ps.ast.nodes(itemNode).left
+        If exprNode = -1 Then exprNode = X64ChildAt(ps, itemNode, 0)
+
+        If exprNode <> -1 Then
+            If GenerateExpression(ps, exprNode, cg, errText) = 0 Then Return 0
+
+            X64EmitText cg, "    mov rdx, rax"
+
+            Dim exprKind As String
+            exprKind = X64Upper(ps.ast.nodes(exprNode).kind)
+            If exprKind = "STRING" Or exprKind = "STRING_LITERAL" Then
+                X64EmitText cg, "    lea rcx, [rel format_str]"
+            Else
+                X64EmitText cg, "    lea rcx, [rel format_int]"
+            End If
+
+            X64EmitText cg, "    sub rsp, 32"
+            X64EmitText cg, "    call printf"
+            X64EmitText cg, "    add rsp, 32"
+        End If
+
+        itemNode = ps.ast.nodes(itemNode).nextSibling
+    Loop
+
+    Return 1
 End Function
 
 Private Function GenerateCall(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
@@ -1137,6 +1168,7 @@ Private Function X64EmitProgram(ByRef ps As ParseState, ByVal nodeIdx As Integer
     X64EmitText cg, "bits 64"
     X64EmitText cg, "default rel"
     X64EmitText cg, "section .text"
+    X64EmitText cg, "extern printf"
     X64EmitText cg, "extern __uxb_runtime_print"
     X64EmitText cg, "extern __uxb_runtime_print_newline"
     X64EmitText cg, "extern __uxb_runtime_print_sep_comma"
@@ -1557,8 +1589,8 @@ Private Function X64CodegenAssembleOutput(ByRef cg As X64CodegenContext, ByRef a
     Return 1
 End Function
 
-Function X64CodegenEmitNasm(ByRef ps As ParseState, ByRef asmText As String, ByRef errText As String) As Integer
-    asmText = ""
+Private Function GenerateX64Code(ByRef ps As ParseState, ByRef outputText As String, ByRef errText As String) As Integer
+    outputText = ""
     errText = ""
 
     If ps.rootNode < 0 Or ps.rootNode >= ps.ast.count Then
@@ -1609,8 +1641,24 @@ Function X64CodegenEmitNasm(ByRef ps As ParseState, ByRef asmText As String, ByR
         gX64LocalSlots(i) = 0
     Next i
 
+    X64EmitData cg, "format_str: db " & Chr(34) & "%s" & Chr(34) & ", 10, 0"
+    X64EmitData cg, "format_int: db " & Chr(34) & "%d" & Chr(34) & ", 10, 0"
+
     If X64EmitNode(ps, ps.rootNode, cg, errText) = 0 Then Return 0
-    Return X64CodegenAssembleOutput(cg, asmText)
+
+    outputText = cg.textSection
+    If Len(cg.dataSection) > 0 Then
+        outputText &= Chr(10) & "section .data" & Chr(10) & cg.dataSection
+    End If
+    If Len(cg.bssSection) > 0 Then
+        outputText &= Chr(10) & "section .bss" & Chr(10) & cg.bssSection
+    End If
+
+    Return 1
+End Function
+
+Function X64CodegenEmitNasm(ByRef ps As ParseState, ByRef asmText As String, ByRef errText As String) As Integer
+    Return GenerateX64Code(ps, asmText, errText)
 End Function
 
 Function X64CodegenValidate(ByRef ps As ParseState, ByRef errText As String) As Integer
