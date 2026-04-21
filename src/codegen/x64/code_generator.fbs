@@ -842,6 +842,118 @@ Private Function X64EmitExprToRax(ByRef ps As ParseState, ByVal nodeIdx As Integ
             End If
         End If
         Return X64EmitCallNode(ps, nodeIdx, cg, errText)
+    Case "NEW_EXPR"
+        Dim classTypeName As String
+        classTypeName = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+        If classTypeName = "" Then
+            errText = "x64-codegen: NEW_EXPR missing class type"
+            Return 0
+        End If
+
+        Dim classSize As Integer
+        Dim layoutErr As String
+        If TypeLayoutSizeOf(ps, classTypeName, classSize, layoutErr) = 0 Then
+            errText = "x64-codegen: NEW_EXPR layout resolve failed " & layoutErr
+            Return 0
+        End If
+        If classSize <= 0 Then
+            errText = "x64-codegen: NEW_EXPR invalid class size " & classTypeName
+            Return 0
+        End If
+
+        X64EmitComment cg, "NEW_EXPR native allocation"
+        X64EmitText cg, "    mov rcx, 1"
+        X64EmitText cg, "    mov rdx, " & X64ToStr(classSize)
+        X64EmitText cg, "    sub rsp, 32"
+        X64EmitText cg, "    call calloc"
+        X64EmitText cg, "    add rsp, 32"
+
+        Dim ctorName As String
+        ctorName = classTypeName & "_CTOR"
+
+        Dim ctorArgCount As Integer
+        Dim ctorIsFunction As Integer
+        Dim ctorFound As Integer
+        ctorFound = X64TryGetRoutineSignature(cg, ctorName, ctorArgCount, ctorIsFunction)
+
+        If ctorFound <> 0 Then
+            Dim newArgCount As Integer
+            newArgCount = X64ChildCount(ps, nodeIdx)
+            Dim totalCtorArgs As Integer
+            totalCtorArgs = newArgCount + 1
+
+            If ctorArgCount <> totalCtorArgs Then
+                errText = "x64-codegen: constructor argument count mismatch for " & ctorName & " expected=" & X64ToStr(ctorArgCount) & " actual=" & X64ToStr(totalCtorArgs)
+                Return 0
+            End If
+
+            Dim skipCtorLabel As String
+            skipCtorLabel = X64NextLabel(cg, "new_ctor_skip")
+            X64EmitText cg, "    cmp rax, 0"
+            X64EmitText cg, "    je " & skipCtorLabel
+
+            Dim stackArgCount As Integer
+            stackArgCount = 0
+            If totalCtorArgs > 4 Then stackArgCount = totalCtorArgs - 4
+
+            Dim regSpillSlots As Integer
+            regSpillSlots = totalCtorArgs
+            If regSpillSlots > 4 Then regSpillSlots = 4
+
+            Dim reserveBytes As Integer
+            reserveBytes = 32
+            reserveBytes += stackArgCount * 8
+            reserveBytes += regSpillSlots * 8
+            If (reserveBytes Mod 16) <> 0 Then reserveBytes += 8
+
+            X64EmitText cg, "    sub rsp, " & X64ToStr(reserveBytes)
+
+            Dim selfSpillOffset As Integer
+            selfSpillOffset = 32 + (stackArgCount * 8)
+            X64EmitText cg, "    mov [rsp + " & X64ToStr(selfSpillOffset) & "], rax"
+
+            Dim argPos As Integer
+            For argPos = 0 To newArgCount - 1
+                Dim argNode As Integer
+                argNode = X64ChildAt(ps, nodeIdx, argPos)
+                If argNode = -1 Then
+                    X64EmitText cg, "    xor rax, rax"
+                Else
+                    If X64EmitExprToRax(ps, argNode, cg, errText) = 0 Then Return 0
+                End If
+
+                Dim dstIndex As Integer
+                dstIndex = argPos + 1
+                If dstIndex < 4 Then
+                    Dim spillOffset As Integer
+                    spillOffset = 32 + (stackArgCount * 8) + (dstIndex * 8)
+                    X64EmitText cg, "    mov [rsp + " & X64ToStr(spillOffset) & "], rax"
+                Else
+                    Dim stackOffset As Integer
+                    stackOffset = 32 + ((dstIndex - 4) * 8)
+                    X64EmitText cg, "    mov [rsp + " & X64ToStr(stackOffset) & "], rax"
+                End If
+            Next argPos
+
+            Dim regOrder(0 To 3) As String
+            regOrder(0) = "rcx"
+            regOrder(1) = "rdx"
+            regOrder(2) = "r8"
+            regOrder(3) = "r9"
+
+            Dim regIdx As Integer
+            For regIdx = 0 To regSpillSlots - 1
+                Dim loadOffset As Integer
+                loadOffset = 32 + (stackArgCount * 8) + (regIdx * 8)
+                X64EmitText cg, "    mov " & regOrder(regIdx) & ", [rsp + " & X64ToStr(loadOffset) & "]"
+            Next regIdx
+
+            X64EmitText cg, "    call " & ctorName
+            X64EmitText cg, "    mov rax, [rsp + " & X64ToStr(selfSpillOffset) & "]"
+            X64EmitText cg, "    add rsp, " & X64ToStr(reserveBytes)
+            X64EmitLabel cg, skipCtorLabel
+        End If
+        Return 1
     Case "INDEX_EXPR", "ARRAY_INDEX", "SUBSCRIPT_EXPR", "ARRAY_ACCESS"
         Dim indexedBaseName As String
         Dim indexedExpr As Integer
@@ -1307,6 +1419,7 @@ Private Function X64EmitProgram(ByRef ps As ParseState, ByVal nodeIdx As Integer
     X64EmitText cg, "default rel"
     X64EmitText cg, "section .text"
     X64EmitText cg, "extern printf"
+    X64EmitText cg, "extern calloc"
     X64EmitText cg, "extern __uxb_runtime_print"
     X64EmitText cg, "extern __uxb_runtime_print_newline"
     X64EmitText cg, "extern __uxb_runtime_print_sep_comma"

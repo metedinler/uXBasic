@@ -16,6 +16,7 @@ Type ExecVar
     value As ExecValue
     addr As UInteger
     declType As String
+    runtimeClassType As String
     isArray As Integer
     arrayDims As Integer
     arrayLower As Integer
@@ -494,10 +495,30 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
                 Dim collHandle As Integer
                 collHandle = ExecCollectionCreate(declType)
                 ExecValueSetInteger varValue, collHandle
-            ElseIf ExecFindClassDeclNode(ps, declType) <> -1 Then
+            ElseIf ExecFindClassDeclNode(ps, declType) <> -1 Or declType = "OBJECT" Then
                 If initNode <> -1 Then
-                    errText = "DIM: class initializer not supported"
-                    Return 0
+                    If ps.ast.nodes(initNode).left = -1 Then
+                        errText = "DIM: invalid class initializer"
+                        Return 0
+                    End If
+
+                    Dim initExprNode As Integer
+                    initExprNode = ps.ast.nodes(initNode).left
+                    If UCase(ps.ast.nodes(initExprNode).kind) <> "NEW_EXPR" Then
+                        errText = "DIM: class initializer must be NEW " & declType
+                        Return 0
+                    End If
+
+                    Dim newType As String
+                    newType = UCase(Trim(ps.ast.nodes(initExprNode).value))
+                    If ExecCanAssignClassType(ps, declType, newType) = 0 Then
+                        errText = "DIM: class initializer type mismatch expected=" & declType & " actual=" & newType
+                        Return 0
+                    End If
+
+                    Dim initValue As ExecValue
+                    If ExecEvalExpression(ps, initExprNode, es, initValue, errText) = 0 Then Return 0
+                    varValue = initValue
                 End If
             ElseIf initNode <> -1 Then
                 If ps.ast.nodes(initNode).left = -1 Then
@@ -512,7 +533,28 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
 
             ExecSetVarValue es, varName, varValue
             ExecSetVarDeclMeta es, varName, declType, 0, 0, 0, 0, 0
-            If ExecConfigureClassStorage(ps, es, varName, declType, errText) = 0 Then Return 0
+            If ExecFindClassDeclNode(ps, declType) <> -1 Then
+                If initNode <> -1 Then
+                    ExecSetVarAddr es, varName, CUInt(ExecValueToInteger(varValue))
+                    Dim initExprNode2 As Integer
+                    initExprNode2 = ps.ast.nodes(initNode).left
+                    If initExprNode2 <> -1 Then
+                        es.vars(ExecFindVar(es, varName)).runtimeClassType = UCase(Trim(ps.ast.nodes(initExprNode2).value))
+                    End If
+                Else
+                    If ExecConfigureClassStorage(ps, es, varName, declType, errText) = 0 Then Return 0
+                    es.vars(ExecFindVar(es, varName)).runtimeClassType = declType
+                End If
+            ElseIf declType = "OBJECT" Then
+                If initNode <> -1 Then
+                    ExecSetVarAddr es, varName, CUInt(ExecValueToInteger(varValue))
+                    Dim initExprNode3 As Integer
+                    initExprNode3 = ps.ast.nodes(initNode).left
+                    If initExprNode3 <> -1 Then
+                        es.vars(ExecFindVar(es, varName)).runtimeClassType = UCase(Trim(ps.ast.nodes(initExprNode3).value))
+                    End If
+                End If
+            End If
         End If
     Next declPos
 
@@ -958,6 +1000,13 @@ Function ExecEvalExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer, By
         callExprValue = ExecEvalNode(ps, es, nodeIdx, errText)
         If errText <> "" Then Return 0
         ExecValueSetInteger result, callExprValue
+        Return 1
+
+    Case "NEW_EXPR"
+        Dim newExprValue As Integer
+        newExprValue = ExecEvalNode(ps, es, nodeIdx, errText)
+        If errText <> "" Then Return 0
+        ExecValueSetInteger result, newExprValue
         Return 1
 
     Case Else
@@ -1434,6 +1483,9 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
         Dim callExprValue As Integer
         If ExecEvalCall(ps, es, n.value, nodeIdx, 1, callExprValue, errText) = 0 Then Return 0
         Return callExprValue
+
+    Case "NEW_EXPR"
+        Return ExecAllocClassInstance(ps, es, n.value, nodeIdx, errText)
 
     Case Else
         errText = "exec: unsupported node kind " & n.kind

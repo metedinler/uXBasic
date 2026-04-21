@@ -29,6 +29,12 @@ Private Function SemChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer)
     Return cnt
 End Function
 
+Declare Function SemHasClassName(ByRef ps As ParseState, ByRef classUpper As String) As Integer
+Declare Function SemFindClassNode(ByRef ps As ParseState, ByRef classNameRaw As String) As Integer
+Declare Function SemClassBaseName(ByRef ps As ParseState, ByVal classNode As Integer, ByRef baseNameOut As String) As Integer
+Declare Function SemCanAssignClassType(ByRef ps As ParseState, ByRef declTypeRaw As String, ByRef actualTypeRaw As String) As Integer
+Declare Function SemFindDimDeclTypeByName(ByRef ps As ParseState, ByRef varNameRaw As String, ByRef declTypeOut As String) As Integer
+
 Private Function SemValidateTypeRefs(ByRef ps As ParseState, ByRef errText As String) As Integer
     Dim i As Integer
 
@@ -285,6 +291,141 @@ Private Function SemValidateConstNodes(ByRef ps As ParseState, ByRef errText As 
     Return 1
 End Function
 
+Private Function SemValidateNewExprNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "NEW_EXPR" Then Continue For
+
+        Dim classType As String
+        classType = UCase(Trim(ps.ast.nodes(i).value))
+        If classType = "" Then
+            errText = "semantic: NEW class type missing"
+            Return 0
+        End If
+
+        If SemHasClassName(ps, classType) = 0 Then
+            errText = "semantic: NEW target class not found " & classType
+            Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateDimClassInitializers(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "DIM_DECL" Then Continue For
+
+        Dim typeNode As Integer
+        typeNode = -1
+        Dim initNode As Integer
+        initNode = -1
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            Dim ck As String
+            ck = UCase(ps.ast.nodes(ch).kind)
+            If ck = "TYPE_REF" Then typeNode = ch
+            If ck = "INIT_EXPR" Then initNode = ch
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+
+        If typeNode = -1 Then Continue For
+
+        Dim declType As String
+        declType = UCase(Trim(ps.ast.nodes(typeNode).value))
+        If declType = "" Then Continue For
+        If SemHasClassName(ps, declType) = 0 Then Continue For
+
+        If initNode = -1 Then Continue For
+        If ps.ast.nodes(initNode).left = -1 Then
+            errText = "semantic: DIM class initializer expression missing"
+            Return 0
+        End If
+
+        Dim initExpr As Integer
+        initExpr = ps.ast.nodes(initNode).left
+        If UCase(ps.ast.nodes(initExpr).kind) <> "NEW_EXPR" Then
+            errText = "semantic: DIM class initializer must be NEW " & declType
+            Return 0
+        End If
+
+        Dim newType As String
+        newType = UCase(Trim(ps.ast.nodes(initExpr).value))
+        If SemCanAssignClassType(ps, declType, newType) = 0 Then
+            errText = "semantic: DIM class initializer type mismatch expected=" & declType & " actual=" & newType
+            Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateClassAssignments(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "ASSIGN_STMT" Then Continue For
+
+        Dim lhsNode As Integer
+        lhsNode = ps.ast.nodes(i).left
+        Dim rhsNode As Integer
+        rhsNode = ps.ast.nodes(i).right
+        If lhsNode = -1 Or rhsNode = -1 Then Continue For
+        If UCase(ps.ast.nodes(lhsNode).kind) <> "IDENT" Then Continue For
+        If UCase(ps.ast.nodes(rhsNode).kind) <> "NEW_EXPR" Then Continue For
+
+        Dim declType As String
+        If SemFindDimDeclTypeByName(ps, ps.ast.nodes(lhsNode).value, declType) = 0 Then Continue For
+
+        If declType <> "OBJECT" And SemHasClassName(ps, declType) = 0 Then Continue For
+
+        Dim actualType As String
+        actualType = UCase(Trim(ps.ast.nodes(rhsNode).value))
+        If SemCanAssignClassType(ps, declType, actualType) = 0 Then
+            errText = "semantic: class assignment type mismatch expected=" & declType & " actual=" & actualType
+            Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateDeleteNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "DELETE_STMT" Then Continue For
+
+        Dim targetNode As Integer
+        targetNode = ps.ast.nodes(i).left
+        If targetNode = -1 Then
+            errText = "semantic: DELETE target missing"
+            Return 0
+        End If
+
+        If UCase(ps.ast.nodes(targetNode).kind) <> "IDENT" Then
+            errText = "semantic: DELETE target must be identifier"
+            Return 0
+        End If
+
+        Dim declType As String
+        If SemFindDimDeclTypeByName(ps, ps.ast.nodes(targetNode).value, declType) = 0 Then
+            errText = "semantic: DELETE target must be DIM variable"
+            Return 0
+        End If
+
+        If declType <> "OBJECT" And SemHasClassName(ps, declType) = 0 Then
+            errText = "semantic: DELETE target must be class or OBJECT"
+            Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
 Private Function SemHasClassName(ByRef ps As ParseState, ByRef classUpper As String) As Integer
     Dim i As Integer
     For i = 0 To ps.ast.count - 1
@@ -292,6 +433,72 @@ Private Function SemHasClassName(ByRef ps As ParseState, ByRef classUpper As Str
             If UCase(Trim(ps.ast.nodes(i).value)) = classUpper Then Return 1
         End If
     Next i
+    Return 0
+End Function
+
+Private Function SemClassIsOrDerivedFrom(ByRef ps As ParseState, ByRef actualTypeRaw As String, ByRef expectedTypeRaw As String) As Integer
+    Dim actualType As String
+    Dim expectedType As String
+    actualType = UCase(Trim(actualTypeRaw))
+    expectedType = UCase(Trim(expectedTypeRaw))
+
+    If actualType = "" Or expectedType = "" Then Return 0
+    If actualType = expectedType Then Return 1
+
+    Dim curType As String
+    curType = actualType
+
+    Do While curType <> ""
+        Dim classNode As Integer
+        classNode = SemFindClassNode(ps, curType)
+        If classNode = -1 Then Exit Do
+
+        Dim baseType As String
+        If SemClassBaseName(ps, classNode, baseType) = 0 Then Exit Do
+        If baseType = expectedType Then Return 1
+
+        curType = baseType
+    Loop
+
+    Return 0
+End Function
+
+Private Function SemCanAssignClassType(ByRef ps As ParseState, ByRef declTypeRaw As String, ByRef actualTypeRaw As String) As Integer
+    Dim declType As String
+    Dim actualType As String
+    declType = UCase(Trim(declTypeRaw))
+    actualType = UCase(Trim(actualTypeRaw))
+
+    If actualType = "" Then Return 0
+    If SemHasClassName(ps, actualType) = 0 Then Return 0
+
+    If declType = "OBJECT" Then Return 1
+    Return SemClassIsOrDerivedFrom(ps, actualType, declType)
+End Function
+
+Private Function SemFindDimDeclTypeByName(ByRef ps As ParseState, ByRef varNameRaw As String, ByRef declTypeOut As String) As Integer
+    declTypeOut = ""
+
+    Dim varName As String
+    varName = UCase(Trim(varNameRaw))
+    If varName = "" Then Return 0
+
+    Dim i As Integer
+    For i = ps.ast.count - 1 To 0 Step -1
+        If UCase(ps.ast.nodes(i).kind) <> "DIM_DECL" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> varName Then Continue For
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "TYPE_REF" Then
+                declTypeOut = UCase(Trim(ps.ast.nodes(ch).value))
+                Return IIf(declTypeOut <> "", 1, 0)
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
     Return 0
 End Function
 
@@ -1065,6 +1272,10 @@ Function SemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Int
     If SemValidateIfSelectNodes(ps, errText) = 0 Then Return 0
     If SemValidateRoutineNodes(ps, errText) = 0 Then Return 0
     If SemValidateConstNodes(ps, errText) = 0 Then Return 0
+    If SemValidateNewExprNodes(ps, errText) = 0 Then Return 0
+    If SemValidateDimClassInitializers(ps, errText) = 0 Then Return 0
+    If SemValidateClassAssignments(ps, errText) = 0 Then Return 0
+    If SemValidateDeleteNodes(ps, errText) = 0 Then Return 0
     If SemFoldConstants(ps, errText) = 0 Then Return 0
     If SemValidateOverloadResolution(ps, errText) = 0 Then Return 0
     If SemValidateReachability(ps, errText) = 0 Then Return 0

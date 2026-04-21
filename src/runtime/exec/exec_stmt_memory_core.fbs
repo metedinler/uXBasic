@@ -74,6 +74,44 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
     End Select
 
     ExecSetVarValue es, targetName, outValue
+
+    Dim targetIdx As Integer
+    targetIdx = ExecFindVar(es, targetName)
+    If targetIdx <> -1 Then
+        Dim targetDeclType As String
+        targetDeclType = UCase(Trim(es.vars(targetIdx).declType))
+        Dim isClassLikeTarget As Integer
+        isClassLikeTarget = 0
+        If targetDeclType = "OBJECT" Then
+            isClassLikeTarget = 1
+        ElseIf targetDeclType <> "" And ExecFindClassDeclNode(ps, targetDeclType) <> -1 Then
+            isClassLikeTarget = 1
+        End If
+
+        If isClassLikeTarget <> 0 And es.vars(targetIdx).isArray = 0 Then
+            If opText <> "=" Then
+                errText = "exec: class assignment only supports ="
+                Return 0
+            End If
+
+            If st.right <> -1 And UCase(ps.ast.nodes(st.right).kind) = "NEW_EXPR" Then
+                Dim rhsNewType As String
+                rhsNewType = UCase(Trim(ps.ast.nodes(st.right).value))
+                If ExecCanAssignClassType(ps, targetDeclType, rhsNewType) = 0 Then
+                    errText = "exec: class assignment type mismatch expected=" & targetDeclType & " actual=" & rhsNewType
+                    Return 0
+                End If
+                es.vars(targetIdx).runtimeClassType = rhsNewType
+            ElseIf ExecValueToInteger(outValue) = 0 Then
+                es.vars(targetIdx).runtimeClassType = ""
+            ElseIf targetDeclType <> "OBJECT" Then
+                es.vars(targetIdx).runtimeClassType = targetDeclType
+            End If
+
+            ExecSetVarAddr es, targetName, CUInt(ExecValueToInteger(outValue))
+        End If
+    End If
+
     Return 1
 End Function
 
@@ -458,10 +496,65 @@ Private Function ExecRunSetNewOffsetStmt(ByRef ps As ParseState, ByRef es As Exe
     Return 1
 End Function
 
+Private Function ExecRunDeleteStmt(ByRef ps As ParseState, ByRef es As ExecState, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim targetNode As Integer
+    targetNode = st.left
+    If targetNode = -1 Then
+        errText = "exec: DELETE target missing"
+        Return 0
+    End If
+
+    If UCase(ps.ast.nodes(targetNode).kind) <> "IDENT" Then
+        errText = "exec: DELETE target must be ident"
+        Return 0
+    End If
+
+    Dim varName As String
+    varName = ps.ast.nodes(targetNode).value
+
+    Dim varIdx As Integer
+    varIdx = ExecFindVar(es, varName)
+    If varIdx = -1 Then
+        errText = "exec: DELETE variable not found " & UCase(varName)
+        Return 0
+    End If
+
+    Dim declType As String
+    declType = UCase(Trim(es.vars(varIdx).declType))
+    Dim runtimeType As String
+    runtimeType = UCase(Trim(es.vars(varIdx).runtimeClassType))
+
+    If declType <> "OBJECT" And ExecFindClassDeclNode(ps, declType) = -1 Then
+        errText = "exec: DELETE target must be class or OBJECT"
+        Return 0
+    End If
+
+    Dim objAddr As UInteger
+    objAddr = es.vars(varIdx).addr
+    If objAddr = 0 Then objAddr = CUInt(ExecValueToInteger(es.vars(varIdx).value))
+
+    If objAddr <> 0 Then
+        Dim dtorType As String
+        dtorType = runtimeType
+        If dtorType = "" And declType <> "OBJECT" Then dtorType = declType
+
+        If dtorType <> "" And ExecFindClassDeclNode(ps, dtorType) <> -1 Then
+            If ExecInvokeClassDtorIfPresent(ps, es, dtorType, objAddr, errText) = 0 Then Return 0
+        End If
+    End If
+
+    ExecSetVar es, varName, 0
+    ExecSetVarAddr es, varName, 0
+    es.vars(varIdx).runtimeClassType = ""
+    Return 1
+End Function
+
 Private Function ExecRunMemoryCoreStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
     Select Case UCase(st.kind)
     Case "ASSIGN_STMT"
         Return ExecRunAssignStmt(ps, es, st, errText)
+    Case "DELETE_STMT"
+        Return ExecRunDeleteStmt(ps, es, st, errText)
     Case "INCDEC_STMT"
         Return ExecRunIncDecStmt(ps, es, st, errText)
     Case "RANDOMIZE_STMT"

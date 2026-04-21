@@ -13,6 +13,58 @@ Private Function ExecFindClassDeclNode(ByRef ps As ParseState, ByRef classTypeNa
     Return -1
 End Function
 
+Private Function ExecClassIsOrDerivedFrom(ByRef ps As ParseState, ByRef actualTypeRaw As String, ByRef expectedTypeRaw As String) As Integer
+    Dim actualType As String
+    Dim expectedType As String
+    actualType = UCase(Trim(actualTypeRaw))
+    expectedType = UCase(Trim(expectedTypeRaw))
+
+    If actualType = "" Or expectedType = "" Then Return 0
+    If actualType = expectedType Then Return 1
+
+    Dim curType As String
+    curType = actualType
+
+    Do While curType <> ""
+        Dim classNode As Integer
+        classNode = ExecFindClassDeclNode(ps, curType)
+        If classNode = -1 Then Exit Do
+
+        Dim baseType As String
+        baseType = ""
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(classNode).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CLASS_BASE_REF" Then
+                baseType = UCase(Trim(ps.ast.nodes(ch).value))
+                Exit Do
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+
+        If baseType = "" Then Exit Do
+        If baseType = expectedType Then Return 1
+
+        curType = baseType
+    Loop
+
+    Return 0
+End Function
+
+Private Function ExecCanAssignClassType(ByRef ps As ParseState, ByRef declTypeRaw As String, ByRef actualTypeRaw As String) As Integer
+    Dim declType As String
+    Dim actualType As String
+    declType = UCase(Trim(declTypeRaw))
+    actualType = UCase(Trim(actualTypeRaw))
+
+    If actualType = "" Then Return 0
+    If ExecFindClassDeclNode(ps, actualType) = -1 Then Return 0
+
+    If declType = "OBJECT" Then Return 1
+    Return ExecClassIsOrDerivedFrom(ps, actualType, declType)
+End Function
+
 Private Function ExecIsCtorSelfTypeSupported(ByRef typeNameRaw As String) As Integer
     Dim typeUpper As String
     typeUpper = UCase(Trim(typeNameRaw))
@@ -68,8 +120,8 @@ Private Function ExecValidateClassCtorSignature(ByRef ps As ParseState, ByVal ro
         ch = ps.ast.nodes(ch).nextSibling
     Loop
 
-    If paramCount <> 1 Then
-        errText = "DIM: constructor arity mismatch " & routineName & " expected=1 actual=" & LTrim(Str(paramCount))
+    If paramCount < 1 Then
+        errText = "DIM: constructor arity mismatch " & routineName & " expected>=1 actual=" & LTrim(Str(paramCount))
         Return 0
     End If
 
@@ -87,7 +139,7 @@ Private Function ExecValidateClassCtorSignature(ByRef ps As ParseState, ByVal ro
     Return 1
 End Function
 
-Private Function ExecInvokeClassCtorIfPresent(ByRef ps As ParseState, ByRef es As ExecState, ByRef classTypeName As String, ByVal instanceAddr As UInteger, ByRef errText As String) As Integer
+Private Function ExecInvokeClassCtorIfPresent(ByRef ps As ParseState, ByRef es As ExecState, ByRef classTypeName As String, ByVal instanceAddr As UInteger, ByVal ctorCallNodeIdx As Integer, ByRef errText As String) As Integer
     Dim classUpper As String
     classUpper = UCase(Trim(classTypeName))
     If classUpper = "" Then Return 1
@@ -102,7 +154,7 @@ Private Function ExecInvokeClassCtorIfPresent(ByRef ps As ParseState, ByRef es A
     If ExecValidateClassCtorSignature(ps, routineIdx, classUpper, errText) = 0 Then Return 0
 
     Dim ctorResult As Integer
-    If ExecInvokeRoutineByIndex(ps, es, routineIdx, -1, 0, 1, CInt(instanceAddr), ctorResult, errText) = 0 Then
+    If ExecInvokeRoutineByIndex(ps, es, routineIdx, ctorCallNodeIdx, 0, 1, CInt(instanceAddr), ctorResult, errText) = 0 Then
         If errText = "" Then errText = "DIM: constructor invoke failed " & ctorName
         Return 0
     End If
@@ -219,7 +271,56 @@ Private Function ExecConfigureClassStorage(ByRef ps As ParseState, ByRef es As E
     objectEnd = objectBase + CUInt(classSize)
     If objectEnd > es.nextVarAddr Then es.nextVarAddr = objectEnd
 
-    If ExecInvokeClassCtorIfPresent(ps, es, classTypeName, objectBase, errText) = 0 Then Return 0
+    ' Keep class variable scalar value aligned with its address for pointer-like class workflows.
+    ExecSetVar es, varName, CInt(objectBase)
+
+    If ExecInvokeClassCtorIfPresent(ps, es, classTypeName, objectBase, -1, errText) = 0 Then Return 0
 
     Return 1
+End Function
+
+Private Function ExecAllocClassInstance(ByRef ps As ParseState, ByRef es As ExecState, ByRef classTypeName As String, ByVal ctorCallNodeIdx As Integer, ByRef errText As String) As Integer
+    Dim classUpper As String
+    classUpper = UCase(Trim(classTypeName))
+    If classUpper = "" Then
+        errText = "exec: NEW class type missing"
+        Return 0
+    End If
+
+    If ExecFindClassDeclNode(ps, classUpper) = -1 Then
+        errText = "exec: NEW unknown class " & classUpper
+        Return 0
+    End If
+
+    Dim classSize As Integer
+    Dim classLayoutErr As String
+    If TypeLayoutSizeOf(ps, classUpper, classSize, classLayoutErr) = 0 Then
+        errText = "exec: NEW class layout resolve failed " & classLayoutErr
+        Return 0
+    End If
+
+    If classSize <= 0 Then
+        errText = "exec: NEW invalid class size " & classUpper
+        Return 0
+    End If
+
+    Dim objectBase As UInteger
+    objectBase = es.nextVarAddr
+    If objectBase > &h7FFFFFFF - CUInt(classSize) + 1 Then
+        errText = "exec: NEW allocation overflow"
+        Return 0
+    End If
+
+    If VMemFillB(objectBase, 0, CUInt(classSize)) = 0 Then
+        errText = "exec: NEW allocation out of range"
+        Return 0
+    End If
+
+    Dim objectEnd As UInteger
+    objectEnd = objectBase + CUInt(classSize)
+    If objectEnd > es.nextVarAddr Then es.nextVarAddr = objectEnd
+
+    If ExecInvokeClassCtorIfPresent(ps, es, classUpper, objectBase, ctorCallNodeIdx, errText) = 0 Then Return 0
+
+    Return CInt(objectBase)
 End Function

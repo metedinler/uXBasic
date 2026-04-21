@@ -1,4 +1,12 @@
-#include "build/main_frontend_include_bundle.fbs"
+#include "parser/token_kinds.fbs"
+#include "parser/lexer.fbs"
+#include "parser/ast.fbs"
+#include "parser/parser.fbs"
+#include "semantic/hir.fbs"
+#include "semantic/mir.fbs"
+#include "semantic/semantic_pass.fbs"
+#include "build/interop_manifest.fbs"
+#include "codegen/x64/code_generator.fbs"
 #include "build/main_runtime_include_bundle.fbs"
 #include "codegen/x64/ffi_call_backend.fbs"
 #include "codegen/x86/ffi_call_backend.fbs"
@@ -37,6 +45,9 @@ Private Function IsValueArgKey(ByRef keyText As String) As Integer
     If k = "--x64gen-out" Then Return 1
     If k = "--ir-json-out" Then Return 1
     If k = "--inventory-json-out" Then Return 1
+    If k = "--pipeline-json-out" Then Return 1
+    If k = "--mir-opcodes-json-out" Then Return 1
+    If k = "--interpreter-backend" Then Return 1
     If k = "--source" Then Return 1
     If k = "-s" Then Return 1
 
@@ -114,6 +125,26 @@ Private Function SaveTextFile(ByRef filePath As String, ByRef textIn As String) 
     Return 1
 End Function
 
+Private Function BuildParseErrorReport(ByRef ps As ParseState, ByRef sourcePath As String) As String
+    Dim reportText As String
+    reportText = "uXBasic parse error report" & Chr(13) & Chr(10)
+    reportText &= "source: " & sourcePath & Chr(13) & Chr(10)
+    reportText &= "error_count: " & LTrim(Str(ps.parseErrorCount)) & Chr(13) & Chr(10)
+    reportText &= String(72, "-") & Chr(13) & Chr(10)
+
+    Dim i As Integer
+    For i = 0 To ps.parseErrorCount - 1
+        reportText &= LTrim(Str(i + 1)) & ". " & ps.parseErrors(i) & Chr(13) & Chr(10)
+    Next i
+
+    If Trim(ps.lastError) <> "" Then
+        reportText &= String(72, "-") & Chr(13) & Chr(10)
+        reportText &= "summary: " & ps.lastError & Chr(13) & Chr(10)
+    End If
+
+    Return reportText
+End Function
+
 Dim As String sourceText
 Dim As String sourcePath
 Dim As Integer debugMode
@@ -125,6 +156,9 @@ Dim As Integer codegenMode
 Dim As Integer runSemanticPass
 Dim As String x64OutPath
 Dim As String inventoryJsonOutPath
+Dim As String pipelineJsonOutPath
+Dim As String mirOpcodesJsonOutPath
+Dim As String interpreterBackend
 
 DiagInit
 
@@ -155,6 +189,24 @@ If GetArgValue("--ir-json-out", inventoryJsonOutPath) = 0 Then
         inventoryJsonOutPath = ""
     End If
 End If
+
+pipelineJsonOutPath = ""
+If GetArgValue("--pipeline-json-out", pipelineJsonOutPath) = 0 Then pipelineJsonOutPath = ""
+
+mirOpcodesJsonOutPath = ""
+If GetArgValue("--mir-opcodes-json-out", mirOpcodesJsonOutPath) = 0 Then mirOpcodesJsonOutPath = ""
+
+interpreterBackend = "AST"
+Dim backendArg As String
+If GetArgValue("--interpreter-backend", backendArg) <> 0 Then
+    interpreterBackend = UCase(Trim(backendArg))
+End If
+
+If interpreterBackend <> "AST" And interpreterBackend <> "MIR" Then
+    DiagHata "Gecersiz interpreter backend: " & interpreterBackend
+    End 2
+End If
+
 DiagBilgi "uXBasic calistirildi"
 
 If execMemMode <> 0 And interopMode <> 0 Then
@@ -184,6 +236,23 @@ Dim As ParseState ps
 ParserInit ps, st
 
 If ParseProgram(ps) = 0 Then
+    If ps.parseErrorCount > 0 Then
+        Dim parseReportPath As String
+        parseReportPath = "dist\parse_errors.txt"
+
+        Dim parseReportText As String
+        parseReportText = BuildParseErrorReport(ps, sourcePath)
+
+        If SaveTextFile(parseReportPath, parseReportText) <> 0 Then
+            DiagHata "Ayristirma basarisiz: " & LocalizeErrorMessage(ps.lastError)
+            DiagHata "Detayli parse hatalari yazildi: " & parseReportPath
+        Else
+            DiagHata "Ayristirma basarisiz: " & LocalizeErrorMessage(ps.lastError)
+            DiagHata "Detayli parse raporu yazilamadi: " & parseReportPath
+        End If
+        End 1
+    End If
+
     DiagHata "Ayristirma basarisiz: " & LocalizeErrorMessage(ps.lastError)
     End 1
 End If
@@ -191,6 +260,7 @@ End If
 runSemanticPass = IIf(semanticMode <> 0 Or execMemMode <> 0 Or interopMode <> 0 Or x64EmitMode <> 0 Or codegenMode <> 0, 1, 0)
 
 If Trim(inventoryJsonOutPath) <> "" Then runSemanticPass = 1
+If interpreterBackend = "MIR" And execMemMode <> 0 Then runSemanticPass = 1
 
 If runSemanticPass <> 0 Then
     Dim semanticErr As String
@@ -220,11 +290,54 @@ If Trim(inventoryJsonOutPath) <> "" Then
     End If
 End If
 
+If Trim(mirOpcodesJsonOutPath) <> "" Then
+    Dim mirOpsErr As String
+    If MIRWriteOpcodeSurfaceJson(mirOpcodesJsonOutPath, mirOpsErr) = 0 Then
+        DiagHata "MIR opcode JSON cikti yazimi basarisiz: " & LocalizeErrorMessage(mirOpsErr)
+        End 9
+    End If
+End If
+
+If Trim(pipelineJsonOutPath) <> "" Then
+    Dim pipelineErr As String
+    If MIRWritePipelineFlowJson(pipelineJsonOutPath, pipelineErr) = 0 Then
+        DiagHata "Pipeline JSON cikti yazimi basarisiz: " & LocalizeErrorMessage(pipelineErr)
+        End 10
+    End If
+End If
+
 If execMemMode Then
-    Dim execErr As String
-    If ExecRunMemoryProgram(ps, execErr) = 0 Then
-        DiagHata "Bellek yurutme basarisiz: " & LocalizeErrorMessage(execErr)
-        End 5
+    If interpreterBackend = "MIR" Then
+        Dim mirModule As MIRModule
+        Dim mirBuildErr As String
+        Dim mirOptErr As String
+        Dim mirRunErr As String
+        Dim mirResult As MIRValue
+
+        If MIRBuildModuleFromAST(ps, mirModule, mirBuildErr) = 0 Then
+            DiagHata "MIR build basarisiz: " & LocalizeErrorMessage(mirBuildErr)
+            End 11
+        End If
+
+        If MIROptimizeModule(mirModule, mirOptErr) = 0 Then
+            DiagHata "MIR optimize basarisiz: " & LocalizeErrorMessage(mirOptErr)
+            End 12
+        End If
+
+        If MIRRunModule(mirModule, mirResult, mirRunErr) = 0 Then
+            DiagHata "MIR interpreter basarisiz: " & LocalizeErrorMessage(mirRunErr)
+            End 13
+        End If
+
+        If debugMode Then
+            DiagBilgi "MIR backend calisti; result type=" & mirResult.valueType
+        End If
+    Else
+        Dim execErr As String
+        If ExecRunMemoryProgram(ps, execErr) = 0 Then
+            DiagHata "Bellek yurutme basarisiz: " & LocalizeErrorMessage(execErr)
+            End 5
+        End If
     End If
     DiagBilgi "Bellek yurutme basarili"
 End If

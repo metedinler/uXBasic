@@ -23,7 +23,8 @@ Proje `src/` altında organize edilmiş ve **.fbs** uzantılı dosyalarla (FreeB
 4. **Interop / Build Sistemi** (`src/build/`):
    - `interop_manifest.fbs`: `#INCLUDE` ve `#IMPORT` (C/CPP/ASM) toplama, path normalization, escape root kontrolü.
    - `EmitInteropArtifacts`: CSV manifest, compile commands (gcc/g++/nasm), link rsp üretimi.
-   - `main_frontend_include_bundle.fbs` ve `main_runtime_include_bundle.fbs`: Include zinciri.
+    - `main_runtime_include_bundle.fbs`: aktif include zinciri (runtime + legacy helpers).
+    - `main_frontend_include_bundle.fbs`: frontend include listesi; şu an doğrudan `main.bas` tarafından kullanılmıyor (dokümantasyon/uyumluluk artığı).
 
 5. **Codegen / Backend** (`src/codegen/`):
    - **x64** ve **x86** için ayrı FFI (DLL çağrıları) backend'leri: `ffi_call_backend.fbs`.
@@ -46,6 +47,17 @@ Proje `src/` altında organize edilmiş ve **.fbs** uzantılı dosyalarla (FreeB
 - `--interop`: Interop manifest çöz (include/import topla) + artifact emit (CSV, compile cmds, FFI stubs).
 - Legacy komut ayrımı (`LegacyGetCommands`).
 
+### main.bas ve Include Bundle İlişki Analizi (2026-04-21)
+
+- `src/main.bas` derleyicinin **tek giriş noktasıdır**; lexer, parser, semantic, codegen ve runtime bağımlılıkları burada toplanır.
+- `src/main.bas` şu an frontend tarafını **doğrudan** include eder (`parser/*`, `semantic/*`, `build/interop_manifest.fbs`, `codegen/x64/code_generator.fbs`).
+- `src/main.bas` yalnızca `build/main_runtime_include_bundle.fbs` dosyasını include eder; runtime bundle aktif kullanımdadır.
+- `src/build/main_frontend_include_bundle.fbs` içerik olarak frontend include listesi taşır; ancak kod tarafında aktif referansı yoktur (yalnızca plan/dokümanlarda geçer).
+- Sonuç:
+    - Mimari niyet: tek entrypoint `main.bas`.
+    - Mevcut durum: frontend bundle ile `main.bas` arasında işlevsel ayrışma var; bundle dosyası pasif hale gelmiş.
+    - Öneri: ya `main_frontend_include_bundle.fbs` yeniden aktif edilip tek kaynak listesi haline getirilmeli, ya da deprecated edilip kaldırılmalı.
+
 ### Güçlü Yönler / İlginç Özellikler
 - **Modern BASIC uzantıları**: Class (virtual/override/implements), METHOD, USING/ALIAS, generic-like intrinsic'ler (`SIZEOF`, `OFFSETOF` path desteğiyle).
 - **C/CPP/ASM interop**: `#IMPORT "C", "file.c"` gibi, build-time gcc/nasm entegrasyonu + manifest.
@@ -64,7 +76,7 @@ Proje `src/` altında organize edilmiş ve **.fbs** uzantılı dosyalarla (FreeB
 2. **Dil Kapsamı Eksikleri**:
    - Tam OOP (inheritance, polymorphism) destekleniyor gibi ama semantic'te sadece override contract + interface var. Full multiple inheritance veya property'ler tam mı belirsiz.
    - Generic'ler, module/namespace tam desteği sınırlı görünüyor (USING/ALIAS var ama derin değil).
-   - Array/Collection (LIST/DICT/SET) runtime implementasyonu tam detaylı değil (type_binding'de stub gibi).
+    - Array/Collection (LIST/DICT/SET) runtime tarafında temel implementasyon mevcut; kapsam ve performans derinliği artırılmalı.
     - Error handling hattı (TRY/CATCH/FINALLY/THROW/ASSERT) parser + runtime exec tarafında mevcut; kapsam ve edge-case testleri ayrıca genişletilmeli.
 
 3. **Build / Toolchain Bağımlılığı**:
@@ -114,32 +126,39 @@ Bu bölüm güncel repo snapshot'ına göre revize edilmiştir. Önceki metindek
 | 2 | **Runtime Exec Motoru mevcut, kapsam testleri kritik** | `ExecRunMemoryProgram` ve ilgili runtime modülleri projede mevcut; risk, kapsam ve hata yolları için regresyon testlerinin yeterliliğinde. | `main.bas`, `runtime/memory_exec.fbs`, `runtime/memory_vm.fbs` |
 | 3 | **Type Layout Sistemi mevcut, kapsamı sınırlı alanlar var** | `BuildTypeLayoutTable`, `TypeLayoutSizeOf`, `FindFieldByName` ve `gTypeLayoutFields` tanımlı. Açık konu, pointer/union ve daha ileri senaryoların kapsamı. | `semantic/layout.fbs`, `semantic/layout/*.fbs` |
 | 4 | **Semantic Pass çok parçalı ve eksik** | `semantic_pass.fbs` sadece bazı validation’ları çağırıyor. Tam semantic analiz (overload resolution, generic, constant folding, reachability) yok. | `semantic_pass.fbs` (parçalı) |
-| 5 | **Interop Build Pipeline yarım** | Manifest ve CSV üretiyor ama **otomatik build scripti (make/bat/ps1)** üretmiyor. Kullanıcı elle derlemek zorunda. Link adımı da eksik. | `interop_manifest.fbs` + `EmitInteropArtifacts` |
+| 5 | **Interop Build Pipeline kısmi ve Windows-ağırlıklı** | Manifest + link arg + `build_import.bat` / `link_command.bat` / `makefile` üretiyor; ancak taşınabilirlik, hata dayanımı ve tam uçtan-uça pipeline standardizasyonu eksik. | `interop_manifest.fbs` + `EmitInteropArtifacts` |
 
 ### 2. ÖNEMLİ TASARIM / MİMARİ EKSİKLER
 
-- **Preprocessor derinliği sadece 8** (`depth > 8` → kaynak olduğu gibi döner). Büyük projelerde patlar.
-- **Macro sistemi çok basit**: Sadece `%%DEFINE` (değer), fonksiyon makro yok (`%%MACRO` yok).
-- **Parser’da error recovery yok**. İlk hata sonrası parsing duruyor.
-- **Class/Interface sistemi yarım**:
-  - `VIRTUAL` / `OVERRIDE` / `IMPLEMENTS` var.
-  - Ama **vtable oluşturma**, **dynamic dispatch**, **multiple inheritance** yok.
-  - Ctor/Dtor çağrısı sadece `ExecConfigureClassStorage` içinde ve çok kırılgan.
-- **Array ve Collection (LIST/DICT/SET) runtime implementasyonu yok**.
-- **Namespace / Module sistemi** sadece `USING`/`ALIAS` seviyesinde, gerçek qualified name resolution yok.
-- **Optimiser / Constant Folding / Dead-code elimination** hiç yok.
-- **Debug info / Source map** yok (`--debug` sadece token sayısını basıyor).
-- **Cross-platform desteği zayıf** (sadece Windows path’leri, `nasm -f win64`, `gcc` varsayımı).
-- **Test / Example yapısı parçalı**. Örnekler ve doğrulamalar farklı klasörlere dağılmış; tek bir düzenli örnek/test kataloğu standardı henüz yok.
-- **Logging çok ilkel** (`uxbasic.log` sadece 3 satır hata kaydı içeriyor).
+- **Preprocessor derinliği 8 ile sınırlı**: `lexer_preprocess.fbs` içinde `If depth > 8 Then Return src` mevcut.
+- **Macro sistemi sınırlı**: `%%DEFINE` / `%%UNDEF` / `%%IF` / `%%ELSE` / `%%ENDIF` / `%%INCLUDE` var; `%%MACRO` (fonksiyon makro) yok.
+- **Parser error recovery yok**: `ParseProgram` içinde `ParseSimpleStatement` başarısızlığında (`stmt = -1`) doğrudan `Return 0` ile duruyor.
+- **Class/Interface modeli kısmi**:
+    - `VIRTUAL` / `OVERRIDE` / `IMPLEMENTS` semantic doğrulaması var.
+    - Runtime'da hiyerarşi çözümü ve method dispatch helper'ları var.
+    - Ancak **vtable tabanlı model**, **multiple inheritance** ve tam kapsamlı polymorphism halen yok.
+    - Ctor/Dtor path'i runtime class storage konfigurasyonuna sıkı bağlı.
+- **DÜZELTME:** `LIST/DICT/SET` için runtime implementasyonu vardır (`exec_collections.fbs` ve collection testleri mevcut). Eksik olan taraf: kapsam/perf/semantik derinlik.
+- **Namespace / Module çözümleme derinliği sınırlı**: `USING/ALIAS` semantiği var; tam qualified symbol resolution ve güçlü modül sınırları eksik.
+- **Optimiser hattı zayıf**: belirgin constant folding / dead-code elimination pipeline'ı yok.
+- **Debug info / source map yok**: `--debug` operatif ama sınırlı düzeyde diagnostic verir; symbol/source map üretimi yok.
+- **Cross-platform kırılganlık**: interop tarafı Windows odaklı (`nasm -f win64`, `gcc` çağrıları, path varsayımları).
+- **Test/example yapısı dağınık**: test klasörleri geniş ama standart bir kataloglama kontratı henüz net değil.
+- **Logging minimal**: `src/dist/loglar/uxbasic.log` örneğinde çok temel oturum/hata kaydı var.
 
 ### 3. KOD KALİTESİ / TEKNİK BORÇ EKSİKLERİ
 
 - Birçok `ReDim Preserve` ve dinamik array kullanımı → performans ve bellek sızıntısı riski.
-- `PathNormalize` fonksiyonu UNC path ve long filename’leri desteklemiyor.
+- `PathNormalize` fonksiyonu drive/relative normalize ediyor; UNC (`\\server\share`) ve long-path (`\\?\`) senaryoları için açık koruma/ayrım içermiyor.
 - `InlineX64BackendValidate` çok katı policy’ler koyuyor ama **gerçek asm validation** yok.
 - `LegacyGetCommands` hala kullanılıyor ama modern parser ile çakışıyor.
 - Birçok `Shared` global değişken (`gTypeBindings`, `gVarBindings`, `gRoutineDefs` vb.) → thread-safety ve modülerlik sıfır.
+
+### 3.1 Bu Turda Tamamlananlar (Belgeleme ve Doğrulama)
+
+- `main.bas` / `main_frontend_include_bundle.fbs` / `main_runtime_include_bundle.fbs` ilişki analizi tamamlandı.
+- Mimari eksikler listesi kod gerçekliğiyle yeniden doğrulandı.
+- Hatalı ifade düzeltildi: `LIST/DICT/SET runtime implementasyonu yok` maddesi güncellendi.
 
 ### 4. İYİLEŞTİRME İÇİN HAZIR KULLANABİLECEĞİN PROMPT’LAR
 

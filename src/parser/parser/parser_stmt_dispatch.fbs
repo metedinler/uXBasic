@@ -838,10 +838,44 @@ Private Function ValidateConstRhsSemantics(ByRef ps As ParseState) As Integer
     Return ValidateConstRhsSemanticsNode(ps, ps.rootNode)
 End Function
 
+Private Sub ParserAppendParseError(ByRef ps As ParseState, ByRef tk As Token, ByRef detailText As String)
+    Dim msg As String
+    msg = Trim(detailText)
+    If msg = "" Then msg = "statement parse failed"
+
+    msg = "[" & LTrim(Str(tk.lineNo)) & ":" & LTrim(Str(tk.colNo)) & "] " & msg
+
+    If ps.parseErrorCount = 0 Then
+        ReDim ps.parseErrors(0)
+    Else
+        ReDim Preserve ps.parseErrors(ps.parseErrorCount)
+    End If
+
+    ps.parseErrors(ps.parseErrorCount) = msg
+    ps.parseErrorCount += 1
+End Sub
+
+Private Sub ParserRecoverToNextStatement(ByRef ps As ParseState)
+    Do While CurToken(ps).kind <> "EOF"
+        Dim tk As Token
+        tk = CurToken(ps)
+
+        If tk.kind = "EOL" Then Exit Do
+        If tk.kind = "OP" And tk.lexeme = ":" Then
+            AdvanceTok ps
+            Exit Do
+        End If
+
+        AdvanceTok ps
+    Loop
+End Sub
+
 Sub ParserInit(ByRef ps As ParseState, ByRef lx As LexerState)
     ps.lx = lx
     ps.cursorIndex = 0
     ps.lastError = ""
+    ps.parseErrorCount = 0
+    Erase ps.parseErrors
     ASTPoolInit ps.ast
     ps.rootNode = -1
     ps.namespaceDepth = 0
@@ -871,10 +905,31 @@ Function ParseProgram(ByRef ps As ParseState) As Integer
     Do While CurToken(ps).kind <> "EOF"
         Dim stmt As Integer
         stmt = ParseSimpleStatement(ps)
-        If stmt = -1 Then Return 0
+
+        If stmt = -1 Then
+            Dim errTok As Token
+            errTok = CurToken(ps)
+            ParserAppendParseError ps, errTok, ps.lastError
+            ParserRecoverToNextStatement ps
+            SkipSeparators ps
+            Continue Do
+        End If
+
         ASTAddChild ps.ast, ps.rootNode, stmt
         SkipSeparators ps
     Loop
+
+    If ps.parseErrorCount > 0 Then
+        Dim summary As String
+        summary = "parse failed with " & LTrim(Str(ps.parseErrorCount)) & " error(s)"
+        If ps.parseErrorCount > 0 Then
+            Dim firstErr As String
+            firstErr = Trim(ps.parseErrors(0))
+            If firstErr <> "" Then summary &= "; first: " & firstErr
+        End If
+        ps.lastError = summary
+        Return 0
+    End If
 
     If ValidateMainProgramSemantics(ps) = 0 Then Return 0
     If ValidateIfSelectSemantics(ps) = 0 Then Return 0
