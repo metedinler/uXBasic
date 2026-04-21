@@ -1,37 +1,88 @@
-# uXBasic Type Binding System
-# Veri tiplerinin semantic analizini ve runtime binding'ini yönetir
+' uXBasic type binding state used by semantic/runtime hand-off.
 
 Type TypeBinding
-    typeKind As String        ' I8, U8, I16, U16, I32, U32, I64, U64, F32, F64, F80, BOOLEAN, STRING, ARRAY, TYPE, CLASS, LIST, DICT, SET
-    typeName As String        ' Kullanıcı tanımlı tipler için
-    sizeBytes As Integer      ' Tip boyutu
-    alignBytes As Integer     ' Hizalama
-    isSigned As Integer       ' İşaretli mi (1=evet, 0=hayır)
-    isFloat As Integer        ' Float mı (1=evet, 0=hayır)
-    isArray As Integer        ' Array mi (1=evet, 0=hayır)
-    arrayDims As Integer      ' Array boyut sayısı
-    arrayBounds(Any) As Integer ' Array sınırları (lower, upper pairs)
-    elemType As TypeBinding   ' Array element tipi (recursive)
-    isClass As Integer        ' Class mı
-    classFields(Any) As String ' Class field isimleri
-    classFieldTypes(Any) As TypeBinding ' Class field tipleri
-    isCollection As Integer   ' Collection mı (LIST/DICT/SET)
-    collectionKind As String  ' LIST, DICT, SET
+    typeKind As String
+    typeName As String
+    sizeBytes As Integer
+    alignBytes As Integer
+    isSigned As Integer
+    isFloat As Integer
+    isArray As Integer
+    arrayDims As Integer
+    elemTypeName As String
+    isClass As Integer
+    isCollection As Integer
+    collectionKind As String
 End Type
 
 Type VarBinding
     varName As String
-    varType As TypeBinding
-    isConst As Integer        ' CONST mı
-    constValue As String      ' CONST değeri (string representation)
-    storageAddr As UInteger   ' Runtime adresi
-    isGlobal As Integer       ' Global mı
+    typeIdx As Integer
+    isConst As Integer
+    constValue As String
+    storageAddr As ULongInt
+    isGlobal As Integer
 End Type
 
 Dim Shared gTypeBindings() As TypeBinding
 Dim Shared gTypeBindingCount As Integer
 Dim Shared gVarBindings() As VarBinding
 Dim Shared gVarBindingCount As Integer
+
+Private Function TypeBindingCanonical(ByRef rawKind As String) As String
+    Dim k As String
+    k = UCase(Trim(rawKind))
+
+    Select Case k
+    Case "BYTE"
+        Return "I8"
+    Case "UBYTE"
+        Return "U8"
+    Case "SHORT"
+        Return "I16"
+    Case "USHORT"
+        Return "U16"
+    Case "INTEGER", "LONG"
+        Return "I32"
+    Case "UINTEGER", "ULONG"
+        Return "U32"
+    Case "LONGINT"
+        Return "I64"
+    Case "ULONGINT"
+        Return "U64"
+    End Select
+
+    Return k
+End Function
+
+Private Function TypeBindingPointerSize() As Integer
+    Return 8
+End Function
+
+Private Function TypeBindingFindByKey(ByRef kindName As String, ByRef typeName As String) As Integer
+    Dim i As Integer
+    For i = 0 To gTypeBindingCount - 1
+        If gTypeBindings(i).typeKind = kindName AndAlso gTypeBindings(i).typeName = typeName Then
+            Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function VarBindingFindByName(ByRef varName As String) As Integer
+    Dim nameKey As String
+    nameKey = UCase(Trim(varName))
+
+    Dim i As Integer
+    For i = 0 To gVarBindingCount - 1
+        If UCase(gVarBindings(i).varName) = nameKey Then
+            Return i
+        End If
+    Next i
+
+    Return -1
+End Function
 
 Sub TypeBindingInit()
     gTypeBindingCount = 0
@@ -40,36 +91,42 @@ End Sub
 
 Function TypeBindingCreate(ByRef typeKind As String, ByRef typeName As String) As TypeBinding
     Dim tb As TypeBinding
-    tb.typeKind = typeKind
-    tb.typeName = typeName
+    Dim k As String
+    Dim ptrSize As Integer
+
+    k = TypeBindingCanonical(typeKind)
+    ptrSize = TypeBindingPointerSize()
+
+    tb.typeKind = k
+    tb.typeName = UCase(Trim(typeName))
     tb.sizeBytes = 0
     tb.alignBytes = 1
     tb.isSigned = 0
     tb.isFloat = 0
     tb.isArray = 0
     tb.arrayDims = 0
+    tb.elemTypeName = ""
     tb.isClass = 0
     tb.isCollection = 0
     tb.collectionKind = ""
 
-    ' Temel tipler için boyut ve hizalama ayarla
-    Select Case UCase(typeKind)
+    Select Case k
     Case "I8", "U8"
         tb.sizeBytes = 1
         tb.alignBytes = 1
-        tb.isSigned = IIf(UCase(typeKind) = "I8", 1, 0)
+        tb.isSigned = IIf(k = "I8", 1, 0)
     Case "I16", "U16"
         tb.sizeBytes = 2
         tb.alignBytes = 2
-        tb.isSigned = IIf(UCase(typeKind) = "I16", 1, 0)
+        tb.isSigned = IIf(k = "I16", 1, 0)
     Case "I32", "U32"
         tb.sizeBytes = 4
         tb.alignBytes = 4
-        tb.isSigned = IIf(UCase(typeKind) = "I32", 1, 0)
+        tb.isSigned = IIf(k = "I32", 1, 0)
     Case "I64", "U64"
         tb.sizeBytes = 8
         tb.alignBytes = 8
-        tb.isSigned = IIf(UCase(typeKind) = "I64", 1, 0)
+        tb.isSigned = IIf(k = "I64", 1, 0)
     Case "F32"
         tb.sizeBytes = 4
         tb.alignBytes = 4
@@ -86,20 +143,25 @@ Function TypeBindingCreate(ByRef typeKind As String, ByRef typeName As String) A
         tb.sizeBytes = 1
         tb.alignBytes = 1
         tb.isSigned = 1
-    Case "STRING"
-        tb.sizeBytes = 4  ' Pointer boyutu
-        tb.alignBytes = 4
+    Case "STRING", "REF", "POINTER"
+        tb.sizeBytes = ptrSize
+        tb.alignBytes = ptrSize
     Case "ARRAY"
         tb.isArray = 1
+        tb.sizeBytes = ptrSize
+        tb.alignBytes = ptrSize
     Case "TYPE"
-        ' User-defined type, boyut layout'tan hesaplanacak
+        tb.sizeBytes = ptrSize
+        tb.alignBytes = ptrSize
     Case "CLASS"
         tb.isClass = 1
+        tb.sizeBytes = ptrSize
+        tb.alignBytes = ptrSize
     Case "LIST", "DICT", "SET"
         tb.isCollection = 1
-        tb.collectionKind = UCase(typeKind)
-        tb.sizeBytes = 4  ' Pointer boyutu
-        tb.alignBytes = 4
+        tb.collectionKind = k
+        tb.sizeBytes = ptrSize
+        tb.alignBytes = ptrSize
     End Select
 
     Return tb
@@ -132,24 +194,31 @@ Private Function VarBindingAdd() As Integer
 End Function
 
 Function TypeBindingResolve(ByRef typeName As String, ByRef errText As String) As Integer
-    ' Temel tipler için doğrudan döndür
-    Select Case UCase(typeName)
-    Case "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "F80", "BOOLEAN", "STRING", "ARRAY", "TYPE", "CLASS", "LIST", "DICT", "SET"
-        Dim tb As TypeBinding
-        tb = TypeBindingCreate(UCase(typeName), "")
+    Dim canonical As String
+    canonical = TypeBindingCanonical(typeName)
+
+    Select Case canonical
+    Case "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "F80", "BOOLEAN", "STRING", "ARRAY", "TYPE", "CLASS", "LIST", "DICT", "SET", "REF", "POINTER"
+        Dim existing As Integer
+        existing = TypeBindingFindByKey(canonical, "")
+        If existing <> -1 Then Return existing
+
         Dim idx As Integer
         idx = TypeBindingAdd()
-        gTypeBindings(idx) = tb
+        gTypeBindings(idx) = TypeBindingCreate(canonical, "")
         Return idx
     End Select
 
-    ' User-defined tipler için ara
-    Dim i As Integer
-    For i = 0 To gTypeBindingCount - 1
-        If UCase(gTypeBindings(i).typeName) = UCase(typeName) Then
-            Return i
-        End If
-    Next i
+    Dim userName As String
+    userName = UCase(Trim(typeName))
+    If userName = "" Then
+        errText = "type: empty type name"
+        Return -1
+    End If
+
+    Dim userIdx As Integer
+    userIdx = TypeBindingFindByKey("TYPE", userName)
+    If userIdx <> -1 Then Return userIdx
 
     errText = "type: unknown type '" & typeName & "'"
     Return -1
@@ -157,31 +226,40 @@ End Function
 
 Function VarBindingResolve(ByRef varName As String, ByRef errText As String) As Integer
     Dim i As Integer
-    For i = 0 To gVarBindingCount - 1
-        If UCase(gVarBindings(i).varName) = UCase(varName) Then
-            Return i
-        End If
-    Next i
+    i = VarBindingFindByName(varName)
+    If i <> -1 Then Return i
 
     errText = "var: unknown variable '" & varName & "'"
     Return -1
 End Function
 
 Function VarBindingCreate(ByRef varName As String, ByVal typeIdx As Integer, ByVal isConst As Integer, ByRef constValue As String, ByRef errText As String) As Integer
+    Dim varKey As String
+    varKey = UCase(Trim(varName))
+
+    If varKey = "" Then
+        errText = "var: empty variable name"
+        Return -1
+    End If
+
     If typeIdx < 0 Or typeIdx >= gTypeBindingCount Then
         errText = "var: invalid type index"
         Return -1
     End If
 
+    If VarBindingFindByName(varKey) <> -1 Then
+        errText = "var: duplicate variable '" & varName & "'"
+        Return -1
+    End If
+
     Dim idx As Integer
     idx = VarBindingAdd()
-    gVarBindings(idx).varName = varName
-    gVarBindings(idx).varType = gTypeBindings(typeIdx)
+    gVarBindings(idx).varName = varKey
+    gVarBindings(idx).typeIdx = typeIdx
     gVarBindings(idx).isConst = isConst
     gVarBindings(idx).constValue = constValue
-    gVarBindings(idx).storageAddr = 0  ' Runtime'da atanacak
-    gVarBindings(idx).isGlobal = 1     ' Şimdilik tümü global
+    gVarBindings(idx).storageAddr = 0
+    gVarBindings(idx).isGlobal = 1
 
     Return idx
-End Function</content>
-<parameter name="filePath">c:\Users\mete\Downloads\BasicOyunSource\uXBasic_repo\src\semantic\type_binding.fbs
+End Function
