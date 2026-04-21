@@ -5,7 +5,7 @@
 
 Private Function HasArg(ByRef keyText As String) As Integer
     Dim i As Integer
-    For i = 1 To 16
+    For i = 1 To 64
         Dim a As String
         a = Command(i)
         If a = "" Then Exit For
@@ -16,7 +16,7 @@ End Function
 
 Private Function GetArgValue(ByRef keyText As String, ByRef valueOut As String) As Integer
     Dim i As Integer
-    For i = 1 To 16
+    For i = 1 To 64
         Dim a As String
         a = Command(i)
         If a = "" Then Exit For
@@ -26,6 +26,58 @@ Private Function GetArgValue(ByRef keyText As String, ByRef valueOut As String) 
         End If
     Next i
     valueOut = ""
+    Return 0
+End Function
+
+Private Function IsValueArgKey(ByRef keyText As String) As Integer
+    Dim k As String
+    k = LCase(Trim(keyText))
+
+    If k = "--emit-x64-nasm-out" Then Return 1
+    If k = "--x64gen-out" Then Return 1
+    If k = "--source" Then Return 1
+    If k = "-s" Then Return 1
+
+    Return 0
+End Function
+
+Private Function IsOptionLike(ByRef argText As String) As Integer
+    Dim t As String
+    t = Trim(argText)
+    If Len(t) >= 2 And Left(t, 2) = "--" Then Return 1
+    If Len(t) >= 1 And Left(t, 1) = "-" Then Return 1
+    Return 0
+End Function
+
+Private Function TryGetSourcePath(ByRef sourcePathOut As String, ByRef errText As String) As Integer
+    Dim explicitSource As String
+    If GetArgValue("--source", explicitSource) <> 0 Or GetArgValue("-s", explicitSource) <> 0 Then
+        If Trim(explicitSource) = "" Then
+            errText = "source argument missing value"
+            Return 0
+        End If
+        sourcePathOut = Trim(explicitSource)
+        Return 1
+    End If
+
+    Dim i As Integer
+    i = 1
+    Do While i <= 64
+        Dim a As String
+        a = Command(i)
+        If a = "" Then Exit Do
+
+        If IsOptionLike(a) <> 0 Then
+            If IsValueArgKey(a) <> 0 Then i += 1
+        Else
+            sourcePathOut = a
+            Return 1
+        End If
+
+        i += 1
+    Loop
+
+    errText = "source file path not provided"
     Return 0
 End Function
 
@@ -78,6 +130,7 @@ Dim As Integer execMemMode
 Dim As Integer interopMode
 Dim As Integer x64EmitMode
 Dim As Integer codegenMode
+Dim As Integer runSemanticPass
 Dim As String x64OutPath
 
 DiagInit
@@ -104,14 +157,19 @@ If GetArgValue("--emit-x64-nasm-out", x64OutPath) = 0 Then
 End If
 DiagBilgi "uXBasic calistirildi"
 
-sourcePath = Command(1)
-If sourcePath <> "" Then
-    If LoadTextFile(sourcePath, sourceText) = 0 Then
-        DiagHata "Kaynak dosya okunamadi: " & sourcePath
-        End 2
-    End If
-Else
-    DiagHata "Kaynak dosya yolu verilmedi"
+If execMemMode <> 0 And interopMode <> 0 Then
+    DiagHata LocalizeErrorMessage("execmem and interop modes cannot be combined")
+    End 2
+End If
+
+Dim sourceArgErr As String
+If TryGetSourcePath(sourcePath, sourceArgErr) = 0 Then
+    DiagHata LocalizeErrorMessage(sourceArgErr)
+    End 2
+End If
+
+If LoadTextFile(sourcePath, sourceText) = 0 Then
+    DiagHata "Kaynak dosya okunamadi: " & sourcePath
     End 2
 End If
 
@@ -130,7 +188,9 @@ If ParseProgram(ps) = 0 Then
     End 1
 End If
 
-If semanticMode Then
+runSemanticPass = IIf(semanticMode <> 0 Or execMemMode <> 0 Or interopMode <> 0 Or x64EmitMode <> 0 Or codegenMode <> 0, 1, 0)
+
+If runSemanticPass <> 0 Then
     Dim semanticErr As String
     If SemanticAnalyze(ps, semanticErr) = 0 Then
         DiagHata "Anlamsal analiz basarisiz: " & LocalizeErrorMessage(semanticErr)
