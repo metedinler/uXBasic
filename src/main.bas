@@ -14,6 +14,21 @@ Private Function HasArg(ByRef keyText As String) As Integer
     Return 0
 End Function
 
+Private Function GetArgValue(ByRef keyText As String, ByRef valueOut As String) As Integer
+    Dim i As Integer
+    For i = 1 To 16
+        Dim a As String
+        a = Command(i)
+        If a = "" Then Exit For
+        If LCase(a) = LCase(keyText) Then
+            valueOut = Command(i + 1)
+            Return IIf(valueOut <> "", 1, 0)
+        End If
+    Next i
+    valueOut = ""
+    Return 0
+End Function
+
 Private Function LocalizeErrorMessage(ByRef rawText As String) As String
     Dim localized As String
     localized = UxbYerellestirHata(rawText)
@@ -43,12 +58,27 @@ Private Function LoadTextFile(ByRef filePath As String, ByRef textOut As String)
     Return 1
 End Function
 
+Private Function SaveTextFile(ByRef filePath As String, ByRef textIn As String) As Integer
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Output As #f
+    If Err <> 0 Then Return 0
+
+    Print #f, textIn;
+    Close #f
+    Return 1
+End Function
+
 Dim As String sourceText
 Dim As String sourcePath
 Dim As Integer debugMode
 Dim As Integer semanticMode
 Dim As Integer execMemMode
 Dim As Integer interopMode
+Dim As Integer x64EmitMode
+Dim As Integer codegenMode
+Dim As String x64OutPath
 
 DiagInit
 
@@ -56,6 +86,22 @@ debugMode = HasArg("--debug") Or HasArg("--ayikla")
 semanticMode = HasArg("--semantic") Or HasArg("--semantik")
 execMemMode = HasArg("--execmem")
 interopMode = HasArg("--interop")
+x64EmitMode = HasArg("--emit-x64-nasm") Or HasArg("--x64gen")
+codegenMode = HasArg("--codegen") Or HasArg("--x64")
+If codegenMode Then
+    x64OutPath = "dist\uxb_output.asm"
+Else
+    x64OutPath = "dist\uxbasic_program.nasm"
+End If
+If GetArgValue("--emit-x64-nasm-out", x64OutPath) = 0 Then
+    If GetArgValue("--x64gen-out", x64OutPath) = 0 Then
+        If codegenMode Then
+            x64OutPath = "dist\uxb_output.asm"
+        Else
+            x64OutPath = "dist\uxbasic_program.nasm"
+        End If
+    End If
+End If
 DiagBilgi "uXBasic calistirildi"
 
 sourcePath = Command(1)
@@ -134,6 +180,42 @@ If interopMode Then
         DiagBilgi "Interop include sayisi: " & Str(manifest.includeCount)
         DiagBilgi "Interop import sayisi: " & Str(manifest.importCount)
     End If
+End If
+
+If x64EmitMode Then
+    Dim asmText As String
+    Dim codegenErr As String
+
+    If X64CodegenEmitNasm(ps, asmText, codegenErr) = 0 Then
+        DiagHata "x64 NASM codegen basarisiz: " & LocalizeErrorMessage(codegenErr)
+        End 6
+    End If
+
+    If SaveTextFile(x64OutPath, asmText) = 0 Then
+        DiagHata "x64 NASM cikti dosyasi yazilamadi: " & x64OutPath
+        End 7
+    End If
+
+    If debugMode Then
+        DiagBilgi "x64 NASM cikti yazildi: " & x64OutPath
+    End If
+End If
+
+If codegenMode Then
+    Dim codegenAsmText As String
+    Dim codegenAsmErr As String
+
+    If GenerateX64Code(ps, codegenAsmText, codegenAsmErr) = 0 Then
+        DiagHata "x64 codegen basarisiz: " & LocalizeErrorMessage(codegenAsmErr)
+        End 6
+    End If
+
+    If SaveTextFile("dist\uxb_output.asm", codegenAsmText) = 0 Then
+        DiagHata "x64 codegen cikti dosyasi yazilamadi: dist\uxb_output.asm"
+        End 7
+    End If
+
+    DiagBilgi "x64 codegen cikti yazildi: dist\uxb_output.asm"
 End If
 
 Dim As String selected

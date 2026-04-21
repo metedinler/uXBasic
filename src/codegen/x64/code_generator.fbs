@@ -8,6 +8,7 @@ Type X64CodegenContext
     currentRoutineLabel As String
     labelSeed As Integer
     symbolCount As Integer
+    globalCount As Integer
     loopDepth As Integer
     localVars As VarMapping
     localCount As Integer
@@ -20,6 +21,9 @@ End Type
 
 Dim Shared gX64SymbolKeys(0 To 4095) As String
 Dim Shared gX64SymbolLabels(0 To 4095) As String
+Dim Shared gX64GlobalKeys(0 To 4095) As String
+Dim Shared gX64GlobalLabels(0 To 4095) As String
+Dim Shared gX64GlobalSlots(0 To 4095) As Integer
 Dim Shared gX64LoopVars(0 To 255) As String
 Dim Shared gX64LoopStartLabels(0 To 255) As String
 Dim Shared gX64LoopEndLabels(0 To 255) As String
@@ -153,6 +157,44 @@ Private Function X64FindRoutine(ByRef cg As X64CodegenContext, ByRef routineKey 
     Return -1
 End Function
 
+Private Function X64FindGlobalSymbol(ByRef cg As X64CodegenContext, ByRef symbolText As String) As Integer
+    Dim keyText As String
+    keyText = X64Upper(Trim(symbolText))
+    If keyText = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To cg.globalCount - 1
+        If gX64GlobalKeys(i) = keyText Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function X64EnsureGlobalSymbol(ByRef cg As X64CodegenContext, ByRef symbolText As String, ByVal slotCount As Integer) As String
+    If slotCount < 1 Then slotCount = 1
+
+    Dim existing As Integer
+    existing = X64FindGlobalSymbol(cg, symbolText)
+    If existing <> -1 Then Return gX64GlobalLabels(existing)
+
+    Dim labelText As String
+    labelText = "__uxb_var_global_" & X64SanitizeSymbol(symbolText)
+
+    If cg.globalCount <= 4095 Then
+        gX64GlobalKeys(cg.globalCount) = X64Upper(Trim(symbolText))
+        gX64GlobalLabels(cg.globalCount) = labelText
+        gX64GlobalSlots(cg.globalCount) = slotCount
+        cg.globalCount += 1
+    End If
+
+    If slotCount = 1 Then
+        X64EmitData cg, labelText & ": dq 0"
+    Else
+        X64EmitData cg, labelText & ": times " & X64ToStr(slotCount) & " dq 0"
+    End If
+
+    Return labelText
+End Function
+
 Private Sub X64RegisterRoutineSignature(ByRef ps As ParseState, ByVal routineNode As Integer, ByRef cg As X64CodegenContext)
     If routineNode < 0 Or routineNode >= ps.ast.count Then Exit Sub
 
@@ -234,6 +276,10 @@ End Sub
 Private Function X64EnsureSymbol(ByRef cg As X64CodegenContext, ByRef scopeText As String, ByRef symbolText As String, ByVal slotCount As Integer) As String
     If slotCount < 1 Then slotCount = 1
 
+    If X64Upper(Trim(scopeText)) = "GLOBAL" Then
+        Return X64EnsureGlobalSymbol(cg, symbolText, slotCount)
+    End If
+
     Dim keyText As String
     keyText = X64MakeScopedKey(scopeText, symbolText)
 
@@ -263,10 +309,9 @@ Private Function X64TryFindSymbolLabel(ByRef cg As X64CodegenContext, ByRef scop
         Return 1
     End If
 
-    keyText = X64MakeScopedKey("global", symbolText)
-    i = X64FindSymbol(cg, keyText)
+    i = X64FindGlobalSymbol(cg, symbolText)
     If i <> -1 Then
-        labelOut = gX64SymbolLabels(i)
+        labelOut = gX64GlobalLabels(i)
         Return 1
     End If
 
@@ -353,11 +398,7 @@ Private Function X64EnsureVar(ByRef cg As X64CodegenContext, ByRef varName As St
     End If
 
     Dim scopeText As String
-    If cg.currentRoutineLabel = "" Then
-        scopeText = "global"
-    Else
-        scopeText = cg.currentRoutineLabel
-    End If
+    If cg.currentRoutineLabel = "" Then scopeText = "global" Else scopeText = cg.currentRoutineLabel
     Return X64EnsureSymbol(cg, scopeText, varName, 1)
 End Function
 
@@ -1605,6 +1646,7 @@ Private Function GenerateX64Code(ByRef ps As ParseState, ByRef outputText As Str
     cg.currentRoutineLabel = ""
     cg.labelSeed = 0
     cg.symbolCount = 0
+    cg.globalCount = 0
     cg.loopDepth = 0
     VarMappingInit(cg.localVars)
     cg.localCount = 0
@@ -1618,6 +1660,9 @@ Private Function GenerateX64Code(ByRef ps As ParseState, ByRef outputText As Str
     For i = 0 To 4095
         gX64SymbolKeys(i) = ""
         gX64SymbolLabels(i) = ""
+        gX64GlobalKeys(i) = ""
+        gX64GlobalLabels(i) = ""
+        gX64GlobalSlots(i) = 0
     Next i
 
     For i = 0 To 255
