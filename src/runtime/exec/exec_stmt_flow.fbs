@@ -8,6 +8,90 @@ Private Function ExecHandleIfExitRequest() As Integer
     Return 1
 End Function
 
+Private Sub ExecExceptionClear()
+    gExecException.active = 0
+    gExecException.kindText = ""
+    gExecException.code = 0
+    gExecException.messageText = ""
+    gExecException.lineNo = 0
+    gExecException.colNo = 0
+    gExecException.routineName = ""
+    ExecValueInit gExecException.value
+End Sub
+
+Private Function ExecExceptionBuildMessage() As String
+    Dim msg As String
+    msg = EXEC_ERR_PREFIX
+
+    If gExecException.kindText <> "" Then msg &= gExecException.kindText Else msg &= "ERROR"
+    If gExecException.code <> 0 Then msg &= "(" & LTrim(Str(gExecException.code)) & ")"
+
+    If gExecException.messageText <> "" Then
+        msg &= " " & gExecException.messageText
+    Else
+        msg &= " execution error"
+    End If
+
+    If gExecException.lineNo > 0 Then
+        msg &= " [line " & LTrim(Str(gExecException.lineNo)) & ":" & LTrim(Str(gExecException.colNo)) & "]"
+    End If
+
+    If gExecException.routineName <> "" Then
+        msg &= " [routine " & gExecException.routineName & "]"
+    End If
+
+    Return msg
+End Function
+
+Private Sub ExecExceptionRaise(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByRef kindText As String, ByVal code As Integer, ByRef messageText As String, ByRef payload As ExecValue)
+    gExecException.active = 1
+    gExecException.kindText = UCase(Trim(kindText))
+    gExecException.code = code
+    gExecException.messageText = messageText
+    gExecException.routineName = UCase(Trim(gCurrentRoutineName))
+    gExecException.value = payload
+
+    gExecException.lineNo = 0
+    gExecException.colNo = 0
+    If stmtIdx >= 0 And stmtIdx < ps.ast.count Then
+        gExecException.lineNo = ps.ast.nodes(stmtIdx).lineNo
+        gExecException.colNo = ps.ast.nodes(stmtIdx).colNo
+    End If
+End Sub
+
+Private Sub ExecExceptionPublishCatchVars(ByRef es As ExecState, ByRef catchVarName As String)
+    If catchVarName <> "" Then ExecSetVar es, catchVarName, 1
+
+    ExecSetVar es, "__ERR_THROWN", IIf(gExecException.active <> 0, 1, 0)
+    ExecSetVar es, "__ERR_CODE", gExecException.code
+    ExecSetVar es, "__ERR_LINE", gExecException.lineNo
+    ExecSetVar es, "__ERR_COL", gExecException.colNo
+    ExecSetVar es, "__ERR_VALUE", ExecValueToInteger(gExecException.value)
+    ExecSetVar es, "__ERR_IS_STRING", IIf(UCase(gExecException.value.valueType) = "STRING", 1, 0)
+
+    Dim kindValue As ExecValue
+    ExecValueSetString kindValue, gExecException.kindText
+    ExecSetVarValue es, "__ERR_KIND", kindValue
+
+    Dim msgValue As ExecValue
+    ExecValueSetString msgValue, gExecException.messageText
+    ExecSetVarValue es, "__ERR_MESSAGE", msgValue
+
+    Dim routineValue As ExecValue
+    ExecValueSetString routineValue, gExecException.routineName
+    ExecSetVarValue es, "__ERR_ROUTINE", routineValue
+
+    Dim valueTypeValue As ExecValue
+    ExecValueSetString valueTypeValue, UCase(gExecException.value.valueType)
+    ExecSetVarValue es, "__ERR_VALUE_TYPE", valueTypeValue
+
+    Dim valueTextValue As ExecValue
+    Dim valueText As String
+    valueText = ExecValueToString(gExecException.value)
+    ExecValueSetString valueTextValue, valueText
+    ExecSetVarValue es, "__ERR_VALUE_TEXT", valueTextValue
+End Sub
+
 Private Function ExecCaseExprMatches(ByRef ps As ParseState, ByRef es As ExecState, ByVal caseExpr As Integer, ByVal selectorValue As Integer, ByRef errText As String) As Integer
     Dim caseExprNode As ASTNode
     caseExprNode = ps.ast.nodes(caseExpr)
@@ -271,14 +355,23 @@ Private Function ExecRunTryStmt(ByRef ps As ParseState, ByRef es As ExecState, B
     Dim hasError As Integer
     hasError = 0
 
+    Dim savedException As ExecExceptionState
+    savedException = gExecException
+
     If ExecRunTryPart(ps, es, tryBodyNode, errText) = 0 Then
         hasError = 1
         capturedErr = errText
         errText = ""
+
+        If gExecException.active = 0 Then
+            Dim payload As ExecValue
+            ExecValueInit payload
+            ExecExceptionRaise ps, stmtIdx, "RUNTIME", EXEC_EXC_CODE_RUNTIME, capturedErr, payload
+        End If
     End If
 
     If hasError <> 0 And catchNode <> -1 Then
-        If catchVarName <> "" Then ExecSetVar es, catchVarName, 1
+        ExecExceptionPublishCatchVars es, catchVarName
 
         hasError = 0
         capturedErr = ""
@@ -299,10 +392,16 @@ Private Function ExecRunTryStmt(ByRef ps As ParseState, ByRef es As ExecState, B
     End If
 
     If hasError <> 0 Then
-        errText = capturedErr
-        If errText = "" Then errText = "exec: TRY failed"
+        If gExecException.active <> 0 Then
+            errText = ExecExceptionBuildMessage()
+        Else
+            errText = capturedErr
+            If errText = "" Then errText = "exec: TRY failed"
+        End If
         Return 0
     End If
+
+    gExecException = savedException
 
     Return 1
 End Function
@@ -727,11 +826,22 @@ Private Function ExecRunThrowStmt(ByRef ps As ParseState, ByRef es As ExecState,
         Return 0
     End If
 
-    Dim throwValue As Integer
-    throwValue = ExecEvalNode(ps, es, throwExpr, errText)
-    If errText <> "" Then Return 0
+    Dim throwValue As ExecValue
+    If ExecEvalExpression(ps, throwExpr, es, throwValue, errText) = 0 Then Return 0
 
-    errText = "exec: THROW " & LTrim(Str(throwValue))
+    Dim throwMsg As String
+    throwMsg = "THROW " & ExecValueToString(throwValue)
+
+    Dim throwCode As Integer
+    throwCode = EXEC_EXC_CODE_THROW
+    If UCase(throwValue.valueType) = "INTEGER" Then
+        throwCode = throwValue.intValue
+    ElseIf UCase(throwValue.valueType) = "FLOAT" Then
+        throwCode = CInt(throwValue.floatValue)
+    End If
+
+    ExecExceptionRaise ps, stmtIdx, "THROW", throwCode, throwMsg, throwValue
+    errText = ExecExceptionBuildMessage()
     Return 0
 End Function
 
@@ -749,16 +859,21 @@ Private Function ExecRunAssertStmt(ByRef ps As ParseState, ByRef es As ExecState
 
     If condValue <> 0 Then Return 1
 
+    Dim payload As ExecValue
+    ExecValueSetInteger payload, condValue
+
     Dim assertMsgExpr As Integer
     assertMsgExpr = ExecChildAt(ps, stmtIdx, 1)
     If assertMsgExpr = -1 Then
-        errText = "exec: ASSERT failed"
+        ExecExceptionRaise ps, stmtIdx, "ASSERT", EXEC_EXC_CODE_ASSERT, "ASSERT failed", payload
+        errText = ExecExceptionBuildMessage()
         Return 0
     End If
 
     Dim assertMsg As String
     If ExecEvalNodeAsText(ps, es, assertMsgExpr, assertMsg, errText) = 0 Then Return 0
-    errText = "exec: ASSERT failed: " & assertMsg
+    ExecExceptionRaise ps, stmtIdx, "ASSERT", EXEC_EXC_CODE_ASSERT, "ASSERT failed: " & assertMsg, payload
+    errText = ExecExceptionBuildMessage()
     Return 0
 End Function
 
