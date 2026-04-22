@@ -10,6 +10,8 @@
 #include "build/main_runtime_include_bundle.fbs"
 #include "codegen/x64/ffi_call_backend.fbs"
 #include "codegen/x86/ffi_call_backend.fbs"
+#include "codegen/x64/inline_backend.fbs"
+#include "build/x64_build_pipeline.fbs"
 
 Private Function HasArg(ByRef keyText As String) As Integer
     Dim i As Integer
@@ -47,6 +49,8 @@ Private Function IsValueArgKey(ByRef keyText As String) As Integer
     If k = "--inventory-json-out" Then Return 1
     If k = "--pipeline-json-out" Then Return 1
     If k = "--mir-opcodes-json-out" Then Return 1
+    If k = "--ast-json-out" Then Return 1
+    If k = "--build-x64-out" Then Return 1
     If k = "--interpreter-backend" Then Return 1
     If k = "--source" Then Return 1
     If k = "-s" Then Return 1
@@ -153,11 +157,14 @@ Dim As Integer execMemMode
 Dim As Integer interopMode
 Dim As Integer x64EmitMode
 Dim As Integer codegenMode
+Dim As Integer x64BuildMode
 Dim As Integer runSemanticPass
 Dim As String x64OutPath
+Dim As String x64BuildOutPath
 Dim As String inventoryJsonOutPath
 Dim As String pipelineJsonOutPath
 Dim As String mirOpcodesJsonOutPath
+Dim As String astJsonOutPath
 Dim As String interpreterBackend
 
 DiagInit
@@ -168,10 +175,16 @@ execMemMode = HasArg("--execmem")
 interopMode = HasArg("--interop")
 x64EmitMode = HasArg("--emit-x64-nasm") Or HasArg("--x64gen")
 codegenMode = HasArg("--codegen") Or HasArg("--x64")
+x64BuildMode = HasArg("--build-x64")
 If codegenMode Then
     x64OutPath = "dist\uxb_output.asm"
 Else
     x64OutPath = "dist\uxbasic_program.nasm"
+End If
+
+x64BuildOutPath = "dist\x64build"
+If GetArgValue("--build-x64-out", x64BuildOutPath) = 0 Then
+    x64BuildOutPath = "dist\x64build"
 End If
 If GetArgValue("--emit-x64-nasm-out", x64OutPath) = 0 Then
     If GetArgValue("--x64gen-out", x64OutPath) = 0 Then
@@ -195,6 +208,9 @@ If GetArgValue("--pipeline-json-out", pipelineJsonOutPath) = 0 Then pipelineJson
 
 mirOpcodesJsonOutPath = ""
 If GetArgValue("--mir-opcodes-json-out", mirOpcodesJsonOutPath) = 0 Then mirOpcodesJsonOutPath = ""
+
+astJsonOutPath = ""
+If GetArgValue("--ast-json-out", astJsonOutPath) = 0 Then astJsonOutPath = ""
 
 interpreterBackend = "AST"
 Dim backendArg As String
@@ -257,7 +273,7 @@ If ParseProgram(ps) = 0 Then
     End 1
 End If
 
-runSemanticPass = IIf(semanticMode <> 0 Or execMemMode <> 0 Or interopMode <> 0 Or x64EmitMode <> 0 Or codegenMode <> 0, 1, 0)
+runSemanticPass = IIf(semanticMode <> 0 Or execMemMode <> 0 Or interopMode <> 0 Or x64EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0, 1, 0)
 
 If Trim(inventoryJsonOutPath) <> "" Then runSemanticPass = 1
 If interpreterBackend = "MIR" And execMemMode <> 0 Then runSemanticPass = 1
@@ -273,6 +289,14 @@ End If
 If debugMode Then
     DiagBilgi "Ayristirma basarili. AST dugum sayisi: " & Str(ps.ast.count)
     'ASTDump ps.ast, ps.rootNode
+End If
+
+If Trim(astJsonOutPath) <> "" Then
+    Dim astJsonErr As String
+    If ASTWriteJson(ps.ast, ps.rootNode, astJsonOutPath, astJsonErr) = 0 Then
+        DiagHata "AST JSON cikti yazimi basarisiz: " & LocalizeErrorMessage(astJsonErr)
+        End 14
+    End If
 End If
 
 If Trim(inventoryJsonOutPath) <> "" Then
@@ -406,6 +430,16 @@ If codegenMode Then
     End If
 
     DiagBilgi "x64 codegen cikti yazildi: dist\uxb_output.asm"
+End If
+
+If x64BuildMode Then
+    Dim x64BuildErr As String
+    If X64BuildRunArtifacts(ps, sourcePath, x64BuildOutPath, x64BuildErr) = 0 Then
+        DiagHata "x64 build basarisiz: " & LocalizeErrorMessage(x64BuildErr)
+        End 14
+    End If
+
+    DiagBilgi "x64 build tamamlandi: " & x64BuildOutPath & "\program.exe"
 End If
 
 Dim As String selected

@@ -498,6 +498,115 @@ Bu bolum append-only mantigiyla yazilmistir. Yani mevcut ust bolumleri bozmadan 
 | LEN(s) | Uzunluk | LEN("abc") -> 3 |
 | MID(s,p,n) | Alt metin | MID("Merhaba",2,3) -> "erb" |
 | UCASE(s) | Buyuk harf | UCASE("abc") -> "ABC" |
+
+## 9. Parser-Uyumlu Standart Söz Dizimi Komutları ve Dahili Fonksiyonlar Durumu
+
+Bu bölüm, PCK2.MD bölümünde listelenen parser-uyumlu standart söz dizimi komutlarını ve dahili fonksiyonları tablo halinde sunar, uXBasic kod tabanında varlığını parser, runtime ve test kanıtlarına dayanarak doğrular.
+
+### 9.1 Akış Komutları
+
+| Komut | Söz Dizimi | Kod Durumu | Notlar |
+|---|---|---|---|
+| IF | IF koşul THEN ... END IF | UYGULANMIŞ | Parser: parser_stmt_registry.fbs, Runtime: memory_exec.fbs |
+| SELECT CASE | SELECT CASE ifade ... END SELECT | UYGULANMIŞ | Parser: parser_stmt_registry.fbs, Testler: manifest.csv |
+| FOR | FOR değişken = başlangıç TO bitiş ... NEXT | UYGULANMIŞ | Parser: parser_stmt_registry.fbs, Runtime: exec döngüleri |
+| DO | DO ... LOOP [UNTIL/WHILE] | UYGULANMIŞ | Parser: parser_stmt_registry.fbs, Runtime: exec döngüleri |
+| GOTO | GOTO etiket | UYGULANMIŞ | Parser: parser_stmt_registry.fbs, Runtime: kontrol akışı |
+| GOSUB | GOSUB etiket ... RETURN | UYGULANMIŞ | Parser: parser_stmt_registry.fbs, Runtime: kontrol akışı |
+| RETURN | RETURN [ifade] | UYGULANMIŞ | Parser: parser_stmt_registry.fbs, Runtime: kontrol akışı |
+| EXIT | EXIT [IF/FOR/DO/vb.] | UYGULANMIŞ | Parser: parser_stmt_registry.fbs, Runtime: exec_stmt_flow.fbs |
+| END | END [MAIN/FUNCTION/vb.] | UYGULANMIŞ | Parser: parser_stmt_registry.fbs, Runtime: kontrol akışı |
+
+### 9.2 Tanımlamalar
+
+| Komut | Söz Dizimi | Kod Durumu | Notlar |
+|---|---|---|---|
+| CONST | CONST isim = değer | UYGULANMIŞ | Parser: parser_stmt_basic.fbs |
+| DIM | DIM değişken AS tip | UYGULANMIŞ | Parser: parser_stmt_basic.fbs, Runtime: bellek yönetimi |
+| REDIM | REDIM [PRESERVE] dizi(...) AS tip | UYGULANMIŞ | Parser: parser_stmt_basic.fbs, Runtime: dinamik diziler |
+| TYPE | TYPE isim ... END TYPE | UYGULANMIŞ | Parser: parser_stmt_basic.fbs, Runtime: değer tipleri |
+| DECLARE SUB/FUNCTION | DECLARE SUB isim(...) | UYGULANMIŞ | Parser: parser_stmt_basic.fbs |
+| SUB/FUNCTION | SUB isim(...) ... END SUB | UYGULANMIŞ | Parser: parser_stmt_basic.fbs, Runtime: fonksiyon çağrıları |
+| DEFINT vb. | DEFINT a-z | EKSİK | Eski tip tanımlamaları uygulanmamış |
+| SETSTRINGSIZE | SETSTRINGSIZE boyut | EKSİK | Parser/runtime'da bulunamadı |
+| INCLUDE | INCLUDE "dosya" | UYGULANMIŞ | Parser: preprocess direktifleri |
+| IMPORT | IMPORT(C/CPP/ASM, "dosya") | UYGULANMIŞ | Parser: parser_stmt_basic.fbs, Build: interop manifest |
+
+### 9.3 G/Ç Komutları
+
+| Komut | Söz Dizimi | Kod Durumu | Notlar |
+|---|---|---|---|
+| PRINT | PRINT ifade [, ifade...] | UYGULANMIŞ | Parser: parser_stmt_io.fbs, Runtime: exec G/Ç |
+| INPUT | INPUT değişken [, değişken...] | UYGULANMIŞ | Parser: parser_stmt_io.fbs, Runtime: exec G/Ç |
+| OPEN | OPEN dosya FOR mod AS #tutamak | UYGULANMIŞ | Parser: parser_stmt_io.fbs, Runtime: dosya işlemleri |
+| CLOSE | CLOSE #tutamak | UYGULANMIŞ | Parser: parser_stmt_io.fbs, Runtime: dosya işlemleri |
+| GET | GET #tutamak, pozisyon, değişken | UYGULANMIŞ | Parser: parser_stmt_io.fbs, Runtime: dosya işlemleri |
+| PUT | PUT #tutamak, pozisyon, değişken | UYGULANMIŞ | Parser: parser_stmt_io.fbs, Runtime: dosya işlemleri |
+| SEEK | SEEK #tutamak, pozisyon | UYGULANMIŞ | Parser: parser_stmt_io.fbs, Runtime: dosya işlemleri |
+| LOCATE | LOCATE satır, sütun | EKSİK | Parser/runtime'da bulunamadı |
+| COLOR | COLOR önplan, arkaplan | EKSİK | Parser/runtime'da bulunamadı |
+| CLS | CLS | EKSİK | Parser/runtime'da bulunamadı |
+
+### 9.4 Bellek Komutları
+
+| Komut | Söz Dizimi | Kod Durumu | Notlar |
+|---|---|---|---|
+| INC | INC değişken | EKSİK | Parser/runtime'da bulunamadı |
+| DEC | DEC değişken | EKSİK | Parser/runtime'da bulunamadı |
+| RANDOMIZE | RANDOMIZE [tohum] | EKSİK | Parser/runtime'da bulunamadı |
+| POKEB/W/D | POKEB adres, değer | UYGULANMIŞ | Parser: parser_stmt_memory.fbs, Runtime: exec bellek |
+| MEMCOPYB | MEMCOPYB hedef, kaynak, sayı | UYGULANMIŞ | Parser: parser_stmt_memory.fbs, Runtime: exec bellek |
+| MEMFILLB | MEMFILLB hedef, değer, sayı | UYGULANMIŞ | Parser: parser_stmt_memory.fbs, Runtime: exec bellek |
+| INLINE | INLINE(...) ... END INLINE | UYGULANMIŞ | Parser: parser_stmt_basic.fbs, Runtime: interop |
+
+### 9.5 Dahili Fonksiyonlar
+
+| Fonksiyon | Söz Dizimi | Kod Durumu | Notlar |
+|---|---|---|---|
+| LEN | LEN(dizgi) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| STR | STR(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| VAL | VAL(dizgi) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| ABS | ABS(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| INT | INT(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| UCASE | UCASE(dizgi) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| LCASE | LCASE(dizgi) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| ASC | ASC(dizgi) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| CHR | CHR(kod) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| LTRIM | LTRIM(dizgi) | EKSİK | Runtime dahili fonksiyonlarında bulunamadı |
+| RTRIM | RTRIM(dizgi) | EKSİK | Runtime dahili fonksiyonlarında bulunamadı |
+| SPACE | SPACE(sayı) | EKSİK | Runtime dahili fonksiyonlarında bulunamadı |
+| SGN | SGN(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| SQRT | SQRT(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| SIN | SIN(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| COS | COS(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| TAN | TAN(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| ATN | ATN(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| EXP | EXP(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| LOG | LOG(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| CINT | CINT(ifade) | UYGULANMIŞ | Runtime: tip dönüşümleri |
+| CLNG | CLNG(ifade) | UYGULANMIŞ | Runtime: tip dönüşümleri |
+| CDBL | CDBL(ifade) | UYGULANMIŞ | Runtime: tip dönüşümleri |
+| CSNG | CSNG(ifade) | UYGULANMIŞ | Runtime: tip dönüşümleri |
+| FIX | FIX(sayı) | EKSİK | Runtime dahili fonksiyonlarında bulunamadı |
+| SQR | SQR(sayı) | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| LOF | LOF(#tutamak) | UYGULANMIŞ | Runtime: dosya işlemleri |
+| EOF | EOF(#tutamak) | UYGULANMIŞ | Runtime: dosya işlemleri |
+| PEEKB | PEEKB(adres) | UYGULANMIŞ | Runtime: bellek erişimi |
+| PEEKW | PEEKW(adres) | UYGULANMIŞ | Runtime: bellek erişimi |
+| PEEKD | PEEKD(adres) | UYGULANMIŞ | Runtime: bellek erişimi |
+| MID | MID(dizgi, başlangıç, uzunluk) | UYGULANMIŞ | Runtime: dizgi işlemleri |
+| STRING | STRING(sayı, karakter) | EKSİK | Runtime dahili fonksiyonlarında bulunamadı |
+| RND | RND() | UYGULANMIŞ | Runtime: exec_eval_builtin_categories.fbs |
+| INKEY | INKEY() | UYGULANMIŞ | Runtime: giriş işlemleri |
+| GETKEY | GETKEY() | EKSİK | Runtime dahili fonksiyonlarında bulunamadı |
+| TIMER | TIMER() | EKSİK | Runtime dahili fonksiyonlarında bulunamadı |
+
+### 9.6 Özet
+
+- **Uygulanmış**: Akış, G/Ç, bellek ve çoğu dahili fonksiyonların çoğunluğu kod tabanında mevcut.
+- **Eksik**: Bazı eski veya az kullanılan komutlar (LOCATE, COLOR, CLS, INC, DEC vb.) uygulanmamış.
+- **Doğrulama Kaynakları**: Parser dosyaları (src/parser/), runtime dosyaları (src/runtime/), test manifestleri (tests/manifest.csv) ve uyumluluk planları (tests/plan/command_compatibility_win11.csv).
+- **Notlar**: Durum, inceleme.md analizi ve doğrudan kod incelemesi ile çapraz doğrulanmış.
 | LCASE(s) | Kucuk harf | LCASE("ABC") -> "abc" |
 | VAL(s) | String->sayi | VAL("42") -> 42 |
 

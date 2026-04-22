@@ -1,0 +1,342 @@
+#include once "../parser/parser.fbs"
+
+Private Function X64BuildSaveTextFile(ByRef filePath As String, ByRef textIn As String, ByRef errText As String) As Integer
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Output As #f
+    If Err <> 0 Then
+        errText = "x64-build: cannot write " & filePath
+        Return 0
+    End If
+
+    Print #f, textIn;
+    Close #f
+    Return 1
+End Function
+
+Private Function X64BuildLoadTextFile(ByRef filePath As String, ByRef textOut As String, ByRef errText As String) As Integer
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Input As #f
+    If Err <> 0 Then
+        errText = "x64-build: cannot read " & filePath
+        Return 0
+    End If
+
+    textOut = ""
+    Do While Not Eof(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        textOut &= lineText & Chr(13) & Chr(10)
+    Loop
+
+    Close #f
+    Return 1
+End Function
+
+Private Sub X64BuildEnsureDir(ByRef dirPath As String)
+    MkDir dirPath
+End Sub
+
+Private Function X64BuildSlashify(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+    outText = ""
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        If Asc(ch) = 92 Then
+            outText &= "/"
+        Else
+            outText &= ch
+        End If
+    Next i
+    Return outText
+End Function
+
+Private Function X64BuildRspQuotePath(ByRef pathIn As String) As String
+    Dim normalized As String
+    normalized = pathIn
+    If Len(normalized) >= 2 Then
+        If Mid(normalized, 2, 1) <> ":" Then normalized = PathNormalize(CurDir$ & "\" & normalized)
+    Else
+        normalized = PathNormalize(CurDir$ & "\" & normalized)
+    End If
+    normalized = X64BuildSlashify(normalized)
+    Return Chr(34) & normalized & Chr(34)
+End Function
+
+Private Function X64BuildEmitInlineArtifacts(ByRef ps As ParseState, ByRef outputDir As String, ByRef errText As String) As Integer
+    Dim inlinePlan As String
+    Dim inlineErr As String
+
+    If InlineX64BackendEmitPlan(ps, inlinePlan, inlineErr) = 0 Then
+        If Instr(UCase(inlineErr), "NO INLINE BLOCK FOUND") > 0 Then
+            errText = ""
+            Return 1
+        End If
+
+        errText = inlineErr
+        Return 0
+    End If
+
+    X64BuildEnsureDir outputDir
+
+    Dim planPath As String
+    planPath = outputDir & "\inline_x64_plan.csv"
+    Return X64BuildSaveTextFile(planPath, inlinePlan, errText)
+End Function
+
+Private Function X64BuildStripCr(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+    outText = ""
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        If Asc(ch) <> 13 Then outText &= ch
+    Next i
+    Return outText
+End Function
+
+Private Function X64BuildEnsureFfiStubExports(ByRef interopDir As String, ByRef errText As String) As Integer
+    Dim planPath As String
+    planPath = interopDir & "\ffi_call_x64_plan.csv"
+
+    Dim asmPath As String
+    asmPath = interopDir & "\ffi_call_x64_stubs.asm"
+
+    If FileExistsPath(planPath) = 0 Or FileExistsPath(asmPath) = 0 Then Return 1
+
+    Dim asmText As String
+    If X64BuildLoadTextFile(asmPath, asmText, errText) = 0 Then Return 0
+
+    Dim planText As String
+    If X64BuildLoadTextFile(planPath, planText, errText) = 0 Then Return 0
+
+    Dim exportText As String
+    exportText = ""
+
+    Dim posLine As Integer
+    posLine = 1
+    Dim rowNo As Integer
+    rowNo = 0
+
+    Do While posLine <= Len(planText)
+        Dim nextLf As Integer
+        nextLf = InStr(posLine, planText, Chr(10))
+
+        Dim lineText As String
+        If nextLf = 0 Then
+            lineText = Mid(planText, posLine)
+            posLine = Len(planText) + 1
+        Else
+            lineText = Mid(planText, posLine, nextLf - posLine)
+            posLine = nextLf + 1
+        End If
+
+        lineText = Trim(X64BuildStripCr(lineText))
+        If lineText = "" Then Continue Do
+        rowNo += 1
+        If rowNo = 1 Then Continue Do
+
+        Dim cols(0 To 10) As String
+        Dim colIdx As Integer
+        Dim startPos As Integer
+        startPos = 1
+
+        For colIdx = 0 To 10
+            Dim commaPos As Integer
+            commaPos = InStr(startPos, lineText, ",")
+            If commaPos = 0 Then
+                cols(colIdx) = Mid(lineText, startPos)
+                Exit For
+            Else
+                cols(colIdx) = Mid(lineText, startPos, commaPos - startPos)
+                startPos = commaPos + 1
+            End If
+        Next colIdx
+
+        Dim stubId As String
+        stubId = LTrim(Str(rowNo - 1))
+
+        exportText &= "global __uxb_ffi_stub_" & stubId & Chr(10)
+        exportText &= "global __uxb_ffi_symptr_" & stubId & Chr(10)
+
+        Dim argCount As Integer
+        argCount = Val(cols(5))
+        Dim argIdx As Integer
+        For argIdx = 1 To argCount
+            exportText &= "global __uxb_ffi_arg_" & stubId & "_" & LTrim(Str(argIdx)) & Chr(10)
+        Next argIdx
+    Loop
+
+    If exportText = "" Then Return 1
+
+    Dim patched As String
+    patched = asmText
+
+    If InStr(patched, "global __uxb_ffi_symptr_") = 0 Then
+        patched = exportText & Chr(10) & patched
+    End If
+
+    Return X64BuildSaveTextFile(asmPath, patched, errText)
+End Function
+
+Private Function X64BuildEmitStatusReport(ByRef ps As ParseState, ByRef sourcePath As String, ByRef reportPath As String, ByRef errText As String) As Integer
+    Dim reportText As String
+    reportText = "# uXBasic x64 Build Status" & Chr(13) & Chr(10) & Chr(13) & Chr(10)
+    reportText &= "- source: " & sourcePath & Chr(13) & Chr(10)
+    reportText &= "- AST node count: " & LTrim(Str(ps.ast.count)) & Chr(13) & Chr(10)
+    reportText &= "- x64 lane status: partial, statement-oriented native emit + import/ffi/link pipeline" & Chr(13) & Chr(10)
+    reportText &= "- current guarantees: asm output, object build, import object aggregation, rsp generation, linker invocation, final exe emission" & Chr(13) & Chr(10)
+    reportText &= "- known limits: x64 codegen still does not cover every language construct from PCK4/inceleme, INLINE is reported/planned as artifact but not yet semantically woven into main AST emit path" & Chr(13) & Chr(10)
+    reportText &= "- recommendation: use this report together with COMPILER_TODO.md and generated interop artifacts" & Chr(13) & Chr(10)
+
+    Return X64BuildSaveTextFile(reportPath, reportText, errText)
+End Function
+
+Private Function X64BuildEmitEntryShim(ByRef outDir As String, ByRef errText As String) As Integer
+    Dim shimText As String
+    shimText = "bits 64" & Chr(13) & Chr(10)
+    shimText &= "default rel" & Chr(13) & Chr(10)
+    shimText &= "section .text" & Chr(13) & Chr(10)
+    shimText &= "extern main" & Chr(13) & Chr(10)
+    shimText &= "global WinMain" & Chr(13) & Chr(10)
+    shimText &= "WinMain:" & Chr(13) & Chr(10)
+    shimText &= "    sub rsp, 40" & Chr(13) & Chr(10)
+    shimText &= "    call main" & Chr(13) & Chr(10)
+    shimText &= "    add rsp, 40" & Chr(13) & Chr(10)
+    shimText &= "    ret" & Chr(13) & Chr(10)
+    Return X64BuildSaveTextFile(outDir & "\entry_shim.asm", shimText, errText)
+End Function
+
+Function X64BuildEmitArtifacts(ByRef ps As ParseState, ByRef sourcePath As String, ByRef outputDir As String, ByRef errText As String) As Integer
+    Dim outDir As String
+    outDir = outputDir
+    If Trim(outDir) = "" Then outDir = "dist\x64build"
+
+    X64BuildEnsureDir "dist"
+    X64BuildEnsureDir outDir
+    X64BuildEnsureDir outDir & "\obj"
+    X64BuildEnsureDir outDir & "\interop"
+    X64BuildEnsureDir outDir & "\inline"
+
+    Dim asmText As String
+    If GenerateX64Code(ps, asmText, errText) = 0 Then Return 0
+
+    Dim asmPath As String
+    asmPath = outDir & "\program.asm"
+    If X64BuildSaveTextFile(asmPath, asmText, errText) = 0 Then Return 0
+    If X64BuildEmitEntryShim(outDir, errText) = 0 Then Return 0
+
+    Dim manifest As InteropManifest
+    If ResolveInteropManifestForSource(sourcePath, manifest, errText) = 0 Then Return 0
+    If EmitInteropArtifacts(manifest, outDir & "\interop", errText) = 0 Then Return 0
+    If FfiX64BackendEmitArtifacts(ps, outDir & "\interop", errText) = 0 Then Return 0
+    If X64BuildEnsureFfiStubExports(outDir & "\interop", errText) = 0 Then Return 0
+    If InlineX64BackendValidate(ps, errText) = 0 Then
+        If Instr(UCase(errText), "NO INLINE BLOCK FOUND") = 0 Then Return 0
+        errText = ""
+    Else
+        If X64BuildEmitInlineArtifacts(ps, outDir & "\inline", errText) = 0 Then Return 0
+    End If
+
+    Dim rspText As String
+    rspText = X64BuildRspQuotePath(outDir & "\obj\program.obj") & Chr(13) & Chr(10)
+    rspText &= X64BuildRspQuotePath(outDir & "\obj\entry_shim.obj") & Chr(13) & Chr(10)
+
+    Dim importRspPath As String
+    importRspPath = outDir & "\interop\import_link_args.rsp"
+    Dim importRspText As String
+    Dim importRspErr As String
+    If X64BuildLoadTextFile(importRspPath, importRspText, importRspErr) <> 0 Then
+        If Trim(importRspText) <> "" Then rspText &= importRspText
+    End If
+
+    Dim finalRspPath As String
+    finalRspPath = outDir & "\program_link_args.rsp"
+    If X64BuildSaveTextFile(finalRspPath, rspText, errText) = 0 Then Return 0
+
+    Dim buildBat As String
+    buildBat = "@echo off" & Chr(13) & Chr(10)
+    buildBat &= "setlocal EnableExtensions" & Chr(13) & Chr(10)
+    buildBat &= "pushd ""%~dp0\..\..""" & Chr(13) & Chr(10)
+    buildBat &= "if errorlevel 1 exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= "call ""%~dp0interop\toolchain.env.bat""" & Chr(13) & Chr(10)
+    buildBat &= "if errorlevel 1 exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= "if not exist ""%~dp0obj"" mkdir ""%~dp0obj""" & Chr(13) & Chr(10)
+    buildBat &= Chr(34) & "%UXB_ASM_CMD%" & Chr(34) & " -f win64 ""%~dp0program.asm"" -o ""%~dp0obj\program.obj""" & Chr(13) & Chr(10)
+    buildBat &= "if errorlevel 1 (" & Chr(13) & Chr(10)
+    buildBat &= "  popd" & Chr(13) & Chr(10)
+    buildBat &= "  exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= ")" & Chr(13) & Chr(10)
+    buildBat &= Chr(34) & "%UXB_ASM_CMD%" & Chr(34) & " -f win64 ""%~dp0entry_shim.asm"" -o ""%~dp0obj\entry_shim.obj""" & Chr(13) & Chr(10)
+    buildBat &= "if errorlevel 1 (" & Chr(13) & Chr(10)
+    buildBat &= "  popd" & Chr(13) & Chr(10)
+    buildBat &= "  exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= ")" & Chr(13) & Chr(10)
+    buildBat &= "if exist ""%~dp0obj\ffi_call_x64_stubs.obj"" del /Q ""%~dp0obj\ffi_call_x64_stubs.obj""" & Chr(13) & Chr(10)
+    buildBat &= "if exist ""%~dp0interop\build_import.bat"" (" & Chr(13) & Chr(10)
+    buildBat &= "  call ""%~dp0interop\build_import.bat""" & Chr(13) & Chr(10)
+    buildBat &= "  if errorlevel 1 (" & Chr(13) & Chr(10)
+    buildBat &= "    popd" & Chr(13) & Chr(10)
+    buildBat &= "    exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= "  )" & Chr(13) & Chr(10)
+    buildBat &= ")" & Chr(13) & Chr(10)
+    buildBat &= "popd" & Chr(13) & Chr(10)
+    buildBat &= "exit /b 0" & Chr(13) & Chr(10)
+
+    If X64BuildSaveTextFile(outDir & "\build_program.bat", buildBat, errText) = 0 Then Return 0
+
+    Dim linkBat As String
+    linkBat = "@echo off" & Chr(13) & Chr(10)
+    linkBat &= "setlocal EnableExtensions" & Chr(13) & Chr(10)
+    linkBat &= "pushd ""%~dp0\..\..""" & Chr(13) & Chr(10)
+    linkBat &= "if errorlevel 1 exit /b 1" & Chr(13) & Chr(10)
+    linkBat &= "call ""%~dp0interop\toolchain.env.bat""" & Chr(13) & Chr(10)
+    linkBat &= "if errorlevel 1 exit /b 1" & Chr(13) & Chr(10)
+    linkBat &= Chr(34) & "%UXB_LINK_CMD%" & Chr(34) & " @%~dp0program_link_args.rsp -o ""%~dp0program.exe""" & Chr(13) & Chr(10)
+    linkBat &= "if errorlevel 1 (" & Chr(13) & Chr(10)
+    linkBat &= "  popd" & Chr(13) & Chr(10)
+    linkBat &= "  exit /b 1" & Chr(13) & Chr(10)
+    linkBat &= ")" & Chr(13) & Chr(10)
+    linkBat &= "echo [x64-build] link complete: %~dp0program.exe" & Chr(13) & Chr(10)
+    linkBat &= "popd" & Chr(13) & Chr(10)
+    linkBat &= "exit /b 0" & Chr(13) & Chr(10)
+
+    If X64BuildSaveTextFile(outDir & "\link_program.bat", linkBat, errText) = 0 Then Return 0
+
+    Dim allBat As String
+    allBat = "@echo off" & Chr(13) & Chr(10)
+    allBat &= "call ""%~dp0build_program.bat""" & Chr(13) & Chr(10)
+    allBat &= "if errorlevel 1 exit /b 1" & Chr(13) & Chr(10)
+    allBat &= "call ""%~dp0link_program.bat""" & Chr(13) & Chr(10)
+    allBat &= "exit /b %errorlevel%" & Chr(13) & Chr(10)
+    If X64BuildSaveTextFile(outDir & "\build_all.bat", allBat, errText) = 0 Then Return 0
+
+    If X64BuildEmitStatusReport(ps, sourcePath, outDir & "\codegen_status_report.md", errText) = 0 Then Return 0
+
+    Return 1
+End Function
+
+Function X64BuildRunArtifacts(ByRef ps As ParseState, ByRef sourcePath As String, ByRef outputDir As String, ByRef errText As String) As Integer
+    Dim outDir As String
+    outDir = outputDir
+    If Trim(outDir) = "" Then outDir = "dist\x64build"
+
+    If X64BuildEmitArtifacts(ps, sourcePath, outDir, errText) = 0 Then Return 0
+
+    Dim cmdText As String
+    cmdText = "cmd /c " & Chr(34) & PathNormalize(outDir & "\build_all.bat") & Chr(34)
+    Dim shellResult As Integer
+    shellResult = Shell(cmdText)
+    If shellResult <> 0 Then
+        errText = "x64-build: build_all.bat failed with exit code " & LTrim(Str(shellResult))
+        Return 0
+    End If
+
+    Return 1
+End Function

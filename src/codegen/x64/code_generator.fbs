@@ -17,6 +17,8 @@ Type X64CodegenContext
     currentEpilogLabel As String
     currentRoutineIsFunction As Integer
     routineCount As Integer
+    ffiCallTotal As Integer
+    ffiCallEmitIndex As Integer
 End Type
 
 Dim Shared gX64SymbolKeys(0 To 4095) As String
@@ -37,6 +39,7 @@ Dim Shared gX64RoutineKeys(0 To 1023) As String
 Dim Shared gX64RoutineArgCounts(0 To 1023) As Integer
 Dim Shared gX64RoutineIsFunction(0 To 1023) As Integer
 Dim Shared gX64GlobalLabelCounter As Integer
+Dim Shared gX64FfiArgCounts(0 To 1023) As Integer
 
 Declare Function X64EmitNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function GenerateStatement(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
@@ -64,16 +67,26 @@ Declare Function X64EmitBlockStmt(ByRef ps As ParseState, ByVal nodeIdx As Integ
 Declare Function X64EmitExprStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function X64EmitAssignStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function X64EmitIncDecStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+Declare Function X64EmitClsStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+Declare Function X64EmitLocateStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+Declare Function X64EmitColorStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+Declare Function X64EmitRandomizeStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function X64EmitUnknownNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function X64EmitCallNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function X64EmitExprToRax(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function X64ComputeDimSlotCount(ByRef ps As ParseState, ByVal declNode As Integer) As Integer
+Declare Function X64ExprReturnsString(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+Declare Sub X64EmitBuiltinSupport(ByRef cg As X64CodegenContext)
+Declare Sub X64EmitFfiSupport(ByRef cg As X64CodegenContext)
 Declare Sub X64CollectRoutineLocals(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext)
 Declare Function X64TryExtractIndexedTarget(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef baseNameOut As String, ByRef indexExprOut As Integer) As Integer
 Declare Function X64EnsureLocalSlot(ByRef cg As X64CodegenContext, ByRef varName As String, ByVal slotCount As Integer) As Integer
 Declare Sub X64RegisterRoutineSignature(ByRef ps As ParseState, ByVal routineNode As Integer, ByRef cg As X64CodegenContext)
 Declare Function X64TryGetRoutineSignature(ByRef cg As X64CodegenContext, ByRef routineName As String, ByRef argCountOut As Integer, ByRef isFunctionOut As Integer) As Integer
 Declare Sub X64RegisterProcedureParams(ByRef ps As ParseState, ByVal routineNode As Integer, ByRef cg As X64CodegenContext)
+Declare Function X64CollectDllCallPlan(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext) As Integer
+Declare Function X64EmitDllCallNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+Declare Sub X64EmitDllExterns(ByRef cg As X64CodegenContext)
 
 Private Function X64Upper(ByRef s As String) As String
     Return UCase(Trim(s))
@@ -223,6 +236,351 @@ End Sub
 
 Private Sub X64EmitComment(ByRef cg As X64CodegenContext, ByRef commentText As String)
     X64EmitText cg, "; " & commentText
+End Sub
+
+Private Sub X64EmitCall0(ByRef cg As X64CodegenContext, ByRef symbolName As String)
+    X64EmitText cg, "    sub rsp, 32"
+    X64EmitText cg, "    call " & symbolName
+    X64EmitText cg, "    add rsp, 32"
+End Sub
+
+Private Sub X64EmitCall1(ByRef cg As X64CodegenContext, ByRef symbolName As String)
+    X64EmitText cg, "    mov rcx, rax"
+    X64EmitText cg, "    xor rdx, rdx"
+    X64EmitText cg, "    xor r8, r8"
+    X64EmitCall0 cg, symbolName
+End Sub
+
+Private Sub X64EmitCall2(ByRef cg As X64CodegenContext, ByRef symbolName As String)
+    X64EmitText cg, "    mov rdx, rax"
+    X64EmitText cg, "    pop rcx"
+    X64EmitText cg, "    xor r8, r8"
+    X64EmitCall0 cg, symbolName
+End Sub
+
+Private Sub X64EmitCall3(ByRef cg As X64CodegenContext, ByRef symbolName As String)
+    X64EmitText cg, "    mov r8, rax"
+    X64EmitText cg, "    pop rdx"
+    X64EmitText cg, "    pop rcx"
+    X64EmitCall0 cg, symbolName
+End Sub
+
+Private Function X64BuiltinCallSymbol(ByRef callName As String) As String
+    Select Case X64Upper(Trim(callName))
+    Case "GETKEY"
+        Return "__uxb_builtin_getkey"
+    Case "TIMER"
+        Return "__uxb_builtin_timer"
+    Case "LTRIM"
+        Return "__uxb_builtin_ltrim"
+    Case "RTRIM"
+        Return "__uxb_builtin_rtrim"
+    Case "SPACE"
+        Return "__uxb_builtin_space"
+    Case "STRING"
+        Return "__uxb_builtin_string"
+    Case "MID"
+        Return "__uxb_builtin_mid"
+    Case "UCASE"
+        Return "__uxb_builtin_ucase"
+    Case "LCASE"
+        Return "__uxb_builtin_lcase"
+    Case "STR"
+        Return "__uxb_builtin_str"
+    Case "CHR"
+        Return "__uxb_builtin_chr"
+    Case "LEN"
+        Return "__uxb_builtin_len"
+    End Select
+
+    Return ""
+End Function
+
+Private Function X64ExprReturnsString(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim nodeKind As String
+    nodeKind = X64Upper(ps.ast.nodes(nodeIdx).kind)
+
+    Select Case nodeKind
+    Case "STRING", "STRING_LITERAL"
+        Return 1
+    Case "CALL_EXPR"
+        Dim callName As String
+        callName = X64Upper(Trim(ps.ast.nodes(nodeIdx).value))
+        Select Case callName
+        Case "STR", "CHR", "UCASE", "LCASE", "LTRIM", "RTRIM", "SPACE", "STRING", "MID"
+            Return 1
+        End Select
+    End Select
+
+    Return 0
+End Function
+
+Private Sub X64EmitBuiltinSupport(ByRef cg As X64CodegenContext)
+    X64EmitText cg, "__uxb_runtime_cls:"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_runtime_locate:"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_runtime_color:"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_runtime_randomize_auto:"
+    X64EmitText cg, "    sub rsp, 32"
+    X64EmitText cg, "    call GetTickCount64"
+    X64EmitText cg, "    add rsp, 32"
+    X64EmitText cg, "    mov ecx, eax"
+    X64EmitText cg, "    sub rsp, 32"
+    X64EmitText cg, "    call srand"
+    X64EmitText cg, "    add rsp, 32"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_runtime_randomize_seed:"
+    X64EmitText cg, "    sub rsp, 32"
+    X64EmitText cg, "    call srand"
+    X64EmitText cg, "    add rsp, 32"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_getkey:"
+    X64EmitText cg, "    xor rax, rax"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_timer:"
+    X64EmitText cg, "    test rdx, rdx"
+    X64EmitText cg, "    jz .timer_now"
+    X64EmitText cg, "    test r8, r8"
+    X64EmitText cg, "    jz .timer_now"
+    X64EmitText cg, "    mov rax, rdx"
+    X64EmitText cg, "    sub rax, rcx"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ".timer_now:"
+    X64EmitText cg, "    sub rsp, 32"
+    X64EmitText cg, "    call GetTickCount64"
+    X64EmitText cg, "    add rsp, 32"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_len:"
+    X64EmitText cg, "    xor rax, rax"
+    X64EmitText cg, "    test rcx, rcx"
+    X64EmitText cg, "    jz .len_done"
+    X64EmitText cg, ".len_loop:"
+    X64EmitText cg, "    cmp byte [rcx + rax], 0"
+    X64EmitText cg, "    je .len_done"
+    X64EmitText cg, "    inc rax"
+    X64EmitText cg, "    jmp .len_loop"
+    X64EmitText cg, ".len_done:"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_chr:"
+    X64EmitText cg, "    mov byte [rel __uxb_chr_buf], cl"
+    X64EmitText cg, "    mov byte [rel __uxb_chr_buf + 1], 0"
+    X64EmitText cg, "    lea rax, [rel __uxb_chr_buf]"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_str:"
+    X64EmitText cg, "    mov r8, rcx"
+    X64EmitText cg, "    lea rcx, [rel __uxb_str_buf]"
+    X64EmitText cg, "    lea rdx, [rel __uxb_fmt_num]"
+    X64EmitText cg, "    sub rsp, 32"
+    X64EmitText cg, "    call sprintf"
+    X64EmitText cg, "    add rsp, 32"
+    X64EmitText cg, "    lea rax, [rel __uxb_str_buf]"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_ltrim:"
+    X64EmitText cg, "    lea rax, [rel __uxb_ltrim_buf]"
+    X64EmitText cg, "    mov r8, rcx"
+    X64EmitText cg, ".ltrim_skip:"
+    X64EmitText cg, "    mov dl, [r8]"
+    X64EmitText cg, "    cmp dl, 32"
+    X64EmitText cg, "    je .ltrim_advance"
+    X64EmitText cg, "    cmp dl, 9"
+    X64EmitText cg, "    jne .ltrim_copy"
+    X64EmitText cg, ".ltrim_advance:"
+    X64EmitText cg, "    cmp dl, 0"
+    X64EmitText cg, "    je .ltrim_done"
+    X64EmitText cg, "    inc r8"
+    X64EmitText cg, "    jmp .ltrim_skip"
+    X64EmitText cg, ".ltrim_copy:"
+    X64EmitText cg, "    mov dl, [r8]"
+    X64EmitText cg, "    mov [rax], dl"
+    X64EmitText cg, "    inc r8"
+    X64EmitText cg, "    inc rax"
+    X64EmitText cg, "    cmp dl, 0"
+    X64EmitText cg, "    jne .ltrim_copy"
+    X64EmitText cg, "    lea rax, [rel __uxb_ltrim_buf]"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ".ltrim_done:"
+    X64EmitText cg, "    mov byte [rel __uxb_ltrim_buf], 0"
+    X64EmitText cg, "    lea rax, [rel __uxb_ltrim_buf]"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_rtrim:"
+    X64EmitText cg, "    lea rax, [rel __uxb_rtrim_buf]"
+    X64EmitText cg, "    mov r8, rcx"
+    X64EmitText cg, ".rtrim_copy:"
+    X64EmitText cg, "    mov dl, [r8]"
+    X64EmitText cg, "    mov [rax], dl"
+    X64EmitText cg, "    inc r8"
+    X64EmitText cg, "    inc rax"
+    X64EmitText cg, "    cmp dl, 0"
+    X64EmitText cg, "    jne .rtrim_copy"
+    X64EmitText cg, "    lea rax, [rel __uxb_rtrim_buf]"
+    X64EmitText cg, "    lea r8, [rax]"
+    X64EmitText cg, ".rtrim_seek_end:"
+    X64EmitText cg, "    mov dl, [r8]"
+    X64EmitText cg, "    cmp dl, 0"
+    X64EmitText cg, "    je .rtrim_back"
+    X64EmitText cg, "    inc r8"
+    X64EmitText cg, "    jmp .rtrim_seek_end"
+    X64EmitText cg, ".rtrim_back:"
+    X64EmitText cg, "    cmp r8, rax"
+    X64EmitText cg, "    je .rtrim_ret"
+    X64EmitText cg, "    dec r8"
+    X64EmitText cg, "    mov dl, [r8]"
+    X64EmitText cg, "    cmp dl, 32"
+    X64EmitText cg, "    je .rtrim_zero"
+    X64EmitText cg, "    cmp dl, 9"
+    X64EmitText cg, "    je .rtrim_zero"
+    X64EmitText cg, "    jmp .rtrim_ret"
+    X64EmitText cg, ".rtrim_zero:"
+    X64EmitText cg, "    mov byte [r8], 0"
+    X64EmitText cg, "    jmp .rtrim_back"
+    X64EmitText cg, ".rtrim_ret:"
+    X64EmitText cg, "    lea rax, [rel __uxb_rtrim_buf]"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_ucase:"
+    X64EmitText cg, "    lea rax, [rel __uxb_ucase_buf]"
+    X64EmitText cg, "    mov r8, rcx"
+    X64EmitText cg, ".ucase_loop:"
+    X64EmitText cg, "    mov dl, [r8]"
+    X64EmitText cg, "    cmp dl, 'a'"
+    X64EmitText cg, "    jb .ucase_store"
+    X64EmitText cg, "    cmp dl, 'z'"
+    X64EmitText cg, "    ja .ucase_store"
+    X64EmitText cg, "    sub dl, 32"
+    X64EmitText cg, ".ucase_store:"
+    X64EmitText cg, "    mov [rax], dl"
+    X64EmitText cg, "    inc r8"
+    X64EmitText cg, "    inc rax"
+    X64EmitText cg, "    cmp dl, 0"
+    X64EmitText cg, "    jne .ucase_loop"
+    X64EmitText cg, "    lea rax, [rel __uxb_ucase_buf]"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_lcase:"
+    X64EmitText cg, "    lea rax, [rel __uxb_lcase_buf]"
+    X64EmitText cg, "    mov r8, rcx"
+    X64EmitText cg, ".lcase_loop:"
+    X64EmitText cg, "    mov dl, [r8]"
+    X64EmitText cg, "    cmp dl, 'A'"
+    X64EmitText cg, "    jb .lcase_store"
+    X64EmitText cg, "    cmp dl, 'Z'"
+    X64EmitText cg, "    ja .lcase_store"
+    X64EmitText cg, "    add dl, 32"
+    X64EmitText cg, ".lcase_store:"
+    X64EmitText cg, "    mov [rax], dl"
+    X64EmitText cg, "    inc r8"
+    X64EmitText cg, "    inc rax"
+    X64EmitText cg, "    cmp dl, 0"
+    X64EmitText cg, "    jne .lcase_loop"
+    X64EmitText cg, "    lea rax, [rel __uxb_lcase_buf]"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_space:"
+    X64EmitText cg, "    lea rax, [rel __uxb_space_buf]"
+    X64EmitText cg, "    xor r8, r8"
+    X64EmitText cg, "    cmp rcx, 4095"
+    X64EmitText cg, "    jle .space_loop"
+    X64EmitText cg, "    mov rcx, 4095"
+    X64EmitText cg, ".space_loop:"
+    X64EmitText cg, "    cmp r8, rcx"
+    X64EmitText cg, "    jge .space_done"
+    X64EmitText cg, "    mov byte [rax + r8], 32"
+    X64EmitText cg, "    inc r8"
+    X64EmitText cg, "    jmp .space_loop"
+    X64EmitText cg, ".space_done:"
+    X64EmitText cg, "    mov byte [rax + r8], 0"
+    X64EmitText cg, "    lea rax, [rel __uxb_space_buf]"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_string:"
+    X64EmitText cg, "    lea rax, [rel __uxb_string_buf]"
+    X64EmitText cg, "    xor r8, r8"
+    X64EmitText cg, "    cmp rcx, 4095"
+    X64EmitText cg, "    jle .string_pick"
+    X64EmitText cg, "    mov rcx, 4095"
+    X64EmitText cg, ".string_pick:"
+    X64EmitText cg, "    cmp rdx, 255"
+    X64EmitText cg, "    jle .string_fill"
+    X64EmitText cg, "    mov dl, [rdx]"
+    X64EmitText cg, ".string_fill:"
+    X64EmitText cg, "    cmp r8, rcx"
+    X64EmitText cg, "    jge .string_done"
+    X64EmitText cg, "    mov [rax + r8], dl"
+    X64EmitText cg, "    inc r8"
+    X64EmitText cg, "    jmp .string_fill"
+    X64EmitText cg, ".string_done:"
+    X64EmitText cg, "    mov byte [rax + r8], 0"
+    X64EmitText cg, "    lea rax, [rel __uxb_string_buf]"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_builtin_mid:"
+    X64EmitText cg, "    lea rax, [rel __uxb_mid_buf]"
+    X64EmitText cg, "    mov r9, 0"
+    X64EmitText cg, "    cmp rdx, 1"
+    X64EmitText cg, "    jge .mid_seek"
+    X64EmitText cg, "    mov rdx, 1"
+    X64EmitText cg, ".mid_seek:"
+    X64EmitText cg, "    cmp r9, rdx"
+    X64EmitText cg, "    jge .mid_copy_prep"
+    X64EmitText cg, "    cmp byte [rcx], 0"
+    X64EmitText cg, "    je .mid_empty"
+    X64EmitText cg, "    inc rcx"
+    X64EmitText cg, "    inc r9"
+    X64EmitText cg, "    jmp .mid_seek"
+    X64EmitText cg, ".mid_copy_prep:"
+    X64EmitText cg, "    xor r9, r9"
+    X64EmitText cg, ".mid_copy:"
+    X64EmitText cg, "    mov dl, [rcx]"
+    X64EmitText cg, "    cmp dl, 0"
+    X64EmitText cg, "    je .mid_done"
+    X64EmitText cg, "    cmp r8, 0"
+    X64EmitText cg, "    je .mid_store"
+    X64EmitText cg, "    cmp r9, r8"
+    X64EmitText cg, "    jge .mid_done"
+    X64EmitText cg, ".mid_store:"
+    X64EmitText cg, "    mov [rax + r9], dl"
+    X64EmitText cg, "    inc rcx"
+    X64EmitText cg, "    inc r9"
+    X64EmitText cg, "    jmp .mid_copy"
+    X64EmitText cg, ".mid_done:"
+    X64EmitText cg, "    mov byte [rax + r9], 0"
+    X64EmitText cg, "    lea rax, [rel __uxb_mid_buf]"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ".mid_empty:"
+    X64EmitText cg, "    mov byte [rel __uxb_mid_buf], 0"
+    X64EmitText cg, "    lea rax, [rel __uxb_mid_buf]"
+    X64EmitText cg, "    ret"
 End Sub
 
 Private Function X64NextLabel(ByRef cg As X64CodegenContext, ByRef prefixText As String) As String
@@ -601,6 +959,219 @@ Private Function X64ChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer)
     Return count
 End Function
 
+Private Function X64IsDllCallNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim nodeKind As String
+    nodeKind = X64Upper(ps.ast.nodes(nodeIdx).kind)
+    If nodeKind <> "CALL_STMT" And nodeKind <> "CALL_EXPR" And nodeKind <> "CALL" Then Return 0
+
+    Dim calleeName As String
+    calleeName = X64Upper(ps.ast.nodes(nodeIdx).value)
+    If calleeName = "DLL" Then Return 1
+
+    If calleeName = "CALL" Then
+        Dim firstArg As Integer
+        firstArg = X64ChildAt(ps, nodeIdx, 0)
+        If firstArg <> -1 Then
+            Dim firstKind As String
+            firstKind = X64Upper(ps.ast.nodes(firstArg).kind)
+            If firstKind = "IDENT" Or firstKind = "KEYWORD_REF" Then
+                Return IIf(X64Upper(ps.ast.nodes(firstArg).value) = "DLL", 1, 0)
+            End If
+        End If
+    End If
+
+    Return 0
+End Function
+
+Private Function X64DllCallArgStartPos(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim argc As Integer
+    argc = X64ChildCount(ps, nodeIdx)
+
+    Dim callName As String
+    callName = X64Upper(ps.ast.nodes(nodeIdx).value)
+
+    Dim argStartPos As Integer
+    If callName = "CALL" Then
+        argStartPos = 4
+        If argc >= 6 Then
+            Dim convNode As Integer
+            convNode = X64ChildAt(ps, nodeIdx, 4)
+            If convNode <> -1 And X64Upper(ps.ast.nodes(convNode).kind) = "KEYWORD_REF" Then
+                Dim convCandidate As String
+                convCandidate = X64Upper(ps.ast.nodes(convNode).value)
+                If convCandidate = "CDECL" Or convCandidate = "STDCALL" Then argStartPos = 5
+            End If
+        End If
+    Else
+        argStartPos = 3
+        If argc >= 5 Then
+            Dim convNode As Integer
+            convNode = X64ChildAt(ps, nodeIdx, 3)
+            If convNode <> -1 And X64Upper(ps.ast.nodes(convNode).kind) = "KEYWORD_REF" Then
+                Dim convCandidate As String
+                convCandidate = X64Upper(ps.ast.nodes(convNode).value)
+                If convCandidate = "CDECL" Or convCandidate = "STDCALL" Then argStartPos = 4
+            End If
+        End If
+    End If
+
+    Return argStartPos
+End Function
+
+Private Sub X64CollectDllCallPlanNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext)
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Exit Sub
+
+    If X64IsDllCallNode(ps, nodeIdx) <> 0 Then
+        Dim argc As Integer
+        argc = X64ChildCount(ps, nodeIdx)
+        Dim argStartPos As Integer
+        argStartPos = X64DllCallArgStartPos(ps, nodeIdx)
+
+        If cg.ffiCallTotal >= 0 And cg.ffiCallTotal <= UBound(gX64FfiArgCounts) Then
+            gX64FfiArgCounts(cg.ffiCallTotal) = argc - argStartPos
+            If gX64FfiArgCounts(cg.ffiCallTotal) < 0 Then gX64FfiArgCounts(cg.ffiCallTotal) = 0
+            cg.ffiCallTotal += 1
+        End If
+    Else
+        Dim nodeKind As String
+        nodeKind = X64Upper(ps.ast.nodes(nodeIdx).kind)
+        Dim nodeValue As String
+        nodeValue = X64Upper(ps.ast.nodes(nodeIdx).value)
+        If (nodeKind = "CALL_EXPR" Or nodeKind = "CALL_STMT" Or nodeKind = "CALL") And nodeValue = "CALL" Then
+            Dim firstArg As Integer
+            firstArg = X64ChildAt(ps, nodeIdx, 0)
+            If firstArg <> -1 Then
+                Dim firstKind As String
+                firstKind = X64Upper(ps.ast.nodes(firstArg).kind)
+                If (firstKind = "IDENT" Or firstKind = "KEYWORD_REF") And X64Upper(ps.ast.nodes(firstArg).value) = "DLL" Then
+                    Dim argc2 As Integer
+                    argc2 = X64ChildCount(ps, nodeIdx)
+                    Dim argStartPos2 As Integer
+                    argStartPos2 = X64DllCallArgStartPos(ps, nodeIdx)
+                    If cg.ffiCallTotal >= 0 And cg.ffiCallTotal <= UBound(gX64FfiArgCounts) Then
+                        gX64FfiArgCounts(cg.ffiCallTotal) = argc2 - argStartPos2
+                        If gX64FfiArgCounts(cg.ffiCallTotal) < 0 Then gX64FfiArgCounts(cg.ffiCallTotal) = 0
+                        cg.ffiCallTotal += 1
+                    End If
+                End If
+            End If
+        End If
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then X64CollectDllCallPlanNode ps, ps.ast.nodes(nodeIdx).left, cg
+    If ps.ast.nodes(nodeIdx).right <> -1 Then X64CollectDllCallPlanNode ps, ps.ast.nodes(nodeIdx).right, cg
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        X64CollectDllCallPlanNode ps, ch, cg
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+End Sub
+
+Private Function X64CollectDllCallPlan(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext) As Integer
+    cg.ffiCallTotal = 0
+    cg.ffiCallEmitIndex = 0
+    X64CollectDllCallPlanNode ps, nodeIdx, cg
+    Return 1
+End Function
+
+Private Sub X64EmitDllExterns(ByRef cg As X64CodegenContext)
+    Dim i As Integer
+    For i = 0 To cg.ffiCallTotal - 1
+        Dim stubId As String
+        stubId = X64ToStr(i + 1)
+        X64EmitText cg, "extern __uxb_ffi_stub_" & stubId
+
+        Dim argIdx As Integer
+        For argIdx = 1 To gX64FfiArgCounts(i)
+            X64EmitText cg, "extern __uxb_ffi_arg_" & stubId & "_" & X64ToStr(argIdx)
+        Next argIdx
+    Next i
+
+    If cg.ffiCallTotal > 0 Then X64EmitText cg, ""
+End Sub
+
+Private Sub X64EmitFfiSupport(ByRef cg As X64CodegenContext)
+    If cg.ffiCallTotal <= 0 Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To cg.ffiCallTotal - 1
+        Dim stubId As String
+        stubId = X64ToStr(i + 1)
+
+        X64EmitText cg, "__uxb_ffi_stub_" & stubId & ":"
+        X64EmitText cg, "    sub rsp, 40"
+
+        If gX64FfiArgCounts(i) >= 1 Then X64EmitText cg, "    mov rcx, qword [rel __uxb_ffi_arg_" & stubId & "_1]"
+        If gX64FfiArgCounts(i) >= 2 Then X64EmitText cg, "    mov rdx, qword [rel __uxb_ffi_arg_" & stubId & "_2]"
+        If gX64FfiArgCounts(i) >= 3 Then X64EmitText cg, "    mov r8, qword [rel __uxb_ffi_arg_" & stubId & "_3]"
+        If gX64FfiArgCounts(i) >= 4 Then X64EmitText cg, "    mov r9, qword [rel __uxb_ffi_arg_" & stubId & "_4]"
+
+        Dim argIdx As Integer
+        For argIdx = 5 To gX64FfiArgCounts(i)
+            Dim slotOffset As Integer
+            slotOffset = 32 + ((argIdx - 5) * 8)
+            X64EmitText cg, "    mov rax, qword [rel __uxb_ffi_arg_" & stubId & "_" & X64ToStr(argIdx) & "]"
+            X64EmitText cg, "    mov qword [rsp + " & X64ToStr(slotOffset) & "], rax"
+        Next argIdx
+
+        X64EmitText cg, "    mov r11, qword [rel __uxb_ffi_symptr_" & stubId & "]"
+        X64EmitText cg, "    test r11, r11"
+        X64EmitText cg, "    jnz __uxb_ffi_call_" & stubId
+        X64EmitText cg, "    xor rax, rax"
+        X64EmitText cg, "    add rsp, 40"
+        X64EmitText cg, "    ret"
+        X64EmitText cg, "__uxb_ffi_call_" & stubId & ":"
+        X64EmitText cg, "    call r11"
+        X64EmitText cg, "    add rsp, 40"
+        X64EmitText cg, "    ret"
+        X64EmitText cg, ""
+
+        X64EmitData cg, "__uxb_ffi_symptr_" & stubId & ": dq 0"
+        For argIdx = 1 To gX64FfiArgCounts(i)
+            X64EmitData cg, "__uxb_ffi_arg_" & stubId & "_" & X64ToStr(argIdx) & ": dq 0"
+        Next argIdx
+    Next i
+End Sub
+
+Private Function X64EmitDllCallNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    If cg.ffiCallEmitIndex >= cg.ffiCallTotal Then
+        errText = "x64-codegen: ffi call emit index overflow"
+        Return 0
+    End If
+
+    Dim stubIdNum As Integer
+    stubIdNum = cg.ffiCallEmitIndex + 1
+    Dim stubId As String
+    stubId = X64ToStr(stubIdNum)
+
+    Dim argc As Integer
+    argc = X64ChildCount(ps, nodeIdx)
+
+    Dim argStartPos As Integer
+    argStartPos = X64DllCallArgStartPos(ps, nodeIdx)
+
+    Dim argCount As Integer
+    argCount = argc - argStartPos
+    If argCount < 0 Then argCount = 0
+
+    Dim i As Integer
+    For i = 0 To argCount - 1
+        Dim argNode As Integer
+        argNode = X64ChildAt(ps, nodeIdx, argStartPos + i)
+        If argNode = -1 Then Continue For
+        If X64EmitExprToRax(ps, argNode, cg, errText) = 0 Then Return 0
+        X64EmitText cg, "    mov [rel __uxb_ffi_arg_" & stubId & "_" & X64ToStr(i + 1) & "], rax"
+    Next i
+
+    X64EmitText cg, "    call __uxb_ffi_stub_" & stubId
+    cg.ffiCallEmitIndex += 1
+    Return 1
+End Function
+
 Private Function X64ComputeDimSlotCount(ByRef ps As ParseState, ByVal declNode As Integer) As Integer
     If declNode < 0 Or declNode >= ps.ast.count Then Return 1
 
@@ -798,7 +1369,12 @@ Private Function X64EmitExprToRax(ByRef ps As ParseState, ByVal nodeIdx As Integ
         Dim rawNumber As String
         rawNumber = Trim(ps.ast.nodes(nodeIdx).value)
         If rawNumber = "" Then rawNumber = "0"
-        X64EmitText cg, "    mov rax, " & rawNumber
+        Dim intNumber As LongInt
+        If X64TryParseInteger(rawNumber, intNumber) <> 0 Then
+            X64EmitText cg, "    mov rax, " & LTrim(Str(intNumber))
+        Else
+            X64EmitText cg, "    mov rax, " & LTrim(Str(CLng(Val(rawNumber))))
+        End If
         Return 1
     Case "STRING", "STRING_LITERAL"
         Dim strLabel As String
@@ -1142,8 +1718,19 @@ Private Function GenerateStatement(ByRef ps As ParseState, ByVal nodeIdx As Inte
     Select Case nodeKind
     Case "DIM_STMT", "DIM", "REDIM_STMT", "REDIM"
         Return GenerateLocalDim(ps, nodeIdx, cg, errText)
+    Case "DEFTYPE_STMT", "SETSTRINGSIZE_STMT"
+        X64EmitComment cg, "stmt: " & nodeKind & " (metadata-only for x64 emit)"
+        Return 1
     Case "PRINT_STMT", "PRINT"
         Return GeneratePrint(ps, nodeIdx, cg, errText)
+    Case "CLS_STMT"
+        Return X64EmitClsStmt(ps, nodeIdx, cg, errText)
+    Case "LOCATE_STMT"
+        Return X64EmitLocateStmt(ps, nodeIdx, cg, errText)
+    Case "COLOR_STMT"
+        Return X64EmitColorStmt(ps, nodeIdx, cg, errText)
+    Case "RANDOMIZE_STMT"
+        Return X64EmitRandomizeStmt(ps, nodeIdx, cg, errText)
     Case "CALL_STMT", "CALL_EXPR", "CALL"
         Return GenerateCall(ps, nodeIdx, cg, errText)
     Case "IF_STMT", "IF"
@@ -1178,9 +1765,7 @@ Private Function GeneratePrint(ByRef ps As ParseState, ByVal nodeIdx As Integer,
 
             X64EmitText cg, "    mov rdx, rax"
 
-            Dim exprKind As String
-            exprKind = X64Upper(ps.ast.nodes(exprNode).kind)
-            If exprKind = "STRING" Or exprKind = "STRING_LITERAL" Then
+            If X64ExprReturnsString(ps, exprNode) <> 0 Then
                 X64EmitText cg, "    lea rcx, [rel format_str]"
             Else
                 X64EmitText cg, "    lea rcx, [rel format_int]"
@@ -1194,6 +1779,63 @@ Private Function GeneratePrint(ByRef ps As ParseState, ByVal nodeIdx As Integer,
         itemNode = ps.ast.nodes(itemNode).nextSibling
     Loop
 
+    Return 1
+End Function
+
+Private Function X64EmitClsStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: CLS"
+    X64EmitCall0 cg, "__uxb_runtime_cls"
+    Return 1
+End Function
+
+Private Function X64EmitLocateStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim rowExpr As Integer
+    Dim colExpr As Integer
+    rowExpr = X64ChildAt(ps, nodeIdx, 0)
+    colExpr = X64ChildAt(ps, nodeIdx, 1)
+    If rowExpr = -1 Or colExpr = -1 Then
+        errText = "x64-codegen: LOCATE missing row/col"
+        Return 0
+    End If
+
+    X64EmitComment cg, "stmt: LOCATE"
+    If X64EmitExprToRax(ps, rowExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, colExpr, cg, errText) = 0 Then Return 0
+    X64EmitCall2 cg, "__uxb_runtime_locate"
+    Return 1
+End Function
+
+Private Function X64EmitColorStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim fgExpr As Integer
+    Dim bgExpr As Integer
+    fgExpr = X64ChildAt(ps, nodeIdx, 0)
+    bgExpr = X64ChildAt(ps, nodeIdx, 1)
+    If fgExpr = -1 Or bgExpr = -1 Then
+        errText = "x64-codegen: COLOR missing fg/bg"
+        Return 0
+    End If
+
+    X64EmitComment cg, "stmt: COLOR"
+    If X64EmitExprToRax(ps, fgExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, bgExpr, cg, errText) = 0 Then Return 0
+    X64EmitCall2 cg, "__uxb_runtime_color"
+    Return 1
+End Function
+
+Private Function X64EmitRandomizeStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim seedExpr As Integer
+    seedExpr = X64ChildAt(ps, nodeIdx, 0)
+
+    X64EmitComment cg, "stmt: RANDOMIZE"
+    If seedExpr = -1 Then
+        X64EmitCall0 cg, "__uxb_runtime_randomize_auto"
+        Return 1
+    End If
+
+    If X64EmitExprToRax(ps, seedExpr, cg, errText) = 0 Then Return 0
+    X64EmitCall1 cg, "__uxb_runtime_randomize_seed"
     Return 1
 End Function
 
@@ -1399,6 +2041,8 @@ Private Function X64EmitNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, B
         Return GenerateStatement(ps, nodeIdx, cg, errText)
     Case "PRINT_STMT", "PRINT"
         Return GenerateStatement(ps, nodeIdx, cg, errText)
+    Case "CLS_STMT", "LOCATE_STMT", "COLOR_STMT", "RANDOMIZE_STMT", "DEFTYPE_STMT", "SETSTRINGSIZE_STMT"
+        Return GenerateStatement(ps, nodeIdx, cg, errText)
     Case "RETURN_STMT", "RETURN"
         Return X64EmitReturnStmt(ps, nodeIdx, cg, errText)
     Case "BLOCK", "SCOPE_BLOCK", "BODY"
@@ -1419,12 +2063,15 @@ Private Function X64EmitProgram(ByRef ps As ParseState, ByVal nodeIdx As Integer
     X64EmitText cg, "default rel"
     X64EmitText cg, "section .text"
     X64EmitText cg, "extern printf"
+    X64EmitText cg, "extern sprintf"
     X64EmitText cg, "extern calloc"
-    X64EmitText cg, "extern __uxb_runtime_print"
-    X64EmitText cg, "extern __uxb_runtime_print_newline"
-    X64EmitText cg, "extern __uxb_runtime_print_sep_comma"
-    X64EmitText cg, "extern __uxb_runtime_print_sep_semicolon"
+    X64EmitText cg, "extern srand"
+    X64EmitText cg, "extern GetTickCount64"
+    X64CollectDllCallPlan ps, nodeIdx, cg
     X64EmitText cg, ""
+
+    X64EmitBuiltinSupport cg
+    X64EmitFfiSupport cg
 
     Dim sigScan As Integer
     sigScan = ps.ast.nodes(nodeIdx).firstChild
@@ -1446,8 +2093,11 @@ Private Function X64EmitProgram(ByRef ps As ParseState, ByVal nodeIdx As Integer
     cg.paramCount = 0
     cg.currentRoutineIsFunction = 1
     cg.currentEpilogLabel = X64NextLabel(cg, "ret")
+    cg.ffiCallEmitIndex = 0
 
+    X64EmitText cg, "global main"
     X64EmitText cg, "global __uxb_main"
+    X64EmitLabel cg, "main"
     X64EmitLabel cg, mainLabel
     EmitFunctionProlog cg, 0
     X64EmitText cg, "    xor rax, rax"
@@ -1564,6 +2214,64 @@ Private Function X64EmitCallNode(ByRef ps As ParseState, ByVal nodeIdx As Intege
 
     Dim argCount As Integer
     argCount = X64ChildCount(ps, nodeIdx)
+
+    Dim builtinName As String
+    builtinName = X64Upper(calleeName)
+
+    If X64IsDllCallNode(ps, nodeIdx) <> 0 Then
+        Return X64EmitDllCallNode(ps, nodeIdx, cg, errText)
+    End If
+
+    If builtinName = "CALL" Then
+        Dim firstArg As Integer
+        firstArg = X64ChildAt(ps, nodeIdx, 0)
+        If firstArg <> -1 Then
+            Dim firstKind As String
+            firstKind = X64Upper(ps.ast.nodes(firstArg).kind)
+            If (firstKind = "IDENT" Or firstKind = "KEYWORD_REF") And X64Upper(ps.ast.nodes(firstArg).value) = "DLL" Then
+                Return X64EmitDllCallNode(ps, nodeIdx, cg, errText)
+            End If
+        End If
+    End If
+
+    If builtinName = "FIX" Then
+        If argCount <> 1 Then
+            errText = "x64-codegen: FIX expects 1 argument"
+            Return 0
+        End If
+        Return X64EmitExprToRax(ps, X64ChildAt(ps, nodeIdx, 0), cg, errText)
+    End If
+
+    Dim builtinSymbol As String
+    builtinSymbol = X64BuiltinCallSymbol(builtinName)
+    If builtinSymbol <> "" Then
+        Select Case argCount
+        Case 0
+            X64EmitCall0 cg, builtinSymbol
+            Return 1
+        Case 1
+            If X64EmitExprToRax(ps, X64ChildAt(ps, nodeIdx, 0), cg, errText) = 0 Then Return 0
+            X64EmitCall1 cg, builtinSymbol
+            Return 1
+        Case 2
+            If X64EmitExprToRax(ps, X64ChildAt(ps, nodeIdx, 0), cg, errText) = 0 Then Return 0
+            X64EmitText cg, "    push rax"
+            If X64EmitExprToRax(ps, X64ChildAt(ps, nodeIdx, 1), cg, errText) = 0 Then Return 0
+            X64EmitCall2 cg, builtinSymbol
+            Return 1
+        Case 3
+            If X64EmitExprToRax(ps, X64ChildAt(ps, nodeIdx, 0), cg, errText) = 0 Then Return 0
+            X64EmitText cg, "    push rax"
+            If X64EmitExprToRax(ps, X64ChildAt(ps, nodeIdx, 1), cg, errText) = 0 Then Return 0
+            X64EmitText cg, "    push rax"
+            If X64EmitExprToRax(ps, X64ChildAt(ps, nodeIdx, 2), cg, errText) = 0 Then Return 0
+            X64EmitCall3 cg, builtinSymbol
+            Return 1
+        Case Else
+            errText = "x64-codegen: builtin argument count not supported for " & builtinName
+            Return 0
+        End Select
+    End If
 
     Dim expectedArgCount As Integer
     Dim calleeIsFunction As Integer
@@ -1911,7 +2619,17 @@ Private Function GenerateX64Code(ByRef ps As ParseState, ByRef outputText As Str
     Next i
 
     X64EmitData cg, "format_str: db " & Chr(34) & "%s" & Chr(34) & ", 10, 0"
-    X64EmitData cg, "format_int: db " & Chr(34) & "%d" & Chr(34) & ", 10, 0"
+    X64EmitData cg, "format_int: db " & Chr(34) & "%lld" & Chr(34) & ", 10, 0"
+    X64EmitData cg, "__uxb_fmt_num: db " & Chr(34) & "%lld" & Chr(34) & ", 0"
+    X64EmitData cg, "__uxb_chr_buf: times 2 db 0"
+    X64EmitData cg, "__uxb_str_buf: times 64 db 0"
+    X64EmitData cg, "__uxb_ltrim_buf: times 4096 db 0"
+    X64EmitData cg, "__uxb_rtrim_buf: times 4096 db 0"
+    X64EmitData cg, "__uxb_ucase_buf: times 4096 db 0"
+    X64EmitData cg, "__uxb_lcase_buf: times 4096 db 0"
+    X64EmitData cg, "__uxb_space_buf: times 4096 db 0"
+    X64EmitData cg, "__uxb_string_buf: times 4096 db 0"
+    X64EmitData cg, "__uxb_mid_buf: times 4096 db 0"
 
     If X64EmitNode(ps, ps.rootNode, cg, errText) = 0 Then Return 0
 

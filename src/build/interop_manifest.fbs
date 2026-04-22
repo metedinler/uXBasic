@@ -213,6 +213,39 @@ Private Sub InteropToolchainApplyPolicy(ByRef tc As InteropToolchainConfig, ByRe
     Loop
 End Sub
 
+Private Sub InteropToolchainApplyHostFallbacks(ByRef tc As InteropToolchainConfig)
+    Dim cbRoot As String
+    cbRoot = "C:\Program Files\CodeBlocks\MinGW\bin"
+
+    If Trim(tc.asmPath) = "" And UCase(Trim(tc.asmCompiler)) = "NASM" Then
+        If Dir(cbRoot & "\nasm.exe") <> "" Then
+            tc.asmPath = cbRoot
+            tc.sourceTag = "host-fallback:codeblocks"
+        End If
+    End If
+
+    If Trim(tc.ccPath) = "" And UCase(Trim(tc.cc)) = "GCC" Then
+        If Dir(cbRoot & "\gcc.exe") <> "" Then
+            tc.ccPath = cbRoot
+            tc.sourceTag = "host-fallback:codeblocks"
+        End If
+    End If
+
+    If Trim(tc.cxxPath) = "" And (UCase(Trim(tc.cxx)) = "G++" Or UCase(Trim(tc.cxx)) = "GCC") Then
+        If Dir(cbRoot & "\g++.exe") <> "" Then
+            tc.cxxPath = cbRoot
+            tc.sourceTag = "host-fallback:codeblocks"
+        End If
+    End If
+
+    If Trim(tc.linkPath) = "" And UCase(Trim(tc.linker)) = "GCC" Then
+        If Dir(cbRoot & "\gcc.exe") <> "" Then
+            tc.linkPath = cbRoot
+            tc.sourceTag = "host-fallback:codeblocks"
+        End If
+    End If
+End Sub
+
 Private Sub InteropManifestEnsureIncludes(ByRef m As InteropManifest, ByVal minSize As Integer)
     If minSize <= 0 Then Exit Sub
     If m.includeCapacity >= minSize Then Exit Sub
@@ -644,6 +677,7 @@ End Function
 Function ResolveInteropManifestForSource(ByRef sourceFile As String, ByRef manifest As InteropManifest, ByRef errText As String) As Integer
     InteropManifestInit manifest
     InteropToolchainApplyEnv manifest.toolchain
+    InteropToolchainApplyHostFallbacks manifest.toolchain
 
     Dim normalizedSource As String
     normalizedSource = PathNormalize(sourceFile)
@@ -732,14 +766,37 @@ End Function
 Private Function BuildCompileCommand(ByRef lang As String, ByRef importPath As String, ByRef objectPath As String) As String
     Select Case UCase(lang)
     Case "C"
-        Return "%UXB_CC_CMD% -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+        Return Chr(34) & "%UXB_CC_CMD%" & Chr(34) & " -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
     Case "CPP"
-        Return "%UXB_CXX_CMD% -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+        Return Chr(34) & "%UXB_CXX_CMD%" & Chr(34) & " -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
     Case "ASM"
-        Return "%UXB_ASM_CMD% -f win64 " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+        Return Chr(34) & "%UXB_ASM_CMD%" & Chr(34) & " -f win64 " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
     End Select
 
     Return ""
+End Function
+
+Private Function BuildSlashify(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+    outText = ""
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        If Asc(ch) = 92 Then
+            outText &= "/"
+        Else
+            outText &= ch
+        End If
+    Next i
+    Return outText
+End Function
+
+Private Function BuildRspArgPath(ByRef pathIn As String) As String
+    Dim normalized As String
+    normalized = PathNormalize(pathIn)
+    normalized = BuildSlashify(normalized)
+    Return Chr(34) & normalized & Chr(34)
 End Function
 
 Private Sub EnsureOutputDirs(ByRef outputDir As String)
@@ -879,6 +936,10 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
     Print #tf, "if not ""%UXB_CXX_PATH%""=="""" set UXB_CXX_CMD=%UXB_CXX_PATH%\%UXB_CXX%"
     Print #tf, "if not ""%UXB_ASM_PATH%""=="""" set UXB_ASM_CMD=%UXB_ASM_PATH%\%UXB_ASM%"
     Print #tf, "if not ""%UXB_LINK_PATH%""=="""" set UXB_LINK_CMD=%UXB_LINK_PATH%\%UXB_LINK%"
+    Print #tf, "if /I ""%UXB_CC%""==""gcc"" if exist ""C:\Program Files\CodeBlocks\MinGW\bin\gcc.exe"" set UXB_CC_CMD=C:\Program Files\CodeBlocks\MinGW\bin\gcc.exe"
+    Print #tf, "if /I ""%UXB_CXX%""==""g++"" if exist ""C:\Program Files\CodeBlocks\MinGW\bin\g++.exe"" set UXB_CXX_CMD=C:\Program Files\CodeBlocks\MinGW\bin\g++.exe"
+    Print #tf, "if /I ""%UXB_ASM%""==""nasm"" if exist ""C:\Program Files\CodeBlocks\MinGW\bin\nasm.exe"" set UXB_ASM_CMD=C:\Program Files\CodeBlocks\MinGW\bin\nasm.exe"
+    Print #tf, "if /I ""%UXB_LINK%""==""gcc"" if exist ""C:\Program Files\CodeBlocks\MinGW\bin\gcc.exe"" set UXB_LINK_CMD=C:\Program Files\CodeBlocks\MinGW\bin\gcc.exe"
     Print #tf, "exit /b 0"
 
     Print #pf, "# Import compile steps"
@@ -887,11 +948,11 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
 
     Print #bf, "@echo off"
     Print #bf, "setlocal EnableExtensions"
-    Print #bf, "pushd ""%~dp0\..\.."""
+    Print #bf, "pushd ""%~dp0\..\..\.."""
     Print #bf, "if errorlevel 1 exit /b 1"
-    Print #bf, "call """ & outputDirNorm & "\toolchain.env.bat"""
+    Print #bf, "call ""%~dp0toolchain.env.bat"""
     Print #bf, "if errorlevel 1 exit /b 1"
-    Print #bf, "if not exist """ & outputDirNorm & "\import_objs"" mkdir """ & outputDirNorm & "\import_objs"""
+    Print #bf, "if not exist ""%~dp0import_objs"" mkdir ""%~dp0import_objs"""
     Print #bf, "echo [interop] toolchain source: " & manifest.toolchain.sourceTag
     Print #bf, "echo [interop] cc=%UXB_CC_CMD% cxx=%UXB_CXX_CMD% asm=%UXB_ASM_CMD% link=%UXB_LINK_CMD%"
     Print #bf, "echo [interop] compiling imports..."
@@ -906,7 +967,7 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
         compileCmd = BuildCompileCommand(manifest.imports(i).language, manifest.imports(i).importPath, objPath)
 
         Print #mf, "IMPORT," & CsvEscape(manifest.imports(i).language) & "," & CsvEscape(manifest.imports(i).sourceFile) & "," & CsvEscape(manifest.imports(i).importPath) & "," & CsvEscape(objPath) & "," & CsvEscape(compileCmd) & "," & CsvEscape(objPath) & "," & CsvEscape(manifest.toolchain.sourceTag)
-        Print #rf, Chr(34) & objPath & Chr(34)
+        Print #rf, BuildRspArgPath(objPath)
         Print #pf, compileCmd
 
         If compileCmd <> "" Then
@@ -933,21 +994,21 @@ Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir
 
     Print #lf, "@echo off"
     Print #lf, "setlocal EnableExtensions"
-    Print #lf, "pushd ""%~dp0\..\.."""
+    Print #lf, "pushd ""%~dp0\..\..\.."""
     Print #lf, "if errorlevel 1 exit /b 1"
-    Print #lf, "call """ & outputDirNorm & "\toolchain.env.bat"""
+    Print #lf, "call ""%~dp0toolchain.env.bat"""
     Print #lf, "if errorlevel 1 exit /b 1"
-    Print #lf, "if not exist """ & outputDirNorm & "\import_link_args.rsp"" ("
-    Print #lf, "  echo [interop] missing response file: " & outputDirNorm & "\import_link_args.rsp"
+    Print #lf, "if not exist ""%~dp0import_link_args.rsp"" ("
+    Print #lf, "  echo [interop] missing response file: %~dp0import_link_args.rsp"
     Print #lf, "  popd"
     Print #lf, "  exit /b 1"
     Print #lf, ")"
-    Print #lf, "%UXB_LINK_CMD% @""" & outputDirNorm & "\import_link_args.rsp"" -o """ & outputDirNorm & "\interop_program.exe"""
+    Print #lf, Chr(34) & "%UXB_LINK_CMD%" & Chr(34) & " @""" & "%~dp0import_link_args.rsp" & """ -o ""%~dp0interop_program.exe"""
     Print #lf, "if errorlevel 1 ("
     Print #lf, "  popd"
     Print #lf, "  exit /b 1"
     Print #lf, ")"
-    Print #lf, "echo [interop] link complete: " & outputDirNorm & "\interop_program.exe"
+    Print #lf, "echo [interop] link complete: %~dp0interop_program.exe"
     Print #lf, "popd"
     Print #lf, "exit /b 0"
 

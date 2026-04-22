@@ -1,54 +1,123 @@
-# uXbasic
+# uXBasic
 
-uXbasic, ubasic031 kod tabaninin Windows 11 odakli ve FreeBASIC temelli yeniden yapilandirilmis devamidir.
+uXBasic, klasik BASIC hissini korurken Windows odakli modern bir compiler ve deneysel programlama ortami olusturmayi hedefleyen acik kaynak bir projedir.
 
-## Ilk Hedefler
-- 32-bit kod uretim hattini korumak
-- Eklenen yeni syntaxi (INLINE, operator genisletmesi, TIMER unit) parser seviyesinde oturtmak
-- Eski davranisi kirilmadan test etmek
+Bu depo ana gelistirme deposudur. Burada:
 
-## Bu klasorde neler var
-- `spec/LANGUAGE_CONTRACT.md`: normatif dil sozlesmesi (R2)
-- `src/`: lexer/parser/codegen cekirdegi
-- `tests/manifest.csv`: test kayit iskeleti
-- `tests/run_manifest.bas`: ilk 10 `pending` test icin smoke harness
-- `build.bat`: ilk derleme komutu
-- `build_32.bat`: 32-bit derleme
-- `build_64.bat`: 64-bit derleme
-- `build_matrix.bat`: 32+64 birlikte dogrulama
+- compiler kaynak kodu
+- parser, semantic, runtime ve x64 codegen calismalari
+- testler
+- teknik planlar
+- deneysel FFI ve native build lane'leri
 
-## Hizli calistirma
-- Derleme: `build.bat src\main.bas`
-- Smoke test derleme: `build.bat tests\run_manifest.bas`
-- Smoke test calistirma: `tests\run_manifest.exe`
-- CMP interop test derleme: `build.bat tests\run_cmp_interop.bas`
-- CMP interop test calistirma: `tests\run_cmp_interop.exe`
-- 32-bit derleme: `build_32.bat src\main.bas`
-- Win64 toolchain kurulum: `tools\setup_win64_toolchain.bat`
-- 64-bit derleme: `build_64.bat src\main.bas`
-- Matrix derleme: `build_matrix.bat src\main.bas`
+birlikte yasiyor.
 
-## Interop Artefaktlari (Sira 16)
-- `dist/cmp_interop/import_build_manifest.csv`
-- `dist/cmp_interop/import_link_args.rsp`
-- `dist/cmp_interop/import_link_plan_win11.txt`
+## Proje ne yapiyor
 
-## Mini release otomasyonu (Sira 13)
-- Cikti esleme dosyasi: `release/ci_outputs.map`
-- Checklist: `release/RELEASE_CHECKLIST.md`
-- Paketleme: `tools/release_mini.bat v0.1.X-mini`
-- Paketleme + yayin: `tools/release_mini.bat v0.1.X-mini --publish`
+uXBasic ile su tip programlar yazilabilir:
 
-## Durum Ozeti
-- Parser artik gercek AST node havuzu uretir.
-- Token listesi kapasite bazli dinamik buyume modeli kullanir.
+- konsol programlari
+- klasik BASIC egitim ornekleri
+- dosya islemleri
+- tipler, diziler ve veri yapilari ile calisma
+- deneysel native x64 derleme
+- gelecekte Windows API, dis DLL ve daha guclu kutuphane entegrasyonlari
 
-## Faz B.2 Milestone (B2-DONE)
-- Kapsam: nested layout semantigi, indexed `OFFSETOF`, width fail-fast, runtime `VARPTR+OFFSETOF` entegrasyonu.
-- Toplu fail-fast kosusu: `tools\run_faz_b2_failfast.ps1`
-- Kapanis checklist raporu: `reports/faz_b2_done_checklist.md`
-- Release notes ozeti: `reports/faz_b2_release_notes.md`
+## Bugun calisan kisimlar
 
-## Not
-Bu proje strict syntax modunda sonek tip belirteclerini (`$`, `%`, `&`, `!`, `#`, `@`) kabul etmez.
-`@` yalnizca operator olarak kullanilir.
+Bugun pratikte kullanilabilen alanlar:
+
+- lexer + parser
+- semantic analiz
+- AST tabanli runtime
+- MIR tabanli interpreter
+- x64 asm/object/exe build lane
+- bircok temel komut ve intrinsic
+- test suite ve JSON rapor ciktilari
+
+Detayli mimari:
+
+- [uxbasic_mimari.md](uxbasic_mimari.md)
+
+Detayli dil yuzeyi ve syntax:
+
+- [PCK5.md](PCK5.md)
+
+## Su anda ne eksik
+
+Projenin durumu acikca soyle:
+
+- native x64 lane artik gercek exe uretiyor
+- fakat `CALL(DLL)` icin native lane henuz tam resolver asamasina gelmedi
+- yani bazi DLL cagrilari derlenebilir hale geldi, ama hepsi henuz gercek API invocation yapmiyor
+- GUI ve ileri seviye Windows API kullanimi henuz gelistirme asamasinda
+
+Bu proje "tamamlanmis urun" degil; hizla buyuyen, ciddi bir teknik taban kazanan bir compiler projesidir.
+
+## Ilk deneme
+
+Yeni baslayan biri icin en kolay giris:
+
+1. [START_HERE.md](C:/Users/mete/Downloads/BasicOyunSource/uXBasic_repo/START_HERE.md) dosyasini ac
+2. `tests/basicCodeTests/42_uxb_native_console_codegen_smoke.bas` dosyasina bak
+3. compiler'i derle
+4. ornek programi calistir
+
+## Hazir belgeler
+
+- Baslangic rehberi: [START_HERE.md](START_HERE.md)
+- Mimari: [uxbasic_mimari.md](uxbasic_mimari.md)
+- Dil yuzeyi: [PCK5.md](PCK5.md)
+- Sponsor ve vizyon notu: [SPONSORING.md](SPONSORING.md)
+- Test ve sonuc raporu: [tests/basicCodeTests/RESULTS.md](tests/basicCodeTests/RESULTS.md)
+
+## Hazir test dosyalari
+
+Ozellikle bakilabilecek dosyalar:
+
+- [42_uxb_native_console_codegen_smoke.bas](tests/basicCodeTests/42_uxb_native_console_codegen_smoke.bas)
+- [43_uxb_native_flow_math_codegen_smoke.bas](tests/basicCodeTests/43_uxb_native_flow_math_codegen_smoke.bas)
+- [31_uxb_windows_kernel_sleep_tick.bas](tests/basicCodeTests/31_uxb_windows_kernel_sleep_tick.bas)
+- [32_uxb_windows_user32_metrics.bas](tests/basicCodeTests/32_uxb_windows_user32_metrics.bas)
+
+## Windows'ta nasil denenir
+
+Kisa cevap:
+
+- Evet, bu compiler Windows ortaminda gelistiriliyor ve test ediliyor.
+- Native x64 console lane calisiyor.
+- Windows DLL/API syntax ve build lane mevcut.
+- Ama tum API cagrilari bugun icin tam runtime parity seviyesinde degil.
+
+Acik deneme adimlari:
+
+1. FreeBASIC kur
+2. NASM ve MinGW toolchain kur
+3. `src/main.bas` dosyasini derle
+4. `--build-x64` ile ornek `.bas` dosyasini exe'ye cevir
+
+Detayli adimlar:
+
+- [START_HERE.md](START_HERE.md)
+
+## Neden onemli
+
+uXBasic yalnizca nostaljik bir BASIC projesi degil.
+Hedefi:
+
+- yeni baslayanlara kolay bir dil sunmak
+- eski BASIC dusuncesini modern native derleme ile birlestirmek
+- Windows tarafinda egitim, oyun, otomasyon ve arac gelistirme icin anlasilir bir compiler ekosistemi kurmak
+
+## Sponsor ve destek
+
+Bu proje sponsor bulmaya uygun cunku:
+
+- egitim odakli
+- yerli gelistirici hikayesi tasiyor
+- compiler, dil ve tooling boyutu olan zor bir problem uzerinde ilerliyor
+- somut artefact ureten bir teknik tabana sahip
+
+Sponsor anlatimi icin:
+
+- [SPONSORING.md](SPONSORING.md)
