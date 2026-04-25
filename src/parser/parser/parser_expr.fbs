@@ -1,7 +1,19 @@
 Declare Function ParseExpression(ByRef ps As ParseState) As Integer
+Declare Function ParsePrimary(ByRef ps As ParseState) As Integer
 
 Private Function IsKeywordOp(ByRef tk As Token, ByRef opText As String) As Integer
     Return tk.kind = "KEYWORD" And UCase(tk.lexeme) = UCase(opText)
+End Function
+
+Private Function IsAssignmentOp(ByRef tk As Token) As Integer
+    If tk.kind <> "OP" Then Return 0
+
+    Select Case tk.lexeme
+    Case "=", "+=", "-=", "*=", "/=", "\\=", "=+", "=-"
+        Return 1
+    End Select
+
+    Return 0
 End Function
 
 Private Function ParseNewPrimary(ByRef ps As ParseState, ByRef newTok As Token) As Integer
@@ -9,6 +21,7 @@ Private Function ParseNewPrimary(ByRef ps As ParseState, ByRef newTok As Token) 
         ps.lastError = "NEW expected"
         Return -1
     End If
+    AdvanceTok ps
 
     Dim typeTok As Token
     typeTok = CurToken(ps)
@@ -61,48 +74,7 @@ Private Function ParseIdentOrKeywordPrimary(ByRef ps As ParseState, ByRef tk As 
 
     Dim callName As String
     callName = tk.lexeme
-
-    Dim isDottedCall As Integer
-    isDottedCall = 0
-
-    Dim nextTok As Token
-    nextTok = LookToken(ps, 1)
-    If nextTok.kind = "OP" And nextTok.lexeme = "." Then
-        Dim methodTok As Token
-        methodTok = LookToken(ps, 2)
-        If methodTok.kind <> "IDENT" And methodTok.kind <> "KEYWORD" Then
-            ps.lastError = "method name expected after ."
-            Return -1
-        End If
-
-        Dim afterMethodTok As Token
-        afterMethodTok = LookToken(ps, 3)
-        If afterMethodTok.kind <> "OP" Or afterMethodTok.lexeme <> "(" Then
-            ps.lastError = "member access expression unsupported; expected call"
-            Return -1
-        End If
-
-        isDottedCall = 1
-    End If
-
     AdvanceTok ps
-
-    If isDottedCall <> 0 Then
-        If MatchOp(ps, ".") = 0 Then
-            ps.lastError = "missing . in dotted call"
-            Return -1
-        End If
-
-        Dim methodLex As Token
-        methodLex = CurToken(ps)
-        If methodLex.kind <> "IDENT" And methodLex.kind <> "KEYWORD" Then
-            ps.lastError = "method name expected after ."
-            Return -1
-        End If
-        AdvanceTok ps
-
-        callName = callName & "." & methodLex.lexeme
-    End If
 
     If MatchOp(ps, "(") Then
         Dim callNode As Integer
@@ -141,6 +113,73 @@ Private Function ParseIdentOrKeywordPrimary(ByRef ps As ParseState, ByRef tk As 
     End If
 
     Return MakeNodeFromToken(ps, "IDENT", tk.lexeme, "", tk)
+End Function
+
+Private Function ParsePostfix(ByRef ps As ParseState) As Integer
+    Dim baseExpr As Integer
+    baseExpr = ParsePrimary(ps)
+    If baseExpr = -1 Then Return -1
+
+    Do
+        Dim tk As Token
+        tk = CurToken(ps)
+
+        If tk.kind = "OP" And tk.lexeme = "." Then
+            AdvanceTok ps
+
+            Dim memberTok As Token
+            memberTok = CurToken(ps)
+            If memberTok.kind <> "IDENT" And memberTok.kind <> "KEYWORD" Then
+                ps.lastError = "member name expected after ."
+                Return -1
+            End If
+            AdvanceTok ps
+
+            If MatchOp(ps, "(") Then
+                Dim dottedBaseName As String
+                dottedBaseName = Trim(ps.ast.nodes(baseExpr).value)
+                If dottedBaseName = "" Then
+                    ps.lastError = "method call base must be identifier-like"
+                    Return -1
+                End If
+
+                Dim dottedCall As Integer
+                dottedCall = MakeNodeFromToken(ps, "CALL_EXPR", dottedBaseName & "." & memberTok.lexeme, "", memberTok)
+
+                If MatchOp(ps, ")") = 0 Then
+                    Do
+                        Dim argExpr As Integer
+                        argExpr = ParseExpression(ps)
+                        If argExpr = -1 Then Return -1
+                        ASTAddChild ps.ast, dottedCall, argExpr
+                        If MatchOp(ps, ",") = 0 Then Exit Do
+                    Loop
+
+                    If MatchOp(ps, ")") = 0 Then
+                        ps.lastError = "missing ) in call"
+                        Return -1
+                    End If
+                End If
+
+                baseExpr = dottedCall
+            Else
+                Dim fieldNode As Integer
+                fieldNode = MakeNodeFromToken(ps, "FIELD_EXPR", memberTok.lexeme, "", memberTok)
+                ps.ast.nodes(fieldNode).left = baseExpr
+                baseExpr = fieldNode
+            End If
+        ElseIf tk.kind = "OP" And (tk.lexeme = "++" Or tk.lexeme = "--") Then
+            AdvanceTok ps
+            Dim postNode As Integer
+            postNode = MakeNodeFromToken(ps, "INCDEC_EXPR", "POST", tk.lexeme, tk)
+            ps.ast.nodes(postNode).left = baseExpr
+            baseExpr = postNode
+        Else
+            Exit Do
+        End If
+    Loop
+
+    Return baseExpr
 End Function
 
 Private Function ParsePrimary(ByRef ps As ParseState) As Integer
@@ -184,7 +223,19 @@ Private Function ParseUnary(ByRef ps As ParseState) As Integer
     Dim tk As Token
     tk = CurToken(ps)
 
-    If (tk.kind = "OP" And (tk.lexeme = "+" Or tk.lexeme = "-" Or tk.lexeme = "@")) Or _
+    If tk.kind = "OP" And (tk.lexeme = "++" Or tk.lexeme = "--") Then
+        AdvanceTok ps
+        Dim targetExpr As Integer
+        targetExpr = ParseUnary(ps)
+        If targetExpr = -1 Then Return -1
+
+        Dim preNode As Integer
+        preNode = MakeNodeFromToken(ps, "INCDEC_EXPR", "PRE", tk.lexeme, tk)
+        ps.ast.nodes(preNode).left = targetExpr
+        Return preNode
+    End If
+
+    If (tk.kind = "OP" And (tk.lexeme = "+" Or tk.lexeme = "-" Or tk.lexeme = "@" Or tk.lexeme = "!" Or tk.lexeme = "~")) Or _
        (tk.kind = "KEYWORD" And UCase(tk.lexeme) = "NOT") Then
         AdvanceTok ps
         Dim rightExpr As Integer
@@ -192,12 +243,24 @@ Private Function ParseUnary(ByRef ps As ParseState) As Integer
         If rightExpr = -1 Then Return -1
 
         Dim n As Integer
-        n = MakeNodeFromToken(ps, "UNARY", "", tk.lexeme, tk)
+        Dim unaryOp As String
+        unaryOp = tk.lexeme
+        If tk.kind = "OP" Then
+            If tk.lexeme = "!" Then
+                unaryOp = "LNOT"
+            ElseIf tk.lexeme = "~" Then
+                unaryOp = "NOT"
+            End If
+        ElseIf tk.kind = "KEYWORD" Then
+            unaryOp = UCase(tk.lexeme)
+        End If
+
+        n = MakeNodeFromToken(ps, "UNARY", "", unaryOp, tk)
         ps.ast.nodes(n).right = rightExpr
         Return n
     End If
 
-    Return ParsePrimary(ps)
+    Return ParsePostfix(ps)
 End Function
 
 Private Function ParsePower(ByRef ps As ParseState) As Integer
@@ -332,7 +395,7 @@ Function ParseRelation(ByRef ps As ParseState) As Integer
         Dim tk As Token
         tk = CurToken(ps)
         If tk.kind <> "OP" Then Exit Do
-        If tk.lexeme <> "=" And tk.lexeme <> "<>" And tk.lexeme <> "<" And tk.lexeme <> ">" And tk.lexeme <> "<=" And tk.lexeme <> ">=" Then Exit Do
+        If tk.lexeme <> "==" And tk.lexeme <> "<>" And tk.lexeme <> "!=" And tk.lexeme <> "<" And tk.lexeme <> ">" And tk.lexeme <> "<=" And tk.lexeme <> ">=" Then Exit Do
 
         AdvanceTok ps
         Dim rightExpr As Integer
@@ -340,7 +403,12 @@ Function ParseRelation(ByRef ps As ParseState) As Integer
         If rightExpr = -1 Then Return -1
 
         Dim n As Integer
-        n = MakeNodeFromToken(ps, "BINARY", "", tk.lexeme, tk)
+        Dim relationOp As String
+        relationOp = tk.lexeme
+        If relationOp = "==" Then relationOp = "="
+        If relationOp = "!=" Then relationOp = "<>"
+
+        n = MakeNodeFromToken(ps, "BINARY", "", relationOp, tk)
         ps.ast.nodes(n).left = leftExpr
         ps.ast.nodes(n).right = rightExpr
         leftExpr = n
@@ -354,9 +422,10 @@ Private Function ParseBitwiseAnd(ByRef ps As ParseState) As Integer
     leftExpr = ParseRelation(ps)
     If leftExpr = -1 Then Return -1
 
-    Do While IsKeywordOp(CurToken(ps), "AND")
+    Do
         Dim tk As Token
         tk = CurToken(ps)
+        If tk.kind <> "OP" Or tk.lexeme <> "&" Then Exit Do
         AdvanceTok ps
 
         Dim rightExpr As Integer
@@ -364,7 +433,7 @@ Private Function ParseBitwiseAnd(ByRef ps As ParseState) As Integer
         If rightExpr = -1 Then Return -1
 
         Dim n As Integer
-        n = MakeNodeFromToken(ps, "BINARY", "", "AND", tk)
+        n = MakeNodeFromToken(ps, "BINARY", "", "&", tk)
         ps.ast.nodes(n).left = leftExpr
         ps.ast.nodes(n).right = rightExpr
         leftExpr = n
@@ -378,7 +447,7 @@ Private Function ParseBitwiseXor(ByRef ps As ParseState) As Integer
     leftExpr = ParseBitwiseAnd(ps)
     If leftExpr = -1 Then Return -1
 
-    Do While IsKeywordOp(CurToken(ps), "XOR")
+    Do While IsKeywordOp(CurToken(ps), "XOR") Or (CurToken(ps).kind = "OP" And CurToken(ps).lexeme = "^")
         Dim tk As Token
         tk = CurToken(ps)
         AdvanceTok ps
@@ -402,7 +471,7 @@ Private Function ParseBitwiseOr(ByRef ps As ParseState) As Integer
     leftExpr = ParseBitwiseXor(ps)
     If leftExpr = -1 Then Return -1
 
-    Do While IsKeywordOp(CurToken(ps), "OR")
+    Do While CurToken(ps).kind = "OP" And CurToken(ps).lexeme = "|"
         Dim tk As Token
         tk = CurToken(ps)
         AdvanceTok ps
@@ -412,7 +481,7 @@ Private Function ParseBitwiseOr(ByRef ps As ParseState) As Integer
         If rightExpr = -1 Then Return -1
 
         Dim n As Integer
-        n = MakeNodeFromToken(ps, "BINARY", "", "OR", tk)
+        n = MakeNodeFromToken(ps, "BINARY", "", "|", tk)
         ps.ast.nodes(n).left = leftExpr
         ps.ast.nodes(n).right = rightExpr
         leftExpr = n
@@ -421,6 +490,145 @@ Private Function ParseBitwiseOr(ByRef ps As ParseState) As Integer
     Return leftExpr
 End Function
 
+Private Function ParseLogicalAnd(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParseBitwiseOr(ps)
+    If leftExpr = -1 Then Return -1
+
+    Do While (CurToken(ps).kind = "OP" And CurToken(ps).lexeme = "&&") Or IsKeywordOp(CurToken(ps), "AND")
+        Dim tk As Token
+        tk = CurToken(ps)
+        AdvanceTok ps
+
+        Dim rightExpr As Integer
+        rightExpr = ParseBitwiseOr(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        If tk.kind = "KEYWORD" Then
+            n = MakeNodeFromToken(ps, "BINARY", "", "AND", tk)
+        Else
+            n = MakeNodeFromToken(ps, "BINARY", "", "&&", tk)
+        End If
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        leftExpr = n
+    Loop
+
+    Return leftExpr
+End Function
+
+Private Function ParseLogicalOr(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParseLogicalAnd(ps)
+    If leftExpr = -1 Then Return -1
+
+    Do While (CurToken(ps).kind = "OP" And CurToken(ps).lexeme = "||") Or IsKeywordOp(CurToken(ps), "OR")
+        Dim tk As Token
+        tk = CurToken(ps)
+        AdvanceTok ps
+
+        Dim rightExpr As Integer
+        rightExpr = ParseLogicalAnd(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        If tk.kind = "KEYWORD" Then
+            n = MakeNodeFromToken(ps, "BINARY", "", "OR", tk)
+        Else
+            n = MakeNodeFromToken(ps, "BINARY", "", "||", tk)
+        End If
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        leftExpr = n
+    Loop
+
+    Return leftExpr
+End Function
+
+Private Function ParsePipeExpression(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParseLogicalOr(ps)
+    If leftExpr = -1 Then Return -1
+
+    Do
+        Dim tk As Token
+        tk = CurToken(ps)
+        If tk.kind <> "OP" Or tk.lexeme <> "|>" Then Exit Do
+
+        AdvanceTok ps
+
+        Dim rightExpr As Integer
+        rightExpr = ParseLogicalOr(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        n = MakeNodeFromToken(ps, "BINARY", "", "|>", tk)
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        leftExpr = n
+    Loop
+
+    Return leftExpr
+End Function
+
+Private Function ParseTernaryExpression(ByRef ps As ParseState) As Integer
+    Dim condExpr As Integer
+    condExpr = ParsePipeExpression(ps)
+    If condExpr = -1 Then Return -1
+
+    If MatchOp(ps, "?") Then
+        Dim qTok As Token
+        qTok = LookToken(ps, -1)
+
+        Dim trueExpr As Integer
+        trueExpr = ParseExpression(ps)
+        If trueExpr = -1 Then Return -1
+
+        If MatchOp(ps, ":") = 0 Then
+            ps.lastError = "missing : in ternary expression"
+            Return -1
+        End If
+
+        Dim falseExpr As Integer
+        falseExpr = ParseTernaryExpression(ps)
+        If falseExpr = -1 Then Return -1
+
+        Dim ternaryNode As Integer
+        ternaryNode = MakeNodeFromToken(ps, "TERNARY_EXPR", "", "?:", qTok)
+        ps.ast.nodes(ternaryNode).left = condExpr
+        ps.ast.nodes(ternaryNode).right = falseExpr
+        ASTAddChild ps.ast, ternaryNode, trueExpr
+        Return ternaryNode
+    End If
+
+    Return condExpr
+End Function
+
+Private Function ParseAssignment(ByRef ps As ParseState) As Integer
+    Dim leftExpr As Integer
+    leftExpr = ParseTernaryExpression(ps)
+    If leftExpr = -1 Then Return -1
+
+    If IsAssignmentOp(CurToken(ps)) Then
+        Dim tk As Token
+        tk = CurToken(ps)
+        AdvanceTok ps
+
+        Dim rightExpr As Integer
+        rightExpr = ParseAssignment(ps)
+        If rightExpr = -1 Then Return -1
+
+        Dim n As Integer
+        n = MakeNodeFromToken(ps, "BINARY", "", tk.lexeme, tk)
+        ps.ast.nodes(n).left = leftExpr
+        ps.ast.nodes(n).right = rightExpr
+        Return n
+    End If
+
+    Return leftExpr
+End Function
+
 Private Function ParseExpression(ByRef ps As ParseState) As Integer
-    Return ParseBitwiseOr(ps)
+    Return ParseAssignment(ps)
 End Function

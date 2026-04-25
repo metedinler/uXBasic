@@ -2,138 +2,18 @@
 #include once "error_format.fbs"
 #include once "diagnostics.fbs"
 #include once "ffi_signer.fbs"
-
-Type ExecValue
-    valueType As String  ' INTEGER, FLOAT, STRING
-    intValue As Integer
-    floatValue As Double
-    stringValue As String
-    ' Array and object support removed for simplicity
-End Type
-
-Type ExecVar
-    nameText As String
-    value As ExecValue
-    addr As UInteger
-    declType As String
-    runtimeClassType As String
-    isArray As Integer
-    arrayDims As Integer
-    arrayLower As Integer
-    arrayUpper As Integer
-    arrayBytes As LongInt
-    ' typeBinding As TypeBinding
-End Type
-
-Type ExecArray
-    dims As Integer
-    bounds(Any) As Integer  ' lower/upper pairs
-    elements(Any) As ExecValue
-    totalElements As Integer
-End Type
-
-Type ExecObject
-    typeName As String
-    fields(Any) As ExecValue
-    fieldNames(Any) As String
-    fieldCount As Integer
-End Type
-
-Type ExecCollection
-    kind As String  ' LIST, DICT, SET
-    listItems(Any) As ExecValue
-    dictKeys(Any) As String
-    dictValues(Any) As ExecValue
-    setItems(Any) As String
-    count As Integer
-End Type
-
-Type ExecExceptionState
-    active As Integer
-    kindText As String
-    code As Integer
-    messageText As String
-    lineNo As Integer
-    colNo As Integer
-    routineName As String
-    value As ExecValue
-End Type
-
-Type ExecState
-    vars(0 to 255) As ExecVar
-    count As Integer
-    nextVarAddr As UInteger
-    fileIo As UxbFileRuntime
-    ' arrays(Any) As ExecArray
-    ' arrayCount As Integer
-    ' objects(Any) As ExecObject
-    ' objectCount As Integer
-    ' collections(Any) As ExecCollection
-    ' collectionCount As Integer
-End Type
+#include once "exec/exec_types.fbs"
 
 Declare Function ExecEvalExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es As ExecState, ByRef result As ExecValue, ByRef errText As String) As Integer
+Declare Function ExecEvalCall(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNameRaw As String, ByVal callNodeIdx As Integer, ByVal expectValue As Integer, ByRef valueOut As Integer, ByRef errText As String) As Integer
+Declare Function ExecEvalPipeInvoke(ByRef ps As ParseState, ByRef es As ExecState, ByVal targetNodeIdx As Integer, ByRef pipeInput As ExecValue, ByRef result As ExecValue, ByRef errText As String) As Integer
+Declare Function ExecReadFieldValue(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef valueOut As ExecValue, ByRef errText As String) As Integer
+Declare Function ExecWriteFieldValue(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef valueIn As ExecValue, ByRef errText As String) As Integer
 
 Declare Function ExecEnsureVar(ByRef es As ExecState, ByRef nameText As String) As Integer
 Declare Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
-Declare Function ExecRoutineIndexOf(ByRef needle As String) As Integer
+Declare Function ExecRoutineIndexOf(ByRef es As ExecState, ByRef needle As String) As Integer
 Declare Function ExecInvokeRoutineByIndex(ByRef ps As ParseState, ByRef es As ExecState, ByVal routineIdx As Integer, ByVal callNodeIdx As Integer, ByVal expectValue As Integer, ByVal prependReceiver As Integer, ByVal receiverAddr As Integer, ByRef valueOut As Integer, ByRef errText As String) As Integer
-
-Type ExecFfiAllowEntry
-    dllName As String
-    symbolName As String
-    signatureText As String
-    callingConventionText As String
-    hashText As String
-    signerText As String
-End Type
-
-Type ExecFfiX86ResolverEntry
-    stubId As Integer
-    dllName As String
-    symbolName As String
-    signatureText As String
-    callingConventionText As String
-    argCount As Integer
-    argStackBytes As Integer
-    cleanupType As String
-    symptrLabel As String
-End Type
-
-Type ExecFfiX86ResolvedEntry
-    stubId As Integer
-    procAddr As Any Ptr
-End Type
-
-Type ExecFfiX86SymptrMapEntry
-    symptrLabel As String
-    stubId As Integer
-    procAddr As Any Ptr
-End Type
-
-Type ExecRoutineDef
-    nameText As String
-    nodeIdx As Integer
-    routineKind As String
-End Type
-
-Type MIRInstruction
-    opcode As String
-    operand1 As String
-    operand2 As String
-    operand3 As String
-End Type
-
-Type MIRBlock
-    instructions(Any) As MIRInstruction
-    count As Integer
-End Type
-
-Type MIREvaluator
-    blocks(Any) As MIRBlock
-    blockCount As Integer
-    currentBlock As Integer
-End Type
 
 #include once "exec/exec_state_value_utils.fbs"
 #include once "exec/exec_collections.fbs"
@@ -141,8 +21,6 @@ End Type
 Declare Function ExecEvalNodeAsText(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef textOut As String, ByRef errText As String) As Integer
 Declare Function ExecRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
 
-Private Dim Shared gExitRequest As String
-Private Dim Shared gExecException As ExecExceptionState
 Private Const EXEC_EXC_CODE_THROW As Integer = 1001
 Private Const EXEC_EXC_CODE_ASSERT As Integer = 1002
 Private Const EXEC_EXC_CODE_RUNTIME As Integer = 1099
@@ -168,37 +46,31 @@ Private Const UXB_FFI_ERR_DLL_LOAD_FAILED As Integer = 9218
 Private Const UXB_FFI_ERR_SYMBOL_RESOLVE_FAILED As Integer = 9219
 Private Const UXB_CTRL_ERR_RETURN_WITHOUT_GOSUB As Integer = 9301
 Private Const UXB_FFI_POLICY_HEADER_V1 As String = "UXB_FFI_ALLOWLIST_V1"
-Private Dim Shared gFfiPolicyEnforce As Integer
-Private Dim Shared gFfiPolicyPath As String
-Private Dim Shared gFfiAllowEntries(Any) As ExecFfiAllowEntry
-Private Dim Shared gFfiAllowEntryCount As Integer
-Private Dim Shared gFfiAllowlistLoaded As Integer
-Private Dim Shared gFfiAllowlistLoadFailed As Integer
-Private Dim Shared gFfiAllowlistLoadFailReason As String
-Private Dim Shared gFfiResolverPath As String
-Private Dim Shared gFfiResolverEnforce As Integer
-Private Dim Shared gFfiX86ResolverEntries(Any) As ExecFfiX86ResolverEntry
-Private Dim Shared gFfiX86ResolverEntryCount As Integer
-Private Dim Shared gFfiX86ResolverLoaded As Integer
-Private Dim Shared gFfiX86ResolverLoadFailed As Integer
-Private Dim Shared gFfiX86ResolverLoadFailReason As String
-Private Dim Shared gFfiX86ResolvedEntries(Any) As ExecFfiX86ResolvedEntry
-Private Dim Shared gFfiX86ResolvedEntryCount As Integer
-Private Dim Shared gFfiX86SymptrMapEntries(Any) As ExecFfiX86SymptrMapEntry
-Private Dim Shared gFfiX86SymptrMapEntryCount As Integer
-Private Dim Shared gFfiX86InvokeCount As Integer
-Private Dim Shared gFfiX86LastInvokeStubId As Integer
-Private Dim Shared gFfiX86LastInvokeConv As String
-Private Dim Shared gFfiX86CallerCleanupBytes As Integer
-Private Dim Shared gFfiX86CalleeCleanupBytes As Integer
-Private Dim Shared gFfiX86SymptrWriteCount As Integer
-Private Dim Shared gRoutineDefs(Any) As ExecRoutineDef
-Private Dim Shared gRoutineDefCount As Integer
-Private Dim Shared gCallContextDepth As Integer
-Private Dim Shared gCallReturnValue As Integer
-Private Dim Shared gCallReturnHasValue As Integer
-Private Dim Shared gCurrentRoutineName As String
-Private Dim Shared gCurrentRoutineNodeIdx As Integer
+Private Dim Shared gActiveRuntimeCtx As ExecRuntimeContext Ptr
+Private Dim Shared gFfiDefaultPolicyEnforce As Integer
+Private Dim Shared gFfiDefaultPolicyPath As String
+Private Dim Shared gFfiDefaultResolverPath As String
+Private Dim Shared gFfiDefaultResolverEnforce As Integer
+#define gFfiAllowEntries gActiveRuntimeCtx->ffiAllowEntries
+#define gFfiAllowEntryCount gActiveRuntimeCtx->ffiAllowEntryCount
+#define gFfiAllowlistLoaded gActiveRuntimeCtx->ffiAllowlistLoaded
+#define gFfiAllowlistLoadFailed gActiveRuntimeCtx->ffiAllowlistLoadFailed
+#define gFfiAllowlistLoadFailReason gActiveRuntimeCtx->ffiAllowlistLoadFailReason
+#define gFfiX86ResolverEntries gActiveRuntimeCtx->ffiX86ResolverEntries
+#define gFfiX86ResolverEntryCount gActiveRuntimeCtx->ffiX86ResolverEntryCount
+#define gFfiX86ResolverLoaded gActiveRuntimeCtx->ffiX86ResolverLoaded
+#define gFfiX86ResolverLoadFailed gActiveRuntimeCtx->ffiX86ResolverLoadFailed
+#define gFfiX86ResolverLoadFailReason gActiveRuntimeCtx->ffiX86ResolverLoadFailReason
+#define gFfiX86ResolvedEntries gActiveRuntimeCtx->ffiX86ResolvedEntries
+#define gFfiX86ResolvedEntryCount gActiveRuntimeCtx->ffiX86ResolvedEntryCount
+#define gFfiX86SymptrMapEntries gActiveRuntimeCtx->ffiX86SymptrMapEntries
+#define gFfiX86SymptrMapEntryCount gActiveRuntimeCtx->ffiX86SymptrMapEntryCount
+#define gFfiX86InvokeCount gActiveRuntimeCtx->ffiX86InvokeCount
+#define gFfiX86LastInvokeStubId gActiveRuntimeCtx->ffiX86LastInvokeStubId
+#define gFfiX86LastInvokeConv gActiveRuntimeCtx->ffiX86LastInvokeConv
+#define gFfiX86CallerCleanupBytes gActiveRuntimeCtx->ffiX86CallerCleanupBytes
+#define gFfiX86CalleeCleanupBytes gActiveRuntimeCtx->ffiX86CalleeCleanupBytes
+#define gFfiX86SymptrWriteCount gActiveRuntimeCtx->ffiX86SymptrWriteCount
 Private Dim Shared gDebugLocateRow As Integer
 Private Dim Shared gDebugLocateCol As Integer
 Private Dim Shared gDebugColorFg As Integer
@@ -213,9 +85,12 @@ Private Dim Shared gDebugInputQueueReadPos As Integer
 Private Dim Shared gDebugKeyQueue(Any) As Integer
 Private Dim Shared gDebugKeyQueueCount As Integer
 Private Dim Shared gDebugKeyQueueReadPos As Integer
+Private Dim Shared gExecDebugLastDefTypeCount As Integer
+Private Dim Shared gExecDebugLastStringSize As Integer
 
 #include once "exec/exec_eval_support_helpers.fbs"
 #include once "exec/exec_eval_text_helpers.fbs"
+#include once "exec/exec_slot_manager.fbs"
 
 ' MIR Evaluator functions
 Private Sub MIREvaluatorInit(ByRef mir As MIREvaluator)
@@ -302,26 +177,14 @@ End Sub
 ' ===== EXECUTION CONTRACT IMPLEMENTATIONS =====
 ' YOK R öğeleri için runtime execution ekleme
 
-Type ExecConstEntry
-    nameText As String
-    value As ExecValue
-End Type
-
-Type ExecDefTypeEntry
-    typeChar As String  ' I, L, S, D, E, T, B, Y
-    typeName As String  ' INTEGER, LONG, SINGLE, DOUBLE, EXTENDED, STRING, BOOLEAN, BYTE
-End Type
-
-Dim Shared gExecConsts() As ExecConstEntry
-Dim Shared gExecConstCount As Integer
-Dim Shared gExecDefTypes() As ExecDefTypeEntry
-Dim Shared gExecDefTypeCount As Integer
-Dim Shared gExecStringSize As Integer
-
-Private Sub ExecContractInit()
-    gExecConstCount = 0
-    gExecDefTypeCount = 0
-    gExecStringSize = 255  ' Default string size
+Private Sub ExecContractInit(ByRef es As ExecState)
+    es.constCount = 0
+    es.defTypeCount = 0
+    es.stringSize = 255
+    Erase es.consts
+    Erase es.defTypes
+    gExecDebugLastDefTypeCount = es.defTypeCount
+    gExecDebugLastStringSize = es.stringSize
 End Sub
 
 #include once "exec/exec_class_layout_helpers.fbs"
@@ -361,8 +224,8 @@ Function ExecEvalCONST(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef e
 
         ' Check if already defined
         Dim i As Integer
-        For i = 0 To gExecConstCount - 1
-            If UCase(gExecConsts(i).nameText) = constName Then
+        For i = 0 To es.constCount - 1
+            If UCase(es.consts(i).nameText) = constName Then
                 errText = "CONST: Sabit zaten tanımlanmış: " & constName
                 Return 0
             End If
@@ -375,15 +238,15 @@ Function ExecEvalCONST(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef e
         End If
 
         ' Add to const table
-        If gExecConstCount = 0 Then
-            ReDim gExecConsts(0)
+        If es.constCount = 0 Then
+            ReDim es.consts(0)
         Else
-            ReDim Preserve gExecConsts(gExecConstCount)
+            ReDim Preserve es.consts(es.constCount)
         End If
 
-        gExecConsts(gExecConstCount).nameText = constName
-        gExecConsts(gExecConstCount).value = constValue
-        gExecConstCount += 1
+        es.consts(es.constCount).nameText = constName
+        es.consts(es.constCount).value = constValue
+        es.constCount += 1
     Next
 
     Return 1
@@ -488,6 +351,10 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
             varValue.valueType = "ARRAY"
             ExecSetVarValue es, varName, varValue
             ExecSetVarDeclMeta es, varName, declType, 1, 1, lowerBound, upperBound, totalBytes
+            If ExecArrayResizeVar(es, varName, lowerBound, upperBound, 0) = 0 Then
+                errText = "DIM: array storage init failed"
+                Return 0
+            End If
         Else
             Dim initNode As Integer
             initNode = ExecFindChildByKind(ps, declNode, "INIT_EXPR")
@@ -533,7 +400,31 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
 
             ExecSetVarValue es, varName, varValue
             ExecSetVarDeclMeta es, varName, declType, 0, 0, 0, 0, 0
-            If ExecFindClassDeclNode(ps, declType) <> -1 Then
+            Dim aggregateSize As Integer
+            Dim aggregateErr As String
+            Dim hasAggregateLayout As Integer
+            hasAggregateLayout = 0
+            If TypeLayoutSizeOf(ps, declType, aggregateSize, aggregateErr) <> 0 Then
+                If ExecFindClassDeclNode(ps, declType) = -1 And declType <> "OBJECT" Then
+                    hasAggregateLayout = 1
+                End If
+            End If
+
+            If hasAggregateLayout <> 0 Then
+                Dim aggVarIdx As Integer
+                aggVarIdx = ExecFindVar(es, varName)
+                If aggVarIdx = -1 Then
+                    errText = "DIM: aggregate variable allocation failed " & varName
+                    Return 0
+                End If
+                If VMemFillB(es.vars(aggVarIdx).addr, 0, CUInt(aggregateSize)) = 0 Then
+                    errText = "DIM: aggregate allocation out of range"
+                    Return 0
+                End If
+                Dim aggEnd As UInteger
+                aggEnd = es.vars(aggVarIdx).addr + CUInt(aggregateSize)
+                If aggEnd > es.nextVarAddr Then es.nextVarAddr = aggEnd
+            ElseIf ExecFindClassDeclNode(ps, declType) <> -1 Then
                 If initNode <> -1 Then
                     ExecSetVarAddr es, varName, CUInt(ExecValueToInteger(varValue))
                     Dim initExprNode2 As Integer
@@ -699,11 +590,11 @@ Function ExecEvalREDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef e
         ExecValueInit newValue
         newValue.valueType = "ARRAY"
 
-        If preserveMode <> 0 Then
-            ' Array element store su an metadata odakli; PRESERVE yolunda semantik olarak mevcut degeri korumaya izin veriyoruz.
-        End If
-
         es.vars(varIdx).value = newValue
+        If ExecArrayResizeVar(es, varName, firstLower, firstUpper, preserveMode) = 0 Then
+            errText = "REDIM: array storage resize failed"
+            Return 0
+        End If
         ExecSetVarDeclMeta es, varName, redimType, 1, dimCount, firstLower, firstUpper, totalBytes
     Next declPos
 
@@ -744,22 +635,23 @@ Function ExecEvalDEF(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
         typeName = "STRING"
     Case "DEFBYT", "DEFBYT_STMT"
         typeChar = "B"
-        typeName = "BYTE"
+        typeName = "I8"
     Case Else
         errText = "DEF: Bilinmeyen DEF türü: " & stmtKind
         Return 0
     End Select
 
     ' Add to def type table
-    If gExecDefTypeCount = 0 Then
-        ReDim gExecDefTypes(0)
+    If es.defTypeCount = 0 Then
+        ReDim es.defTypes(0)
     Else
-        ReDim Preserve gExecDefTypes(gExecDefTypeCount)
+        ReDim Preserve es.defTypes(es.defTypeCount)
     End If
 
-    gExecDefTypes(gExecDefTypeCount).typeChar = typeChar
-    gExecDefTypes(gExecDefTypeCount).typeName = typeName
-    gExecDefTypeCount += 1
+    es.defTypes(es.defTypeCount).typeChar = typeChar
+    es.defTypes(es.defTypeCount).typeName = typeName
+    es.defTypeCount += 1
+    gExecDebugLastDefTypeCount = es.defTypeCount
 
     Return 1
 End Function
@@ -790,7 +682,8 @@ Function ExecEvalSETSTRINGSIZE(ByRef ps As ParseState, ByVal nodeIdx As Integer,
         Return 0
     End If
 
-    gExecStringSize = sizeValue
+    es.stringSize = sizeValue
+    gExecDebugLastStringSize = es.stringSize
     Return 1
 End Function
 
@@ -855,10 +748,18 @@ Private Function ExecEvalBinaryValues(ByRef leftVal As ExecValue, ByRef rightVal
             Return 0
         End If
         ExecValueSetInteger result, ExecValueToInteger(leftVal) Mod modInt
-    Case "AND"
+    Case "&"
         ExecValueSetInteger result, ExecValueToInteger(leftVal) And ExecValueToInteger(rightVal)
-    Case "OR"
+    Case "|"
         ExecValueSetInteger result, ExecValueToInteger(leftVal) Or ExecValueToInteger(rightVal)
+    Case "AND"
+        ExecValueSetInteger result, IIf((ExecValueToInteger(leftVal) <> 0) And (ExecValueToInteger(rightVal) <> 0), -1, 0)
+    Case "OR"
+        ExecValueSetInteger result, IIf((ExecValueToInteger(leftVal) <> 0) Or (ExecValueToInteger(rightVal) <> 0), -1, 0)
+    Case "&&"
+        ExecValueSetInteger result, IIf((ExecValueToInteger(leftVal) <> 0) And (ExecValueToInteger(rightVal) <> 0), -1, 0)
+    Case "||"
+        ExecValueSetInteger result, IIf((ExecValueToInteger(leftVal) <> 0) Or (ExecValueToInteger(rightVal) <> 0), -1, 0)
     Case "XOR"
         ExecValueSetInteger result, ExecValueToInteger(leftVal) Xor ExecValueToInteger(rightVal)
     Case "<<", "SHL"
@@ -928,14 +829,14 @@ Function ExecEvalExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer, By
         ExecValueSetString result, n.value
         Return 1
 
-    Case "IDENT"
+    Case "IDENT", "KEYWORD_REF"
         Dim varName As String
         varName = UCase(n.value)
         ' Check consts first
         Dim i As Integer
-        For i = 0 To gExecConstCount - 1
-            If UCase(gExecConsts(i).nameText) = varName Then
-                result = gExecConsts(i).value
+        For i = 0 To es.constCount - 1
+            If UCase(es.consts(i).nameText) = varName Then
+                result = es.consts(i).value
                 Return 1
             End If
         Next
@@ -987,15 +888,121 @@ Function ExecEvalExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer, By
 
         Return 1
 
+    Case "INCDEC_EXPR"
+        Dim targetNode As Integer
+        targetNode = n.left
+        If targetNode = -1 Then
+            errText = "Expression: inc/dec target missing"
+            Return 0
+        End If
+
+        Dim curVal As ExecValue
+        Dim nextVal As ExecValue
+        Dim targetName As String
+        Dim arrayVarIdx As Integer
+        Dim arrayElemIdx As Integer
+        Dim isIndexedTarget As Integer
+        isIndexedTarget = 0
+
+        If UCase(ps.ast.nodes(targetNode).kind) = "IDENT" Then
+            targetName = ps.ast.nodes(targetNode).value
+            If ExecGetVarValue(es, targetName, curVal) = 0 Then ExecValueInit curVal
+        ElseIf ExecTryResolveArrayAccess(ps, es, targetNode, arrayVarIdx, arrayElemIdx, errText) <> 0 Then
+            isIndexedTarget = 1
+            If ExecGetArrayElement(es, arrayVarIdx, arrayElemIdx, curVal) = 0 Then
+                errText = "Expression: inc/dec array read failed"
+                Return 0
+            End If
+        Else
+            If errText = "" Then errText = "Expression: inc/dec target must be ident or indexed array"
+            Return 0
+        End If
+
+        If Trim(n.op) = "--" Then
+            ExecValueSetInteger nextVal, ExecValueToInteger(curVal) - 1
+        Else
+            ExecValueSetInteger nextVal, ExecValueToInteger(curVal) + 1
+        End If
+
+        If isIndexedTarget <> 0 Then
+            If ExecSetArrayElement(es, arrayVarIdx, arrayElemIdx, nextVal) = 0 Then
+                errText = "Expression: inc/dec array write failed"
+                Return 0
+            End If
+        Else
+            ExecSetVarValue es, targetName, nextVal
+        End If
+
+        If UCase(Trim(n.value)) = "POST" Then
+            result = curVal
+        Else
+            result = nextVal
+        End If
+        Return 1
+
     Case "BINARY"
         Dim leftVal As ExecValue, rightVal As ExecValue
         If ExecEvalExpression(ps, n.left, es, leftVal, errText) = 0 Then Return 0
+
+        If n.op = "|>" Then
+            If n.right = -1 Then
+                errText = "Expression: pipe target missing"
+                Return 0
+            End If
+
+            Dim pipeOutput As ExecValue
+            If ExecEvalPipeInvoke(ps, es, n.right, leftVal, pipeOutput, errText) = 0 Then Return 0
+            result = pipeOutput
+            Return 1
+        End If
+
+        If n.op = "&&" Or UCase(Trim(n.op)) = "AND" Then
+            If ExecValueToInteger(leftVal) = 0 Then
+                ExecValueSetInteger result, 0
+                Return 1
+            End If
+        ElseIf n.op = "||" Or UCase(Trim(n.op)) = "OR" Then
+            If ExecValueToInteger(leftVal) <> 0 Then
+                ExecValueSetInteger result, -1
+                Return 1
+            End If
+        End If
+
         If ExecEvalExpression(ps, n.right, es, rightVal, errText) = 0 Then Return 0
 
         If ExecEvalBinaryValues(leftVal, rightVal, n.op, result, errText) = 0 Then Return 0
         Return 1
 
+    Case "TERNARY_EXPR"
+        Dim condVal As ExecValue
+        If ExecEvalExpression(ps, n.left, es, condVal, errText) = 0 Then Return 0
+
+        Dim thenNode As Integer
+        thenNode = ExecChildAt(ps, nodeIdx, 0)
+        If thenNode = -1 Then
+            errText = "Expression: ternary true branch missing"
+            Return 0
+        End If
+
+        If ExecValueToInteger(condVal) <> 0 Then
+            Return ExecEvalExpression(ps, thenNode, es, result, errText)
+        End If
+        Return ExecEvalExpression(ps, n.right, es, result, errText)
+
     Case "CALL_EXPR"
+        Dim arrayVarIdx As Integer
+        Dim arrayElemIdx As Integer
+        Dim arrayTry As Integer
+        arrayTry = ExecTryResolveArrayAccess(ps, es, nodeIdx, arrayVarIdx, arrayElemIdx, errText)
+        If arrayTry <> 0 Then
+            If ExecGetArrayElement(es, arrayVarIdx, arrayElemIdx, result) = 0 Then
+                errText = "Expression: array element read failed"
+                Return 0
+            End If
+            Return 1
+        End If
+        If errText <> "" Then Return 0
+
         Dim callExprValue As Integer
         callExprValue = ExecEvalNode(ps, es, nodeIdx, errText)
         If errText <> "" Then Return 0
@@ -1008,6 +1015,9 @@ Function ExecEvalExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer, By
         If errText <> "" Then Return 0
         ExecValueSetInteger result, newExprValue
         Return 1
+
+    Case "FIELD_EXPR"
+        Return ExecReadFieldValue(ps, es, nodeIdx, result, errText)
 
     Case Else
         errText = "Expression: Desteklenmeyen ifade türü: " & n.kind
@@ -1126,16 +1136,53 @@ Function ExecDebugGetKeyQueueRemaining() As Integer
 End Function
 
 Function ExecDebugGetDefTypeCount() As Integer
-    Return gExecDefTypeCount
+    Return gExecDebugLastDefTypeCount
+End Function
+
+Private Function ExecEvalPipeInvoke(ByRef ps As ParseState, ByRef es As ExecState, ByVal targetNodeIdx As Integer, ByRef pipeInput As ExecValue, ByRef result As ExecValue, ByRef errText As String) As Integer
+    If targetNodeIdx < 0 Or targetNodeIdx >= ps.ast.count Then
+        errText = "Expression: pipe target missing"
+        Return 0
+    End If
+
+    Dim targetKind As String
+    targetKind = UCase(ps.ast.nodes(targetNodeIdx).kind)
+
+    If targetKind = "IDENT" Or targetKind = "KEYWORD_REF" Then
+        Dim tmpName As String
+        tmpName = "__UXB_PIPE_TMP"
+        ExecEnsureVar es, tmpName
+        ExecSetVarValue es, tmpName, pipeInput
+
+        Dim identNode As Integer
+        identNode = ASTNewNode(ps.ast, "IDENT", tmpName, "", ps.ast.nodes(targetNodeIdx).lineNo, ps.ast.nodes(targetNodeIdx).colNo)
+
+        Dim callNode As Integer
+        callNode = ASTNewNode(ps.ast, "CALL_EXPR", ps.ast.nodes(targetNodeIdx).value, "", ps.ast.nodes(targetNodeIdx).lineNo, ps.ast.nodes(targetNodeIdx).colNo)
+        ASTAddChild ps.ast, callNode, identNode
+
+        Dim callValue As Integer
+        If ExecEvalCall(ps, es, ps.ast.nodes(targetNodeIdx).value, callNode, 1, callValue, errText) = 0 Then Return 0
+        ExecValueSetInteger result, callValue
+        Return 1
+    End If
+
+    If targetKind = "STRING" Then
+        If ExecSlotTriggerPipeValue(ps, es, ps.ast.nodes(targetNodeIdx).value, pipeInput, result, errText) = 0 Then Return 0
+        Return 1
+    End If
+
+    errText = "Expression: pipe target must be identifier or pipe name"
+    Return 0
 End Function
 
 Function ExecDebugGetStringSize() As Integer
-    Return gExecStringSize
+    Return gExecDebugLastStringSize
 End Function
 
 Private Function ExecIsBuiltinCallName(ByRef callName As String) As Integer
     Select Case UCase(callName)
-    Case "DLL", "API", "SIZEOF", "OFFSETOF", "LEN", "ABS", "INT", "SGN", "VAL", "ASC", "CINT", "CLNG", "CDBL", "CSNG", "FIX", "SQR", "SIN", "COS", "TAN", "ATN", "EXP", "LOG", "RND", "TIMER", "LOF", "EOF", "INKEY", "GETKEY", "PEEKB", "PEEKW", "PEEKD", "VARPTR", "SADD", "LPTR", "CODEPTR", _
+    Case "DLL", "API", "CALL", "SIZEOF", "OFFSETOF", "LEN", "ABS", "INT", "SGN", "VAL", "ASC", "CINT", "CLNG", "CDBL", "CSNG", "FIX", "SQR", "SIN", "COS", "TAN", "ATN", "EXP", "LOG", "RND", "TIMER", "LOF", "EOF", "INKEY", "GETKEY", "PEEKB", "PEEKW", "PEEKD", "VARPTR", "SADD", "LPTR", "CODEPTR", _
          "LISTLEN", "LISTGET", "LISTSET", "LISTADD", "LISTREMOVE", "LISTCLEAR", "DICTLEN", "DICTHAS", "DICTGET", "DICTSET", "DICTCLEAR", "SETLEN", "SETHAS", "SETADD", "SETREMOVE", "SETCLEAR"
         Return 1
     End Select
@@ -1221,6 +1268,139 @@ Private Function ExecResolveThisMeIdentAddr(ByRef es As ExecState, ByRef identTe
     Return 1
 End Function
 
+Private Function ExecBuildFieldPath(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef rootNameOut As String, ByRef pathOut As String, ByRef errText As String) As Integer
+    rootNameOut = ""
+    pathOut = ""
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then
+        errText = "exec: field access invalid node"
+        Return 0
+    End If
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+    Dim k As String
+    k = UCase(n.kind)
+
+    If k = "IDENT" Or k = "KEYWORD_REF" Then
+        rootNameOut = UCase(Trim(n.value))
+        Return IIf(rootNameOut <> "", 1, 0)
+    End If
+
+    If k <> "FIELD_EXPR" Then
+        errText = "exec: field access base must be identifier or field"
+        Return 0
+    End If
+
+    Dim parentRoot As String
+    Dim parentPath As String
+    If ExecBuildFieldPath(ps, n.left, parentRoot, parentPath, errText) = 0 Then Return 0
+
+    rootNameOut = parentRoot
+    If parentPath = "" Then
+        pathOut = UCase(Trim(n.value))
+    Else
+        pathOut = parentPath & "." & UCase(Trim(n.value))
+    End If
+
+    Return IIf(rootNameOut <> "" And pathOut <> "", 1, 0)
+End Function
+
+Private Function ExecResolveFieldAccess(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef baseAddrOut As UInteger, ByRef targetTypeOut As String, ByRef targetSizeOut As Integer, ByRef errText As String) As Integer
+    Dim rootName As String
+    Dim pathText As String
+    If ExecBuildFieldPath(ps, nodeIdx, rootName, pathText, errText) = 0 Then Return 0
+
+    Dim rootIdx As Integer
+    rootIdx = ExecFindVar(es, rootName)
+    If rootIdx = -1 Then
+        errText = "exec: field root variable missing " & rootName
+        Return 0
+    End If
+
+    Dim rootDeclType As String
+    Dim rootRuntimeType As String
+    rootDeclType = UCase(Trim(es.vars(rootIdx).declType))
+    rootRuntimeType = UCase(Trim(es.vars(rootIdx).runtimeClassType))
+
+    Dim rootType As String
+    Dim baseAddr As UInteger
+
+    If rootDeclType = "OBJECT" Or ExecFindClassDeclNode(ps, rootDeclType) <> -1 Then
+        rootType = IIf(rootRuntimeType <> "", rootRuntimeType, rootDeclType)
+        baseAddr = CUInt(ExecValueToInteger(es.vars(rootIdx).value))
+        If baseAddr = 0 Then baseAddr = es.vars(rootIdx).addr
+    Else
+        rootType = rootDeclType
+        baseAddr = es.vars(rootIdx).addr
+    End If
+
+    If rootType = "" Then
+        errText = "exec: field root type missing for " & rootName
+        Return 0
+    End If
+    If baseAddr = 0 Then
+        errText = "exec: field root address missing for " & rootName
+        Return 0
+    End If
+
+    Dim fieldErr As String
+    Dim fieldOffset As Integer
+    If TypeLayoutResolvePath(ps, rootType, pathText, fieldOffset, targetTypeOut, targetSizeOut, fieldErr) = 0 Then
+        errText = "exec: field resolve failed " & fieldErr
+        Return 0
+    End If
+
+    baseAddrOut = baseAddr + CUInt(fieldOffset)
+    targetTypeOut = UCase(Trim(targetTypeOut))
+    Return 1
+End Function
+
+Private Function ExecReadFieldValue(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef valueOut As ExecValue, ByRef errText As String) As Integer
+    Dim fieldAddr As UInteger
+    Dim fieldType As String
+    Dim fieldSize As Integer
+    If ExecResolveFieldAccess(ps, es, nodeIdx, fieldAddr, fieldType, fieldSize, errText) = 0 Then Return 0
+
+    Select Case fieldType
+    Case "I8", "U8"
+        ExecValueSetInteger valueOut, VMemPeekB(fieldAddr)
+    Case "I16", "U16", "SHORT"
+        ExecValueSetInteger valueOut, VMemPeekW(fieldAddr)
+    Case Else
+        If fieldSize = 1 Then
+            ExecValueSetInteger valueOut, VMemPeekB(fieldAddr)
+        ElseIf fieldSize = 2 Then
+            ExecValueSetInteger valueOut, VMemPeekW(fieldAddr)
+        Else
+            ExecValueSetInteger valueOut, VMemPeekD(fieldAddr)
+        End If
+    End Select
+
+    Return 1
+End Function
+
+Private Function ExecWriteFieldValue(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef valueIn As ExecValue, ByRef errText As String) As Integer
+    Dim fieldAddr As UInteger
+    Dim fieldType As String
+    Dim fieldSize As Integer
+    If ExecResolveFieldAccess(ps, es, nodeIdx, fieldAddr, fieldType, fieldSize, errText) = 0 Then Return 0
+
+    Dim rawValue As Integer
+    rawValue = ExecValueToInteger(valueIn)
+
+    Select Case fieldType
+    Case "I8", "U8"
+        If VMemPokeB(fieldAddr, rawValue) = 0 Then errText = "exec: field write out of range": Return 0
+    Case "I16", "U16", "SHORT"
+        If VMemPokeW(fieldAddr, rawValue) = 0 Then errText = "exec: field write out of range": Return 0
+    Case Else
+        If VMemPokeD(fieldAddr, rawValue) = 0 Then errText = "exec: field write out of range": Return 0
+    End Select
+
+    Return 1
+End Function
+
 #include once "exec/exec_eval_builtin_categories.fbs"
 
 Private Function ExecEvalBuiltinCall(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNameRaw As String, ByVal callNodeIdx As Integer, ByRef errText As String) As Integer
@@ -1228,7 +1408,7 @@ Private Function ExecEvalBuiltinCall(ByRef ps As ParseState, ByRef es As ExecSta
     callName = UCase(Trim(callNameRaw))
 
     Select Case callName
-    Case "DLL", "API"
+    Case "DLL", "API", "CALL"
         Return ExecEvalBuiltinFfiCategory(ps, es, callName, callNodeIdx, errText)
 
     Case "SIZEOF", "OFFSETOF"
@@ -1268,7 +1448,7 @@ Private Function ExecEvalUserCall(ByRef ps As ParseState, ByRef es As ExecState,
     callName = UCase(Trim(callNameRaw))
 
     Dim routineIdx As Integer
-    routineIdx = ExecRoutineIndexOf(callName)
+    routineIdx = ExecRoutineIndexOf(es, callName)
     If routineIdx = -1 Then
         errText = "exec: unsupported call " & callName
         Return 0
@@ -1372,6 +1552,11 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
         If ExecResolveThisMeIdentValue(es, n.value, identValue, errText) = 0 Then Return 0
         Return identValue
 
+    Case "KEYWORD_REF"
+        Dim keywordValue As Integer
+        If ExecResolveThisMeIdentValue(es, n.value, keywordValue, errText) = 0 Then Return 0
+        Return keywordValue
+
     Case "UNARY"
         Dim rv As Integer
         Select Case n.op
@@ -1383,6 +1568,10 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
             rv = ExecEvalNode(ps, es, n.right, errText)
             If errText <> "" Then Return 0
             Return -rv
+        Case "LNOT", "!"
+            rv = ExecEvalNode(ps, es, n.right, errText)
+            If errText <> "" Then Return 0
+            If rv = 0 Then Return -1 Else Return 0
         Case "NOT"
             rv = ExecEvalNode(ps, es, n.right, errText)
             If errText <> "" Then Return 0
@@ -1409,11 +1598,77 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
             Return 0
         End Select
 
+    Case "INCDEC_EXPR"
+        Dim exprTarget As Integer
+        exprTarget = n.left
+        If exprTarget = -1 Then
+            errText = "exec: INCDEC expression target missing"
+            Return 0
+        End If
+
+        Dim oldVal As Integer
+        Dim newVal As Integer
+        Dim idxVar As Integer
+        Dim idxElem As Integer
+        Dim tmpVal As ExecValue
+
+        If UCase(ps.ast.nodes(exprTarget).kind) = "IDENT" Then
+            oldVal = ExecGetVar(es, ps.ast.nodes(exprTarget).value)
+            If Trim(n.op) = "--" Then
+                newVal = oldVal - 1
+            Else
+                newVal = oldVal + 1
+            End If
+            ExecSetVar es, ps.ast.nodes(exprTarget).value, newVal
+        ElseIf ExecTryResolveArrayAccess(ps, es, exprTarget, idxVar, idxElem, errText) <> 0 Then
+            If ExecGetArrayElement(es, idxVar, idxElem, tmpVal) = 0 Then
+                errText = "exec: INCDEC expression array read failed"
+                Return 0
+            End If
+            oldVal = ExecValueToInteger(tmpVal)
+            If Trim(n.op) = "--" Then
+                newVal = oldVal - 1
+            Else
+                newVal = oldVal + 1
+            End If
+            ExecValueSetInteger tmpVal, newVal
+            If ExecSetArrayElement(es, idxVar, idxElem, tmpVal) = 0 Then
+                errText = "exec: INCDEC expression array write failed"
+                Return 0
+            End If
+        Else
+            If errText = "" Then errText = "exec: INCDEC expression target must be ident or indexed array"
+            Return 0
+        End If
+
+        If UCase(Trim(n.value)) = "POST" Then
+            Return oldVal
+        End If
+        Return newVal
+
     Case "BINARY"
         Dim lv As Integer
         Dim rv2 As Integer
         lv = ExecEvalNode(ps, es, n.left, errText)
         If errText <> "" Then Return 0
+
+        If n.op = "|>" Then
+            Dim pipeInput As ExecValue
+            Dim pipeOutput As ExecValue
+            ExecValueSetInteger pipeInput, lv
+            If ExecEvalPipeInvoke(ps, es, n.right, pipeInput, pipeOutput, errText) = 0 Then Return 0
+            Return ExecValueToInteger(pipeOutput)
+        End If
+
+        Dim opNorm As String
+        opNorm = UCase(Trim(n.op))
+
+        If opNorm = "&&" Or opNorm = "AND" Then
+            If lv = 0 Then Return 0
+        ElseIf opNorm = "||" Or opNorm = "OR" Then
+            If lv <> 0 Then Return -1
+        End If
+
         rv2 = ExecEvalNode(ps, es, n.right, errText)
         If errText <> "" Then Return 0
 
@@ -1448,11 +1703,23 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
                 Return 0
             End If
             Return lv Mod rv2
-        Case "AND"
+        Case "&"
             Return lv And rv2
-        Case "OR"
+        Case "|"
             Return lv Or rv2
+        Case "AND"
+            If rv2 <> 0 Then Return -1 Else Return 0
+        Case "OR"
+            If rv2 <> 0 Then Return -1 Else Return 0
+        Case "&&"
+            If lv = 0 Then Return 0
+            If rv2 <> 0 Then Return -1 Else Return 0
+        Case "||"
+            If lv <> 0 Then Return -1
+            If rv2 <> 0 Then Return -1 Else Return 0
         Case "XOR"
+            Return lv Xor rv2
+        Case "^"
             Return lv Xor rv2
         Case "<<", "SHL"
             Return CInt(CUInt(lv) Shl (rv2 And 31))
@@ -1464,7 +1731,11 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
             Return CInt(ExecRor32(CUInt(lv), rv2))
         Case "="
             If lv = rv2 Then Return -1 Else Return 0
+        Case "=="
+            If lv = rv2 Then Return -1 Else Return 0
         Case "<>"
+            If lv <> rv2 Then Return -1 Else Return 0
+        Case "!="
             If lv <> rv2 Then Return -1 Else Return 0
         Case "<"
             If lv < rv2 Then Return -1 Else Return 0
@@ -1479,13 +1750,49 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
             Return 0
         End Select
 
+    Case "TERNARY_EXPR"
+        Dim condInt As Integer
+        condInt = ExecEvalNode(ps, es, n.left, errText)
+        If errText <> "" Then Return 0
+
+        Dim thenExpr As Integer
+        thenExpr = ExecChildAt(ps, nodeIdx, 0)
+        If thenExpr = -1 Then
+            errText = "exec: ternary true branch missing"
+            Return 0
+        End If
+
+        If condInt <> 0 Then
+            Return ExecEvalNode(ps, es, thenExpr, errText)
+        End If
+        Return ExecEvalNode(ps, es, n.right, errText)
+
     Case "CALL_EXPR"
+        Dim arrVarIdx As Integer
+        Dim arrElemIdx As Integer
+        Dim arrValue As ExecValue
+        Dim arrAccessTry As Integer
+        arrAccessTry = ExecTryResolveArrayAccess(ps, es, nodeIdx, arrVarIdx, arrElemIdx, errText)
+        If arrAccessTry <> 0 Then
+            If ExecGetArrayElement(es, arrVarIdx, arrElemIdx, arrValue) = 0 Then
+                errText = "exec: array element read failed"
+                Return 0
+            End If
+            Return ExecValueToInteger(arrValue)
+        End If
+        If errText <> "" Then Return 0
+
         Dim callExprValue As Integer
         If ExecEvalCall(ps, es, n.value, nodeIdx, 1, callExprValue, errText) = 0 Then Return 0
         Return callExprValue
 
     Case "NEW_EXPR"
         Return ExecAllocClassInstance(ps, es, n.value, nodeIdx, errText)
+
+    Case "FIELD_EXPR"
+        Dim fieldValue As ExecValue
+        If ExecReadFieldValue(ps, es, nodeIdx, fieldValue, errText) = 0 Then Return 0
+        Return ExecValueToInteger(fieldValue)
 
     Case Else
         errText = "exec: unsupported node kind " & n.kind
@@ -1541,7 +1848,7 @@ Private Function ExecRunTailStmt(ByRef ps As ParseState, ByRef es As ExecState, 
             Return 0
         End If
 
-        gExitRequest = exitMode
+        es.runtime.exitRequest = exitMode
         Return 1
 
     Case "GOTO_STMT"
@@ -1550,7 +1857,7 @@ Private Function ExecRunTailStmt(ByRef ps As ParseState, ByRef es As ExecState, 
             Return 0
         End If
 
-        gExitRequest = "GOTO:" & UCase(st.value)
+        es.runtime.exitRequest = "GOTO:" & UCase(st.value)
         Return 1
 
     Case "GOSUB_STMT"
@@ -1559,11 +1866,11 @@ Private Function ExecRunTailStmt(ByRef ps As ParseState, ByRef es As ExecState, 
             Return 0
         End If
 
-        gExitRequest = "GOSUB:" & UCase(st.value)
+        es.runtime.exitRequest = "GOSUB:" & UCase(st.value)
         Return 1
 
     Case "END_STMT"
-        gExitRequest = "END"
+        es.runtime.exitRequest = "END"
         Return 1
 
     Case "RETURN_STMT"
@@ -1574,7 +1881,7 @@ Private Function ExecRunTailStmt(ByRef ps As ParseState, ByRef es As ExecState, 
             Return 0
         End If
 
-        If gCallContextDepth > 0 Then
+        If es.runtime.callContextDepth > 0 Then
             If returnCount = 1 Then
                 Dim callReturnExpr As Integer
                 callReturnExpr = ExecChildAt(ps, stmtIdx, 0)
@@ -1583,15 +1890,15 @@ Private Function ExecRunTailStmt(ByRef ps As ParseState, ByRef es As ExecState, 
                     Return 0
                 End If
 
-                gCallReturnValue = ExecEvalNode(ps, es, callReturnExpr, errText)
+                es.runtime.callReturnValue = ExecEvalNode(ps, es, callReturnExpr, errText)
                 If errText <> "" Then Return 0
-                gCallReturnHasValue = 1
+                es.runtime.callReturnHasValue = 1
             Else
-                gCallReturnValue = 0
-                gCallReturnHasValue = 0
+                es.runtime.callReturnValue = 0
+                es.runtime.callReturnHasValue = 0
             End If
 
-            gExitRequest = "RETURN_CALL"
+            es.runtime.exitRequest = "RETURN_CALL"
             Return 1
         End If
 
@@ -1608,7 +1915,7 @@ Private Function ExecRunTailStmt(ByRef ps As ParseState, ByRef es As ExecState, 
             If errText <> "" Then Return 0
         End If
 
-        gExitRequest = "RETURN"
+        es.runtime.exitRequest = "RETURN"
         Return 1
 
     Case "LABEL_STMT"
@@ -1641,7 +1948,7 @@ Private Function ExecRunBlockChildren(ByRef ps As ParseState, ByRef es As ExecSt
 
     Do While ch <> -1
         If ExecRunStmt(ps, es, ch, errText) = 0 Then Return 0
-        If gExitRequest <> "" Then Exit Do
+        If es.runtime.exitRequest <> "" Then Exit Do
         ch = ps.ast.nodes(ch).nextSibling
     Loop
 
@@ -1680,6 +1987,10 @@ Private Function ExecRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVa
     memoryCoreResult = ExecRunMemoryCoreStmt(ps, es, stmtIdx, st, errText)
     If memoryCoreResult <> -2 Then Return memoryCoreResult
 
+    Dim slotResult As Integer
+    slotResult = ExecSlotRunStmt(ps, es, stmtIdx, st, errText)
+    If slotResult <> -2 Then Return slotResult
+
     errText = "exec: unsupported statement kind " & st.kind
     Return 0
 End Function
@@ -1704,25 +2015,31 @@ Private Function ExecRunProgramScopeDtors(ByRef ps As ParseState, ByRef es As Ex
 End Function
 
 Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) As Integer
-    Dim es As ExecState
+    Static es As ExecState
     ExecStateInit es
+    gActiveRuntimeCtx = @es.runtime
+    es.runtime.ffiPolicyEnforce = gFfiDefaultPolicyEnforce
+    es.runtime.ffiPolicyPath = gFfiDefaultPolicyPath
+    es.runtime.ffiResolverPath = gFfiDefaultResolverPath
+    es.runtime.ffiResolverEnforce = gFfiDefaultResolverEnforce
     ExecCollectionsReset
+    ExecSlotsReset es
     ExecDebugConsoleReset
-    ExecContractInit  ' Execution contract'ları initialize et
-    gExitRequest = ""
-    gCallContextDepth = 0
-    gCallReturnValue = 0
-    gCallReturnHasValue = 0
-    gCurrentRoutineName = ""
-    gCurrentRoutineNodeIdx = -1
-    gExecException.active = 0
-    gExecException.kindText = ""
-    gExecException.code = 0
-    gExecException.messageText = ""
-    gExecException.lineNo = 0
-    gExecException.colNo = 0
-    gExecException.routineName = ""
-    ExecValueInit gExecException.value
+    ExecContractInit es
+    es.runtime.exitRequest = ""
+    es.runtime.callContextDepth = 0
+    es.runtime.callReturnValue = 0
+    es.runtime.callReturnHasValue = 0
+    es.runtime.currentRoutineName = ""
+    es.runtime.currentRoutineNodeIdx = -1
+    es.runtime.execException.active = 0
+    es.runtime.execException.kindText = ""
+    es.runtime.execException.code = 0
+    es.runtime.execException.messageText = ""
+    es.runtime.execException.lineNo = 0
+    es.runtime.execException.colNo = 0
+    es.runtime.execException.routineName = ""
+    ExecValueInit es.runtime.execException.value
 
     If ps.rootNode = -1 Then
         errText = "exec: no AST root"
@@ -1741,7 +2058,7 @@ Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) A
         Return 0
     End If
 
-    If ExecBuildTopLevelRoutineMap(ps, ps.rootNode, errText) = 0 Then
+    If ExecBuildTopLevelRoutineMap(ps, es, ps.rootNode, errText) = 0 Then
         ExecNormalizeError errText
         UxbFileCloseAll es.fileIo
         Return 0
@@ -1771,12 +2088,12 @@ Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) A
             Return 0
         End If
 
-        If gExitRequest <> "" Then
+        If es.runtime.exitRequest <> "" Then
             Dim exitReq As String
-            exitReq = UCase(gExitRequest)
+            exitReq = UCase(es.runtime.exitRequest)
 
             If exitReq = "END" Then
-                gExitRequest = ""
+                es.runtime.exitRequest = ""
                 Exit Do
             End If
 
@@ -1790,11 +2107,11 @@ Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) A
 
                 callDepth -= 1
                 st = callStack(callDepth)
-                gExitRequest = ""
+                es.runtime.exitRequest = ""
                 Continue Do
             ElseIf Left(exitReq, 5) = "GOTO:" Then
                 Dim gotoTarget As String
-                gotoTarget = Trim(Mid(gExitRequest, 6))
+                gotoTarget = Trim(Mid(es.runtime.exitRequest, 6))
 
                 Dim gotoIdx As Integer
                 gotoIdx = ExecLabelIndexOf(labelNames(), labelCount, gotoTarget)
@@ -1806,11 +2123,11 @@ Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) A
                 End If
 
                 st = labelNodes(gotoIdx)
-                gExitRequest = ""
+                es.runtime.exitRequest = ""
                 Continue Do
             ElseIf Left(exitReq, 6) = "GOSUB:" Then
                 Dim gosubTarget As String
-                gosubTarget = Trim(Mid(gExitRequest, 7))
+                gosubTarget = Trim(Mid(es.runtime.exitRequest, 7))
 
                 Dim gosubIdx As Integer
                 gosubIdx = ExecLabelIndexOf(labelNames(), labelCount, gosubTarget)
@@ -1831,7 +2148,7 @@ Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) A
                 callDepth += 1
 
                 st = labelNodes(gosubIdx)
-                gExitRequest = ""
+                es.runtime.exitRequest = ""
                 Continue Do
             ElseIf exitReq = "IF" Then
                 errText = "exec: EXIT IF used outside IF block"
