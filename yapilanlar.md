@@ -1,5 +1,167 @@
 # Yapilanlar
 
+## 2026-04-30
+
+### Hamle 4 x64 Float/F80 Todo Kapanisi (4 Madde)
+
+Bugun kalan 4 todo maddesi kapatildi:
+
+1) EnsureLocalSlot/EnsureGlobalSymbol call-site audit + fix
+- `src/codegen/x64/code_generator.fbs` icinde `X64EnsureSymbol(...)` sabit 8-byte varsayimindan cikartildi.
+- Scope bazli symbol allocate edilirken tip registry'den (F32/F64/F80) elem byte-size cikartiliyor:
+	- F32 -> `dd`
+	- F64 -> `dq`
+	- F80 -> `dt`
+
+2) F80 literal emission (Option 1)
+- F80 icin x87 arithmetic'e girmeden literal-store lane eklendi.
+- Yeni yardimci fonksiyonlar:
+	- `X64TryGetNumberLiteral`
+	- `X64EmitStoreF80FromLabelAtRcX`
+	- `X64EmitStoreF80LiteralVar`
+	- `X64EmitStoreIndexedLocalF80Literal`
+	- `X64EmitStoreIndexedGlobalF80Literal`
+- `DIM ... AS F80` init ve `ASSIGN` flow'unda rhs NUMBER ise `dt` constant olusturulup hedefe 10 byte (8+2) olarak kopyalaniyor.
+
+3) Float assignment/init call-site tamamlama
+- F64-ozel kontrol F32/F64/F80 hedef-kind modeline genislendi.
+- `X64EmitExprToXmm0As(..., targetKind, ...)` call-site'lari assignment/init flow'una tasindi.
+- Global float store yaziminda F32 icin `movss`, F64 icin `movsd` secimi explicit hale getirildi.
+
+4) Parity + test dogrulama ve dokumantasyon
+- Verbatim diagnostic eklendi: `x64-codegen: F80 arithmetic not yet supported in x64 backend`
+- Test/parity kaniti alindi ve bu kayit append edildi.
+
+Kanit komut/sonuclar:
+- `tests/run_44_matrix_float_native_64.exe` -> `PASS 44 matrix float native`
+- `tests/basicCodeTests/45_matrix_f80_diagnostic_64.exe` -> `DONE_F80_EXEC`
+- `tools/run_err_codegen_parity_gate.ps1` -> `ERR_CODEGEN_PARITY_GATE_OK`
+- Ek post-change bundle:
+	- `tests/run_err_mir_lowering_64.exe` -> `ERR_MIR_OK`
+	- `tests/run_err_backend_hooks_64.exe` -> `PASS err backend hooks` + `ERR_BACKEND_HOOKS_OK`
+	- `tests/run_err_semantic_pass_64.exe` -> `PASS err semantic pass` + `ERR_SEMANTIC_OK`
+	- `tests/run_floating_point_exec_64.exe` -> `PASS floating point exec` + `FLOAT_EXEC_OK`
+
+### Hamle 5 TYPE layout + field access durum sabitleme (2026-04-30)
+
+Bu turda Hamle 5 lane'i test ve log kaniti ile netlestirildi.
+
+Kanit komut/sonuclar:
+- `tests/run_x64_type_field_codegen_h5_64.exe` -> `PASS H5 x64 type field codegen`
+- `tests/run_x64_type_field_f80_diag_64.exe` -> `PASS H5 F80 diagnostic`
+- `tests/run_x64_codegen_emit_64.exe` -> `PASS x64 codegen emit`
+- `tests/basicCodeTests/46_matrix_float_array_stride_64.exe` -> `PASS 46 matrix float array stride`
+- `tests/basicCodeTests/47_matrix_float_function_return_64.exe` -> `PASS 47 matrix float function return`
+
+50-54 lane durumu:
+- `50_type_field_numeric.bas` -> AST/MIR/x64 build OK
+- `51_type_nested_field.bas` -> AST/MIR/x64 build OK
+- `52_type_array_field.bas` -> AST fail (`exit=5`), MIR fail (`exit=13`), x64 build fail (`exit=14`)
+- `53_type_f80_field_diagnostic.bas` -> AST/MIR OK, x64 build fail (`exit=14`, bilincli diagnostic lane)
+- `54_type_string_field_partial.bas` -> AST/MIR/x64 build OK
+
+Log kaniti (`dist/loglar/uxbasic.log`):
+- `x64-codegen: field resolve failed OFFSETOF invalid index syntax`
+- `x64-codegen: F80 field store is not implemented in x64 backend yet`
+
+Durum karari:
+- Hamle 5 bu snapshotta `PARTIAL`.
+- Kapanis icin 52 array-field ve 53 F80 field-store lane'leri tamamlanmali.
+
+## 2026-04-29
+
+### Hamle 2 Kapanisi - MIR I/O Parity Kaniti Tazelendi
+
+Hamle 2 (I/O parity) icin MIR lane'i taze derle-calistir kaniti ile yeniden dogrulandi.
+
+Kanit komutlari:
+- `tools/FreeBASIC-1.10.1-win64/fbc.exe -lang fb -arch x86_64 tests/run_print_zone_exec_mir.bas -x tests/run_print_zone_exec_mir_64.exe`
+- `tests/run_print_zone_exec_mir_64.exe` -> `PASS print zone MIR exec`
+- `tools/FreeBASIC-1.10.1-win64/fbc.exe -lang fb -arch x86_64 tests/run_input_exec_mir.bas -x tests/run_input_exec_mir_64.exe`
+- `tests/run_input_exec_mir_64.exe` -> `PASS input MIR exec`
+- `tools/FreeBASIC-1.10.1-win64/fbc.exe -lang fb -arch x86_64 tests/run_file_io_exec_mir.bas -x tests/run_file_io_exec_mir_64.exe`
+- `tests/run_file_io_exec_mir_64.exe` -> `PASS file io MIR exec`
+
+Sonuc:
+- `COMPILER_COVERAGE.md` icinde Hamle 2 `DONE (2026-04-29)` olarak guncellendi.
+
+### Hamle 3 Baslangici - MIR Bellek Parity Genisletmesi
+
+MIR lowering + evaluator tarafinda bellek statement lane'i genisletildi:
+
+Kod kapsami:
+- `src/semantic/mir.fbs`
+	- `POKES_STMT`
+	- `MEMCOPYB/W/D_STMT`
+	- `MEMFILLB/W/D_STMT`
+	- `SETNEWOFFSET_STMT`
+- `src/semantic/mir_evaluator.fbs`
+	- `CALL POKES`
+	- `CALL MEMCOPYB/W/D`
+	- `CALL MEMFILLB/W/D`
+	- `CALL SETNEWOFFSET`
+	- overlap-safe byte copy ve width-aware fill yardimcilari
+
+Yeni test:
+- `tests/run_memory_exec_mir.bas`
+	- `POKE*/PEEK*`, `POKES`, `MEMCOPY*`, `MEMFILL*`, `SETNEWOFFSET + VARPTR` pozitif lane
+	- `MEMCOPYB ... -1` icin fail-fast lane (`NEGATIF UZUNLUK`)
+
+Kanit komutlari:
+- `tools/FreeBASIC-1.10.1-win64/fbc.exe -lang fb -arch x86_64 tests/run_memory_exec_mir.bas -x tests/run_memory_exec_mir_64.exe`
+- `tests/run_memory_exec_mir_64.exe` -> `PASS memory MIR exec`
+
+Sonuc:
+- `COMPILER_COVERAGE.md` icinde bellek satirlarinda `MIR Runtime` hucreleri `OK` olarak guncellendi.
+- Hamle 3 durumu `IN-PROGRESS (2026-04-29)` olarak isaretlendi (x64 codegen memory lane acik).
+
+### Hamle 3 Kapanisi - x64 Bellek Codegen Lane'i Tamamlandi
+
+x64 codegen tarafinda Hamle 3 bellek lane'i kapatildi.
+
+Kod kapsami:
+- `src/codegen/x64/code_generator.fbs`
+	- statement emit: `POKES_STMT`, `MEMCOPYB/W/D_STMT`, `MEMFILLB/W/D_STMT`, `SETNEWOFFSET_STMT`
+	- runtime helper asm: `__uxb_mem_pokes`, `__uxb_mem_copyb/w/d`, `__uxb_mem_fillb/w/d`, `__uxb_set_new_offset`
+	- dispatch/genisletme: `GenerateStatement` ve `X64EmitNode` case listeleri
+	- extern baglantilari: `memmove`, `memset`
+- yeni test: `tests/run_x64_codegen_memory_emit.bas`
+
+Kanit komutlari:
+- `tools/FreeBASIC-1.10.1-win64/fbc.exe -lang fb -arch x86_64 tests/run_x64_codegen_memory_emit.bas -x tests/run_x64_codegen_memory_emit_64.exe`
+- `tests/run_x64_codegen_memory_emit_64.exe` -> `PASS x64 codegen memory emit`
+- `tmp_validate_x64_codegen_epilog_array` gorevi tekrar calistirildi:
+	- `PASS x64 codegen stack frame locals`
+	- `PASS x64 codegen emit`
+	- `PASS x64 codegen local array index`
+
+Sonuc:
+- `COMPILER_COVERAGE.md` icinde Hamle 3 `DONE (2026-04-29)` olarak guncellendi.
+
+### Hamle 4 Baslangici - Operator/Sayisal x64 Kickoff
+
+Hamle 4 icin ilk regression hattı acildi.
+
+Yeni test:
+- `tests/run_x64_codegen_operator_numeric_emit.bas`
+	- `INC/DEC`
+	- bitwise `SHL`/`|`
+	- sayisal builtin emit (`ABS`, `SQR`, `SIN`, `COS`)
+
+Kanit komutlari:
+- `tools/FreeBASIC-1.10.1-win64/fbc.exe -lang fb -arch x86_64 tests/run_x64_codegen_operator_numeric_emit.bas -x tests/run_x64_codegen_operator_numeric_emit_64.exe`
+- `tests/run_x64_codegen_operator_numeric_emit_64.exe` -> `PASS x64 codegen operator numeric emit`
+
+Sonuc:
+- `COMPILER_COVERAGE.md` icinde Hamle 4 durumu `IN-PROGRESS (2026-04-29)` olarak isaretlendi.
+
+### Hamle 4 Gate Entegrasyonu (2026-04-29)
+
+- `tools/run_faz_a_gate.ps1` içerisine x64 codegen regression testleri eklendi:
+	- Build adımları: `Build run_x64_codegen_memory_emit_64`, `Build run_x64_codegen_operator_numeric_emit_64`
+	- Run adımları: `Run run_x64_codegen_memory_emit_64`, `Run run_x64_codegen_operator_numeric_emit_64`
+- `COMPILER_COVERAGE.md` ilgili satırları güncellendi; Hamle 4 otomatik gate tarafından doğrulanacak şekilde izleniyor.
+
 ## 2026-04-13
 
 ### R3.O2 Kapanisi - Constructor/Destructor Lite MVP

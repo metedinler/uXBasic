@@ -1,0 +1,198 @@
+Type TypeLayoutDim
+    lowerBound As Integer
+    upperBound As Integer
+    extent As Integer
+End Type
+
+Type TypeLayoutField
+    fieldName As String
+    fieldTypeName As String
+    offsetBytes As Integer
+    sizeBytes As Integer
+    alignBytes As Integer
+    isArray As Integer
+    elemTypeName As String
+    elemSizeBytes As Integer
+    elemAlignBytes As Integer
+    elemStrideBytes As Integer
+    firstDim As Integer
+    dimCount As Integer
+End Type
+
+Type TypeLayoutRecord
+    typeName As String
+    declNode As Integer
+    firstField As Integer
+    fieldCount As Integer
+    sizeBytes As Integer
+    alignBytes As Integer
+    computed As Integer
+    visiting As Integer
+End Type
+
+Dim Shared gTypeLayouts() As TypeLayoutRecord
+Dim Shared gTypeLayoutCount As Integer
+Dim Shared gTypeLayoutFields() As TypeLayoutField
+Dim Shared gTypeLayoutFieldCount As Integer
+Dim Shared gTypeLayoutDims() As TypeLayoutDim
+Dim Shared gTypeLayoutDimCount As Integer
+Dim Shared gTypeLayoutBuilt As Integer
+
+Private Sub LayoutResetState()
+    gTypeLayoutCount = 0
+    gTypeLayoutFieldCount = 0
+    gTypeLayoutDimCount = 0
+    gTypeLayoutBuilt = 0
+End Sub
+
+Private Function LayoutAlignUp(ByVal valueIn As Integer, ByVal alignBytes As Integer) As Integer
+    If alignBytes < 1 Then alignBytes = 1
+    Return ((valueIn + alignBytes - 1) \ alignBytes) * alignBytes
+End Function
+
+Private Function LayoutChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    Dim i As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i = i + 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function IsBuiltinLayoutType(ByRef rawTypeName As String, ByRef sizeOut As Integer, ByRef alignOut As Integer) As Integer
+    Dim t As String
+    t = UCase(Trim(rawTypeName))
+
+    Select Case t
+    Case "I8", "U8", "BOOLEAN"
+        sizeOut = 1
+        alignOut = 1
+        Return 1
+    Case "I16", "U16"
+        sizeOut = 2
+        alignOut = 2
+        Return 1
+    Case "I32", "U32", "F32"
+        sizeOut = 4
+        alignOut = 4
+        Return 1
+    Case "I64", "U64", "F64"
+        sizeOut = 8
+        alignOut = 8
+        Return 1
+    Case "F80", "EXTENDED", "EXT"
+        sizeOut = 10
+        alignOut = 8
+        Return 1
+    Case "STRING", "ARRAY", "LIST", "DICT", "SET", "REF", "POINTER"
+        sizeOut = 8
+        alignOut = 8
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function FindTypeLayoutIndex(ByRef rawTypeName As String) As Integer
+    Dim normalized As String
+    normalized = UCase(Trim(rawTypeName))
+    If normalized = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To gTypeLayoutCount - 1
+        If gTypeLayouts(i).typeName = normalized Then Return i
+    Next i
+
+    Return -1
+End Function
+
+Private Function AddTypeLayoutDecl(ByRef rawTypeName As String, ByVal declNode As Integer, ByRef errOut As String) As Integer
+    Dim normalized As String
+    normalized = UCase(Trim(rawTypeName))
+    If normalized = "" Then
+        errOut = "layout: empty type name"
+        Return 0
+    End If
+
+    Dim i As Integer
+    i = FindTypeLayoutIndex(normalized)
+    If i <> -1 Then
+        If gTypeLayouts(i).declNode <> -1 Then
+            errOut = "layout: duplicate type declaration: " & normalized
+            Return 0
+        End If
+        gTypeLayouts(i).declNode = declNode
+        Return 1
+    End If
+
+    If gTypeLayoutCount = 0 Then
+        ReDim gTypeLayouts(0)
+    Else
+        ReDim Preserve gTypeLayouts(gTypeLayoutCount)
+    End If
+
+    gTypeLayouts(gTypeLayoutCount).typeName = normalized
+    gTypeLayouts(gTypeLayoutCount).declNode = declNode
+    gTypeLayouts(gTypeLayoutCount).firstField = -1
+    gTypeLayouts(gTypeLayoutCount).fieldCount = 0
+    gTypeLayouts(gTypeLayoutCount).sizeBytes = 0
+    gTypeLayouts(gTypeLayoutCount).alignBytes = 1
+    gTypeLayouts(gTypeLayoutCount).computed = 0
+    gTypeLayouts(gTypeLayoutCount).visiting = 0
+    gTypeLayoutCount = gTypeLayoutCount + 1
+
+    Return 1
+End Function
+
+Private Function AddLayoutDim(ByVal lowerBound As Integer, ByVal upperBound As Integer, ByVal extent As Integer) As Integer
+    Dim idx As Integer
+
+    If gTypeLayoutDimCount = 0 Then
+        ReDim gTypeLayoutDims(0)
+    Else
+        ReDim Preserve gTypeLayoutDims(gTypeLayoutDimCount)
+    End If
+
+    idx = gTypeLayoutDimCount
+    gTypeLayoutDimCount = gTypeLayoutDimCount + 1
+    gTypeLayoutDims(idx).lowerBound = lowerBound
+    gTypeLayoutDims(idx).upperBound = upperBound
+    gTypeLayoutDims(idx).extent = extent
+
+    Return idx
+End Function
+
+Private Function AddLayoutField(ByRef fieldName As String, ByRef fieldTypeName As String, ByVal offsetBytes As Integer, ByVal sizeBytes As Integer, ByVal alignBytes As Integer, ByVal isArray As Integer, ByRef elemTypeName As String, ByVal elemSizeBytes As Integer, ByVal elemAlignBytes As Integer, ByVal elemStrideBytes As Integer, ByVal firstDim As Integer, ByVal dimCount As Integer) As Integer
+    Dim idx As Integer
+
+    If gTypeLayoutFieldCount = 0 Then
+        ReDim gTypeLayoutFields(0)
+    Else
+        ReDim Preserve gTypeLayoutFields(gTypeLayoutFieldCount)
+    End If
+
+    idx = gTypeLayoutFieldCount
+    gTypeLayoutFieldCount = gTypeLayoutFieldCount + 1
+
+    gTypeLayoutFields(idx).fieldName = UCase(Trim(fieldName))
+    gTypeLayoutFields(idx).fieldTypeName = UCase(Trim(fieldTypeName))
+    gTypeLayoutFields(idx).offsetBytes = offsetBytes
+    gTypeLayoutFields(idx).sizeBytes = sizeBytes
+    gTypeLayoutFields(idx).alignBytes = alignBytes
+    gTypeLayoutFields(idx).isArray = isArray
+    gTypeLayoutFields(idx).elemTypeName = UCase(Trim(elemTypeName))
+    gTypeLayoutFields(idx).elemSizeBytes = elemSizeBytes
+    gTypeLayoutFields(idx).elemAlignBytes = elemAlignBytes
+    gTypeLayoutFields(idx).elemStrideBytes = elemStrideBytes
+    gTypeLayoutFields(idx).firstDim = firstDim
+    gTypeLayoutFields(idx).dimCount = dimCount
+
+    Return idx
+End Function

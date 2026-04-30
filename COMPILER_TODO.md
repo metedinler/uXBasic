@@ -79,6 +79,9 @@ Bu not, `src` taramasi sonrasinda compiler katmanlarinin mevcut durumunu ve bu t
   `SQR`, `SIN`, `COS`, `TAN`, `ATN`, `EXP`, `LOG`
   `MOD`, `AND`, `OR`, `XOR`, `NOT`, `SHL`, `SHR`, `ROL`, `ROR`
   `tests/basicCodeTests/13_uxb_commands_operators_types.bas` artik native emit/build asamalarini geciyor
+  `\` ve `\=` lexer/parser/runtime/MIR/x64 zinciri gercek operator tokenine hizalandi
+  `tests/probes/operator_assign_scalar_only_probe.bas` AST/MIR/native olarak `13`
+  `tests/probes/operator_assign_div_probe.bas` AST/MIR/native olarak `5`
 - sembolik operator uyumu:
   `==`, `!=`, `^`, unary `!`, unary `~`
   parser + semantic const-eval + AST runtime + MIR lowering + x64 emit zincirine baglandi
@@ -105,11 +108,34 @@ Bu not, `src` taramasi sonrasinda compiler katmanlarinin mevcut durumunu ve bu t
   `FIELD_EXPR` path lowering (read/write/assign/incdec) eklendi
   `tests/probes/type_class_field_probe.bas` AST/MIR/native olarak `10`, `15`, `33`
   `tests/probes/type_class_field_mutation_probe.bas` AST/MIR/native olarak `12`, `40`
+  `tests/probes/type_class_nested_field_probe.bas` AST/MIR/native olarak `7`, `12`, `10`, `20`, `22`, `24`
+  `tests/probes/type_class_array_bridge_probe.bas` AST/MIR/native olarak `10`, `15`, `20`, `20`
+  `tests/probes/type_class_array_field_probe.bas` AST/MIR/native olarak `3`, `12`, `8`
+  `tests/basicCodeTests/28_matrix_class_interface.bas` AST olarak `42`; native x64 build+run olarak da `42`
+  x64 dotted method dispatch emit eklendi: `d.Speak()` artik receiver adresini ilk arguman olarak indiriyor
+  x64 `NEW` ctor ve `DELETE` dtor lane'i:
+  `tests/probes/native_class_ctor_probe.bas` native exe olarak `7`
+  `tests/probes/native_class_delete_probe.bas` native exe olarak `9`
+  routine icinden global store yolu global sembole baglandi
 - `NEW` parser akisi:
   `NEW BOX()` artik `NEW_EXPR("BOX")` olarak iniyor
 - x64 basic field parity:
   `tests/probes/native_type_field_single_probe.bas` native exe olarak `10`
   `tests/probes/native_class_field_single_probe.bas` native exe olarak `33`
+
+## Kalan En Yakin Kirmizilar
+
+- MIR runtime class lane kapanisi:
+  user routine / method call lowering-evaluation zinciri tamamlandi
+  `tests/basicCodeTests/28_matrix_class_interface.bas --execmem --interpreter-backend MIR` artik `42` ile geciyor
+  `tests/oop/class_constructor_method_runtime.bas` MIR `25`, `tests/probes/native_class_ctor_probe.bas` MIR `7`, `tests/probes/native_class_delete_probe.bas` MIR `9`
+- x64 pointer/layout builtin lane tamamlandi:
+  `VARPTR`, `OFFSETOF`, `PEEKD` native codegen emit bosluklari kapatildi
+  `tests/probes/native_class_new_delete_probe.bas` native build+run ciktilari `77`, `0`, `1`
+- `INPUT` native lane tamamlandi:
+  native x64 `INPUT_STMT` console yolu eklendi (`scanf` tabanli)
+- `EVENT/THREAD/PARALEL/PIPE/SLOT` katmanlari:
+  semantic guard + MIR lowering(no-op) + x64 codegen(no-op) lane'i eklendi
 - coverage test kaniti tazelendi:
   `tests/run_console_state_exec_ast.exe` -> `PASS console state AST exec`
   `tests/run_jump_exec_ast.exe` -> `PASS jump AST exec`
@@ -136,8 +162,10 @@ Bu not, `src` taramasi sonrasinda compiler katmanlarinin mevcut durumunu ve bu t
 - x64 tarafinda siradaki davranis bosluklari:
   array/type access
   `TYPE/CLASS` field access icin daha genis native smoke ve print parity
+  native print/string parity (ozellikle `13.bas`) sertlestirme
+  `NEW/DELETE` lane'i temelde aktif, daha genis davranis matrix'iyle derinlestirme
 - operator tablosunda kalan buyuk bosluklar:
-  aggregate/nested `TYPE/CLASS` field parity (ozellikle daha genis native smoke)
+  `TYPE/CLASS` field parity icin daha genis varyantlar (array/collection ile birlesik native smoke)
   ternary/pipe/incdec lane'i icin daha genis semantic+MIR+x64 coverage
 - PTR/POINTER anlamsal not:
   `POINTER` su an tip sistemi/semantic katmaninda veri tipi kategorisi
@@ -155,8 +183,18 @@ Bu not, `src` taramasi sonrasinda compiler katmanlarinin mevcut durumunu ve bu t
 - `mir_exporter_json` altinda opcode exporter yuzeyi de toplanmali.
 - Dosya bolme ikinci planda; once coverage matrisindeki partial/missing davranislar kodla kapatilacak.
 - Bir sonraki oncelik:
-  `TYPE/CLASS` aggregate/nested field parity probe'larini genisletmek
+  `TYPE/CLASS` field parity probe'larini array/collection kombinasyonlariyla genisletmek
   ardindan daha genis native aggregate/type smoke
+
+## Hamle 5 Kalanlar (2026-04-30)
+
+- `tests/basicCodeTests/52_type_array_field.bas` lane'ini kapat:
+  `OFFSETOF invalid index syntax` kok nedenini resolver/index syntax tarafinda duzelt.
+- `tests/basicCodeTests/53_type_f80_field_diagnostic.bas` lane kararini netlestir:
+  ya gercek F80 field store emit'i ac, ya da bu lane'i resmi olarak fail-fast/PARTIAL backlog olarak dondur.
+- `tests/basicCodeTests/54_type_string_field_partial.bas` icin string field parity'yi nested/array varyantlariyla genislet.
+- Hamle 5 kapanis kriteri:
+  50/51/54 `OK`, 52/53 lane'leri de `OK` olmadan Hamle 5 `DONE` isaretlenmeyecek.
 
 ## Hedef Ornek Regresyonlar
 
