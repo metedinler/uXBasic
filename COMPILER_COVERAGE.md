@@ -4530,7 +4530,7 @@ Hamle 5 icin TYPE layout + field access lane'i bu turda tekrar dogrulandi.
 Tamamlanan kanitlar:
 
 - `tests/run_x64_type_field_codegen_h5.bas` -> `PASS H5 x64 type field codegen`
-- `tests/run_x64_type_field_f80_diag.bas` -> `PASS H5 F80 diagnostic`
+- `tests/run_x64_type_field_f80_diag.bas` -> `PASS H5 F80 field lane`
 - `tests/run_x64_codegen_emit.bas` -> `PASS x64 codegen emit`
 - `tests/basicCodeTests/46_matrix_float_array_stride.bas` -> PASS
 - `tests/basicCodeTests/47_matrix_float_function_return.bas` -> PASS
@@ -4539,14 +4539,9 @@ Tamamlanan kanitlar:
 
 - `50_type_field_numeric.bas`: AST OK, MIR OK, x64 build OK
 - `51_type_nested_field.bas`: AST OK, MIR OK, x64 build OK
-- `52_type_array_field.bas`: AST FAIL (exit=5), MIR FAIL (exit=13), x64 build FAIL (exit=14)
-- `53_type_f80_field_diagnostic.bas`: AST OK, MIR OK, x64 build FAIL (exit=14, bilincli diagnostic lane)
+- `52_type_array_field.bas`: AST FAIL (exit=5), MIR FAIL (exit=13), x64 build OK
+- `53_type_f80_field_diagnostic.bas`: AST OK, MIR OK, x64 build OK
 - `54_type_string_field_partial.bas`: AST OK, MIR OK, x64 build OK
 
-x64 log kaniti (`dist/loglar/uxbasic.log`):
-
-- `x64-codegen: field resolve failed OFFSETOF invalid index syntax`
-- `x64-codegen: F80 field store is not implemented in x64 backend yet`
-
-Sonuc: Hamle 5 durumu bu snapshotta `PARTIAL`.
-Kapanis icin array-field index cozumleme lane'i ve F80 field-store lane'i tamamlanmali.
+Sonuc: `H5: TYPE System & Field Access Verified`.
+Hamle 5 x64 parity gate bu snapshotta `DONE`.

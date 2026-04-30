@@ -41,14 +41,16 @@ Private Sub Main()
     If AssertTrue(ParseText(src, ps, errText), "parse source: " & errText) = 0 Then End 1
 
     errText = ""
-    If X64CodegenEmitNasm(ps, asmText, errText) <> 0 Then
-        Print "FAIL H5-F80 | expected diagnostic but codegen succeeded"
+    If X64CodegenEmitNasm(ps, asmText, errText) = 0 Then
+        Print "FAIL H5-F80 | codegen failed: " & errText
         End 1
     End If
 
-    If AssertTrue(InStr(1, UCase(errText), UCase("F80 field store is not implemented")) > 0, "missing expected F80 diagnostic: " & errText) = 0 Then End 1
+    If AssertTrue(InStr(1, UCase(errText), UCase("not implemented")) = 0, "legacy not-implemented diagnostic should not appear: " & errText) = 0 Then End 1
+    If AssertTrue(InStr(1, UCase(asmText), UCase("mov [rcx + 8], ax")) > 0, "missing F80 field store lane in asm") = 0 Then End 1
+    If AssertTrue(InStr(1, UCase(asmText), UCase("fld tword [rax]")) > 0, "missing F80 field print conversion lane in asm") = 0 Then End 1
 
-    Print "PASS H5 F80 diagnostic"
+    Print "PASS H5 F80 field lane"
     End 0
 End Sub
 

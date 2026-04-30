@@ -26,3 +26,5 @@ MIR lane F80 yuzeyinde fail-fast zorlamasi x64 kadar katman ici degil; asil F80 
 
 Hamle 5 icin MIR durumu: PARTIAL.
 Kapanis icin gereken ana is: 52 array-field zincirinin MIR lowering/eval tarafinda net kapanmasi.
+
+Not: Hamle 5'in kullanici kabul kriteri olan x64 parity gate bu turda kapatildi (50-54 x64 build OK).

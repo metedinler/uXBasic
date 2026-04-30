@@ -1,0 +1,224 @@
+Private Sub ExecSlotsReset(ByRef es As ExecState)
+    es.slotEntryCount = 0
+    Erase es.slotEntries
+End Sub
+
+Private Function ExecSlotNormalizeKind(ByRef kindText As String) As String
+    Dim k As String
+    k = UCase(Trim(kindText))
+    Return k
+End Function
+
+Private Function ExecSlotBlockKind(ByRef nodeKind As String, ByRef kindOut As String) As Integer
+    Select Case UCase(Trim(nodeKind))
+    Case "EVENT_STMT"
+        kindOut = "EVENT"
+        Return 1
+    Case "THREAD_STMT"
+        kindOut = "THREAD"
+        Return 1
+    Case "PARALEL_STMT"
+        kindOut = "PARALEL"
+        Return 1
+    Case "PIPE_STMT"
+        kindOut = "PIPE"
+        Return 1
+    End Select
+
+    kindOut = ""
+    Return 0
+End Function
+
+Private Function ExecSlotFind(ByRef es As ExecState, ByRef kindText As String, ByRef nameText As String, ByVal slotId As Integer, ByVal preferId As Integer) As Integer
+    Dim k As String
+    k = ExecSlotNormalizeKind(kindText)
+    Dim n As String
+    n = UCase(Trim(nameText))
+
+    Dim i As Integer
+    For i = 0 To es.slotEntryCount - 1
+        If es.slotEntries(i).kindText <> k Then Continue For
+        If preferId <> 0 Then
+            If es.slotEntries(i).slotId = slotId Then Return i
+        Else
+            If UCase(es.slotEntries(i).nameText) = n Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function ExecSlotReadHeaderId(ByRef ps As ParseState, ByRef es As ExecState, ByVal blockIdx As Integer, ByRef errText As String) As Integer
+    Dim headerIdx As Integer
+    headerIdx = ExecChildAt(ps, blockIdx, 0)
+    If headerIdx = -1 Then Return -1
+    If UCase(ps.ast.nodes(headerIdx).kind) <> "SLOT_HEADER_ARGS" Then Return -1
+
+    Dim idExpr As Integer
+    idExpr = ExecChildAt(ps, headerIdx, 0)
+    If idExpr = -1 Then Return -1
+
+    Dim slotId As Integer
+    slotId = ExecEvalNode(ps, es, idExpr, errText)
+    If errText <> "" Then Return -2
+    Return slotId
+End Function
+
+Private Function ExecSlotRegisterBlock(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim kindText As String
+    If ExecSlotBlockKind(st.kind, kindText) = 0 Then Return -2
+
+    Dim slotId As Integer
+    slotId = ExecSlotReadHeaderId(ps, es, stmtIdx, errText)
+    If errText <> "" Then Return 0
+    If slotId < -1 Or slotId > 255 Then
+        errText = "exec: slot id out of byte range"
+        Return 0
+    End If
+
+    Dim existing As Integer
+    existing = ExecSlotFind(es, kindText, st.value, slotId, IIf(slotId >= 0, 1, 0))
+    If existing = -1 Then
+        If es.slotEntryCount = 0 Then
+            ReDim es.slotEntries(0)
+        Else
+            ReDim Preserve es.slotEntries(es.slotEntryCount)
+        End If
+        existing = es.slotEntryCount
+        es.slotEntryCount += 1
+    End If
+
+    es.slotEntries(existing).kindText = ExecSlotNormalizeKind(kindText)
+    es.slotEntries(existing).nameText = st.value
+    es.slotEntries(existing).slotId = slotId
+    es.slotEntries(existing).nodeIdx = stmtIdx
+    es.slotEntries(existing).loaded = 1
+    Return 1
+End Function
+
+Private Function ExecSlotTargetInfo(ByRef ps As ParseState, ByRef es As ExecState, ByVal targetIdx As Integer, ByRef nameOut As String, ByRef slotIdOut As Integer, ByRef preferIdOut As Integer, ByRef errText As String) As Integer
+    If targetIdx = -1 Then
+        errText = "exec: slot target missing"
+        Return 0
+    End If
+
+    Dim k As String
+    k = UCase(ps.ast.nodes(targetIdx).kind)
+    Select Case k
+    Case "IDENT", "KEYWORD_REF", "STRING"
+        nameOut = ps.ast.nodes(targetIdx).value
+        slotIdOut = -1
+        preferIdOut = 0
+    Case Else
+        slotIdOut = ExecEvalNode(ps, es, targetIdx, errText)
+        If errText <> "" Then Return 0
+        If slotIdOut < 0 Or slotIdOut > 255 Then
+            errText = "exec: slot target id out of byte range"
+            Return 0
+        End If
+        nameOut = ""
+        preferIdOut = 1
+    End Select
+
+    Return 1
+End Function
+
+Private Function ExecSlotRunBlockBody(ByRef ps As ParseState, ByRef es As ExecState, ByVal blockIdx As Integer, ByRef errText As String) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(blockIdx).firstChild
+
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) <> "SLOT_HEADER_ARGS" Then
+            If ExecRunStmt(ps, es, ch, errText) = 0 Then Return 0
+            If es.runtime.exitRequest <> "" Then Exit Do
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ExecSlotTrigger(ByRef ps As ParseState, ByRef es As ExecState, ByRef kindText As String, ByRef nameText As String, ByVal slotId As Integer, ByVal preferId As Integer, ByRef errText As String) As Integer
+    Dim idx As Integer
+    idx = ExecSlotFind(es, kindText, nameText, slotId, preferId)
+    If idx = -1 Then
+        errText = "exec: slot target not found"
+        Return 0
+    End If
+
+    If es.slotEntries(idx).active = 0 Then Return 1
+    Return ExecSlotRunBlockBody(ps, es, es.slotEntries(idx).nodeIdx, errText)
+End Function
+
+Private Function ExecSlotTriggerPipeValue(ByRef ps As ParseState, ByRef es As ExecState, ByRef pipeName As String, ByRef inputValue As ExecValue, ByRef outputValue As ExecValue, ByRef errText As String) As Integer
+    ExecSetVarValue es, "INPUT", inputValue
+    ExecValueInit outputValue
+    ExecSetVarValue es, "OUTPUT", outputValue
+
+    If ExecSlotTrigger(ps, es, "PIPE", pipeName, -1, 0, errText) = 0 Then Return 0
+
+    If ExecGetVarValue(es, "OUTPUT", outputValue) = 0 Then ExecValueInit outputValue
+    Return 1
+End Function
+
+Private Function ExecSlotRunControlStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim kindName As String
+    kindName = ExecSlotNormalizeKind(st.value)
+
+    Dim targetName As String
+    Dim targetId As Integer
+    Dim preferId As Integer
+    If ExecSlotTargetInfo(ps, es, ExecChildAt(ps, stmtIdx, 0), targetName, targetId, preferId, errText) = 0 Then Return 0
+
+    Dim idx As Integer
+    idx = ExecSlotFind(es, kindName, targetName, targetId, preferId)
+    If idx = -1 Then
+        errText = "exec: slot target not found"
+        Return 0
+    End If
+
+    Select Case UCase(st.op)
+    Case "ON"
+        es.slotEntries(idx).active = 1
+        Return 1
+    Case "OFF"
+        es.slotEntries(idx).active = 0
+        Return 1
+    End Select
+
+    Return -2
+End Function
+
+Private Function ExecSlotRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim registerResult As Integer
+    registerResult = ExecSlotRegisterBlock(ps, es, stmtIdx, st, errText)
+    If registerResult <> -2 Then Return registerResult
+
+    Select Case UCase(st.kind)
+    Case "SLOT_STMT"
+        Dim countExpr As Integer
+        countExpr = ExecChildAt(ps, stmtIdx, 0)
+        If countExpr <> -1 Then
+            Dim slotCount As Integer
+            slotCount = ExecEvalNode(ps, es, countExpr, errText)
+            If errText <> "" Then Return 0
+            If slotCount < 0 Or slotCount > 256 Then
+                errText = "exec: slot count out of byte range"
+                Return 0
+            End If
+        End If
+        Return 1
+
+    Case "SLOT_CONTROL_STMT"
+        Return ExecSlotRunControlStmt(ps, es, stmtIdx, st, errText)
+
+    Case "TRIGGER_STMT"
+        Dim targetName As String
+        Dim targetId As Integer
+        Dim preferId As Integer
+        If ExecSlotTargetInfo(ps, es, ExecChildAt(ps, stmtIdx, 0), targetName, targetId, preferId, errText) = 0 Then Return 0
+        Return ExecSlotTrigger(ps, es, st.value, targetName, targetId, preferId, errText)
+    End Select
+
+    Return -2
+End Function

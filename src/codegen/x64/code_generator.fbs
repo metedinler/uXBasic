@@ -2883,8 +2883,36 @@ Private Function X64ResolveFieldInfo(ByRef ps As ParseState, ByVal fieldNode As 
             End If
 
             Dim idxText As String
-            idxText = ""
-            If X64TryGetNumberLiteral(ps, idxNode, idxText) = 0 Then
+            idxText = Trim(ps.ast.nodes(idxNode).value)
+            If idxText = "" Then
+                errText = "x64-codegen: dynamic field index is not supported in x64 backend yet"
+                Return 0
+            End If
+
+            Dim idxPos As Integer
+            idxPos = 1
+            If Left(idxText, 1) = "+" Or Left(idxText, 1) = "-" Then
+                idxPos = 2
+            End If
+
+            If idxPos > Len(idxText) Then
+                errText = "x64-codegen: dynamic field index is not supported in x64 backend yet"
+                Return 0
+            End If
+
+            Dim idxOk As Integer
+            idxOk = 1
+            Dim idxI As Integer
+            For idxI = idxPos To Len(idxText)
+                Dim idxCh As String
+                idxCh = Mid(idxText, idxI, 1)
+                If idxCh < "0" Or idxCh > "9" Then
+                    idxOk = 0
+                    Exit For
+                End If
+            Next idxI
+
+            If idxOk = 0 Then
                 errText = "x64-codegen: dynamic field index is not supported in x64 backend yet"
                 Return 0
             End If
@@ -3024,8 +3052,23 @@ Private Function X64EmitStoreFieldFromRhs(ByRef ps As ParseState, ByVal fieldNod
         End If
         Return 1
     ElseIf fk = UXF_F80 Then
-        errText = "x64-codegen: F80 field store is not implemented in x64 backend yet"
-        Return 0
+        Dim f80Raw As String
+        f80Raw = ""
+        If X64TryGetNumberLiteral(ps, rhsNode, f80Raw) = 0 Then
+            errText = "x64-codegen: F80 arithmetic not yet supported in x64 backend"
+            Return 0
+        End If
+
+        Dim f80Label As String
+        f80Label = X64CreateFloatConstant(cg, f80Raw, UXF_F80)
+
+        Dim addrFieldType As String
+        Dim addrFieldSize As Integer
+        If X64EmitAddrOfFieldExpr(ps, fieldNode, cg, addrFieldType, addrFieldSize, errText) = 0 Then Return 0
+
+        X64EmitText cg, "    mov rcx, rax"
+        X64EmitStoreF80FromLabelAtRcX(cg, f80Label)
+        Return 1
     End If
 
     If X64EmitExprToRax(ps, rhsNode, cg, errText) = 0 Then Return 0
@@ -3055,8 +3098,14 @@ Private Function X64EmitLoadFieldExpr(ByRef ps As ParseState, ByVal nodeIdx As I
         X64EmitText cg, "    movsd xmm0, [rax]"
         Return 1
     ElseIf fk = UXF_F80 Then
-        errText = "x64-codegen: F80 field load is not implemented in x64 backend yet"
-        Return 0
+        ' F80 yukunu x87 ile qword'e indirip hem XMM0 hem de RAX fallback'i besle.
+        X64EmitText cg, "    sub rsp, 16"
+        X64EmitText cg, "    fld tword [rax]"
+        X64EmitText cg, "    fstp qword [rsp]"
+        X64EmitText cg, "    movsd xmm0, [rsp]"
+        X64EmitText cg, "    add rsp, 16"
+        X64EmitText cg, "    cvttsd2si rax, xmm0"
+        Return 1
     End If
 
     If fieldSize = 1 Then
@@ -6388,10 +6437,37 @@ Private Function X64InferFloatKindOfExpr(ByRef ps As ParseState, ByVal nodeIdx A
         callName = Trim(ps.ast.nodes(nodeIdx).value)
         If callName = "" Then Return 0
 
+        If InStr(callName, ".") > 0 Then
+            Dim rootName As String
+            Dim pathText As String
+            Dim rootNode As Integer
+            Dim rootType As String
+            Dim fieldOffset As Integer
+            Dim fieldType As String
+            Dim fieldSize As Integer
+            Dim resolveErr As String
+            If X64ResolveFieldInfo(ps, nodeIdx, rootName, pathText, rootNode, rootType, fieldOffset, fieldType, fieldSize, resolveErr) <> 0 Then
+                Return X64TypeToFloatKind(fieldType)
+            End If
+        End If
+
         Dim retType As String
         retType = ""
         If X64TryGetRoutineReturnType(cg, callName, retType) <> 0 Then
             Return X64TypeToFloatKind(retType)
+        End If
+        Return 0
+    Case "FIELD_EXPR"
+        Dim rootName As String
+        Dim pathText As String
+        Dim rootNode As Integer
+        Dim rootType As String
+        Dim fieldOffset As Integer
+        Dim fieldType As String
+        Dim fieldSize As Integer
+        Dim resolveErr As String
+        If X64ResolveFieldInfo(ps, nodeIdx, rootName, pathText, rootNode, rootType, fieldOffset, fieldType, fieldSize, resolveErr) <> 0 Then
+            Return X64TypeToFloatKind(fieldType)
         End If
         Return 0
     Case "BINARY", "BINARY_EXPR", "BINOP", "OP", "ADD", "SUB", "MUL", "DIV"
@@ -6445,12 +6521,55 @@ Private Function X64EmitPrintStmt(ByRef ps As ParseState, ByVal nodeIdx As Integ
             Dim inferredFloatKind As Integer
             inferredFloatKind = X64InferFloatKindOfExpr(ps, exprNode, cg)
 
-            If inferredFloatKind = UXF_F80 Then
-                errText = "x64-codegen: PRINT does not support F80 without x87/ST0 path"
-                Return 0
+            If inferredFloatKind = UXF_UNKNOWN Then
+                Dim inferKindExpr As String
+                inferKindExpr = X64Upper(ps.ast.nodes(exprNode).kind)
+                If inferKindExpr = "FIELD_EXPR" Or (inferKindExpr = "CALL_EXPR" And InStr(Trim(ps.ast.nodes(exprNode).value), ".") > 0) Then
+                    Dim inferRootName As String
+                    Dim inferPathText As String
+                    Dim inferRootNode As Integer
+                    Dim inferRootType As String
+                    Dim inferFieldOffset As Integer
+                    Dim inferFieldType As String
+                    Dim inferFieldSize As Integer
+                    Dim inferErr As String
+                    If X64ResolveFieldInfo(ps, exprNode, inferRootName, inferPathText, inferRootNode, inferRootType, inferFieldOffset, inferFieldType, inferFieldSize, inferErr) <> 0 Then
+                        inferredFloatKind = X64TypeToFloatKind(inferFieldType)
+                    End If
+                End If
             End If
 
-            If inferredFloatKind = UXF_F32 Or inferredFloatKind = UXF_F64 Then
+            If inferredFloatKind = UXF_F80 Then
+                Dim exprKind As String
+                exprKind = X64Upper(ps.ast.nodes(exprNode).kind)
+
+                If exprKind = "FIELD_EXPR" Or (exprKind = "CALL_EXPR" And InStr(Trim(ps.ast.nodes(exprNode).value), ".") > 0) Then
+                    Dim f80FieldType As String
+                    Dim f80FieldSize As Integer
+                    If X64EmitAddrOfFieldExpr(ps, exprNode, cg, f80FieldType, f80FieldSize, errText) = 0 Then Return 0
+                ElseIf exprKind = "IDENT" Or exprKind = "IDENTIFIER" Or exprKind = "VAR" Or exprKind = "VAR_REF" Or exprKind = "KEYWORD_REF" Then
+                    If X64EmitAddrOfVar(cg, Trim(ps.ast.nodes(exprNode).value), errText) = 0 Then Return 0
+                Else
+                    errText = "x64-codegen: PRINT F80 currently supports variable/field expressions only"
+                    Return 0
+                End If
+
+                ' x87 uzerinden tword -> qword donusumu yapip mevcut PRINT(f64) yolunu kullan.
+                X64EmitText cg, "    sub rsp, 16"
+                X64EmitText cg, "    fld tword [rax]"
+                X64EmitText cg, "    fstp qword [rsp]"
+                X64EmitText cg, "    movsd xmm0, [rsp]"
+                X64EmitText cg, "    add rsp, 16"
+
+                X64EmitText cg, "    lea rcx, [rel __uxb_str_buf]"
+                X64EmitText cg, "    lea rdx, [rel __uxb_fmt_f64]"
+                X64EmitText cg, "    sub rsp, 40"
+                X64EmitText cg, "    call sprintf"
+                X64EmitText cg, "    add rsp, 40"
+                X64EmitText cg, "    lea rax, [rel __uxb_str_buf]"
+                X64EmitText cg, "    mov rcx, rax"
+                X64EmitText cg, "    call __uxb_runtime_print"
+            ElseIf inferredFloatKind = UXF_F32 Or inferredFloatKind = UXF_F64 Then
                 If X64EmitExprToXmm0As(ps, exprNode, cg, UXF_F64, errText) = 0 Then Return 0
                 X64EmitText cg, "    lea rcx, [rel __uxb_str_buf]"
                 X64EmitText cg, "    lea rdx, [rel __uxb_fmt_f64]"

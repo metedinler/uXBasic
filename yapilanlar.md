@@ -68,6 +68,29 @@ Durum karari:
 - Hamle 5 bu snapshotta `PARTIAL`.
 - Kapanis icin 52 array-field ve 53 F80 field-store lane'leri tamamlanmali.
 
+### Hamle 5 Son Kilometre Kapanisi (2026-04-30)
+
+52 ve 53 lane'lerini bozan codegen blokajlari kapatildi.
+
+Yapilanlar:
+- `r.a(i)` field-index yolunda index metni tamsayi parse edilerek `OFFSETOF invalid index syntax` hatasi giderildi.
+- F80 field store lane'i acildi (`FIELD_EXPR` hedefe 10-byte literal store).
+- F80 PRINT lane'i icin x87 tword->qword donusum fallback'i eklendi.
+- F80 test kosucusu eski diagnostic beklentisinden yeni lane dogrulamasina cekildi.
+
+Kanit:
+- `tests/basicCodeTests/50_type_field_numeric.bas --build-x64` -> `EXIT=0`
+- `tests/basicCodeTests/51_type_nested_field.bas --build-x64` -> `EXIT=0`
+- `tests/basicCodeTests/52_type_array_field.bas --build-x64` -> `EXIT=0`
+- `tests/basicCodeTests/53_type_f80_field_diagnostic.bas --build-x64` -> `EXIT=0`
+- `tests/basicCodeTests/54_type_string_field_partial.bas --build-x64` -> `EXIT=0`
+- `tests/run_x64_type_field_codegen_h5_64.exe` -> `PASS H5 x64 type field codegen`
+- `tests/run_x64_type_field_f80_diag_64.exe` -> `PASS H5 F80 field lane`
+
+Durum karari:
+- `H5: TYPE System & Field Access Verified`
+- Hamle 5 x64 parity gate `DONE`.
+
 ## 2026-04-29
 
 ### Hamle 2 Kapanisi - MIR I/O Parity Kaniti Tazelendi

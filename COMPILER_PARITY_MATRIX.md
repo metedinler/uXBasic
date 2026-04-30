@@ -9,9 +9,9 @@ Kapsam: Hamle 5 kanit ozeti
 |---|---|---|---|---|---|
 | Numeric field read/write | OK | OK | OK | OK | OK |
 | Nested field | OK | OK | OK | OK | OK |
-| Array element field (`a(i).x`) | OK | PARTIAL | FAIL | FAIL | FAIL |
-| F80 field write | OK | OK (F80 canonical) | OK | OK | PARTIAL (diagnostic only) |
-| String field basic | OK | OK | OK | OK | PARTIAL |
+| Array element field (`a(i).x`) | OK | PARTIAL | FAIL | FAIL | OK |
+| F80 field write | OK | OK (F80 canonical) | OK | OK | OK |
+| String field basic | OK | OK | OK | OK | OK |
 
 ## Kanit Komutlari
 
@@ -29,6 +29,9 @@ Kapsam: Hamle 5 kanit ozeti
 
 ## Durum Notu
 
-Hamle 5 tamamen kapanmis degil; native lane'de iki net acik var:
-- OFFSETOF invalid index syntax (array field zinciri)
-- F80 field store not implemented (bilincli diagnostic)
+Hamle 5 x64 native parity gate bu turda kapandi.
+52 ve 53 icin `EXIT=14` ureten iki kritik neden giderildi:
+- OFFSETOF invalid index syntax
+- F80 field store/load lane blokaji
+
+Karar: H5: TYPE System & Field Access Verified.

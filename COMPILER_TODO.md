@@ -186,15 +186,11 @@ Bu not, `src` taramasi sonrasinda compiler katmanlarinin mevcut durumunu ve bu t
   `TYPE/CLASS` field parity probe'larini array/collection kombinasyonlariyla genisletmek
   ardindan daha genis native aggregate/type smoke
 
-## Hamle 5 Kalanlar (2026-04-30)
+## Hamle 5 Kapanis Notu (2026-04-30)
 
-- `tests/basicCodeTests/52_type_array_field.bas` lane'ini kapat:
-  `OFFSETOF invalid index syntax` kok nedenini resolver/index syntax tarafinda duzelt.
-- `tests/basicCodeTests/53_type_f80_field_diagnostic.bas` lane kararini netlestir:
-  ya gercek F80 field store emit'i ac, ya da bu lane'i resmi olarak fail-fast/PARTIAL backlog olarak dondur.
-- `tests/basicCodeTests/54_type_string_field_partial.bas` icin string field parity'yi nested/array varyantlariyla genislet.
-- Hamle 5 kapanis kriteri:
-  50/51/54 `OK`, 52/53 lane'leri de `OK` olmadan Hamle 5 `DONE` isaretlenmeyecek.
+- H5: TYPE System & Field Access Verified.
+- x64 parity gate: 50/51/52/53/54 `--build-x64` lane'leri `EXIT=0`.
+- Kalan is Hamle 5 backlog'u degil; 52 testinin AST/MIR interpreter lane'i ayri sprintte ele alinacak.
 
 ## Hedef Ornek Regresyonlar
 

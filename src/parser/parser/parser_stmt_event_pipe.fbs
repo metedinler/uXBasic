@@ -1,0 +1,181 @@
+Private Function ParseSlotKindToken(ByRef ps As ParseState, ByRef kindOut As String) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+    If tk.kind <> "KEYWORD" And tk.kind <> "IDENT" Then
+        ps.lastError = "slot kind expected"
+        Return 0
+    End If
+
+    kindOut = UCase(Trim(tk.lexeme))
+
+    Select Case kindOut
+    Case "EVENT", "PIPE", "THREAD", "PARALEL"
+        AdvanceTok ps
+        Return 1
+    End Select
+
+    ps.lastError = "invalid slot kind " & tk.lexeme
+    Return 0
+End Function
+
+Private Function ParseNamedSlotHeader(ByRef ps As ParseState, ByRef firstTok As Token, ByRef nodeKind As String, ByRef endKeyword As String) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" And nameTok.kind <> "KEYWORD" Then
+        ps.lastError = firstTok.lexeme & ": name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim blockNode As Integer
+    blockNode = MakeNodeFromToken(ps, nodeKind, nameTok.lexeme, UCase(firstTok.lexeme), firstTok)
+
+    Dim headerArgs As Integer
+    headerArgs = ASTNewNode(ps.ast, "SLOT_HEADER_ARGS", "", "", firstTok.lineNo, firstTok.colNo)
+
+    If MatchOp(ps, ",") Then
+        Do
+            Dim argExpr As Integer
+            argExpr = ParseExpression(ps)
+            If argExpr = -1 Then
+                ps.lastError = firstTok.lexeme & ": header argument expected"
+                Return -1
+            End If
+            ASTAddChild ps.ast, headerArgs, argExpr
+            If MatchOp(ps, ",") = 0 Then Exit Do
+        Loop
+    End If
+
+    If ASTChildCount(ps, headerArgs) > 0 Then ASTAddChild ps.ast, blockNode, headerArgs
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = firstTok.lexeme & ": unexpected trailing tokens"
+        Return -1
+    End If
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsKw(ps, "END") And UCase(LookToken(ps, 1).lexeme) = endKeyword Then Exit Do
+
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then Return -1
+        ASTAddChild ps.ast, blockNode, st
+        SkipSeparators ps
+    Loop
+
+    If IsKw(ps, "END") = 0 Or UCase(LookToken(ps, 1).lexeme) <> endKeyword Then
+        ps.lastError = "missing END " & endKeyword
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    Return blockNode
+End Function
+
+Function ParseEventStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseNamedSlotHeader(ps, firstTok, "EVENT_STMT", "EVENT")
+End Function
+
+Function ParseThreadStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseNamedSlotHeader(ps, firstTok, "THREAD_STMT", "THREAD")
+End Function
+
+Function ParseParalelStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseNamedSlotHeader(ps, firstTok, "PARALEL_STMT", "PARALEL")
+End Function
+
+Function ParsePipeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseNamedSlotHeader(ps, firstTok, "PIPE_STMT", "PIPE")
+End Function
+
+Function ParseSlotStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim slotKind As String
+    If ParseSlotKindToken(ps, slotKind) = 0 Then Return -1
+
+    Dim slotNode As Integer
+    slotNode = MakeNodeFromToken(ps, "SLOT_STMT", slotKind, "", firstTok)
+
+    If MatchOp(ps, "<") Then
+        Dim typeTok As Token
+        typeTok = CurToken(ps)
+        If typeTok.kind <> "KEYWORD" And typeTok.kind <> "IDENT" Then
+            ps.lastError = "SLOT: byte annotation expected"
+            Return -1
+        End If
+        If UCase(typeTok.lexeme) <> "I8" And UCase(typeTok.lexeme) <> "U8" Then
+            ps.lastError = "SLOT: only I8/U8 slot count is supported"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim byteCountExpr As Integer
+        ' The closing ">" belongs to the SLOT annotation, not to a relation.
+        byteCountExpr = ParseShift(ps)
+        If byteCountExpr = -1 Then Return -1
+        ps.ast.nodes(byteCountExpr).op = UCase(typeTok.lexeme)
+        ASTAddChild ps.ast, slotNode, byteCountExpr
+
+        If MatchOp(ps, ">") = 0 Then
+            ps.lastError = "SLOT: missing >"
+            Return -1
+        End If
+    Else
+        Dim countExpr As Integer
+        countExpr = ParseExpression(ps)
+        If countExpr = -1 Then Return -1
+        ASTAddChild ps.ast, slotNode, countExpr
+    End If
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "SLOT: unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return slotNode
+End Function
+
+Private Function ParseSlotControlCore(ByRef ps As ParseState, ByRef firstTok As Token, ByRef opText As String, ByRef nodeKind As String) As Integer
+    Dim slotKind As String
+    If ParseSlotKindToken(ps, slotKind) = 0 Then Return -1
+
+    Dim nodeIdx As Integer
+    nodeIdx = MakeNodeFromToken(ps, nodeKind, slotKind, opText, firstTok)
+
+    Dim targetExpr As Integer
+    targetExpr = ParseExpression(ps)
+    If targetExpr = -1 Then
+        ps.lastError = opText & ": target expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, nodeIdx, targetExpr
+
+    If opText = "TRIGGER" Then
+        Do While MatchOp(ps, ",")
+            Dim argExpr As Integer
+            argExpr = ParseExpression(ps)
+            If argExpr = -1 Then Return -1
+            ASTAddChild ps.ast, nodeIdx, argExpr
+        Loop
+    End If
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = opText & ": unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return nodeIdx
+End Function
+
+Function ParseSlotOnStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseSlotControlCore(ps, firstTok, "ON", "SLOT_CONTROL_STMT")
+End Function
+
+Function ParseSlotOffStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseSlotControlCore(ps, firstTok, "OFF", "SLOT_CONTROL_STMT")
+End Function
+
+Function ParseTriggerStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseSlotControlCore(ps, firstTok, "TRIGGER", "TRIGGER_STMT")
+End Function
