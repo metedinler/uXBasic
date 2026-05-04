@@ -4,6 +4,14 @@ Tarih: 2026-04-25
 
 Bu dosya, belgelerdeki daginik "var/yok/kismi" ifadelerini tek kanonik matrise toplamak icin baslatildi.
 
+Hamle 6 ek notu (2026-04-30):
+
+- CLASS method receiver pipeline (THIS/ME bind + RCX receiver lane) aktif.
+- CLASS method/ctor/dtor inline emit x64 lane'e bagli.
+- DIM class pointer storage semantigi aktif.
+- NEW class allocation bos classlarda min-size fallback ile guvenceye alindi.
+- Parity seti `60/61/62/63` AST + MIR + x64 lane'lerinde PASS.
+
 Bu belge artik su dosyalarla birlikte yonetilir:
 
 - [planyap/incelemeplani.md](/C:/Users/mete/Downloads/BasicOyunSource/uXBasic_repo/planyap/incelemeplani.md)
@@ -51,6 +59,7 @@ Durum etiketleri:
 | Tanim | `CONST/DIM/REDIM` | OK | OK | OK | OK | PARTIAL | OK | OK | AST runtime + MIR runtime indexed assignment/load ve `REDIM PRESERVE` probe'u gecti; native x64 hala daha genis array/type parity kapsamasina ihtiyac duyuyor |
 | Tanim | `TYPE` | OK | OK | OK | OK | OK | OK | OK | `type_class_field_probe.bas`, `type_class_field_mutation_probe.bas`, `type_class_nested_field_probe.bas` ve `type_class_array_field_probe.bas` AST/MIR/native olarak tekrar dogrulandi; temel field/nested/array parity artik kanitli |
 | Tanim | `CLASS/INTERFACE/NEW/DELETE` | OK | OK | OK | OK | OK | OK | OK | MIR user routine/method call zinciri, `NEW -> *_CTOR` ve `DELETE -> *_DTOR` runtime yolu kapatildi. MIR dogrulama: `28_matrix_class_interface.bas`=`42`, `class_constructor_method_runtime.bas`=`25`, `native_class_ctor_probe.bas`=`7`, `native_class_delete_probe.bas`=`9`, `mir_delete_object.bas`=`0` |
+| Tanim | OOP runtime `__vptr` / vtable dispatch | N/A | OK | OK | PARTIAL | OK | PARTIAL | OK | 2026-05-02: runtime object header `__vptr` anlami handle/pointer olarak teklesiyor; x64 classIdx fallback (`__uxb_vtable_ptrs`) kaldirildi. AST+x64 probe `BASE<-DOG NEW`=`22`, MIR ayni probe'da `11` (declared-type dispatch) veriyor; MIR dynamic vcall lane'i acik |
 | Tanim | `DEFINT/DEFLNG/...` | OK | PARTIAL | OK | OK | metadata-only | OK | DOC-DRIFT | `run_deftype_setstringsize_exec.exe` PASS; belgelerde eski eksik yazilmis olabilir |
 | Tanim | `SETSTRINGSIZE` | OK | PARTIAL | OK | OK | metadata-only | OK | DOC-DRIFT | `run_deftype_setstringsize_exec.exe` PASS; native string ABI baglantisi sonraki faz |
 | G/C | `PRINT` | OK | OK | OK | OK | PARTIAL | OK | OK | `run_print_exec_ast.exe` PASS, `run_print_zone_exec_mir_64.exe` PASS, `10.bas` native smoke gecti; MIR print separator/zone lane'i kapandi |
@@ -82,6 +91,30 @@ Durum etiketleri:
 | Slot Control | `ON/OFF/TRIGGER` | OK | PARTIAL | PARTIAL | PARTIAL | PARTIAL | PARTIAL | PARTIAL | AST runtime slot manager MVP var; semantic guard + MIR/x64 no-op lane eklendi |
 
 ## 2.1 2026-04-24 Izleme Notu
+
+### 2026-05-02 Hamle 8A-3 (`__vptr` anlami teklesme)
+
+- Runtime class allocation header yazimi guncellendi:
+  - `src/runtime/exec/exec_class_layout_helpers.fbs`
+  - `DIM` ve `NEW` yollari artik `ExecFindRuntimeVTableHandle` ile `__vptr` yazar; eksik handle durumunda hata verir.
+- Runtime vtable map kurulum yeri program acilisina tasindi:
+  - `src/runtime/exec/exec_eval_support_helpers.fbs`
+  - `src/runtime/memory_exec.fbs`
+  - `ExecBuildVTableMap` yan-etki olarak `DIM/REDIM bound parse` icinde degil, `ExecRunMemoryProgram` baslangicinda kurulur.
+- Method dispatch receiver tipi object header'dan okunur:
+  - `src/runtime/exec/exec_call_dispatch_helpers.fbs`
+  - `VMemPeekD(receiverAddr)` ile handle -> className cozumu yapilir.
+- x64 vtable label tek kaynaga alindi:
+  - `src/codegen/x64/cg_context.fbs`
+  - `src/codegen/x64/code_generator.fbs`
+  - yeni helper: `X64ClassVTableLabel(className) => __uxb_vtbl_<sanitized>`.
+- x64 virtual dispatch classIdx fallback kaldirildi:
+  - `__uxb_vtable_ptrs` emit ve kullanimlari silindi.
+  - Virtual call path pointer tabanli (`[obj+0]` -> vtable -> slot) ve null guard'li emit'e cekildi.
+- Smoke/sonuc:
+  - `64_class_virtual_override_runtime.bas`: AST=`1,1`, MIR=`1,1`
+  - `28_matrix_class_interface.bas`: x64 build+run=`42`
+- `BASE<-DOG` custom probe (`obj = NEW DOG; PRINT obj.SPEAK()`): AST=`22`, x64=`22`, MIR=`11` (acik gap: MIR dynamic receiver dispatch)
 
 - `layout` tek kaynakli hale getirildi.
 - runtime global-state tasimasi `ExecRuntimeContext` altina alindi.
@@ -239,6 +272,16 @@ Durum etiketleri:
 - Yarim kalan codegen split:
   - driver/final assembly assembly-out yuzeyini ayirmak
   - daha sonra expr/stmt fallback diagnostiklerini ayri modullere tasimak
+
+## 2.2 Hamle 8 Kalan 7 Adim Plani
+
+1. MIR runtime dynamic receiver dispatch: `NEW` ile gelen object icin declared-type yerine `__vptr`/runtime class bazli virtual method secimi.
+2. `__VT_SLOT__` string hack temizligi: `MIR_CALL_VIRTUAL` opcode lane'i model + lowering + evaluator + x64 emit.
+3. x64 safe virtual call hardening: null object/vtable/slot guard + debug slot bounds kontrolu.
+4. Magic/internal method ad standardi: `<__...__>` internal protocol, `<...>` user magic ayrimi; semantic conflict guard.
+5. Native builtin gap kapama: `VARPTR`, `OFFSETOF`, `PEEKD` x64 emit parity.
+6. `INPUT` parity sertlestirme: AST/MIR/native prompt + numeric/string lane smoke ve cikti esitligi.
+7. `EVENT/THREAD/PARALEL/PIPE/SLOT` hatlari: semantic guard + MIR lowering + x64 no-op/dispatch MVP ve otomatik smoke seti.
 
 ### Build / Test
 
@@ -635,6 +678,925 @@ class pointer/null kontrolü
 ```
 
 Bu hamlede inheritance/interface değil, **tek sınıf + field + method + ctor/dtor** sağlamlaştırılmalı.
+---
+Mete abi, **Hamle 6 = CLASS basic object model** olarak kapanmalı. Bu hamlede hedef inheritance/override/vtable değil; yalnızca şu zincirin **tüm katmanlarda OK** olmasıdır:
+
+```text
+CLASS field layout
+NEW allocation
+object variable pointer storage
+method call
+receiver / THIS / ME
+class field read/write
+AST / MIR / x64 parity
+```
+
+Aşağıdaki metni VSCode GPTmini’ye **doğrudan ver**. İçinde başka LLM adı yok.
+
+---
+
+# VSCode GPTmini İş Emri
+
+# uXBasic Hamle 6 — CLASS Basic Object Model Full Patch
+
+Bu görevde sadece **Hamle 6** yapılacak. Constructor/destructor/DELETE Hamle 7’ye bırakılacak. Inheritance/interface/override Hamle 8’e bırakılacak.
+
+Amaç:
+
+```text
+CLASS tek başına gerçek nesne olarak çalışacak.
+NEW allocation pointer döndürecek.
+Class değişkenleri pointer olarak saklanacak.
+Method çağrısında receiver ilk argüman gibi taşınacak.
+THIS ve ME receiver adresini gösterecek.
+obj.field ve THIS.field native x64 çalışacak.
+AST/MIR/x64 aynı output verecek.
+```
+
+---
+
+## 0. Kesin kurallar
+
+```text
+1. Parser syntax değiştirme.
+2. Yeni CLASS syntax icat etme.
+3. Hamle 7 işi olan destructor/DELETE kapsamını büyütme.
+4. Hamle 8 işi olan inheritance/vtable/override kapsamına girme.
+5. Yeni layout sistemi yazma.
+6. Mevcut TypeLayoutSizeOf / TypeLayoutResolvePath altyapısını kullan.
+7. THIS ve ME normal global değişken gibi ele alınmayacak.
+8. Object variable by-value TYPE gibi değil pointer gibi saklanacak.
+9. NEW sonucunu struct value gibi kopyalama; pointer olarak sakla.
+10. x64 native unsupported ise OK yazma.
+```
+
+---
+
+## 1. Önce okunacak dosyalar
+
+```text
+src/parser/ast.fbs
+src/parser/parser/parser_stmt_decl_core.fbs
+src/parser/parser/parser_expr.fbs
+
+src/semantic/layout.fbs
+src/semantic/layout/layout_shared_core.fbs
+src/semantic/layout/layout_type_table.fbs
+src/semantic/layout/layout_path_resolution.fbs
+src/semantic/semantic_pass.fbs
+src/semantic/type_binding.fbs
+src/semantic/mir.fbs
+src/semantic/mir_evaluator.fbs
+
+src/runtime/memory_exec.fbs
+src/runtime/exec/exec_call_dispatch_helpers.fbs
+src/runtime/exec/exec_class_layout_helpers.fbs
+src/runtime/exec/exec_state_value_utils.fbs
+
+src/codegen/x64/cg_context.fbs
+src/codegen/x64/code_generator.fbs
+src/codegen/x64/var_mapping.fbs
+```
+
+Özellikle `code_generator.fbs` içinde mevcut şu noktalar okunacak:
+
+```text
+X64FindClassDeclNode
+X64FindDeclaredTypeName
+X64EmitExprToRax
+NEW_EXPR case
+X64BuildFieldPath
+X64EmitLoadFieldExpr
+X64EmitStoreFieldExpr
+X64EmitCallNode
+X64RegisterRoutineSignature
+X64EmitAssignStmt
+X64EmitDimStmt
+```
+
+---
+
+# 2. Hamle 6 alt hedefleri
+
+```text
+6A — Class layout’ın TYPE layout tablosuna girdiğini doğrula
+6B — Object variable pointer storage
+6C — NEW_EXPR allocation + pointer return
+6D — Class method symbol/name mapping
+6E — Method call receiver injection
+6F — THIS/ME binding
+6G — obj.field / THIS.field field access
+6H — AST runtime parity
+6I — MIR parity veya kontrollü MIR route
+6J — x64 native parity + belgeler
+```
+
+---
+
+# 6A — Class layout doğrulama
+
+Mevcut layout sistemi CLASS alanlarını TYPE gibi hesaplayabilmeli. Yeni layout sistemi yazma.
+
+Kontrol:
+
+```text
+CLASS_FIELD node’ları layout table’a alınıyor mu?
+TypeLayoutSizeOf(ps, "Counter") class size döndürüyor mu?
+TypeLayoutResolvePath(ps, "Counter", "value", ...) offset/type/size döndürüyor mu?
+```
+
+Eğer `BuildTypeLayoutTable` yalnızca `TYPE_STMT` topluyorsa, `CLASS_STMT` de eklenecek.
+
+Patch mantığı:
+
+```freebasic
+' layout_type_table.fbs veya class/type decl toplayan yerde:
+If nodeKind = "TYPE_STMT" OrElse nodeKind = "CLASS_STMT" Then
+    AddTypeLayoutDecl ps.ast.nodes(i).value, i, errOut
+End If
+```
+
+Field toplama kısmında:
+
+```freebasic
+If fieldKind = "TYPE_FIELD" OrElse fieldKind = "CLASS_FIELD" Then
+    ' aynı field layout mantığı
+End If
+```
+
+Başarı:
+
+```text
+CLASS Counter
+    value AS I32
+END CLASS
+```
+
+için size en az 4/8 hizalı çıkmalı.
+
+---
+
+# 6B — Object variable pointer storage
+
+`DIM c AS Counter` Hamle 6’da **object pointer slot** olarak ele alınacak.
+
+Yani:
+
+```basic
+DIM c AS Counter
+```
+
+şu an by-value class objesi değil:
+
+```text
+c = 8-byte object pointer
+```
+
+olacak.
+
+Sebep: `c = NEW Counter` pointer döndürüyor.
+
+`X64EmitDimStmt` içinde declared type class ise:
+
+```text
+elemBytes = 8
+slotCount = 1
+initial value = 0
+```
+
+Helper:
+
+```freebasic
+Private Function X64IsClassType(ByRef ps As ParseState, ByRef typeName As String) As Integer
+    Dim t As String
+    t = X64Upper(Trim(typeName))
+    If t = "" Then Return 0
+    Return IIf(X64FindClassDeclNode(ps, t) <> -1, 1, 0)
+End Function
+```
+
+`X64GetElemBytesForType` veya `X64EmitDimStmt` içinde:
+
+```freebasic
+If X64IsClassType(ps, declTypeName) <> 0 Then
+    elemBytes = 8
+Else
+    elemBytes = X64GetElemBytesForType(ps, declTypeName)
+End If
+```
+
+Var type registry’ye yine gerçek type kaydedilecek:
+
+```freebasic
+X64RegisterVarType(cg, declName, declTypeName)
+```
+
+---
+
+# 6C — NEW_EXPR allocation
+
+Mevcut `NEW_EXPR` case var. Bu korunacak ama netleştirilecek.
+
+Doğru davranış:
+
+```text
+NEW Counter
+  classSize = TypeLayoutSizeOf(Counter)
+  calloc(1, classSize)
+  RAX = object pointer
+```
+
+Patch kontrolü:
+
+```freebasic
+Case "NEW_EXPR"
+    classTypeName = X64Upper(Trim(ps.ast.nodes(nodeIdx).value))
+
+    If X64FindClassDeclNode(ps, classTypeName) = -1 Then
+        errText = "x64-codegen: NEW requires class type: " & classTypeName
+        Return 0
+    End If
+
+    If TypeLayoutSizeOf(ps, classTypeName, classSize, layoutErr) = 0 Then
+        errText = "x64-codegen: NEW layout failed: " & layoutErr
+        Return 0
+    End If
+
+    X64EmitText cg, "    mov rcx, 1"
+    X64EmitText cg, "    mov rdx, " & X64ToStr(classSize)
+    X64EmitText cg, "    sub rsp, 32"
+    X64EmitText cg, "    call calloc"
+    X64EmitText cg, "    add rsp, 32"
+
+    ' Hamle 6: constructor zorunlu değil.
+    ' Constructor varsa çağırma kısmı zarar veriyorsa Hamle 7’ye taşınacak.
+```
+
+Önemli karar:
+
+```text
+Hamle 6’da NEW sadece allocation yapsın.
+Constructor çağrısı yarım/kırılgan ise Hamle 7’ye bırak.
+```
+
+Eğer mevcut ctor çağrısı testleri bozuyorsa, şu guard kullanılabilir:
+
+```freebasic
+If X64ClassCtorEnabledForHamle7 <> 0 Then
+    ' mevcut ctor call logic
+End If
+```
+
+Ama yeni global flag şart değil; en doğrusu Hamle 6 testlerinde constructor kullanmamak.
+
+---
+
+# 6D — Class method symbol/name mapping
+
+Class method çağrısı için canonical sembol gerekir.
+
+Önerilen symbol:
+
+```text
+ClassName_MethodName
+```
+
+Örnek:
+
+```basic
+CLASS Counter
+    SUB Inc()
+    END SUB
+END CLASS
+```
+
+x64 sembol:
+
+```text
+COUNTER_INC
+```
+
+Helper:
+
+```freebasic
+Private Function X64ClassMethodSymbol( _
+    ByRef className As String, _
+    ByRef methodName As String _
+) As String
+
+    Return X64Upper(Trim(className)) & "_" & X64Upper(Trim(methodName))
+End Function
+```
+
+Routine registration sırasında `CLASS_METHOD_DECL` görülürse hem gerçek node adı hem class-qualified adı kaydedilecek.
+
+Patch yeri:
+
+```text
+X64RegisterRoutineSignature
+veya routine table build edilen yer
+```
+
+Mantık:
+
+```freebasic
+If routineKind = "CLASS_METHOD_DECL" Then
+    Dim ownerClass As String
+    ownerClass = X64FindOwningClassName(ps, routineNode)
+
+    Dim qualifiedName As String
+    qualifiedName = X64ClassMethodSymbol(ownerClass, ps.ast.nodes(routineNode).value)
+
+    ' routine key olarak qualifiedName kaydet
+End If
+```
+
+Gerekli helper:
+
+```freebasic
+Private Function X64FindOwningClassName( _
+    ByRef ps As ParseState, _
+    ByVal nodeIdx As Integer _
+) As String
+
+    Dim p As Integer
+    p = ps.ast.nodes(nodeIdx).parent
+
+    Do While p <> -1
+        If X64Upper(ps.ast.nodes(p).kind) = "CLASS_STMT" Then
+            Return X64Upper(Trim(ps.ast.nodes(p).value))
+        End If
+        p = ps.ast.nodes(p).parent
+    Loop
+
+    Return ""
+End Function
+```
+
+Eğer AST node’da `parent` yoksa fallback:
+
+```text
+AST traversal sırasında CLASS_STMT çocuklarını gezerken methodları register et.
+```
+
+---
+
+# 6E — Method call receiver injection
+
+Şu çağrı desteklenecek:
+
+```basic
+c.Inc()
+```
+
+AST muhtemelen `MEMBER_EXPR` veya `CALL_EXPR` içinde member path olarak geliyor. Önce mevcut AST print/json ile node şekli kontrol edilecek.
+
+Ama genel hedef:
+
+```text
+c.Inc()
+  receiver = c
+  receiver type = Counter
+  callee symbol = COUNTER_INC
+  call COUNTER_INC(receiver)
+```
+
+Helper:
+
+```freebasic
+Private Function X64TryResolveMemberCall( _
+    ByRef ps As ParseState, _
+    ByVal callNode As Integer, _
+    ByRef receiverNodeOut As Integer, _
+    ByRef receiverNameOut As String, _
+    ByRef receiverTypeOut As String, _
+    ByRef methodNameOut As String, _
+    ByRef calleeSymbolOut As String, _
+    ByRef errText As String _
+) As Integer
+
+    ' CALL_EXPR value veya firstChild yapısını incele.
+    ' Eğer callee MEMBER_EXPR ise:
+    '   root = object variable
+    '   member = method name
+    '   receiverType = X64FindDeclaredTypeName / X64TryGetVarType
+    '   calleeSymbol = CLASS_METHOD_SYMBOL(receiverType, methodName)
+End Function
+```
+
+`X64EmitCallNode` başında:
+
+```freebasic
+Dim receiverNode As Integer
+Dim receiverName As String
+Dim receiverType As String
+Dim methodName As String
+Dim methodSymbol As String
+
+If X64TryResolveMemberCall(ps, nodeIdx, receiverNode, receiverName, receiverType, methodName, methodSymbol, errText) <> 0 Then
+    Return X64EmitClassMethodCall(ps, nodeIdx, cg, receiverNode, receiverName, receiverType, methodSymbol, errText)
+End If
+```
+
+---
+
+## Class method call emitter
+
+İlk sürümde only receiver + integer args yeterli.
+
+```freebasic
+Private Function X64EmitClassMethodCall( _
+    ByRef ps As ParseState, _
+    ByVal callNode As Integer, _
+    ByRef cg As X64CodegenContext, _
+    ByVal receiverNode As Integer, _
+    ByRef receiverName As String, _
+    ByRef receiverType As String, _
+    ByRef methodSymbol As String, _
+    ByRef errText As String _
+) As Integer
+
+    Dim argCount As Integer
+    argCount = X64ChildCount(ps, callNode)
+
+    Dim totalArgs As Integer
+    totalArgs = argCount + 1 ' receiver first
+
+    Dim reserveBytes As Integer
+    reserveBytes = X64ComputeWin64CallReserveBytes(totalArgs)
+
+    X64EmitText cg, "    sub rsp, " & X64ToStr(reserveBytes)
+
+    ' arg0 = receiver pointer
+    If receiverName <> "" Then
+        X64EmitLoadVar cg, receiverName
+    Else
+        If X64EmitExprToRax(ps, receiverNode, cg, errText) = 0 Then Return 0
+    End If
+
+    X64EmitText cg, "    mov rcx, rax"
+
+    ' arg1.. normal args
+    ' Hamle 6 minimum: 0 arg method zorunlu.
+    ' Parametreli method desteklenecekse RDX/R8/R9 + stack sırası mevcut X64EmitCallNode mantığından kopyalanacak.
+
+    If argCount > 0 Then
+        errText = "x64-codegen: class method arguments are planned after zero-arg receiver call"
+        X64EmitText cg, "    add rsp, " & X64ToStr(reserveBytes)
+        Return 0
+    End If
+
+    X64EmitText cg, "    call " & methodSymbol
+    X64EmitText cg, "    add rsp, " & X64ToStr(reserveBytes)
+
+    Return 1
+End Function
+```
+
+Minimum test zero-arg method ile kurulacak.
+
+---
+
+# 6F — THIS / ME binding
+
+Class method içinde:
+
+```basic
+THIS.value = THIS.value + 1
+```
+
+şu an normal değişken gibi görünürse hata verir.
+
+x64 method prologue’da receiver `RCX` ile gelir. Method içinde `THIS` ve `ME` local alias olarak kullanılmalı.
+
+Basit çözüm:
+
+```text
+CLASS_METHOD_DECL emit edilirken:
+  method frame içinde THIS ve ME local slot aç.
+  girişte rcx’i THIS/ME slotuna yaz.
+```
+
+Eğer local slot sistemi ile kolay değilse daha basit:
+
+```text
+X64EmitExprToRax içinde IDENT "THIS"/"ME" görülürse:
+  method içinde rcx korunmuş olmalı.
+```
+
+RCX call sırasında bozulabilir; bu yüzden en sağlamı local slot.
+
+Patch:
+
+Routine prologue içinde, class method ise:
+
+```freebasic
+If X64CurrentRoutineIsClassMethod(cg) <> 0 Then
+    Dim thisOffset As Integer
+    thisOffset = X64EnsureLocalSlot(cg, "THIS", 1, 8)
+    X64EnsureLocalSlot(cg, "ME", 1, 8)
+
+    X64EmitText cg, "    mov " & X64FormatRbpRef(thisOffset) & ", rcx"
+
+    Dim meOffset As Integer
+    If X64TryFindLocalOffset(cg, "ME", meOffset) <> 0 Then
+        X64EmitText cg, "    mov " & X64FormatRbpRef(meOffset) & ", rcx"
+    End If
+
+    X64RegisterVarType(cg, "THIS", cg.currentClassName)
+    X64RegisterVarType(cg, "ME", cg.currentClassName)
+End If
+```
+
+Bunun için `X64CodegenContext` içine eklenebilir:
+
+```freebasic
+currentClassName As String
+currentRoutineIsClassMethod As Integer
+```
+
+Routine emit edilirken:
+
+```freebasic
+cg.currentClassName = X64FindOwningClassName(ps, routineNode)
+cg.currentRoutineIsClassMethod = IIf(cg.currentClassName <> "", 1, 0)
+```
+
+Routine sonunda sıfırla:
+
+```freebasic
+cg.currentClassName = ""
+cg.currentRoutineIsClassMethod = 0
+```
+
+---
+
+# 6G — Class field access
+
+Hamle 5’te TYPE field access düzeldiyse class field de aynı sistemle çalışır; fakat fark şudur:
+
+```text
+TYPE variable:
+  root address = &var
+
+CLASS variable:
+  root address = object pointer value
+```
+
+`X64EmitLoadFieldExpr` içinde zaten şu mantık olmalı:
+
+```freebasic
+If rootType = "OBJECT" Or X64FindClassDeclNode(ps, rootType) <> -1 Then
+    X64EmitLoadVar cg, rootName   ' RAX = object pointer
+Else
+    X64EmitAddrOfVar cg, rootName ' RAX = address of by-value type
+End If
+```
+
+Bunu özellikle `THIS`/`ME` için de çalıştır:
+
+```text
+rootName THIS
+rootType Counter
+X64EmitLoadVar cg, "THIS"
+RAX = receiver pointer
+field offset ekle
+load/store
+```
+
+Eğer `X64FindDeclaredTypeName(ps, "THIS", rootType)` başarısızsa `X64TryGetVarType(cg, "THIS", rootType)` fallback ekle.
+
+Patch:
+
+```freebasic
+If X64FindDeclaredTypeName(ps, rootName, rootType) = 0 Then
+    If X64TryGetVarType(cg, rootName, rootType) = 0 Then
+        errText = "x64-codegen: field root type missing for " & rootName
+        Return 0
+    End If
+End If
+```
+
+Bunu hem load hem store field resolver’a koy.
+
+---
+
+# 6H — AST runtime parity
+
+Runtime tarafında zaten `THIS`/`ME` binding izleri var. Kontrol edilecek:
+
+```text
+ExecInvokeRoutineByIndex receiverAddr aldığında
+ExecSetVar es, "THIS", receiverAddr
+ExecSetVar es, "ME", receiverAddr
+```
+
+Eksikse eklenecek.
+
+Minimum AST testi:
+
+```basic
+CLASS Counter
+    value AS I32
+
+    SUB Inc()
+        THIS.value = THIS.value + 1
+    END SUB
+END CLASS
+
+DIM c AS Counter
+c = NEW Counter
+c.Inc()
+c.Inc()
+PRINT c.value
+END
+```
+
+Beklenen:
+
+```text
+2
+```
+
+---
+
+# 6I — MIR parity
+
+MIR tarafında tam class method lowering yoksa Hamle 6’da dürüst karar:
+
+```text
+MIR class object model PARTIAL olabilir ama test matrix’te açık yazılır.
+```
+
+Ama mümkünse şu minimum sağlanmalı:
+
+```text
+NEW_EXPR MIR’e taşınır.
+MEMBER_EXPR field access MIR’e taşınır.
+CALL_EXPR member call MIR’de AST fallback veya explicit unsupported diagnostic verir.
+```
+
+`MIR_STATUS.md` içine şunu yaz:
+
+```text
+CLASS basic object model:
+AST runtime: OK
+x64 native: OK
+MIR evaluator: PARTIAL if member-call lowering is not complete
+```
+
+Ama hedef “OK” ise minimum MIR fallback route yapılmalı:
+
+```text
+MIR evaluator class method call desteklemiyorsa,
+class tests MIR route yerine AST runtime ile işaretlenmesin.
+Gerçek OK için MIRRunModule’da MEMBER_CALL/NEW/field erişim temsilini tamamla.
+```
+
+Bu hamlede ilk pratik kapanış:
+
+```text
+AST OK + x64 OK + MIR build does not crash + MIR status PARTIAL
+```
+
+Ama “tam OK” istiyorsan MIR’e şu op’lar gerekir:
+
+```text
+MIR_NEW_OBJECT
+MIR_FIELD_LOAD
+MIR_FIELD_STORE
+MIR_METHOD_CALL
+```
+
+Bu büyükse Hamle 6M alt-yaması olarak ayrılacak.
+
+---
+
+# 6J — x64 tests ve belgeler
+
+Test dosyaları oluştur:
+
+## Test 60 — Basic class object
+
+```text
+tests/basicCodeTests/60_class_basic_object.bas
+```
+
+```basic
+CLASS Counter
+    value AS I32
+
+    SUB Inc()
+        THIS.value = THIS.value + 1
+    END SUB
+END CLASS
+
+DIM c AS Counter
+c = NEW Counter
+
+c.Inc()
+c.Inc()
+
+PRINT c.value
+END
+```
+
+Beklenen:
+
+```text
+2
+```
+
+---
+
+## Test 61 — ME alias
+
+```text
+tests/basicCodeTests/61_class_me_alias.bas
+```
+
+```basic
+CLASS Counter
+    value AS I32
+
+    SUB Inc()
+        ME.value = ME.value + 1
+    END SUB
+END CLASS
+
+DIM c AS Counter
+c = NEW Counter
+
+c.Inc()
+c.Inc()
+c.Inc()
+
+PRINT c.value
+END
+```
+
+Beklenen:
+
+```text
+3
+```
+
+---
+
+## Test 62 — Two objects independent
+
+```text
+tests/basicCodeTests/62_class_two_objects.bas
+```
+
+```basic
+CLASS Counter
+    value AS I32
+
+    SUB Inc()
+        THIS.value = THIS.value + 1
+    END SUB
+END CLASS
+
+DIM a AS Counter
+DIM b AS Counter
+
+a = NEW Counter
+b = NEW Counter
+
+a.Inc()
+b.Inc()
+b.Inc()
+
+PRINT a.value
+PRINT b.value
+END
+```
+
+Beklenen:
+
+```text
+1
+2
+```
+
+---
+
+## Test 63 — F64 field in class
+
+```text
+tests/basicCodeTests/63_class_float_field.bas
+```
+
+```basic
+CLASS Acc
+    total AS F64
+
+    SUB AddOne()
+        THIS.total = THIS.total + 1.5
+    END SUB
+END CLASS
+
+DIM a AS Acc
+a = NEW Acc
+
+a.AddOne()
+a.AddOne()
+
+PRINT a.total
+END
+```
+
+Beklenen:
+
+```text
+3
+```
+
+---
+
+# Belgeler
+
+Hamle sonunda güncelle veya oluştur:
+
+```text
+CLASS_BASIC_STATUS.md
+COMPILER_COVERAGE.md
+COMPILER_TODO.md
+COMPILER_PARITY_MATRIX.md
+NATIVE_X64_STATUS.md
+MIR_STATUS.md
+yapilanlar.md
+```
+
+`CLASS_BASIC_STATUS.md` formatı:
+
+```text
+CLASS layout:
+- CLASS_FIELD in layout:
+- TypeLayoutSizeOf(CLASS):
+- TypeLayoutResolvePath(CLASS.field):
+
+Object storage:
+- DIM class variable pointer:
+- NEW allocation:
+- assignment c = NEW Class:
+
+Method call:
+- obj.Method():
+- receiver injection:
+- THIS:
+- ME:
+- zero-arg method:
+- method with args:
+
+Field access:
+- obj.field load:
+- obj.field store:
+- THIS.field load:
+- THIS.field store:
+- F32/F64 fields:
+
+Runtime parity:
+- AST:
+- MIR:
+- x64 build:
+- x64 run:
+- output equality:
+
+Remaining:
+```
+
+---
+
+# Son kısa emir
+
+```text
+Önce CLASS_STMT layout’a giriyor mu kontrol et.
+Sonra DIM class variable pointer storage yap.
+Sonra NEW_EXPR allocation’ı temizle.
+Sonra method symbol mapping kur.
+Sonra obj.Method() için receiver’ı RCX’e koy.
+Sonra method prologue’da THIS/ME local slotlarına RCX yaz.
+Sonra field resolver’da THIS/ME type fallback ekle.
+Sonra test 60, 61, 62, 63 çalıştır.
+Geçmeden Hamle 7’ye geçme.
+```
+
+---
+
+## Kritik not
+
+Hamle 6’nın en tehlikeli kısmı şudur:
+
+```text
+DIM c AS Counter
+```
+
+bunu by-value class gibi ayırırsan `c = NEW Counter` bozulur.
+Hamle 6’da `c` kesinlikle **object pointer slot** olmalı.
+
+Bu tek karar doğru verilirse Hamle 7’de constructor/destructor/DELETE çok daha kolay kapanır.
 
 ---
 
@@ -4545,3 +5507,839 @@ Tamamlanan kanitlar:
 
 Sonuc: `H5: TYPE System & Field Access Verified`.
 Hamle 5 x64 parity gate bu snapshotta `DONE`.
+-----------------------
+Mete abi, `src10.zip` içindeki **src klasörünü** ve coverage/hamle belgesini birlikte okudum. Sonuç şu: **Hamle 1–5 yapılmış kabul edilebilir ama “tam kapanmış” değiller; özellikle Hamle 4 ve 5’te codegen ilerlemiş, fakat MIR/test/coverage/edge-case tarafı hâlâ açık.** Coverage belgesi de bir özelliğin `OK` sayılması için katman ve test kanıtı istediğini söylüyor. 
+
+## 1. Ana mimari
+
+```text
+main.bas
+  → lexer / preprocess
+  → parser / AST
+  → semantic_pass + type_binding + layout
+  → AST runtime / memory_exec
+  → MIR lowering / mir_evaluator
+  → x64 codegen / NASM
+  → x64_build_pipeline
+```
+
+Kod gerçekliği:
+
+| Katman        |                          Durum | Ana sorun                                                                            |
+| ------------- | -----------------------------: | ------------------------------------------------------------------------------------ |
+| Lexer/Parser  |                          Geniş | Fazla yüzey var; bazıları runtime’a tam inmiyor                                      |
+| Semantic      |                       Orta-iyi | TYPE/CLASS var; EVENT/SLOT/API kısmi                                                 |
+| AST Runtime   |               En sağlam katman | Ama ileri özelliklerde MVP/no-op ayrımı bulanık                                      |
+| MIR           |                          Kısmi | `unsupported binary op`, `unsupported expr kind`, `unsupported assign op` izleri var |
+| x64 Codegen   | En çok çalışılmış ama kırılgan | `code_generator.fbs` 7518 satır; fazla şişmiş                                        |
+| Test/coverage |                          Eksik | Standart AST=MIR=x64 runner yok                                                      |
+| Docs          |                      Drift var | Bazı belge notları koddan eski kalmış                                                |
+
+## 2. Hamle 1–5 gerçek kapanış matrisi
+
+| Hamle                     | Kullanıcının durumu |                                                  Kod gerçekliği | Karar           |
+| ------------------------- | ------------------: | --------------------------------------------------------------: | --------------- |
+| 1 Akış                    |             Yapıldı | SELECT/GOTO/FOR EACH iyi; IF/FOR/DO varyantları daha test ister | **KISMEN TAM**  |
+| 2 I/O                     |             Yapıldı |       INPUT/file I/O ilerlemiş; PRINT hâlâ native/string hassas | **KISMEN TAM**  |
+| 3 Bellek                  |             Yapıldı |                    POKE/PEEK/MEM yolları en temiz görünen bölüm | **TAM’A YAKIN** |
+| 4 Operator + sayı + float |             Yapıldı |                  F32/F64 XMM yolu başlamış; F80 ve FFI F64 açık | **KISMEN**      |
+| 5 Metin/ekran/zaman/tuş   |             Yapıldı |        String/console/timer/inkey native varyantları hâlâ eksik | **KISMEN**      |
+
+## 3. 24 hamleye göre karar ağacı
+
+```text
+Önce:
+Hamle 1–5 gerçekten AST=MIR=x64 aynı çıktı veriyor mu?
+  Hayır → Hamle 1–5 düzeltme fazı
+  Evet → Hamle 6’ya geç
+
+Hamle 6–13:
+Gerçek compiler v1 çekirdeği mi kapanıyor?
+  TYPE/CLASS/FFI/API/test/refactor eksikse → önce bunlar
+  Kapanırsa → ileri dil özelliklerine geç
+
+Hamle 14–18:
+EVENT/THREAD/PIPE/LIST/MODULE gerçek runtime mı?
+  Hayır → syntax olarak bırak, v2 etiketi koy
+  Evet → semantic+MIR+x64 parity iste
+
+Hamle 19–24:
+Hata sistemi, bilimsel math, dış kütüphane, backend, IDE, release
+  Ancak Hamle 11–12 kapanmadan bunlara ağır girme
+```
+
+## 4. 24 hamle eksiklik/fazlalık matrisi
+
+| Hamle | Başlık                         |        Durum | Eksik                                                     | Fazlalık / risk                                |
+| ----: | ------------------------------ | -----------: | --------------------------------------------------------- | ---------------------------------------------- |
+|     1 | Akış parity                    |   Kısmen tam | IF/FOR/DO edge testleri                                   | Codegen’e fazla yüklenilmiş                    |
+|     2 | I/O parity                     |   Kısmen tam | PRINT format/parity                                       | PRINT/string birbirine karışmış                |
+|     3 | Bellek                         |  Tam’a yakın | Bounds/failfast testleri                                  | Az risk                                        |
+|     4 | Floating/operator/sayı         |       Kısmen | F80, FFI F64, float compare/return tamlığı                | F80 yüzeyi erken açılmış                       |
+|     5 | Metin/ekran/zaman/tuş          |       Kısmen | String array/type kombinasyonları, INKEY varyantları      | Native helper artmış ama matris yok            |
+|     6 | TYPE layout + field            | Kısmen/ileri | String/float/array field sert test                        | Belgede OK yazması erken olabilir              |
+|     7 | CLASS ctor/dtor/DELETE         |       Kısmen | destructor garantisi, double delete, string field cleanup | OOP “var” görünüyor ama yaşam döngüsü kırılgan |
+|     8 | inheritance/interface/override |       Kısmen | base layout, override dispatch                            | vtable’a erken atlama riski                    |
+|     9 | x64 refactor                   |        Eksik | `code_generator.fbs` bölünmeli                            | En büyük teknik borç                           |
+|    10 | AST/MIR/x64 parity runner      |        Eksik | Standart runner yok                                       | Bu olmadan OK demek riskli                     |
+|    11 | çekirdek BASIC kapanış         |       Kısmen | `13.bas` tam parity                                       | Parser çok geniş, çekirdek dağınık             |
+|    12 | FFI/INLINE/API                 |       Kısmen | CALL(API), F64, callback, struct                          | CALL(DLL) ile API karışmasın                   |
+|    13 | ileri özellikleri dondurma     |        Eksik | v1/v2 etiketi yok                                         | EVENT/THREAD erken açılmış                     |
+|    14 | EVENT                          |          MVP | Gerçek event dispatch                                     | Syntax var, runtime kısmi                      |
+|    15 | THREAD/PARALLEL                |          MVP | gerçek thread modeli                                      | Çok erken                                      |
+|    16 | PIPE/SLOT/SIGNAL               |          MVP | MIR/x64 gerçek lane                                       | Slot manager var ama tam sistem değil          |
+|    17 | LIST/DICT/SET                  |   Plan/kısmi | gerçek collection runtime                                 | Şimdilik ertelenmeli                           |
+|    18 | MODULE/NAMESPACE               |        Kısmi | visibility, include-once, paket                           | Büyük proje için gerekli ama sonra             |
+|    19 | hata sistemi                   |  Eksik/kısmi | ON ERROR, RESUME, ERR/ERL                                 | TRY/CATCH erken                                |
+|    20 | bilimsel matematik             |         Plan | DOUBLE/F80 bitmeden olmaz                                 | Compiler içine gömme riski                     |
+|    21 | dış kütüphane köprüleri        |        Kısmi | BLAS/GSL/MPFR köprüleri                                   | FFI sağlamlaşmadan erken                       |
+|    22 | çoklu backend                  |        Eksik | backend arayüzü                                           | x64 bölünmeden erken                           |
+|    23 | IDE/debugger/profiler          |        Eksik | AST/MIR/ASM viewer                                        | Ürünleşmeden önce araç fazı                    |
+|    24 | release/stdlib/installer       |        Eksik | CI, installer, stdlib, örnekler                           | Hamle 10 olmadan release riskli                |
+
+## 5. En önemli kırmızı karar
+
+**Codegen’e devam etmeden önce Hamle 10’u öne çekmek lazım.**
+
+Yani sıra bence şöyle düzeltilmeli:
+
+```text
+A. Hamle 1–5 kapanış testi
+B. Hamle 10 parity runner
+C. Hamle 9 codegen refactor
+D. Hamle 6–8 TYPE/CLASS gerçek kapanış
+E. Hamle 12 FFI/API
+F. Sonra Hamle 14+
+```
+
+Kısa hüküm: **Diğer katmanlarda eksik var. Sadece codegen çalışmak sistemi büyütüyor ama güvenceyi artırmıyor. En büyük eksik test/coverage runner + MIR parity + codegen refactor.**
+----------------
+Mete abi, `src9.zip` içindeki `src` klasörünü inceledim. Hamle 4 ve 5’ten sonra sistem ciddi gelişmiş; ama Hamle 6’ya geçerken hâlâ “tamamlandı” denemeyecek yarım yerler var. Ben burada **kod gerçekliği üzerinden** mimariyi, akışları, CLI komutlarını ve katman durum matrisini çıkarıyorum.
+
+Derleme çalıştırmadım; zip içinde FreeBASIC aracı yoktu. Bu yüzden değerlendirme **statik kod incelemesi**dir.
+
+---
+
+# 1. Genel mimari
+
+Şu an uXBasic’in ana mimarisi hibrit hale gelmiş:
+
+```text
+source .bas
+   ↓
+lexer
+   ↓
+parser
+   ↓
+AST
+   ↓
+semantic_pass
+   ↓
+HIR inventory / MIR build / MIR optimize
+   ↓
+AST interpreter veya MIR interpreter
+   ↓
+x64 NASM codegen
+   ↓
+x64 build pipeline
+```
+
+`src/main.bas` artık sadece parser çalıştıran dosya değil. Şu yolları yönetiyor:
+
+```text
+AST JSON çıkışı
+HIR inventory JSON çıkışı
+MIR pipeline JSON çıkışı
+MIR opcode/surface JSON çıkışı
+AST interpreter
+MIR interpreter
+x64 NASM emit
+x64 build
+interop artifact üretimi
+artifact report JSON
+```
+
+Bu iyi bir gelişme. Yani proje artık:
+
+```text
+compiler + interpreter + analiz/pipeline aracı
+```
+
+haline gelmiş.
+
+---
+
+# 2. CLI komutları
+
+Kodda görünen ana CLI komutları şunlar:
+
+```text
+--debug
+--ayikla
+
+--semantic
+--semantik
+
+--execmem
+--interpreter-backend AST
+--interpreter-backend MIR
+
+--interop
+
+--emit-x64-nasm
+--emit-x64-nasm-out <file>
+
+--x64gen
+--x64gen-out <file>
+
+--codegen
+--x64
+
+--build-x64
+--build-x64-out <dir>
+
+--codegen-source AST
+--codegen-source MIR
+
+--ast-json-out <file>
+--hir-json-out <file>
+--ir-json-out <file>
+--inventory-json-out <file>
+
+--pipeline-json-out <file>
+--mir-pipeline-json-out <file>
+
+--mir-opcodes-json-out <file>
+--mir-surface-json-out <file>
+
+--artifact-report-json-out <file>
+
+--source <file>
+-s <file>
+```
+
+Önemli gerçek:
+
+```text
+--codegen-source MIR
+```
+
+şu anda gerçek MIR → native emitter değil. Kodda rota şu şekilde:
+
+```text
+MIR verified -> AST emitter
+```
+
+Yani MIR build/opt doğrulama için çalışıyor; ama native üretim hâlâ AST emitter üzerinden gidiyor.
+
+---
+
+# 3. Katmanlar arası akış
+
+## 3.1 Frontend
+
+```text
+src/parser/lexer.fbs
+src/parser/parser.fbs
+src/parser/ast.fbs
+```
+
+Durum: **güçlü**
+
+Parser çok geniş yüzey tanıyor:
+
+```text
+DIM / REDIM / CONST
+TYPE / CLASS / INTERFACE
+SUB / FUNCTION / DECLARE
+IF / SELECT / FOR / DO
+GOTO / GOSUB / RETURN
+TRY / CATCH / FINALLY / THROW
+PRINT / INPUT
+OPEN / CLOSE / GET / PUT / SEEK
+INLINE
+CALL
+EVENT / THREAD / PARALEL / PIPE / SLOT
+MODULE / NAMESPACE / IMPORT / INCLUDE / USING / ALIAS
+```
+
+Ama parser’ın tanıması, backend’in çalıştırdığı anlamına gelmiyor.
+
+---
+
+## 3.2 Semantic
+
+```text
+src/semantic/semantic_pass.fbs
+src/semantic/type_binding.fbs
+src/semantic/layout.fbs
+src/semantic/layout/
+```
+
+Durum: **orta-güçlü**
+
+Özellikle Hamle 5 sonrası layout altyapısı iyi durumda:
+
+```text
+BuildTypeLayoutTable
+ResolveTypeLayout
+TypeLayoutSizeOf
+TypeLayoutOffsetOf
+TypeLayoutResolvePath
+```
+
+F32/F64/F80 da tanınıyor:
+
+```text
+F32 -> 4 byte
+F64 -> 8 byte
+F80 -> 10 byte, align 8
+```
+
+Ama semantic taraf hâlâ şu konularda tam kilitli değil:
+
+```text
+CLASS object model
+method receiver binding
+THIS / ME binding
+method symbol resolution
+constructor/destructor lifecycle
+MIR ile tam type propagation
+```
+
+---
+
+## 3.3 AST runtime
+
+```text
+src/runtime/memory_exec.fbs
+src/runtime/exec/
+```
+
+Durum: **güçlü ama class/native parity açısından belirsiz**
+
+Runtime tarafında birçok yapı var:
+
+```text
+exec_class_layout_helpers
+exec_call_dispatch_helpers
+exec_eval_builtin_categories
+exec_eval_text_helpers
+exec_collections
+exec_slot_manager
+exec_ffi_runtime
+```
+
+AST interpreter muhtemelen birçok şeyi x64’ten önce çalıştırıyor. Ancak Hamle 6 için kritik olan şu:
+
+```text
+AST runtime class method call + THIS/ME + NEW object + field update
+```
+
+bunlar tekrar test edilmeli. Çünkü x64’te bu hatlar yeni yeni bağlanıyor.
+
+---
+
+## 3.4 MIR
+
+```text
+src/semantic/mir.fbs
+src/semantic/mir_model.fbs
+src/semantic/mir_evaluator.fbs
+```
+
+Durum: **kısmi**
+
+MIR build/opt ve MIR interpreter yolu var. CLI da bunu destekliyor:
+
+```text
+--execmem --interpreter-backend MIR
+--codegen-source MIR
+```
+
+Ama kod gerçekliğine göre MIR hâlâ native codegen’in gerçek kaynağı değil. Ayrıca Hamle 6 için gereken şu op’ların tamlığı şüpheli:
+
+```text
+MIR_NEW_OBJECT
+MIR_FIELD_LOAD
+MIR_FIELD_STORE
+MIR_METHOD_CALL
+MIR_THIS / MIR_ME binding
+```
+
+Eğer bunlar yoksa CLASS için MIR tarafı **PARTIAL** kalır.
+
+---
+
+## 3.5 x64 codegen
+
+```text
+src/codegen/x64/code_generator.fbs
+src/codegen/x64/cg_context.fbs
+src/codegen/x64/var_mapping.fbs
+```
+
+Durum: **çok gelişmiş ama hâlâ kırılgan**
+
+Hamle 4 ve 5’ten sonra ciddi eklemeler yapılmış:
+
+```text
+UXF_F32 / UXF_F64 / UXF_F80
+X64EmitExprToXmm0As
+X64EmitFloatBinaryAs
+X64CreateFloatConstant
+X64EmitCallNodeToXmm0As
+X64TryGetRoutineReturnType
+X64EmitAddrOfFieldExpr
+X64ResolveFieldInfo
+X64EmitStoreFieldFromRhs
+F32/F64 print
+F80 dt storage ve bazı print dönüşümü
+```
+
+Ama x64 codegen artık çok şişmiş. `code_generator.fbs` içinde çok fazla sorumluluk var:
+
+```text
+type inference
+var mapping
+layout resolving
+float emit
+field emit
+method call
+runtime helper emit
+file IO
+FFI
+builtin
+control flow
+```
+
+Hamle 9’daki refactor kesin gerekli.
+
+---
+
+# 4. Hamle 4 durumu — Floating point
+
+## Durum özeti
+
+| Özellik                 | Durum                         |
+| ----------------------- | ----------------------------- |
+| F32 type tanıma         | Tam                           |
+| F64 type tanıma         | Tam                           |
+| F80 type tanıma         | Tam                           |
+| F32 storage             | Kısmi/Tam arası               |
+| F64 storage             | Tam’a yakın                   |
+| F80 storage             | Kısmi                         |
+| F32 arithmetic          | Kısmi                         |
+| F64 arithmetic          | Tam’a yakın                   |
+| F80 arithmetic          | Eksik                         |
+| F32/F64 PRINT           | Kısmi/Tam arası               |
+| F80 PRINT               | Kısmi, F80→F64 dönüştürme var |
+| Function return F32/F64 | Kısmi                         |
+| CALL_EXPR float return  | Kısmi                         |
+| Float arrays stride     | Kısmi                         |
+| MIR float parity        | Kısmi                         |
+
+## Kodda görünen iyi gelişmeler
+
+```text
+X64EmitExprToXmm0As var.
+F32/F64 ayrımı var.
+movss/movsd kullanımı var.
+addss/addsd, subss/subsd, mulss/mulsd, divss/divsd var.
+F80 için dt emit var.
+F80 için diagnostic metinleri var.
+Function return type registry eklenmiş.
+CALL_EXPR float return helper var.
+PRINT float path var.
+```
+
+## Kalan kritik eksikler
+
+```text
+1. F80 aritmetik gerçek değil.
+2. F80 bazı yerlerde diagnostic, bazı yerlerde F80→F64 print dönüşümü var; politika net değil.
+3. F32/F64 CALL_EXPR sadece return için gelişmiş; float parameter ABI tam değil.
+4. X64EmitExprToRax hâlâ float NUMBER gelirse CLng(Val(...)) ile integer’a düşürebiliyor.
+5. MIR float op parity kesin değil.
+6. F32/F64 indexed load/store tüm yollarda test edilmeli.
+```
+
+Kısa karar:
+
+```text
+Hamle 4: x64 tarafında büyük ilerleme var; ama FULL OK değil.
+F32/F64: PARTIAL → OK adayı.
+F80: PARTIAL, arithmetic eksik.
+MIR parity: PARTIAL.
+```
+
+---
+
+# 5. Hamle 5 durumu — TYPE layout / field access
+
+## Durum özeti
+
+| Özellik                  | Durum           |
+| ------------------------ | --------------- |
+| Mevcut layout sistemi    | Tam’a yakın     |
+| TYPE size/align          | Tam’a yakın     |
+| TypeLayoutResolvePath    | Var             |
+| FIELD_EXPR x64 load      | Kısmi/Tam arası |
+| FIELD_EXPR x64 store     | Kısmi/Tam arası |
+| F32/F64 field load/store | Kısmi           |
+| F80 field                | Kısmi           |
+| Nested TYPE              | Kısmi           |
+| TYPE içi array field     | Kısmi           |
+| String field             | Eksik/Kısmi     |
+| MIR field parity         | Belirsiz/Kısmi  |
+
+## İyi gelişmeler
+
+Kodda artık şu yapılar var:
+
+```text
+X64ResolveFieldInfo
+X64EmitAddrOfFieldExpr
+X64EmitLoadFieldExpr
+X64EmitStoreFieldFromRhs
+X64EmitStoreIntegerFieldExpr
+```
+
+Bu doğru mimari. Field access için “base address → offset → typed load/store” yaklaşımı kurulmuş.
+
+## Kalan riskli yerler
+
+```text
+1. TYPE içi string field modeli net değil.
+2. F80 field için politika karışık: diagnostic mi, x87 print mi?
+3. Nested field path testleri şart.
+4. Array field path testleri şart.
+5. FIELD_EXPR ile CALL_EXPR(member path) ayrımı çok dikkat istiyor.
+```
+
+Kısa karar:
+
+```text
+Hamle 5: TYPE numeric field tarafı iyi yolda.
+String/F80/nested/array/MIR parity hâlâ tam kapanmamış olabilir.
+```
+
+---
+
+# 6. Hamle 6 başlangıç durumu — CLASS basic object model
+
+Şu anda Hamle 6’ya girmişsin. Kodda class için önemli parçalar var:
+
+```text
+ASTK_CLASS_STMT
+ASTK_CLASS_FIELD
+ASTK_CLASS_METHOD_DECL
+ASTK_CLASS_CONSTRUCTOR_DECL
+ASTK_CLASS_DESTRUCTOR_DECL
+ASTK_NEW_EXPR
+
+X64FindClassDeclNode
+NEW_EXPR allocation
+method receiver çözümleme denemesi
+method symbol mapping denemesi
+class field root kontrolü
+```
+
+## İyi olanlar
+
+```text
+NEW_EXPR TypeLayoutSizeOf ile class size alıyor.
+calloc(1, classSize) ile allocation yapıyor.
+Method call için owner.method ayrıştırma denemesi var.
+Class type root ise field access’te X64EmitLoadVar ile pointer yükleniyor.
+```
+
+## Tehlikeli olanlar
+
+Hamle 6 için en riskli yerler:
+
+```text
+1. DIM c AS Counter pointer mı, by-value mı?
+2. c = NEW Counter assignment doğru pointer store ediyor mu?
+3. c.Inc() AST şekli gerçekten X64SplitMethodCallName ile yakalanıyor mu?
+4. THIS/ME method içinde local slot olarak bağlandı mı?
+5. Method prologue receiver RCX’i koruyor mu?
+6. Constructor çağrısı NEW_EXPR içinde başlamış; bu Hamle 7 işiydi, kırılma yaratabilir.
+7. Class method symbol kayıtları tam mı?
+8. MIR class method call hazır mı?
+```
+
+Özellikle şu karar kritik:
+
+```text
+DIM c AS Counter
+```
+
+Hamle 6’da **object pointer slot** olmalı. Eğer by-value class gibi alan ayrılırsa:
+
+```basic
+c = NEW Counter
+```
+
+mantıksal olarak bozulur.
+
+---
+
+# 7. Veri tipleri matrisi
+
+| Tip              | Parser | Semantic/Layout | AST runtime |         MIR |             x64 |
+| ---------------- | -----: | --------------: | ----------: | ----------: | --------------: |
+| I8/U8            |    Tam |     Tam’a yakın |       Kısmi |       Kısmi |           Kısmi |
+| I16/U16          |    Tam |     Tam’a yakın |       Kısmi |       Kısmi |           Kısmi |
+| I32/INTEGER/LONG |    Tam |             Tam | Tam’a yakın |       Kısmi |     Tam’a yakın |
+| I64/LONGINT      |    Tam |     Tam’a yakın |       Kısmi |       Kısmi |           Kısmi |
+| F32/SINGLE       |    Tam |             Tam |       Kısmi |       Kısmi | Kısmi/Tam adayı |
+| F64/DOUBLE       |    Tam |             Tam | Tam’a yakın |       Kısmi |     Tam’a yakın |
+| F80/EXTENDED     |    Tam |             Tam |       Kısmi | Eksik/Kısmi |           Kısmi |
+| BOOLEAN          |    Tam |           Kısmi |       Kısmi |       Kısmi |           Kısmi |
+| STRING           |    Tam |           Kısmi | Tam’a yakın |       Kısmi |           Kısmi |
+| PTR              |    Tam |           Kısmi |       Kısmi |       Kısmi |           Kısmi |
+| OBJECT           |    Tam |           Kısmi |       Kısmi | Eksik/Kısmi |           Kısmi |
+| TYPE             |    Tam |     Tam’a yakın |       Kısmi |       Kısmi | Kısmi/Tam adayı |
+| CLASS            |    Tam |           Kısmi |       Kısmi | Eksik/Kısmi |           Kısmi |
+
+---
+
+# 8. Veri yapıları matrisi
+
+| Veri yapısı      |     Parser |    Semantic | AST runtime |         MIR |             x64 |
+| ---------------- | ---------: | ----------: | ----------: | ----------: | --------------: |
+| Scalar variable  |        Tam |         Tam | Tam’a yakın |       Kısmi |     Tam’a yakın |
+| Array            |        Tam |       Kısmi |       Kısmi |       Kısmi |           Kısmi |
+| TYPE record      |        Tam | Tam’a yakın |       Kısmi |       Kısmi | Kısmi/Tam adayı |
+| Nested TYPE      |        Tam |   Kısmi/Tam |       Kısmi |       Kısmi |           Kısmi |
+| TYPE array field |        Tam |       Kısmi |       Kısmi |       Kısmi |           Kısmi |
+| CLASS object     |        Tam |       Kısmi |       Kısmi | Eksik/Kısmi |           Kısmi |
+| LIST             | Parser var | Eksik/Kısmi |       Kısmi |       Eksik |           Eksik |
+| DICT             | Parser var | Eksik/Kısmi |       Kısmi |       Eksik |           Eksik |
+| SET              | Parser var | Eksik/Kısmi |       Kısmi |       Eksik |           Eksik |
+| PIPE/SLOT        | Parser var | Eksik/Kısmi |       Kısmi |       Eksik |           Eksik |
+
+---
+
+# 9. Komut matrisi
+
+| Komut                          |             Parser |    AST runtime |         MIR |         x64 | Durum       |
+| ------------------------------ | -----------------: | -------------: | ----------: | ----------: | ----------- |
+| PRINT                          |                Tam |    Tam’a yakın |       Kısmi | Tam’a yakın | Kısmi/Tam   |
+| INPUT                          |                Tam |          Kısmi | Eksik/Kısmi |  Kısmi/stub | Kısmi       |
+| DIM                            |                Tam |            Tam |       Kısmi | Tam’a yakın | Kısmi/Tam   |
+| REDIM                          |                Tam |          Kısmi |       Kısmi |       Kısmi | Kısmi       |
+| CONST                          |                Tam |          Kısmi |       Kısmi |       Kısmi | Kısmi       |
+| IF/ELSEIF/ELSE                 |                Tam |    Tam’a yakın |       Kısmi |   Kısmi/Tam | Kısmi       |
+| SELECT/CASE                    |                Tam |          Kısmi |       Kısmi |       Kısmi | Kısmi       |
+| FOR/NEXT                       |                Tam |    Tam’a yakın |       Kısmi |   Kısmi/Tam | Kısmi       |
+| DO/LOOP                        |                Tam |          Kısmi |       Kısmi |       Kısmi | Kısmi       |
+| FOR EACH                       |                Tam |          Kısmi | Eksik/Kısmi |  Kısmi/stub | Kısmi       |
+| DO EACH                        |                Tam |          Kısmi | Eksik/Kısmi |  Kısmi/stub | Kısmi       |
+| EXIT                           |                Tam |          Kısmi |       Kısmi |       Kısmi | Kısmi       |
+| SUB                            |                Tam |      Kısmi/Tam |       Kısmi |   Kısmi/Tam | Kısmi       |
+| FUNCTION                       |                Tam |      Kısmi/Tam |       Kısmi |   Kısmi/Tam | Kısmi       |
+| RETURN                         |                Tam |      Kısmi/Tam |       Kısmi |   Kısmi/Tam | Kısmi       |
+| CALL                           |                Tam |          Kısmi |       Kısmi |       Kısmi | Kısmi       |
+| CALL(DLL)                      | Parser/interop var |          Kısmi |       Eksik |       Kısmi | Kısmi       |
+| INLINE                         |                Tam |          Kısmi |       Eksik |       Kısmi | Kısmi       |
+| GOTO                           |                Tam |          Kısmi |       Kısmi |   Kısmi/Tam | Kısmi       |
+| GOSUB/RETURN                   |                Tam |          Kısmi |       Kısmi |       Kısmi | Kısmi       |
+| TYPE                           |                Tam |      Kısmi/Tam |       Kısmi |   Kısmi/Tam | Kısmi       |
+| CLASS                          |                Tam |          Kısmi | Eksik/Kısmi |       Kısmi | Kısmi       |
+| INTERFACE                      |                Tam | Semantic kısmi |       Eksik |       Eksik | Eksik/Kısmi |
+| NEW                            |                Tam |          Kısmi | Eksik/Kısmi |       Kısmi | Kısmi       |
+| DELETE                         |                Tam |          Kısmi | Eksik/Kısmi |       Kısmi | Kısmi       |
+| TRY/CATCH/FINALLY              |                Tam |          Kısmi |       Eksik | Eksik/Kısmi | Kısmi       |
+| THROW/ASSERT                   |                Tam |          Kısmi |       Eksik |       Kısmi | Kısmi       |
+| OPEN/CLOSE/GET/PUT/SEEK        |                Tam |      Kısmi/Tam |       Kısmi |       Kısmi | Kısmi       |
+| CLS/COLOR/LOCATE               |                Tam |          Kısmi |       Eksik |  Kısmi/stub | Kısmi       |
+| RANDOMIZE/RND                  |                Tam |          Kısmi |       Kısmi |       Kısmi | Kısmi       |
+| PEEK/POKE/MEMCOPY/MEMFILL      |                Tam |          Kısmi |       Kısmi |   Kısmi/Tam | Kısmi       |
+| EVENT/THREAD/PARALEL/PIPE/SLOT |         Parser var |     Kısmi/stub |       Eksik |  Kısmi/stub | Eksik/Kısmi |
+| MODULE/NAMESPACE               |         Parser var |          Kısmi |       Eksik | Eksik/Kısmi | Kısmi       |
+| IMPORT/INCLUDE/USING/ALIAS     |         Parser var |          Kısmi |       Eksik |       Kısmi | Kısmi       |
+
+---
+
+# 10. Operatör matrisi
+
+| Operatör             |         Parser |   AST |         MIR |             x64 | Durum     |
+| -------------------- | -------------: | ----: | ----------: | --------------: | --------- |
+| `+` integer          |            Tam |   Tam |       Kısmi |     Tam’a yakın | Kısmi/Tam |
+| `-` integer          |            Tam |   Tam |       Kısmi |     Tam’a yakın | Kısmi/Tam |
+| `*` integer          |            Tam |   Tam |       Kısmi |     Tam’a yakın | Kısmi/Tam |
+| `/` integer/float    |            Tam | Kısmi |       Kısmi |           Kısmi | Kısmi     |
+| `\` integer division |     Parser var | Kısmi |       Kısmi |           Kısmi | Kısmi     |
+| `MOD`                |            Tam | Kısmi |       Kısmi |           Kısmi | Kısmi     |
+| `^` veya `**`        | Parser izi var | Kısmi |       Kısmi |     Eksik/Kısmi | Kısmi     |
+| `=` compare/assign   |            Tam |   Tam |       Kısmi |     Tam’a yakın | Kısmi/Tam |
+| `<>`                 |            Tam | Kısmi |       Kısmi |           Kısmi | Kısmi     |
+| `< <= > >=`          |            Tam | Kısmi |       Kısmi |           Kısmi | Kısmi     |
+| `AND OR XOR NOT`     |            Tam | Kısmi |       Kısmi |           Kısmi | Kısmi     |
+| `SHL SHR ROL ROR`    |     Parser var | Kısmi |       Kısmi |           Kısmi | Kısmi     |
+| `.` field/member     |            Tam | Kısmi |       Kısmi | Kısmi/Tam adayı | Kısmi     |
+| `()` call/index      |            Tam | Kısmi |       Kısmi |           Kısmi | Kısmi     |
+| `NEW`                |            Tam | Kısmi | Eksik/Kısmi |           Kısmi | Kısmi     |
+
+---
+
+# 11. Fonksiyon / builtin matrisi
+
+| Fonksiyon                |     Parser |         AST |   MIR |                      x64 | Durum |
+| ------------------------ | ---------: | ----------: | ----: | -----------------------: | ----- |
+| LEN                      |        Tam | Tam’a yakın | Kısmi |                    Kısmi | Kısmi |
+| MID                      |        Tam |       Kısmi | Kısmi |                    Kısmi | Kısmi |
+| STR                      |        Tam |       Kısmi | Kısmi | Kısmi, F64 özel case var | Kısmi |
+| VAL                      |        Tam |       Kısmi | Kısmi |                    Kısmi | Kısmi |
+| ABS                      |        Tam |       Kısmi | Kısmi |                    Kısmi | Kısmi |
+| INT/FIX                  |        Tam |       Kısmi | Kısmi |                    Kısmi | Kısmi |
+| SQR/SQRT                 |        Tam |   Kısmi/Tam | Kısmi |  Kısmi/Tam, XMM path var | Kısmi |
+| SIN/COS/TAN/ATN          |        Tam |   Kısmi/Tam | Kısmi |  Kısmi/Tam, XMM path var | Kısmi |
+| EXP/LOG                  |        Tam |   Kısmi/Tam | Kısmi |  Kısmi/Tam, XMM path var | Kısmi |
+| RND/RANDOMIZE            |        Tam |       Kısmi | Kısmi |                    Kısmi | Kısmi |
+| TIMER                    |        Tam |       Kısmi | Kısmi |                    Kısmi | Kısmi |
+| INKEY/GETKEY             | Parser var |       Kısmi | Eksik |                    Kısmi | Kısmi |
+| VARPTR/SADD/LPTR/CODEPTR | Parser var |       Kısmi | Kısmi | VARPTR Tam, SADD/LPTR/CODEPTR Kısmi | Kısmi |
+| SIZEOF/OFFSETOF          |        Tam |       Kısmi | Kısmi |      OFFSETOF Tam, SIZEOF Kısmi | Kısmi |
+| CINT/CLNG/CDBL/CSNG      |        Tam |       Kısmi | Kısmi |                    Kısmi | Kısmi |
+| PEEKB/PEEKW/PEEKD        |        Tam |       Kısmi | Kısmi |       PEEKD Tam, PEEKB/W Kısmi | Kısmi |
+
+2026-05-05 x64 builtin kaniti:
+
+- `tests/basicCodeTests/88_h8a_varptr_offsetof_peekd_native_parity.bas` AST ciktisi: `0 4 10 15`
+- ayni dosya MIR ciktisi: `0 4 10 15`
+- ayni dosya x64 native ciktisi: `0 4 10 15`
+- kanit: `VARPTR` ham adres degeri backend'e gore degisebildigi icin parity probe'u yalnizca `OFFSETOF + PEEKD + bellekten geri okuma` davranisini olcer.
+
+---
+
+# 12. Hamle 6 için net eksik listesi
+
+Hamle 6’da sırayla kapatılacak eksikler:
+
+```text
+1. CLASS_STMT layout table’a kesin giriyor mu kontrol et.
+2. CLASS_FIELD TypeLayoutResolvePath ile çözülüyor mu kontrol et.
+3. DIM c AS ClassName kesin 8-byte pointer slot ayırmalı.
+4. c = NEW ClassName pointer store etmeli.
+5. NEW_EXPR içinde constructor çağrısı Hamle 7’ye bırakılmalı veya guard edilmeli.
+6. c.Method() AST şekli gerçek olarak incelenmeli.
+7. X64SplitMethodCallName tüm method call biçimlerini yakalıyor mu kontrol edilmeli.
+8. Method sembolleri Class_Method standardıyla kaydedilmeli.
+9. Method call receiver RCX’e konmalı.
+10. Method prologue’da THIS ve ME local slotlara yazılmalı.
+11. THIS/ME type registry’ye class type olarak kaydedilmeli.
+12. Field access resolver X64FindDeclaredTypeName başarısızsa X64TryGetVarType fallback kullanmalı.
+13. THIS.value ve ME.value field access çalışmalı.
+14. obj.field ve THIS.field aynı layout resolver’dan geçmeli.
+15. MIR class object durumu açıkça OK/PARTIAL/EXIK yazılmalı.
+```
+
+---
+
+# 13. Hamle 6 minimum test kapısı
+
+Şu testler geçmeden Hamle 6 kapandı denmemeli:
+
+```basic
+CLASS Counter
+    value AS I32
+
+    SUB Inc()
+        THIS.value = THIS.value + 1
+    END SUB
+END CLASS
+
+DIM c AS Counter
+c = NEW Counter
+
+c.Inc()
+c.Inc()
+
+PRINT c.value
+END
+```
+
+Beklenen:
+
+```text
+2
+```
+
+İkinci test:
+
+```basic
+CLASS Counter
+    value AS I32
+
+    SUB Inc()
+        ME.value = ME.value + 1
+    END SUB
+END CLASS
+
+DIM c AS Counter
+c = NEW Counter
+
+c.Inc()
+c.Inc()
+c.Inc()
+
+PRINT c.value
+END
+```
+
+Beklenen:
+
+```text
+3
+```
+
+Üçüncü test:
+
+```basic
+CLASS Acc
+    total AS F64
+
+    SUB AddOne()
+        THIS.total = THIS.total + 1.5
+    END SUB
+END CLASS
+
+DIM a AS Acc
+a = NEW Acc
+
+a.AddOne()
+a.AddOne()
+
+PRINT a.total
+END
+```
+
+Beklenen:
+
+```text
+3
+```
+
+---
+
+# 14. Kısa hüküm
+
+Mete abi, geldiğin nokta şu:
+
+```text
+Hamle 4: büyük ölçüde yapıldı, ama FULL OK değil.
+Hamle 5: numeric TYPE field tarafı iyi ilerledi, ama string/nested/array/MIR testleri şart.
+Hamle 6: altyapı başlamış, ama henüz kapanmamış.
+```
+
+Şu anda en kritik mimari karar:
+
+```text
+CLASS variable = pointer slot
+TYPE variable = by-value storage
+```
+
+Bu ayrım netleşirse Hamle 6 toparlanır. Netleşmezse `TYPE`, `CLASS`, `NEW`, `field access`, `DELETE`, `constructor/destructor` birbirine karışır.
