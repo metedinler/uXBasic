@@ -9,6 +9,25 @@ Type FfiX64CallPlanEntry
     argumentCount As Integer
 End Type
 
+Private Function FfiCallCStringEscape(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+    outText = ""
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        Select Case Asc(ch)
+        Case 34
+            outText &= "\" & Chr(34)
+        Case 92
+            outText &= "\\"
+        Case Else
+            outText &= ch
+        End Select
+    Next i
+    Return outText
+End Function
+
 Private Function FfiCallIsDllConvention(ByRef conventionText As String) As Integer
     Dim s As String
     s = UCase(Trim(conventionText))
@@ -69,31 +88,41 @@ Private Function FfiCallReadDllEntry(ByRef ps As ParseState, ByVal nodeIdx As In
     nodeKind = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
     If nodeKind <> "CALL_STMT" And nodeKind <> "CALL_EXPR" Then Return 0
 
-    If UCase(Trim(ps.ast.nodes(nodeIdx).value)) <> "DLL" Then Return 0
+    Dim basePos As Integer
+    basePos = 0
+    If UCase(Trim(ps.ast.nodes(nodeIdx).value)) <> "DLL" Then
+        If UCase(Trim(ps.ast.nodes(nodeIdx).value)) <> "CALL" Then Return 0
+        Dim firstArg As Integer
+        firstArg = FfiCallChildAt(ps, nodeIdx, 0)
+        If firstArg = -1 Then Return 0
+        If UCase(Trim(ps.ast.nodes(firstArg).kind)) <> "IDENT" And UCase(Trim(ps.ast.nodes(firstArg).kind)) <> "KEYWORD_REF" Then Return 0
+        If UCase(Trim(ps.ast.nodes(firstArg).value)) <> "DLL" Then Return 0
+        basePos = 1
+    End If
 
     Dim argc As Integer
     argc = FfiCallChildCount(ps, nodeIdx)
-    If argc < 4 Then
+    If argc < basePos + 3 Then
         errText = "ffi-x64: CALL(DLL) arity is invalid at line " & LTrim(Str(ps.ast.nodes(nodeIdx).lineNo))
         Return -1
     End If
 
     Dim libNode As Integer
-    libNode = FfiCallChildAt(ps, nodeIdx, 0)
+    libNode = FfiCallChildAt(ps, nodeIdx, basePos)
     If libNode = -1 Or UCase(ps.ast.nodes(libNode).kind) <> "STRING" Then
         errText = "ffi-x64: CALL(DLL) library must be string at line " & LTrim(Str(ps.ast.nodes(nodeIdx).lineNo))
         Return -1
     End If
 
     Dim symNode As Integer
-    symNode = FfiCallChildAt(ps, nodeIdx, 1)
+    symNode = FfiCallChildAt(ps, nodeIdx, basePos + 1)
     If symNode = -1 Or UCase(ps.ast.nodes(symNode).kind) <> "STRING" Then
         errText = "ffi-x64: CALL(DLL) symbol must be string at line " & LTrim(Str(ps.ast.nodes(nodeIdx).lineNo))
         Return -1
     End If
 
     Dim sigNode As Integer
-    sigNode = FfiCallChildAt(ps, nodeIdx, 2)
+    sigNode = FfiCallChildAt(ps, nodeIdx, basePos + 2)
     If sigNode = -1 Or UCase(ps.ast.nodes(sigNode).kind) <> "KEYWORD_REF" Then
         errText = "ffi-x64: CALL(DLL) signature must be keyword at line " & LTrim(Str(ps.ast.nodes(nodeIdx).lineNo))
         Return -1
@@ -102,17 +131,17 @@ Private Function FfiCallReadDllEntry(ByRef ps As ParseState, ByVal nodeIdx As In
     Dim callingConventionText As String
     callingConventionText = "CDECL"
     Dim argStartPos As Integer
-    argStartPos = 3
+    argStartPos = basePos + 3
 
-    If argc >= 5 Then
+    If argc >= basePos + 5 Then
         Dim convNode As Integer
-        convNode = FfiCallChildAt(ps, nodeIdx, 3)
+        convNode = FfiCallChildAt(ps, nodeIdx, basePos + 3)
         If convNode <> -1 And UCase(ps.ast.nodes(convNode).kind) = "KEYWORD_REF" Then
             Dim convCandidate As String
             convCandidate = UCase(Trim(ps.ast.nodes(convNode).value))
             If FfiCallIsDllConvention(convCandidate) <> 0 Then
                 callingConventionText = convCandidate
-                argStartPos = 4
+                argStartPos = basePos + 4
             Else
                 errText = "ffi-x64: CALL(DLL) invalid calling convention at line " & LTrim(Str(ps.ast.nodes(nodeIdx).lineNo))
                 Return -1
@@ -122,9 +151,16 @@ Private Function FfiCallReadDllEntry(ByRef ps As ParseState, ByVal nodeIdx As In
 
     entryOut.lineNo = ps.ast.nodes(nodeIdx).lineNo
     entryOut.dllName = UCase(Trim(ps.ast.nodes(libNode).value))
-    entryOut.symbolName = UCase(Trim(ps.ast.nodes(symNode).value))
+    entryOut.symbolName = Trim(ps.ast.nodes(symNode).value)
     entryOut.signatureText = UCase(Trim(ps.ast.nodes(sigNode).value))
     entryOut.callingConventionText = callingConventionText
+
+    Dim typeListNode As Integer
+    typeListNode = FfiCallChildAt(ps, nodeIdx, argStartPos)
+    If typeListNode <> -1 And UCase(ps.ast.nodes(typeListNode).kind) = "STRING" Then
+        If Instr(ps.ast.nodes(typeListNode).value, ",") > 0 Then argStartPos += 1
+    End If
+
     entryOut.argumentCount = argc - argStartPos
     If entryOut.argumentCount < 0 Then entryOut.argumentCount = 0
 
@@ -186,6 +222,58 @@ Private Function FfiCallPlanCsv(entries() As FfiX64CallPlanEntry, ByVal entryCou
         csvOut &= LTrim(Str(entries(i).lineNo)) & "," & entries(i).dllName & "," & entries(i).symbolName & "," & entries(i).signatureText & "," & entries(i).callingConventionText & "," & LTrim(Str(entries(i).argumentCount)) & "," & LTrim(Str(stackArgCount)) & "," & LTrim(Str(reserveBytes)) & ",WIN64-MSABI,16,32"
         If i < entryCount - 1 Then csvOut &= Chr(10)
     Next i
+
+    Return 1
+End Function
+
+Private Function FfiCallResolverCsv(entries() As FfiX64CallPlanEntry, ByVal entryCount As Integer, ByRef csvOut As String) As Integer
+    csvOut = "stub_id,dll,symbol,signature,convention,arg_count,arg_stack_bytes,cleanup_type,symptr_label" & Chr(10)
+
+    Dim i As Integer
+    For i = 0 To entryCount - 1
+        Dim stackArgCount As Integer
+        stackArgCount = entries(i).argumentCount - 4
+        If stackArgCount < 0 Then stackArgCount = 0
+
+        Dim stubId As String
+        stubId = LTrim(Str(i + 1))
+
+        ' Win64 uses caller-managed stack space; keep the resolver metadata shape in sync with x86.
+        csvOut &= stubId & "," & entries(i).dllName & "," & entries(i).symbolName & "," & entries(i).signatureText & "," & entries(i).callingConventionText & "," & LTrim(Str(entries(i).argumentCount)) & "," & LTrim(Str(stackArgCount * 8)) & ",CALLER,__uxb_ffi_symptr_" & stubId
+        If i < entryCount - 1 Then csvOut &= Chr(10)
+    Next i
+
+    Return 1
+End Function
+
+Private Function FfiCallResolverCText(entries() As FfiX64CallPlanEntry, ByVal entryCount As Integer, ByRef cOut As String) As Integer
+    cOut = "/* uXBasic generated x64 FFI resolver */" & Chr(10)
+    cOut &= "#include <windows.h>" & Chr(10)
+    cOut &= "#include <stdint.h>" & Chr(10) & Chr(10)
+
+    Dim i As Integer
+    For i = 0 To entryCount - 1
+        Dim stubId As String
+        stubId = LTrim(Str(i + 1))
+        cOut &= "extern void* __uxb_ffi_symptr_" & stubId & ";" & Chr(10)
+    Next i
+
+    cOut &= Chr(10) & "static void uxb_resolve_one(void** target, const char* dll_name, const char* symbol_name) {" & Chr(10)
+    cOut &= "    if (!target || *target) return;" & Chr(10)
+    cOut &= "    HMODULE h = LoadLibraryA(dll_name);" & Chr(10)
+    cOut &= "    if (!h) return;" & Chr(10)
+    cOut &= "    *target = (void*)GetProcAddress(h, symbol_name);" & Chr(10)
+    cOut &= "}" & Chr(10) & Chr(10)
+
+    cOut &= "__declspec(dllexport) void __uxb_ffi_resolve_all(void) {" & Chr(10)
+    For i = 0 To entryCount - 1
+        Dim stubId As String
+        stubId = LTrim(Str(i + 1))
+        cOut &= "    uxb_resolve_one(&__uxb_ffi_symptr_" & stubId & ", """
+        cOut &= FfiCallCStringEscape(entries(i).dllName) & """, """
+        cOut &= FfiCallCStringEscape(entries(i).symbolName) & """);" & Chr(10)
+    Next i
+    cOut &= "}" & Chr(10)
 
     Return 1
 End Function
@@ -316,15 +404,27 @@ Function FfiX64BackendEmitNasmStubs(ByRef ps As ParseState, ByRef asmText As Str
     Return FfiCallNasmStubText(entries(), entryCount, asmText)
 End Function
 
+Function FfiX64BackendEmitResolverC(ByRef ps As ParseState, ByRef cText As String, ByRef errText As String) As Integer
+    Dim entries(Any) As FfiX64CallPlanEntry
+    Dim entryCount As Integer
+    If FfiCallCollectEntries(ps, entries(), entryCount, errText) = 0 Then Return 0
+
+    Return FfiCallResolverCText(entries(), entryCount, cText)
+End Function
+
 Function FfiX64BackendEmitArtifacts(ByRef ps As ParseState, ByRef outputDir As String, ByRef errText As String) As Integer
     Dim entries(Any) As FfiX64CallPlanEntry
     Dim entryCount As Integer
     If FfiCallCollectEntries(ps, entries(), entryCount, errText) = 0 Then Return 0
 
     Dim planCsv As String
+    Dim resolverCsv As String
     Dim asmText As String
+    Dim resolverCText As String
     FfiCallPlanCsv entries(), entryCount, planCsv
+    FfiCallResolverCsv entries(), entryCount, resolverCsv
     FfiCallNasmStubText entries(), entryCount, asmText
+    FfiCallResolverCText entries(), entryCount, resolverCText
 
     MkDir outputDir
 
@@ -334,9 +434,17 @@ Function FfiX64BackendEmitArtifacts(ByRef ps As ParseState, ByRef outputDir As S
     Dim asmPath As String
     asmPath = outputDir & "\\ffi_call_x64_stubs.asm"
 
+    Dim resolverCsvPath As String
+    resolverCsvPath = outputDir & "\\ffi_call_x64_resolver.csv"
+
+    Dim resolverPath As String
+    resolverPath = outputDir & "\\ffi_resolver.c"
+
     If FfiWriteTextFile(planPath, planCsv, errText) = 0 Then Return 0
     If entryCount > 0 Then
         If FfiWriteTextFile(asmPath, asmText, errText) = 0 Then Return 0
+        If FfiWriteTextFile(resolverCsvPath, resolverCsv, errText) = 0 Then Return 0
+        If FfiWriteTextFile(resolverPath, resolverCText, errText) = 0 Then Return 0
     End If
 
     Return 1

@@ -1,0 +1,3 @@
+DIM x AS I32
+INPUT "age"; x
+PRINT x

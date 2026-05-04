@@ -90,6 +90,8 @@ if (-not $SkipBuild) {
     Invoke-Step "Build run_inline_x64_backend_64" { cmd /c build_64.bat tests\run_inline_x64_backend.bas }
     Invoke-Step "Build run_runtime_intrinsics_64" { cmd /c build_64.bat tests\run_runtime_intrinsics.bas }
     Invoke-Step "Build run_diagnostics_log_64" { cmd /c build_64.bat tests\run_diagnostics_log.bas }
+    Invoke-Step "Build run_x64_codegen_memory_emit_64" { cmd /c build_64.bat tests\run_x64_codegen_memory_emit.bas }
+    Invoke-Step "Build run_x64_codegen_operator_numeric_emit_64" { cmd /c build_64.bat tests\run_x64_codegen_operator_numeric_emit.bas }
 }
 
 Invoke-Step "Run run_manifest_64" { cmd /c tests\run_manifest_64.exe }
@@ -146,6 +148,8 @@ Invoke-Step "Run run_percent_preprocess_control_failfast_64" { cmd /c tests\run_
 Invoke-Step "Run run_inline_x64_backend_64" { cmd /c tests\run_inline_x64_backend_64.exe }
 Invoke-Step "Run run_runtime_intrinsics_64" { cmd /c tests\run_runtime_intrinsics_64.exe }
 Invoke-Step "Run run_diagnostics_log_64" { cmd /c tests\run_diagnostics_log_64.exe }
+Invoke-Step "Run run_x64_codegen_memory_emit_64" { cmd /c tests\run_x64_codegen_memory_emit_64.exe }
+Invoke-Step "Run run_x64_codegen_operator_numeric_emit_64" { cmd /c tests\run_x64_codegen_operator_numeric_emit_64.exe }
 Invoke-Step "Run ERR codegen parity gate" { .\tools\run_err_codegen_parity_gate.ps1 }
 
 Write-Host "[DONE] Faz A quality gate passed."

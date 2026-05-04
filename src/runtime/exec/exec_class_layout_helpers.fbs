@@ -13,6 +13,7 @@ Private Function ExecFindClassDeclNode(ByRef ps As ParseState, ByRef classTypeNa
     Return -1
 End Function
 
+
 Private Function ExecClassIsOrDerivedFrom(ByRef ps As ParseState, ByRef actualTypeRaw As String, ByRef expectedTypeRaw As String) As Integer
     Dim actualType As String
     Dim expectedType As String
@@ -93,17 +94,19 @@ Private Function ExecParamDeclTypeName(ByRef ps As ParseState, ByVal paramNode A
     Return 0
 End Function
 
-Private Function ExecValidateClassCtorSignature(ByRef ps As ParseState, ByVal routineIdx As Integer, ByRef classTypeName As String, ByRef errText As String) As Integer
+Private Function ExecValidateClassCtorSignature(ByRef ps As ParseState, ByRef es As ExecState, ByVal routineIdx As Integer, ByRef classTypeName As String, ByRef errText As String) As Integer
     Dim routineName As String
     routineName = UCase(Trim(classTypeName)) & "_CTOR"
 
-    If gRoutineDefs(routineIdx).routineKind <> "SUB_STMT" Then
-        errText = "DIM: constructor must be SUB " & routineName
+    If es.runtime.routineDefs(routineIdx).routineKind = "CLASS_CONSTRUCTOR_DECL" Then Return 1
+
+    If es.runtime.routineDefs(routineIdx).routineKind <> "SUB_STMT" Then
+        errText = "DIM: constructor must be CONSTRUCTOR or SUB " & routineName
         Return 0
     End If
 
     Dim routineNodeIdx As Integer
-    routineNodeIdx = gRoutineDefs(routineIdx).nodeIdx
+    routineNodeIdx = es.runtime.routineDefs(routineIdx).nodeIdx
 
     Dim paramCount As Integer
     Dim firstParamNode As Integer
@@ -139,6 +142,18 @@ Private Function ExecValidateClassCtorSignature(ByRef ps As ParseState, ByVal ro
     Return 1
 End Function
 
+Private Function ExecRoutineParamCount(ByRef ps As ParseState, ByVal routineNodeIdx As Integer) As Integer
+    Dim total As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNodeIdx).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) <> "PARAM_DECL" Then Exit Do
+        total += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return total
+End Function
+
 Private Function ExecInvokeClassCtorIfPresent(ByRef ps As ParseState, ByRef es As ExecState, ByRef classTypeName As String, ByVal instanceAddr As UInteger, ByVal ctorCallNodeIdx As Integer, ByRef errText As String) As Integer
     Dim classUpper As String
     classUpper = UCase(Trim(classTypeName))
@@ -148,10 +163,20 @@ Private Function ExecInvokeClassCtorIfPresent(ByRef ps As ParseState, ByRef es A
     ctorName = classUpper & "_CTOR"
 
     Dim routineIdx As Integer
-    routineIdx = ExecRoutineIndexOf(ctorName)
+    routineIdx = ExecRoutineIndexOf(es, ctorName)
     If routineIdx = -1 Then Return 1
 
-    If ExecValidateClassCtorSignature(ps, routineIdx, classUpper, errText) = 0 Then Return 0
+    If ExecValidateClassCtorSignature(ps, es, routineIdx, classUpper, errText) = 0 Then Return 0
+
+    ' DIM class variables allocate storage first; if class constructor requires
+    ' explicit arguments, postpone constructor execution until NEW call site.
+    If ctorCallNodeIdx = -1 Then
+        If es.runtime.routineDefs(routineIdx).routineKind = "CLASS_CONSTRUCTOR_DECL" Then
+            Dim ctorParamCount As Integer
+            ctorParamCount = ExecRoutineParamCount(ps, es.runtime.routineDefs(routineIdx).nodeIdx)
+            If ctorParamCount > 0 Then Return 1
+        End If
+    End If
 
     Dim ctorResult As Integer
     If ExecInvokeRoutineByIndex(ps, es, routineIdx, ctorCallNodeIdx, 0, 1, CInt(instanceAddr), ctorResult, errText) = 0 Then
@@ -162,17 +187,19 @@ Private Function ExecInvokeClassCtorIfPresent(ByRef ps As ParseState, ByRef es A
     Return 1
 End Function
 
-Private Function ExecValidateClassDtorSignature(ByRef ps As ParseState, ByVal routineIdx As Integer, ByRef classTypeName As String, ByRef errText As String) As Integer
+Private Function ExecValidateClassDtorSignature(ByRef ps As ParseState, ByRef es As ExecState, ByVal routineIdx As Integer, ByRef classTypeName As String, ByRef errText As String) As Integer
     Dim routineName As String
     routineName = UCase(Trim(classTypeName)) & "_DTOR"
 
-    If gRoutineDefs(routineIdx).routineKind <> "SUB_STMT" Then
-        errText = "destructor must be SUB " & routineName
+    If es.runtime.routineDefs(routineIdx).routineKind = "CLASS_DESTRUCTOR_DECL" Then Return 1
+
+    If es.runtime.routineDefs(routineIdx).routineKind <> "SUB_STMT" Then
+        errText = "destructor must be DESTRUCTOR or SUB " & routineName
         Return 0
     End If
 
     Dim routineNodeIdx As Integer
-    routineNodeIdx = gRoutineDefs(routineIdx).nodeIdx
+    routineNodeIdx = es.runtime.routineDefs(routineIdx).nodeIdx
 
     Dim paramCount As Integer
     Dim firstParamNode As Integer
@@ -217,10 +244,10 @@ Private Function ExecInvokeClassDtorIfPresent(ByRef ps As ParseState, ByRef es A
     dtorName = classUpper & "_DTOR"
 
     Dim routineIdx As Integer
-    routineIdx = ExecRoutineIndexOf(dtorName)
+    routineIdx = ExecRoutineIndexOf(es, dtorName)
     If routineIdx = -1 Then Return 1
 
-    If ExecValidateClassDtorSignature(ps, routineIdx, classUpper, errText) = 0 Then Return 0
+    If ExecValidateClassDtorSignature(ps, es, routineIdx, classUpper, errText) = 0 Then Return 0
 
     Dim dtorResult As Integer
     If ExecInvokeRoutineByIndex(ps, es, routineIdx, -1, 0, 1, CInt(instanceAddr), dtorResult, errText) = 0 Then
@@ -274,6 +301,16 @@ Private Function ExecConfigureClassStorage(ByRef ps As ParseState, ByRef es As E
     ' Keep class variable scalar value aligned with its address for pointer-like class workflows.
     ExecSetVar es, varName, CInt(objectBase)
 
+    ' initialize object header (__vptr in first dword)
+    Dim vtblHandle As UInteger
+    vtblHandle = 0
+    If ExecFindRuntimeVTableHandle(es, classTypeName, vtblHandle) = 0 Then
+        errText = "exec: missing runtime vtable for " & UCase(Trim(classTypeName))
+        Return 0
+    End If
+    VMemPokeD(objectBase, CInt(vtblHandle))
+    VMemPokeD(objectBase + 4, 0)
+
     If ExecInvokeClassCtorIfPresent(ps, es, classTypeName, objectBase, -1, errText) = 0 Then Return 0
 
     Return 1
@@ -319,6 +356,16 @@ Private Function ExecAllocClassInstance(ByRef ps As ParseState, ByRef es As Exec
     Dim objectEnd As UInteger
     objectEnd = objectBase + CUInt(classSize)
     If objectEnd > es.nextVarAddr Then es.nextVarAddr = objectEnd
+
+    ' initialize object header (__vptr in first dword)
+    Dim vtblHandle As UInteger
+    vtblHandle = 0
+    If ExecFindRuntimeVTableHandle(es, classUpper, vtblHandle) = 0 Then
+        errText = "exec: missing runtime vtable for " & classUpper
+        Return 0
+    End If
+    VMemPokeD(objectBase, CInt(vtblHandle))
+    VMemPokeD(objectBase + 4, 0)
 
     If ExecInvokeClassCtorIfPresent(ps, es, classUpper, objectBase, ctorCallNodeIdx, errText) = 0 Then Return 0
 

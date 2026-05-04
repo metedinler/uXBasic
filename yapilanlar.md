@@ -2,6 +2,25 @@
 
 ## 2026-04-30
 
+### Hamle 6 kapanis
+
+- x64 codegen'de class method dispatch zinciri tamamlandi:
+	- method owner type cozumleme
+	- receiver'in RCX lane'ine yerlestirilmesi
+	- prologue'da THIS/ME local bind
+	- field resolver'da THIS/ME type fallback
+- CLASS routine emit (method/ctor/dtor) x64 emit pass'ine baglandi.
+- DIM class variable pointer storage lane'i aktif edildi.
+- NEW class allocation bos class size durumunda min 8 byte fallback ile sertlestirildi.
+- Test seti:
+	- `tests/basicCodeTests/60_class_this_me_binding.bas`
+	- `tests/basicCodeTests/61_class_inline_ctor_method.bas`
+	- `tests/basicCodeTests/62_class_dim_pointer_storage.bas`
+	- `tests/basicCodeTests/63_class_inheritance_method_resolution.bas`
+- Sonuc: AST/MIR/x64 lane'lerinde 60-63 PASS.
+
+## 2026-04-30
+
 ### Hamle 4 x64 Float/F80 Todo Kapanisi (4 Madde)
 
 Bugun kalan 4 todo maddesi kapatildi:

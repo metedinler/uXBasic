@@ -52,6 +52,30 @@ Private Function IsEndClassStart(ByRef ps As ParseState) As Integer
     Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "CLASS")
 End Function
 
+Private Function IsEndConstructorStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "CONSTRUCTOR")
+End Function
+
+Private Function IsEndDestructorStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "DESTRUCTOR")
+End Function
+
+Private Function IsEndMethodStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "METHOD")
+End Function
+
+Private Function IsCtorBodyEndStart(ByRef ps As ParseState) As Integer
+    If IsEndConstructorStart(ps) <> 0 Then Return 1
+    If IsEndMethodStart(ps) <> 0 Then Return 1
+    Return 0
+End Function
+
+Private Function IsDtorBodyEndStart(ByRef ps As ParseState) As Integer
+    If IsEndDestructorStart(ps) <> 0 Then Return 1
+    If IsEndMethodStart(ps) <> 0 Then Return 1
+    Return 0
+End Function
+
 Private Function IsEndInterfaceStart(ByRef ps As ParseState) As Integer
     Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "INTERFACE")
 End Function
@@ -152,7 +176,9 @@ Private Function ParseClassMemberParamDeclarator(ByRef ps As ParseState) As Inte
         AdvanceTok ps
 
         Dim typeNode As Integer
-        typeNode = MakeNodeFromToken(ps, "TYPE_REF", typeTok.lexeme, "", typeTok)
+        Dim canonicalTypeName As String
+        canonicalTypeName = CanonicalTypeNameForParser(typeTok.lexeme)
+        typeNode = MakeNodeFromToken(ps, "TYPE_REF", canonicalTypeName, "", typeTok)
         ASTAddChild ps.ast, paramNode, typeNode
     End If
 
@@ -319,6 +345,34 @@ Private Function ParseClassConstructorDecl(ByRef ps As ParseState, ByVal classNo
         Return -1
     End If
 
+    SkipSeparators ps
+
+    If IsCtorBodyEndStart(ps) Then
+        AdvanceTok ps
+        AdvanceTok ps
+    ElseIf IsClassMemberHeaderStart(ps) = 0 Then
+        Do While CurToken(ps).kind <> "EOF"
+            If IsCtorBodyEndStart(ps) Then Exit Do
+            If IsEndClassStart(ps) Then
+                ps.lastError = "CONSTRUCTOR: missing END CONSTRUCTOR"
+                Return -1
+            End If
+
+            Dim st As Integer
+            st = ParseSimpleStatement(ps)
+            If st = -1 Then Return -1
+            ASTAddChild ps.ast, ctorNode, st
+            SkipSeparators ps
+        Loop
+
+        If IsCtorBodyEndStart(ps) = 0 Then
+            ps.lastError = "CONSTRUCTOR: missing END CONSTRUCTOR"
+            Return -1
+        End If
+        AdvanceTok ps
+        AdvanceTok ps
+    End If
+
     ASTAddChild ps.ast, classNode, ctorNode
     SkipSeparators ps
     Return 1
@@ -365,6 +419,34 @@ Private Function ParseClassDestructorDecl(ByRef ps As ParseState, ByVal classNod
     If IsClassMemberTerminator(CurToken(ps)) = 0 Then
         ps.lastError = "DESTRUCTOR: unexpected trailing tokens"
         Return -1
+    End If
+
+    SkipSeparators ps
+
+    If IsDtorBodyEndStart(ps) Then
+        AdvanceTok ps
+        AdvanceTok ps
+    ElseIf IsClassMemberHeaderStart(ps) = 0 Then
+        Do While CurToken(ps).kind <> "EOF"
+            If IsDtorBodyEndStart(ps) Then Exit Do
+            If IsEndClassStart(ps) Then
+                ps.lastError = "DESTRUCTOR: missing END DESTRUCTOR"
+                Return -1
+            End If
+
+            Dim st As Integer
+            st = ParseSimpleStatement(ps)
+            If st = -1 Then Return -1
+            ASTAddChild ps.ast, dtorNode, st
+            SkipSeparators ps
+        Loop
+
+        If IsDtorBodyEndStart(ps) = 0 Then
+            ps.lastError = "DESTRUCTOR: missing END DESTRUCTOR"
+            Return -1
+        End If
+        AdvanceTok ps
+        AdvanceTok ps
     End If
 
     ASTAddChild ps.ast, classNode, dtorNode
@@ -426,7 +508,9 @@ Private Function ParseClassFieldDecl(ByRef ps As ParseState, ByVal classNode As 
     fieldNode = MakeNodeFromToken(ps, "CLASS_FIELD", fieldTok.lexeme, "", fieldTok)
 
     Dim fieldTypeNode As Integer
-    fieldTypeNode = MakeNodeFromToken(ps, "TYPE_REF", fieldTypeTok.lexeme, "", fieldTypeTok)
+    Dim canonicalFieldType As String
+    canonicalFieldType = CanonicalTypeNameForParser(fieldTypeTok.lexeme)
+    fieldTypeNode = MakeNodeFromToken(ps, "TYPE_REF", canonicalFieldType, "", fieldTypeTok)
     ASTAddChild ps.ast, fieldNode, fieldTypeNode
     If fieldBoundsNode <> -1 Then ASTAddChild ps.ast, fieldNode, fieldBoundsNode
 
@@ -504,7 +588,9 @@ Function ParseTypeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integ
         fieldNode = MakeNodeFromToken(ps, "TYPE_FIELD", fieldTok.lexeme, "", fieldTok)
 
         Dim fieldTypeNode As Integer
-        fieldTypeNode = MakeNodeFromToken(ps, "TYPE_REF", fieldTypeTok.lexeme, "", fieldTypeTok)
+        Dim canonicalTypeField As String
+        canonicalTypeField = CanonicalTypeNameForParser(fieldTypeTok.lexeme)
+        fieldTypeNode = MakeNodeFromToken(ps, "TYPE_REF", canonicalTypeField, "", fieldTypeTok)
         ASTAddChild ps.ast, fieldNode, fieldTypeNode
         If fieldBoundsNode <> -1 Then ASTAddChild ps.ast, fieldNode, fieldBoundsNode
         ASTAddChild ps.ast, typeNode, fieldNode
@@ -580,11 +666,6 @@ Function ParseClassStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Inte
     SkipSeparators ps
     Do While CurToken(ps).kind <> "EOF"
         If IsEndClassStart(ps) Then Exit Do
-
-        If IsKw(ps, "RETURN") Or (IsKw(ps, "END") And UCase(LookToken(ps, 1).lexeme) = "METHOD") Then
-            ps.lastError = "inline METHOD body is not supported"
-            Return -1
-        End If
 
         Dim parseResult As Integer
 

@@ -1,0 +1,5 @@
+MAIN
+t = TIMER("ms")
+PRINT t
+END MAIN
+

@@ -1,9 +1,56 @@
 Private Sub ExecStateInit(ByRef es As ExecState)
     es.count = 0
     es.nextVarAddr = &h1000
-    ' es.arrayCount = 0
+    es.constCount = 0
+    es.defTypeCount = 0
+    es.stringSize = 255
+    es.slotEntryCount = 0
+    es.runtime.routineDefCount = 0
+    es.runtime.callContextDepth = 0
+    es.runtime.callReturnValue = 0
+    es.runtime.callReturnHasValue = 0
+    es.runtime.exitRequest = ""
+    es.runtime.currentRoutineName = ""
+    es.runtime.currentRoutineNodeIdx = -1
+    Erase es.consts
+    Erase es.defTypes
+    Erase es.slotEntries
+    Erase es.runtime.routineDefs
+    Erase es.runtime.ffiAllowEntries
+    Erase es.runtime.ffiX86ResolverEntries
+    Erase es.runtime.ffiX86ResolvedEntries
+    Erase es.runtime.ffiX86SymptrMapEntries
+    es.runtime.execException.active = 0
+    es.runtime.execException.kindText = ""
+    es.runtime.execException.code = 0
+    es.runtime.execException.messageText = ""
+    es.runtime.execException.lineNo = 0
+    es.runtime.execException.colNo = 0
+    es.runtime.execException.routineName = ""
+    es.runtime.execException.value.valueType = "INTEGER"
+    es.runtime.execException.value.intValue = 0
+    es.runtime.execException.value.floatValue = 0.0
+    es.runtime.execException.value.stringValue = ""
+    es.runtime.ffiAllowEntryCount = 0
+    es.runtime.ffiAllowlistLoaded = 0
+    es.runtime.ffiAllowlistLoadFailed = 0
+    es.runtime.ffiAllowlistLoadFailReason = ""
+    es.runtime.ffiX86ResolverEntryCount = 0
+    es.runtime.ffiX86ResolverLoaded = 0
+    es.runtime.ffiX86ResolverLoadFailed = 0
+    es.runtime.ffiX86ResolverLoadFailReason = ""
+    es.runtime.ffiX86ResolvedEntryCount = 0
+    es.runtime.ffiX86SymptrMapEntryCount = 0
+    es.runtime.ffiX86InvokeCount = 0
+    es.runtime.ffiX86LastInvokeStubId = 0
+    es.runtime.ffiX86LastInvokeConv = ""
+    es.runtime.ffiX86CallerCleanupBytes = 0
+    es.runtime.ffiX86CalleeCleanupBytes = 0
+    es.runtime.ffiX86SymptrWriteCount = 0
+    es.arrayCount = 0
     ' es.objectCount = 0
     ' es.collectionCount = 0
+    Erase es.arrays
     UxbFileInit es.fileIo
 End Sub
 
@@ -101,6 +148,146 @@ Private Function ExecGetVarValue(ByRef es As ExecState, ByRef nameText As String
     Return 1
 End Function
 
+Private Function ExecArrayExtent(ByVal lowerBound As Integer, ByVal upperBound As Integer) As Integer
+    Return (upperBound - lowerBound) + 1
+End Function
+
+Private Function ExecArrayResizeVar(ByRef es As ExecState, ByRef nameText As String, ByVal lowerBound As Integer, ByVal upperBound As Integer, ByVal preserveMode As Integer) As Integer
+    Dim idx As Integer
+    idx = ExecEnsureVar(es, nameText)
+    If idx = -1 Then Return 0
+
+    If es.vars(idx).arrayId < 0 Then
+        If es.arrayCount = 0 Then
+            ReDim es.arrays(0)
+        Else
+            ReDim Preserve es.arrays(es.arrayCount)
+        End If
+        es.vars(idx).arrayId = es.arrayCount
+        es.arrayCount += 1
+    End If
+
+    Dim arrId As Integer
+    arrId = es.vars(idx).arrayId
+    Dim arrPtr As ExecArray Ptr
+    arrPtr = @es.arrays(arrId)
+
+    Dim newCount As Integer
+    newCount = ExecArrayExtent(lowerBound, upperBound)
+    If newCount < 0 Then Return 0
+
+    Dim oldLower As Integer
+    Dim oldCount As Integer
+    Dim oldElements(Any) As ExecValue
+    oldLower = es.vars(idx).arrayLower
+    oldCount = arrPtr->totalElements
+
+    If preserveMode <> 0 And oldCount > 0 Then
+        ReDim oldElements(oldCount - 1)
+        Dim oldPos As Integer
+        For oldPos = 0 To oldCount - 1
+            oldElements(oldPos) = arrPtr->elements(oldPos)
+        Next oldPos
+    End If
+
+    Erase arrPtr->elements
+    arrPtr->dims = 1
+    arrPtr->totalElements = 0
+    ReDim arrPtr->bounds(1)
+    arrPtr->bounds(0) = lowerBound
+    arrPtr->bounds(1) = upperBound
+
+    If newCount > 0 Then
+        ReDim arrPtr->elements(newCount - 1)
+        arrPtr->totalElements = newCount
+        Dim initPos As Integer
+        For initPos = 0 To newCount - 1
+            ExecValueInit arrPtr->elements(initPos)
+        Next initPos
+    End If
+
+    If preserveMode <> 0 And oldCount > 0 And newCount > 0 Then
+        Dim oldUpper As Integer
+        Dim overlapLower As Integer
+        Dim overlapUpper As Integer
+        oldUpper = oldLower + oldCount - 1
+        overlapLower = IIf(lowerBound > oldLower, lowerBound, oldLower)
+        overlapUpper = IIf(upperBound < oldUpper, upperBound, oldUpper)
+        If overlapUpper >= overlapLower Then
+            Dim keepIdx As Integer
+            For keepIdx = overlapLower To overlapUpper
+                arrPtr->elements(keepIdx - lowerBound) = oldElements(keepIdx - oldLower)
+            Next keepIdx
+        End If
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecTryResolveArrayAccess(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef varIdxOut As Integer, ByRef elemIndexOut As Integer, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+    If UCase(n.kind) <> "CALL_EXPR" Then Return 0
+    If InStr(n.value, ".") > 0 Then Return 0
+
+    Dim firstChild As Integer
+    firstChild = n.firstChild
+    If firstChild = -1 Then Return 0
+    If ps.ast.nodes(firstChild).nextSibling <> -1 Then Return 0
+
+    Dim varIdx As Integer
+    varIdx = ExecFindVar(es, n.value)
+    If varIdx = -1 Or es.vars(varIdx).isArray = 0 Then Return 0
+    If es.vars(varIdx).arrayDims <> 1 Then
+        errText = "exec: only single-dimension array access supported"
+        Return -1
+    End If
+
+    Dim indexNode As Integer
+    indexNode = firstChild
+    If indexNode = -1 Then
+        errText = "exec: array index missing"
+        Return -1
+    End If
+
+    Dim rawIndex As Integer
+    rawIndex = ExecEvalNode(ps, es, indexNode, errText)
+    If errText <> "" Then Return -1
+
+    Dim normalized As Integer
+    normalized = rawIndex - es.vars(varIdx).arrayLower
+    If es.vars(varIdx).arrayId < 0 Or es.vars(varIdx).arrayId >= es.arrayCount Then
+        errText = "exec: array storage missing"
+        Return -1
+    End If
+    If normalized < 0 Or normalized >= es.arrays(es.vars(varIdx).arrayId).totalElements Then
+        errText = "exec: array index out of bounds " & UCase(Trim(n.value))
+        Return -1
+    End If
+
+    varIdxOut = varIdx
+    elemIndexOut = normalized
+    Return 1
+End Function
+
+Private Function ExecGetArrayElement(ByRef es As ExecState, ByVal varIdx As Integer, ByVal elemIndex As Integer, ByRef valueOut As ExecValue) As Integer
+    If varIdx < 0 Or varIdx >= es.count Then Return 0
+    If es.vars(varIdx).arrayId < 0 Or es.vars(varIdx).arrayId >= es.arrayCount Then Return 0
+    If elemIndex < 0 Or elemIndex >= es.arrays(es.vars(varIdx).arrayId).totalElements Then Return 0
+    valueOut = es.arrays(es.vars(varIdx).arrayId).elements(elemIndex)
+    Return 1
+End Function
+
+Private Function ExecSetArrayElement(ByRef es As ExecState, ByVal varIdx As Integer, ByVal elemIndex As Integer, ByRef valueIn As ExecValue) As Integer
+    If varIdx < 0 Or varIdx >= es.count Then Return 0
+    If es.vars(varIdx).arrayId < 0 Or es.vars(varIdx).arrayId >= es.arrayCount Then Return 0
+    If elemIndex < 0 Or elemIndex >= es.arrays(es.vars(varIdx).arrayId).totalElements Then Return 0
+    es.arrays(es.vars(varIdx).arrayId).elements(elemIndex) = valueIn
+    Return 1
+End Function
+
 Private Sub ExecSetVarValue(ByRef es As ExecState, ByRef nameText As String, ByRef value As ExecValue)
     Dim idx As Integer
     idx = ExecEnsureVar(es, nameText)
@@ -124,6 +311,7 @@ Private Function ExecEnsureVar(ByRef es As ExecState, ByRef nameText As String) 
     es.vars(idx).addr = es.nextVarAddr
     es.vars(idx).declType = ""
     es.vars(idx).isArray = 0
+    es.vars(idx).arrayId = -1
     es.vars(idx).arrayDims = 0
     es.vars(idx).arrayLower = 0
     es.vars(idx).arrayUpper = 0

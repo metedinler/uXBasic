@@ -40,6 +40,63 @@ Private Sub X64BuildEnsureDir(ByRef dirPath As String)
     MkDir dirPath
 End Sub
 
+Private Function X64BuildElapsedMs(ByVal startTick As Double) As Integer
+    Dim nowTick As Double
+    nowTick = Timer
+    If nowTick < startTick Then nowTick += 86400.0
+    Return CInt((nowTick - startTick) * 1000.0)
+End Function
+
+Private Function X64BuildAcquireGlobalSlot(ByRef sourcePath As String, ByRef errText As String) As Integer
+    Dim lockRoot As String
+    lockRoot = "dist\locks"
+
+    Dim lockPath As String
+    lockPath = lockRoot & "\x64_native_slot_0.lock"
+
+    X64BuildEnsureDir "dist"
+    X64BuildEnsureDir lockRoot
+
+    Dim startTick As Double
+    startTick = Timer
+
+    Do
+        Err = 0
+        MkDir lockPath
+        If Err = 0 Then
+            Dim ownerText As String
+            ownerText = "source=" & PathNormalize(sourcePath) & Chr(13) & Chr(10)
+            ownerText &= "acquired_ms=" & LTrim(Str(X64BuildElapsedMs(startTick))) & Chr(13) & Chr(10)
+
+            Dim ownerErr As String
+            ownerErr = ""
+            X64BuildSaveTextFile lockPath & "\owner.txt", ownerText, ownerErr
+            Return 1
+        End If
+
+        Err = 0
+        If X64BuildElapsedMs(startTick) >= 120000 Then
+            errText = "x64-build: native slot wait timeout (" & lockPath & ")"
+            Return 0
+        End If
+
+        Sleep 100
+    Loop
+End Function
+
+Private Sub X64BuildReleaseGlobalSlot()
+    Dim lockPath As String
+    lockPath = "dist\locks\x64_native_slot_0.lock"
+
+    If Dir(lockPath & "\owner.txt") <> "" Then
+        Kill lockPath & "\owner.txt"
+        Err = 0
+    End If
+
+    RmDir lockPath
+    Err = 0
+End Sub
+
 Private Function X64BuildSlashify(ByRef textIn As String) As String
     Dim outText As String
     Dim i As Integer
@@ -198,21 +255,6 @@ Private Function X64BuildEmitStatusReport(ByRef ps As ParseState, ByRef sourcePa
     Return X64BuildSaveTextFile(reportPath, reportText, errText)
 End Function
 
-Private Function X64BuildEmitEntryShim(ByRef outDir As String, ByRef errText As String) As Integer
-    Dim shimText As String
-    shimText = "bits 64" & Chr(13) & Chr(10)
-    shimText &= "default rel" & Chr(13) & Chr(10)
-    shimText &= "section .text" & Chr(13) & Chr(10)
-    shimText &= "extern main" & Chr(13) & Chr(10)
-    shimText &= "global WinMain" & Chr(13) & Chr(10)
-    shimText &= "WinMain:" & Chr(13) & Chr(10)
-    shimText &= "    sub rsp, 40" & Chr(13) & Chr(10)
-    shimText &= "    call main" & Chr(13) & Chr(10)
-    shimText &= "    add rsp, 40" & Chr(13) & Chr(10)
-    shimText &= "    ret" & Chr(13) & Chr(10)
-    Return X64BuildSaveTextFile(outDir & "\entry_shim.asm", shimText, errText)
-End Function
-
 Function X64BuildEmitArtifacts(ByRef ps As ParseState, ByRef sourcePath As String, ByRef outputDir As String, ByRef errText As String) As Integer
     Dim outDir As String
     outDir = outputDir
@@ -230,7 +272,6 @@ Function X64BuildEmitArtifacts(ByRef ps As ParseState, ByRef sourcePath As Strin
     Dim asmPath As String
     asmPath = outDir & "\program.asm"
     If X64BuildSaveTextFile(asmPath, asmText, errText) = 0 Then Return 0
-    If X64BuildEmitEntryShim(outDir, errText) = 0 Then Return 0
 
     Dim manifest As InteropManifest
     If ResolveInteropManifestForSource(sourcePath, manifest, errText) = 0 Then Return 0
@@ -246,7 +287,9 @@ Function X64BuildEmitArtifacts(ByRef ps As ParseState, ByRef sourcePath As Strin
 
     Dim rspText As String
     rspText = X64BuildRspQuotePath(outDir & "\obj\program.obj") & Chr(13) & Chr(10)
-    rspText &= X64BuildRspQuotePath(outDir & "\obj\entry_shim.obj") & Chr(13) & Chr(10)
+    If FileExistsPath(outDir & "\interop\ffi_resolver.c") <> 0 Then
+        rspText &= X64BuildRspQuotePath(outDir & "\obj\ffi_resolver.obj") & Chr(13) & Chr(10)
+    End If
 
     Dim importRspPath As String
     importRspPath = outDir & "\interop\import_link_args.rsp"
@@ -273,10 +316,12 @@ Function X64BuildEmitArtifacts(ByRef ps As ParseState, ByRef sourcePath As Strin
     buildBat &= "  popd" & Chr(13) & Chr(10)
     buildBat &= "  exit /b 1" & Chr(13) & Chr(10)
     buildBat &= ")" & Chr(13) & Chr(10)
-    buildBat &= Chr(34) & "%UXB_ASM_CMD%" & Chr(34) & " -f win64 ""%~dp0entry_shim.asm"" -o ""%~dp0obj\entry_shim.obj""" & Chr(13) & Chr(10)
-    buildBat &= "if errorlevel 1 (" & Chr(13) & Chr(10)
-    buildBat &= "  popd" & Chr(13) & Chr(10)
-    buildBat &= "  exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= "if exist ""%~dp0interop\ffi_resolver.c"" (" & Chr(13) & Chr(10)
+    buildBat &= "  ""%UXB_CC_CMD%"" -c ""%~dp0interop\ffi_resolver.c"" -o ""%~dp0obj\ffi_resolver.obj""" & Chr(13) & Chr(10)
+    buildBat &= "  if errorlevel 1 (" & Chr(13) & Chr(10)
+    buildBat &= "    popd" & Chr(13) & Chr(10)
+    buildBat &= "    exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= "  )" & Chr(13) & Chr(10)
     buildBat &= ")" & Chr(13) & Chr(10)
     buildBat &= "if exist ""%~dp0obj\ffi_call_x64_stubs.obj"" del /Q ""%~dp0obj\ffi_call_x64_stubs.obj""" & Chr(13) & Chr(10)
     buildBat &= "if exist ""%~dp0interop\build_import.bat"" (" & Chr(13) & Chr(10)
@@ -327,16 +372,29 @@ Function X64BuildRunArtifacts(ByRef ps As ParseState, ByRef sourcePath As String
     outDir = outputDir
     If Trim(outDir) = "" Then outDir = "dist\x64build"
 
-    If X64BuildEmitArtifacts(ps, sourcePath, outDir, errText) = 0 Then Return 0
+    Dim lockAcquired As Integer
+    lockAcquired = 0
+    If X64BuildAcquireGlobalSlot(sourcePath, errText) = 0 Then Return 0
+    lockAcquired = 1
 
+    Dim ok As Integer
+    ok = 0
     Dim cmdText As String
-    cmdText = "cmd /c " & Chr(34) & PathNormalize(outDir & "\build_all.bat") & Chr(34)
     Dim shellResult As Integer
+
+    If X64BuildEmitArtifacts(ps, sourcePath, outDir, errText) = 0 Then GoTo X64BuildRunArtifactsCleanup
+
+    cmdText = "cmd /c " & Chr(34) & PathNormalize(outDir & "\build_all.bat") & Chr(34)
     shellResult = Shell(cmdText)
     If shellResult <> 0 Then
         errText = "x64-build: build_all.bat failed with exit code " & LTrim(Str(shellResult))
-        Return 0
+        GoTo X64BuildRunArtifactsCleanup
     End If
 
+    ok = 1
+
+X64BuildRunArtifactsCleanup:
+    If lockAcquired <> 0 Then X64BuildReleaseGlobalSlot
+    If ok = 0 Then Return 0
     Return 1
 End Function

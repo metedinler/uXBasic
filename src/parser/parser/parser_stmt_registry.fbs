@@ -68,6 +68,14 @@ Private Const STMT_HANDLER_MEMCOPYD = 700
 Private Const STMT_HANDLER_MEMFILLW = 710
 Private Const STMT_HANDLER_MEMFILLD = 720
 Private Const STMT_HANDLER_SETNEWOFFSET = 730
+Private Const STMT_HANDLER_EVENT = 800
+Private Const STMT_HANDLER_THREAD = 810
+Private Const STMT_HANDLER_PARALEL = 820
+Private Const STMT_HANDLER_PIPE = 830
+Private Const STMT_HANDLER_SLOT = 840
+Private Const STMT_HANDLER_ON = 850
+Private Const STMT_HANDLER_OFF = 860
+Private Const STMT_HANDLER_TRIGGER = 870
 
 Private Dim Shared gStatementDispatchEntries() As StatementDispatchEntry
 Private Dim Shared gStatementDispatchCount As Integer
@@ -159,6 +167,14 @@ Private Sub InitStatementDispatchRegistry()
     AddStatementDispatchEntry "MEMFILLW", STMT_HANDLER_MEMFILLW, "", 0
     AddStatementDispatchEntry "MEMFILLD", STMT_HANDLER_MEMFILLD, "", 0
     AddStatementDispatchEntry "SETNEWOFFSET", STMT_HANDLER_SETNEWOFFSET, "", 0
+    AddStatementDispatchEntry "EVENT", STMT_HANDLER_EVENT, "", 0
+    AddStatementDispatchEntry "THREAD", STMT_HANDLER_THREAD, "", 0
+    AddStatementDispatchEntry "PARALEL", STMT_HANDLER_PARALEL, "", 0
+    AddStatementDispatchEntry "PIPE", STMT_HANDLER_PIPE, "", 0
+    AddStatementDispatchEntry "SLOT", STMT_HANDLER_SLOT, "", 0
+    AddStatementDispatchEntry "ON", STMT_HANDLER_ON, "", 0
+    AddStatementDispatchEntry "OFF", STMT_HANDLER_OFF, "", 0
+    AddStatementDispatchEntry "TRIGGER", STMT_HANDLER_TRIGGER, "", 0
 
     gStatementDispatchInitialized = 1
 End Sub
@@ -169,6 +185,16 @@ Private Function FindStatementDispatchEntry(ByRef keywordText As String) As Inte
         If gStatementDispatchEntries(i).keyword = keywordText Then Return i
     Next i
     Return -1
+End Function
+
+Private Function IsTypeLikeKeyword(ByVal word As String) As Integer
+    Dim k As String
+    k = LCase(Trim(word))
+    Select Case k
+    Case "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64", "f80", "boolean", "string", "object", "ptr", "strptr", "byref", "byval", "cdecl", "stdcall"
+        Return 1
+    End Select
+    Return 0
 End Function
 
 Private Function DispatchBasicStatementById(ByRef ps As ParseState, ByRef tk As Token, ByVal handlerId As Integer) As Integer
@@ -293,6 +319,25 @@ Private Function DispatchStatementByHandlerId(ByRef ps As ParseState, ByRef tk A
     stmtNode = DispatchIoStatementById(ps, tk, handlerId)
     If stmtNode <> -2 Then Return stmtNode
 
+    Select Case handlerId
+    Case STMT_HANDLER_EVENT
+        Return ParseEventStmt(ps, tk)
+    Case STMT_HANDLER_THREAD
+        Return ParseThreadStmt(ps, tk)
+    Case STMT_HANDLER_PARALEL
+        Return ParseParalelStmt(ps, tk)
+    Case STMT_HANDLER_PIPE
+        Return ParsePipeStmt(ps, tk)
+    Case STMT_HANDLER_SLOT
+        Return ParseSlotStmt(ps, tk)
+    Case STMT_HANDLER_ON
+        Return ParseSlotOnStmt(ps, tk)
+    Case STMT_HANDLER_OFF
+        Return ParseSlotOffStmt(ps, tk)
+    Case STMT_HANDLER_TRIGGER
+        Return ParseTriggerStmt(ps, tk)
+    End Select
+
     ps.lastError = "internal: unknown statement handler id " & Str(handlerId)
     Return -1
 End Function
@@ -334,7 +379,15 @@ Private Function TryParseLabelStatement(ByRef ps As ParseState, ByRef tk As Toke
 End Function
 
 Private Function TryParseIdentifierStatement(ByRef ps As ParseState, ByRef tk As Token) As Integer
-    If tk.kind <> "IDENT" Then Return -2
+    If tk.kind <> "IDENT" Then
+        If tk.kind = "KEYWORD" Then
+            If IsTypeLikeKeyword(tk.lexeme) = 0 Then Return -2
+        Else
+            Return -2
+        End If
+    End If
+
+    ParserDiag ps, "[PDBG] TryParseIdentifierStatement tk.kind=" & tk.kind & " lexeme=" & tk.lexeme & " line=" & Str(tk.lineNo) & " col=" & Str(tk.colNo)
 
     Dim identTok As Token
     identTok = tk
@@ -351,9 +404,11 @@ Private Function TryParseIdentifierStatement(ByRef ps As ParseState, ByRef tk As
         Return -1
     End If
 
-    If n1.kind = "OP" And (n1.lexeme = "=" Or n1.lexeme = "+=" Or n1.lexeme = "-=" Or n1.lexeme = "*=" Or n1.lexeme = "/=" Or n1.lexeme = "\\=" Or n1.lexeme = "=+" Or n1.lexeme = "=-") Then
+    If n1.kind = "OP" And (n1.lexeme = "=" Or n1.lexeme = "+=" Or n1.lexeme = "-=" Or n1.lexeme = "*=" Or n1.lexeme = "/=" Or n1.lexeme = "\=" Or n1.lexeme = "=+" Or n1.lexeme = "=-") Then
         AdvanceTok ps
         AdvanceTok ps
+
+        ParserDiag ps, "[PDBG] TryParseIdentifierStatement assignment detected for " & identTok.lexeme
 
         Dim rhs As Integer
         rhs = ParseExpression(ps)
@@ -367,6 +422,76 @@ Private Function TryParseIdentifierStatement(ByRef ps As ParseState, ByRef tk As
         ps.ast.nodes(assignNode).left = lhs
         ps.ast.nodes(assignNode).right = rhs
         Return assignNode
+    End If
+
+    If n1.kind = "OP" And n1.lexeme = "(" Then
+        Dim depth As Integer
+        Dim look As Integer
+        Dim assignTok As Token
+        depth = 0
+        look = 1
+        assignTok.kind = ""
+
+        Do
+            Dim scanTok As Token
+            scanTok = LookToken(ps, look)
+            If scanTok.kind = "EOF" Then Exit Do
+
+            If scanTok.kind = "OP" Then
+                If scanTok.lexeme = "(" Then
+                    depth += 1
+                ElseIf scanTok.lexeme = ")" Then
+                    depth -= 1
+                    If depth = 0 Then
+                        assignTok = LookToken(ps, look + 1)
+                        Exit Do
+                    End If
+                End If
+            End If
+
+            look += 1
+        Loop
+
+        If assignTok.kind = "OP" And (assignTok.lexeme = "=" Or assignTok.lexeme = "+=" Or assignTok.lexeme = "-=" Or assignTok.lexeme = "*=" Or assignTok.lexeme = "/=" Or assignTok.lexeme = "\=" Or assignTok.lexeme = "=+" Or assignTok.lexeme = "=-") Then
+            AdvanceTok ps
+
+            If MatchOp(ps, "(") = 0 Then
+                ps.lastError = "indexed assignment: missing ("
+                Return -1
+            End If
+
+            Dim lhsCall As Integer
+            lhsCall = MakeNodeFromToken(ps, "CALL_EXPR", identTok.lexeme, "", identTok)
+
+            If MatchOp(ps, ")") = 0 Then
+                Do
+                    Dim idxExpr As Integer
+                    idxExpr = ParseExpression(ps)
+                    If idxExpr = -1 Then Return -1
+                    ASTAddChild ps.ast, lhsCall, idxExpr
+                    If MatchOp(ps, ",") = 0 Then Exit Do
+                Loop
+
+                If MatchOp(ps, ")") = 0 Then
+                    ps.lastError = "indexed assignment: missing )"
+                    Return -1
+                End If
+            End If
+
+            Dim opTok As Token
+            opTok = CurToken(ps)
+            AdvanceTok ps
+
+            Dim rhsIndexed As Integer
+            rhsIndexed = ParseExpression(ps)
+            If rhsIndexed = -1 Then Return -1
+
+            Dim assignIndexed As Integer
+            assignIndexed = MakeNodeFromToken(ps, "ASSIGN_STMT", "", opTok.lexeme, opTok)
+            ps.ast.nodes(assignIndexed).left = lhsCall
+            ps.ast.nodes(assignIndexed).right = rhsIndexed
+            Return assignIndexed
+        End If
     End If
 
     If n1.kind = "OP" And (n1.lexeme = "++" Or n1.lexeme = "--") Then
@@ -393,6 +518,30 @@ Private Function ParseExpressionStatement(ByRef ps As ParseState, ByRef tk As To
         Return -1
     End If
 
+    If exprNode <> -1 Then
+        Dim exprKind As String
+        exprKind = UCase(ps.ast.nodes(exprNode).kind)
+        If exprKind = "BINARY" Then
+            Dim exprOp As String
+            exprOp = Trim(ps.ast.nodes(exprNode).op)
+            If exprOp = "=" Or exprOp = "+=" Or exprOp = "-=" Or exprOp = "*=" Or exprOp = "/=" Or exprOp = "\=" Or exprOp = "=+" Or exprOp = "=-" Then
+                Dim lhsNode As Integer
+                lhsNode = ps.ast.nodes(exprNode).left
+                If lhsNode <> -1 Then
+                    Dim lhsKind As String
+                    lhsKind = UCase(ps.ast.nodes(lhsNode).kind)
+                    If lhsKind = "FIELD_EXPR" Then
+                        Dim assignNode As Integer
+                        assignNode = ASTNewNode(ps.ast, "ASSIGN_STMT", "", exprOp, tk.lineNo, tk.colNo)
+                        ps.ast.nodes(assignNode).left = lhsNode
+                        ps.ast.nodes(assignNode).right = ps.ast.nodes(exprNode).right
+                        Return assignNode
+                    End If
+                End If
+            End If
+        End If
+    End If
+
     Dim stNode As Integer
     stNode = ASTNewNode(ps.ast, "EXPR_STMT", "", "", tk.lineNo, tk.colNo)
     ps.ast.nodes(stNode).left = exprNode
@@ -402,6 +551,7 @@ End Function
 Function ParseSimpleStatement(ByRef ps As ParseState) As Integer
     Dim tk As Token
     tk = CurToken(ps)
+    ParserDiag ps, "[PDBG] ParseSimpleStatement tk.kind=" & tk.kind & " lexeme=" & tk.lexeme & " line=" & Str(tk.lineNo) & " col=" & Str(tk.colNo)
 
     Dim labelStmt As Integer
     labelStmt = TryParseLabelStatement(ps, tk)

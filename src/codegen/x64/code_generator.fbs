@@ -18,14 +18,28 @@ Declare Sub X64EmitComment(ByRef cg As X64CodegenContext, ByRef commentText As S
 Declare Function X64ChildAt(ByRef ps As ParseState, ByVal parentIdx As Integer, ByVal childOrdinal As Integer) As Integer
 Declare Function X64HasTopLevelGlobalDecl(ByRef ps As ParseState, ByRef varName As String) As Integer
 Declare Function X64TryFindSymbolLabel(ByRef cg As X64CodegenContext, ByRef scopeName As String, ByRef symbolText As String, ByRef labelOut As String) As Integer
+Declare Function X64FindRoutine(ByRef cg As X64CodegenContext, ByRef routineKey As String) As Integer
+Declare Function X64ExtractRoutineReturnType(ByRef ps As ParseState, ByVal routineNode As Integer) As String
 Declare Function X64EnsureVar(ByRef cg As X64CodegenContext, ByRef varName As String) As String
 Declare Sub X64EmitLoadVar(ByRef cg As X64CodegenContext, ByRef varName As String)
 Declare Sub X64EmitStoreVar(ByRef cg As X64CodegenContext, ByRef varName As String)
 Declare Function X64EmitLoadIndexedLocal(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef varName As String, ByVal indexExpr As Integer, ByRef errText As String) As Integer
 Declare Function X64InferFloatKindOfExpr(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext) As Integer
+Declare Function X64EmitClassRoutineNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 
 Private Function X64Upper(ByRef s As String) As String
     Return UCase(Trim(s))
+End Function
+
+' Find first child of node with matching kind (case-insensitive)
+Private Function X64FindChildByKind(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef kindText As String) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) = X64Upper(kindText) Then Return ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return -1
 End Function
 
 ' Float kind constants
@@ -65,6 +79,187 @@ Private Sub X64RegisterVarType(ByRef cg As X64CodegenContext, ByRef varName As S
     gX64VarTypeNames(gX64VarTypeCount) = X64Upper(Trim(typeName))
     gX64VarTypeCount += 1
 End Sub
+
+' Build and emit vtable for a class (base-first ordering)
+Private Function X64EmitClassVTable(ByRef ps As ParseState, ByVal classNode As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    errText = ""
+    If classNode < 0 Or classNode >= ps.ast.count Then Return 1
+
+    Dim className As String
+    className = X64Upper(Trim(ps.ast.nodes(classNode).value))
+    If className = "" Then Return 1
+
+    ' Already registered?
+    Dim ci As Integer
+    For ci = 0 To gX64VTableClassCount - 1
+        If gX64VTableClassKeys(ci) = className Then Return 1
+    Next ci
+
+    ' Build vtable from semantic CLASS_METHOD_SLOT metadata (base-first; overrides replace implementer)
+    Dim typesList() As String
+    Dim typeCount As Integer
+    typeCount = 0
+
+    Dim curType As String
+    curType = className
+    Do While curType <> ""
+        If typeCount = 0 Then
+            ReDim typesList(0)
+        Else
+            ReDim Preserve typesList(typeCount)
+        End If
+        typesList(typeCount) = X64Upper(Trim(curType))
+        typeCount += 1
+
+        Dim cnode As Integer
+        cnode = X64FindClassDeclNode(ps, typesList(typeCount - 1))
+        If cnode = -1 Then Exit Do
+        Dim baseNode As Integer
+        baseNode = X64FindChildByKind(ps, cnode, "CLASS_BASE_REF")
+        If baseNode = -1 Then Exit Do
+        curType = ps.ast.nodes(baseNode).value
+    Loop
+
+    ' Determine max slot
+    Dim maxSlot As Integer
+    maxSlot = -1
+    Dim ti As Integer
+    For ti = typeCount - 1 To 0 Step -1
+        Dim cnode2 As Integer
+        cnode2 = X64FindClassDeclNode(ps, typesList(ti))
+        If cnode2 = -1 Then Continue For
+        Dim ch As Integer
+        ch = ps.ast.nodes(cnode2).firstChild
+        Do While ch <> -1
+            If X64Upper(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+                Dim mch As Integer
+                mch = X64FindChildByKind(ps, ch, "CLASS_METHOD_SLOT")
+                If mch <> -1 Then
+                    Dim si As Integer
+                    si = Val(ps.ast.nodes(mch).value)
+                    If si > maxSlot Then maxSlot = si
+                End If
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next ti
+
+    Dim slotCount As Integer
+    If maxSlot < 0 Then
+        slotCount = 0
+    Else
+        slotCount = maxSlot + 1
+    End If
+
+    Dim vtblLabel As String
+    vtblLabel = X64ClassVTableLabel(className)
+
+    If slotCount = 0 Then
+        X64EmitData cg, vtblLabel & ": dq 0"
+    Else
+        Dim implOwner() As String
+        Dim implMethod() As String
+        ReDim implOwner(slotCount - 1)
+        ReDim implMethod(slotCount - 1)
+
+        ' base-first: later (derived) entries overwrite earlier (base) entries
+        For ti = typeCount - 1 To 0 Step -1
+            Dim cn As Integer
+            cn = X64FindClassDeclNode(ps, typesList(ti))
+            If cn = -1 Then Continue For
+            Dim ch2 As Integer
+            ch2 = ps.ast.nodes(cn).firstChild
+            Do While ch2 <> -1
+                If X64Upper(ps.ast.nodes(ch2).kind) = "CLASS_METHOD_DECL" Then
+                    Dim mname As String
+                    mname = X64Upper(Trim(ps.ast.nodes(ch2).value))
+                    Dim slotMeta As Integer
+                    slotMeta = X64FindChildByKind(ps, ch2, "CLASS_METHOD_SLOT")
+                    If slotMeta <> -1 Then
+                        Dim sidx As Integer
+                        sidx = Val(ps.ast.nodes(slotMeta).value)
+                        If sidx >= 0 And sidx < slotCount Then
+                            implOwner(sidx) = typesList(ti)
+                            implMethod(sidx) = mname
+                        End If
+                    End If
+                End If
+                ch2 = ps.ast.nodes(ch2).nextSibling
+            Loop
+        Next ti
+
+        Dim entriesText As String
+        entriesText = ""
+        Dim si2 As Integer
+        For si2 = 0 To slotCount - 1
+            Dim implKey As String
+            implKey = ""
+            If implOwner(si2) <> "" And implMethod(si2) <> "" Then
+                implKey = implOwner(si2) & "_" & implMethod(si2)
+            End If
+            Dim emitSym As String
+            emitSym = "0"
+            If implKey <> "" Then
+                Dim exact As String
+                If X64FindRoutineSymbolName(ps, implKey, exact) <> 0 Then
+                    emitSym = exact
+                Else
+                    emitSym = LCase(implKey)
+                End If
+            End If
+
+            If entriesText <> "" Then entriesText &= ", "
+            entriesText &= emitSym
+        Next si2
+
+        X64EmitData cg, vtblLabel & ": dq " & entriesText
+
+        ' register class index and entries
+        Dim classIdx As Integer
+        classIdx = gX64VTableClassCount
+        gX64VTableClassKeys(classIdx) = className
+        gX64VTableClassSlots(classIdx) = slotCount
+        gX64VTableClassCount = gX64VTableClassCount + 1
+
+        If slotCount > 0 Then
+            Dim kidx As Integer
+            For si2 = 0 To slotCount - 1
+                Dim entryKey As String
+                entryKey = className & "_" & UCase(Trim(implMethod(si2)))
+                kidx = gX64VTableEntryCount
+                gX64VTableEntryKeys(kidx) = X64Upper(Trim(entryKey))
+                gX64VTableEntrySlots(kidx) = si2
+                gX64VTableEntryClassIndex(kidx) = classIdx
+                gX64VTableEntryCount = gX64VTableEntryCount + 1
+            Next si2
+        End If
+    End If
+
+    Return 1
+End Function
+
+Private Function X64FindVTableSlot(ByRef cg As X64CodegenContext, ByRef className As String, ByRef methodName As String, ByRef slotOut As Integer) As Integer
+    slotOut = -1
+    Dim key As String
+    key = X64Upper(Trim(className & "_" & methodName))
+    If key = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To gX64VTableEntryCount - 1
+        If gX64VTableEntryKeys(i) = key Then
+            slotOut = gX64VTableEntrySlots(i)
+            Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+Private Function X64RegisterClassVTable(ByRef ps As ParseState, ByVal classNodeIdx As Integer, ByRef cg As X64CodegenContext) As Integer
+    Dim errText As String
+    If classNodeIdx < 0 Or classNodeIdx >= ps.ast.count Then Return 1
+    X64EmitClassVTable ps, classNodeIdx, cg, errText
+    Return IIf(errText = "", 1, 0)
+End Function
 
 Private Function X64TryGetVarType(ByRef cg As X64CodegenContext, ByRef varName As String, ByRef typeNameOut As String) As Integer
     Dim key As String
@@ -162,24 +357,29 @@ End Function
 Private Function X64CreateFloatConstant(ByRef cg As X64CodegenContext, ByRef rawNumber As String, ByVal kind As Integer) As String
     Dim lbl As String
     If rawNumber = "" Then rawNumber = "0.0"
+    Dim normalizedNumber As String
+    normalizedNumber = rawNumber
+    If InStr(normalizedNumber, ".") = 0 And InStr(UCase(normalizedNumber), "E") = 0 Then
+        normalizedNumber &= ".0"
+    End If
     Select Case kind
     Case UXF_F64
         lbl = X64NextLabel(cg, "dbl")
-        X64EmitData cg, lbl & ": dq " & rawNumber
+        X64EmitData cg, lbl & ": dq " & normalizedNumber
         Return lbl
     Case UXF_F32
         lbl = X64NextLabel(cg, "flt")
-        X64EmitData cg, lbl & ": dd " & rawNumber
+        X64EmitData cg, lbl & ": dd " & normalizedNumber
         Return lbl
     Case UXF_F80
         ' DİKKAT: F80 için 10-byte (tword) depolama kullan.
         ' NASM/YASM 'dt' directive: define tword (10 bytes)
         lbl = X64NextLabel(cg, "ext")
-        X64EmitData cg, lbl & ": dt " & rawNumber
+        X64EmitData cg, lbl & ": dt " & normalizedNumber
         Return lbl
     End Select
     lbl = X64NextLabel(cg, "dbl")
-    X64EmitData cg, lbl & ": dq " & rawNumber
+    X64EmitData cg, lbl & ": dq " & normalizedNumber
     Return lbl
 End Function
 
@@ -948,6 +1148,12 @@ Private Function X64SanitizeSymbol(ByRef rawText As String) As String
     Return outText
 End Function
 
+Private Function X64ClassVTableLabel(ByRef className As String) As String
+    Dim s As String
+    s = X64SanitizeSymbol(LCase(Trim(className)))
+    Return "__uxb_vtbl_" & s
+End Function
+
 Private Function X64ScopedLabelSymbol(ByRef cg As X64CodegenContext, ByRef rawLabel As String) As String
     Dim scopeText As String
     scopeText = cg.currentRoutineLabel
@@ -1108,6 +1314,256 @@ Private Function X64FindClassDeclNode(ByRef ps As ParseState, ByRef classTypeNam
     Return -1
 End Function
 
+Private Function X64GetClassBaseTypeName(ByRef ps As ParseState, ByRef classTypeName As String, ByRef baseTypeOut As String) As Integer
+    baseTypeOut = ""
+
+    Dim classNode As Integer
+    classNode = X64FindClassDeclNode(ps, classTypeName)
+    If classNode = -1 Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) = "CLASS_BASE_REF" Then
+            baseTypeOut = X64Upper(Trim(ps.ast.nodes(ch).value))
+            Return IIf(baseTypeOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function X64FindClassMethodDeclNode(ByRef ps As ParseState, ByRef classTypeName As String, ByRef methodName As String) As Integer
+    Dim classNode As Integer
+    classNode = X64FindClassDeclNode(ps, classTypeName)
+    If classNode = -1 Then Return -1
+
+    Dim methodUpper As String
+    methodUpper = X64Upper(Trim(methodName))
+    If methodUpper = "" Then Return -1
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+            If X64Upper(Trim(ps.ast.nodes(ch).value)) = methodUpper Then Return ch
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function X64ResolveMethodOwnerType(ByRef ps As ParseState, ByRef startTypeName As String, ByRef methodName As String, ByRef ownerTypeOut As String) As Integer
+    ownerTypeOut = ""
+
+    Dim curType As String
+    curType = X64Upper(Trim(startTypeName))
+    Dim methodUpper As String
+    methodUpper = X64Upper(Trim(methodName))
+
+    If curType = "" Or methodUpper = "" Then Return 0
+
+    Dim hopGuard As Integer
+    Do While curType <> ""
+        hopGuard += 1
+        If hopGuard > 64 Then Exit Do
+
+        If X64FindClassMethodDeclNode(ps, curType, methodUpper) <> -1 Then
+            ownerTypeOut = curType
+            Return 1
+        End If
+
+        Dim baseType As String
+        If X64GetClassBaseTypeName(ps, curType, baseType) = 0 Then Exit Do
+        curType = X64Upper(Trim(baseType))
+    Loop
+
+    Return 0
+End Function
+
+Private Function X64FindOwningClassName(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef classNameOut As String) As Integer
+    classNameOut = ""
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim p As Integer
+    p = ps.ast.nodes(nodeIdx).parent
+    If p >= 0 And p < ps.ast.count Then
+        If X64Upper(ps.ast.nodes(p).kind) = "CLASS_STMT" Then
+            classNameOut = X64Upper(Trim(ps.ast.nodes(p).value))
+            Return IIf(classNameOut <> "", 1, 0)
+        End If
+    End If
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If X64Upper(ps.ast.nodes(i).kind) <> "CLASS_STMT" Then Continue For
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If ch = nodeIdx Then
+                classNameOut = X64Upper(Trim(ps.ast.nodes(i).value))
+                Return IIf(classNameOut <> "", 1, 0)
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
+    Return 0
+End Function
+
+Private Function X64CountRoutineParams(ByRef ps As ParseState, ByVal routineNode As Integer) As Integer
+    If routineNode < 0 Or routineNode >= ps.ast.count Then Return 0
+
+    Dim paramCount As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNode).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) <> "PARAM_DECL" Then Exit Do
+        paramCount += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return paramCount
+End Function
+
+Private Function X64NodeHasReturnType(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) = "RETURN_TYPE" Then Return 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function X64IsStmtLikeNode(ByRef kindRaw As String) As Integer
+    Dim k As String
+    k = X64Upper(Trim(kindRaw))
+    If Right(k, 5) = "_STMT" Then Return 1
+    Select Case k
+    Case "PRINT", "IF", "FOR", "DO", "CALL", "RETURN", "EXIT", "LET", "DIM", "REDIM", "DELETE", "SELECT", "NEXT", "GOTO", "GOSUB"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function X64ClassRoutineHasBody(ByRef ps As ParseState, ByVal routineNode As Integer) As Integer
+    If routineNode < 0 Or routineNode >= ps.ast.count Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNode).firstChild
+    Do While ch <> -1
+        If X64IsStmtLikeNode(ps.ast.nodes(ch).kind) <> 0 Then Return 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function X64ResolveClassRoutineName(ByRef ps As ParseState, ByVal routineNode As Integer, ByRef routineNameOut As String) As Integer
+    routineNameOut = ""
+    If routineNode < 0 Or routineNode >= ps.ast.count Then Return 0
+
+    Dim k As String
+    k = X64Upper(Trim(ps.ast.nodes(routineNode).kind))
+
+    Dim className As String
+    If X64FindOwningClassName(ps, routineNode, className) = 0 Then Return 0
+
+    Select Case k
+    Case "CLASS_METHOD_DECL"
+        Dim methodName As String
+        methodName = X64Upper(Trim(ps.ast.nodes(routineNode).value))
+        If methodName = "" Then Return 0
+        routineNameOut = className & "_" & methodName
+        Return 1
+    Case "CLASS_CONSTRUCTOR_DECL"
+        routineNameOut = className & "_CTOR"
+        Return 1
+    Case "CLASS_DESTRUCTOR_DECL"
+        routineNameOut = className & "_DTOR"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Sub X64RegisterRoutineSignatureDirect(ByRef cg As X64CodegenContext, ByRef routineName As String, ByVal argCount As Integer, ByVal isFunction As Integer, ByRef returnType As String)
+    Dim routineKey As String
+    routineKey = X64Upper(Trim(routineName))
+    If routineKey = "" Then Exit Sub
+
+    If argCount < 0 Then argCount = 0
+
+    Dim i As Integer
+    i = X64FindRoutine(cg, routineKey)
+    If i <> -1 Then
+        gX64RoutineArgCounts(i) = argCount
+        gX64RoutineIsFunction(i) = isFunction
+        gX64RoutineReturnTypes(i) = X64Upper(Trim(returnType))
+        Exit Sub
+    End If
+
+    If cg.routineCount > 1023 Then Exit Sub
+    gX64RoutineKeys(cg.routineCount) = routineKey
+    gX64RoutineArgCounts(cg.routineCount) = argCount
+    gX64RoutineIsFunction(cg.routineCount) = isFunction
+    gX64RoutineReturnTypes(cg.routineCount) = X64Upper(Trim(returnType))
+    cg.routineCount += 1
+End Sub
+
+Private Sub X64RegisterClassRoutineSignature(ByRef ps As ParseState, ByVal routineNode As Integer, ByRef cg As X64CodegenContext)
+    Dim routineName As String
+    If X64ResolveClassRoutineName(ps, routineNode, routineName) = 0 Then Exit Sub
+
+    Dim argCount As Integer
+    argCount = X64CountRoutineParams(ps, routineNode) + 1
+
+    Dim isFn As Integer
+    isFn = IIf(X64Upper(ps.ast.nodes(routineNode).kind) = "CLASS_METHOD_DECL" And X64NodeHasReturnType(ps, routineNode) <> 0, 1, 0)
+
+    Dim returnTypeText As String
+    returnTypeText = X64ExtractRoutineReturnType(ps, routineNode)
+
+    X64RegisterRoutineSignatureDirect cg, routineName, argCount, isFn, returnTypeText
+End Sub
+
+Private Function X64InferRoutineReceiverClass(ByRef ps As ParseState, ByRef routineNameRaw As String, ByRef classNameOut As String) As Integer
+    classNameOut = ""
+
+    Dim routineName As String
+    routineName = X64Upper(Trim(routineNameRaw))
+    If routineName = "" Then Return 0
+
+    Dim sepPos As Integer
+    sepPos = InStr(routineName, "_")
+    If sepPos <= 1 Then Return 0
+
+    Dim className As String
+    className = Left(routineName, sepPos - 1)
+    If className = "" Then Return 0
+    If X64FindClassDeclNode(ps, className) = -1 Then Return 0
+
+    classNameOut = className
+    Return 1
+End Function
+
+Private Function X64ResolveCurrentReceiverClass(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef classNameOut As String) As Integer
+    classNameOut = ""
+
+    If X64TryGetVarType(cg, "THIS", classNameOut) <> 0 Then
+        classNameOut = X64Upper(Trim(classNameOut))
+        If classNameOut <> "" And X64FindClassDeclNode(ps, classNameOut) <> -1 Then Return 1
+    End If
+
+    Return X64InferRoutineReceiverClass(ps, cg.currentRoutineLabel, classNameOut)
+End Function
+
 Private Function X64HasTopLevelGlobalDecl(ByRef ps As ParseState, ByRef symbolNameRaw As String) As Integer
     Dim targetName As String
     targetName = X64Upper(Trim(symbolNameRaw))
@@ -1158,6 +1614,20 @@ Private Function X64FindRoutineSymbolName(ByRef ps As ParseState, ByRef routineN
 
         symbolOut = Trim(ps.ast.nodes(i).value)
         Return IIf(symbolOut <> "", 1, 0)
+    Next i
+
+    For i = 0 To ps.ast.count - 1
+        Dim classRoutineKind As String
+        classRoutineKind = X64Upper(ps.ast.nodes(i).kind)
+        If classRoutineKind <> "CLASS_METHOD_DECL" And classRoutineKind <> "CLASS_CONSTRUCTOR_DECL" And classRoutineKind <> "CLASS_DESTRUCTOR_DECL" Then Continue For
+
+        Dim classRoutineName As String
+        classRoutineName = ""
+        If X64ResolveClassRoutineName(ps, i, classRoutineName) = 0 Then Continue For
+        If X64Upper(Trim(classRoutineName)) <> targetName Then Continue For
+
+        symbolOut = classRoutineName
+        Return 1
     Next i
 
     Return 0
@@ -1461,6 +1931,65 @@ Private Sub X64EmitBuiltinSupport(ByRef cg As X64CodegenContext)
     X64EmitText cg, "    add rsp, 40"
     X64EmitText cg, ".input_prompt_done:"
     X64EmitText cg, "    mov eax, 1"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_runtime_print:"
+    X64EmitText cg, "    test rcx, rcx"
+    X64EmitText cg, "    jz .print_done"
+    X64EmitText cg, "    mov rdx, rcx"
+    X64EmitText cg, "    xor r8d, r8d"
+    X64EmitText cg, ".print_len_loop:"
+    X64EmitText cg, "    cmp byte [rdx + r8], 0"
+    X64EmitText cg, "    je .print_len_done"
+    X64EmitText cg, "    inc r8"
+    X64EmitText cg, "    jmp .print_len_loop"
+    X64EmitText cg, ".print_len_done:"
+    X64EmitText cg, "    add qword [rel __uxb_print_col], r8"
+    X64EmitText cg, "    mov [rel __uxb_file_io_tmp], rcx"
+    X64EmitText cg, "    lea rcx, [rel __uxb_prompt_fmt]"
+    X64EmitText cg, "    mov rdx, [rel __uxb_file_io_tmp]"
+    X64EmitText cg, "    sub rsp, 40"
+    X64EmitText cg, "    call printf"
+    X64EmitText cg, "    add rsp, 40"
+    X64EmitText cg, ".print_done:"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_runtime_print_sep_comma:"
+    X64EmitText cg, "    mov rax, [rel __uxb_print_col]"
+    X64EmitText cg, "    xor rdx, rdx"
+    X64EmitText cg, "    mov r8, 14"
+    X64EmitText cg, "    div r8"
+    X64EmitText cg, "    mov r9, 14"
+    X64EmitText cg, "    sub r9, rdx"
+    X64EmitText cg, "    xor r10d, r10d"
+    X64EmitText cg, ".print_sep_comma_loop:"
+    X64EmitText cg, "    cmp r10, r9"
+    X64EmitText cg, "    jae .print_sep_comma_done"
+    X64EmitText cg, "    lea rcx, [rel __uxb_prompt_fmt]"
+    X64EmitText cg, "    lea rdx, [rel __uxb_print_space]"
+    X64EmitText cg, "    sub rsp, 40"
+    X64EmitText cg, "    call printf"
+    X64EmitText cg, "    add rsp, 40"
+    X64EmitText cg, "    inc r10"
+    X64EmitText cg, "    jmp .print_sep_comma_loop"
+    X64EmitText cg, ".print_sep_comma_done:"
+    X64EmitText cg, "    add qword [rel __uxb_print_col], r9"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_runtime_print_sep_semicolon:"
+    X64EmitText cg, "    ret"
+    X64EmitText cg, ""
+
+    X64EmitText cg, "__uxb_runtime_print_newline:"
+    X64EmitText cg, "    lea rcx, [rel __uxb_prompt_fmt]"
+    X64EmitText cg, "    lea rdx, [rel __uxb_print_newline]"
+    X64EmitText cg, "    sub rsp, 40"
+    X64EmitText cg, "    call printf"
+    X64EmitText cg, "    add rsp, 40"
+    X64EmitText cg, "    mov qword [rel __uxb_print_col], 0"
     X64EmitText cg, "    ret"
     X64EmitText cg, ""
 
@@ -2568,14 +3097,37 @@ End Function
 Private Sub X64EmitLoadVar(ByRef cg As X64CodegenContext, ByRef varName As String)
     Dim localOffset As Integer
     Dim globalIdx As Integer
+    Dim loadBytes As Integer
+    loadBytes = 8
+    If X64TryGetGlobalElemBytes(cg, varName, loadBytes) = 0 Then
+        If X64TryGetLocalElemBytes(cg, varName, loadBytes) = 0 Then loadBytes = 8
+    End If
     globalIdx = X64FindGlobalSymbol(cg, varName)
     If cg.currentRoutineLabel <> "" Then
         If globalIdx <> -1 Then
-            X64EmitText cg, "    mov rax, [rel " & gX64GlobalLabels(globalIdx) & "]"
+            Select Case loadBytes
+            Case 1
+                X64EmitText cg, "    movsx rax, byte [rel " & gX64GlobalLabels(globalIdx) & "]"
+            Case 2
+                X64EmitText cg, "    movsx rax, word [rel " & gX64GlobalLabels(globalIdx) & "]"
+            Case 4
+                X64EmitText cg, "    movsxd rax, dword [rel " & gX64GlobalLabels(globalIdx) & "]"
+            Case Else
+                X64EmitText cg, "    mov rax, [rel " & gX64GlobalLabels(globalIdx) & "]"
+            End Select
             Exit Sub
         End If
         If X64TryFindLocalOffset(cg, varName, localOffset) <> 0 Then
-            X64EmitText cg, "    mov rax, " & X64FormatRbpRef(localOffset)
+            Select Case loadBytes
+            Case 1
+                X64EmitText cg, "    movsx rax, byte " & X64FormatRbpRef(localOffset)
+            Case 2
+                X64EmitText cg, "    movsx rax, word " & X64FormatRbpRef(localOffset)
+            Case 4
+                X64EmitText cg, "    movsxd rax, dword " & X64FormatRbpRef(localOffset)
+            Case Else
+                X64EmitText cg, "    mov rax, " & X64FormatRbpRef(localOffset)
+            End Select
             Exit Sub
         End If
     End If
@@ -2598,25 +3150,66 @@ Private Sub X64EmitLoadVar(ByRef cg As X64CodegenContext, ByRef varName As Strin
                 End Select
             End If
             localOffset = X64EnsureLocalSlot(cg, varName, 1, vbElemBytes)
-            X64EmitText cg, "    mov rax, " & X64FormatRbpRef(localOffset)
+            Select Case vbElemBytes
+            Case 1
+                X64EmitText cg, "    movsx rax, byte " & X64FormatRbpRef(localOffset)
+            Case 2
+                X64EmitText cg, "    movsx rax, word " & X64FormatRbpRef(localOffset)
+            Case 4
+                X64EmitText cg, "    movsxd rax, dword " & X64FormatRbpRef(localOffset)
+            Case Else
+                X64EmitText cg, "    mov rax, " & X64FormatRbpRef(localOffset)
+            End Select
             Exit Sub
         End If
         labelText = X64EnsureVar(cg, varName)
     End If
-    X64EmitText cg, "    mov rax, [rel " & labelText & "]"
+    Select Case loadBytes
+    Case 1
+        X64EmitText cg, "    movsx rax, byte [rel " & labelText & "]"
+    Case 2
+        X64EmitText cg, "    movsx rax, word [rel " & labelText & "]"
+    Case 4
+        X64EmitText cg, "    movsxd rax, dword [rel " & labelText & "]"
+    Case Else
+        X64EmitText cg, "    mov rax, [rel " & labelText & "]"
+    End Select
 End Sub
 
 Private Sub X64EmitStoreVar(ByRef cg As X64CodegenContext, ByRef varName As String)
     Dim localOffset As Integer
     Dim globalIdx As Integer
+    Dim storeBytes As Integer
+    storeBytes = 8
+    If X64TryGetGlobalElemBytes(cg, varName, storeBytes) = 0 Then
+        If X64TryGetLocalElemBytes(cg, varName, storeBytes) = 0 Then storeBytes = 8
+    End If
     globalIdx = X64FindGlobalSymbol(cg, varName)
     If cg.currentRoutineLabel <> "" Then
         If globalIdx <> -1 Then
-            X64EmitText cg, "    mov [rel " & gX64GlobalLabels(globalIdx) & "], rax"
+            Select Case storeBytes
+            Case 1
+                X64EmitText cg, "    mov byte [rel " & gX64GlobalLabels(globalIdx) & "], al"
+            Case 2
+                X64EmitText cg, "    mov word [rel " & gX64GlobalLabels(globalIdx) & "], ax"
+            Case 4
+                X64EmitText cg, "    mov dword [rel " & gX64GlobalLabels(globalIdx) & "], eax"
+            Case Else
+                X64EmitText cg, "    mov [rel " & gX64GlobalLabels(globalIdx) & "], rax"
+            End Select
             Exit Sub
         End If
         If X64TryFindLocalOffset(cg, varName, localOffset) <> 0 Then
-            X64EmitText cg, "    mov " & X64FormatRbpRef(localOffset) & ", rax"
+            Select Case storeBytes
+            Case 1
+                X64EmitText cg, "    mov byte " & X64FormatRbpRef(localOffset) & ", al"
+            Case 2
+                X64EmitText cg, "    mov word " & X64FormatRbpRef(localOffset) & ", ax"
+            Case 4
+                X64EmitText cg, "    mov dword " & X64FormatRbpRef(localOffset) & ", eax"
+            Case Else
+                X64EmitText cg, "    mov " & X64FormatRbpRef(localOffset) & ", rax"
+            End Select
             Exit Sub
         End If
 
@@ -2636,13 +3229,31 @@ Private Sub X64EmitStoreVar(ByRef cg As X64CodegenContext, ByRef varName As Stri
         End If
 
         localOffset = X64EnsureLocalSlot(cg, varName, 1, sbElemBytes)
-        X64EmitText cg, "    mov " & X64FormatRbpRef(localOffset) & ", rax"
+        Select Case sbElemBytes
+        Case 1
+            X64EmitText cg, "    mov byte " & X64FormatRbpRef(localOffset) & ", al"
+        Case 2
+            X64EmitText cg, "    mov word " & X64FormatRbpRef(localOffset) & ", ax"
+        Case 4
+            X64EmitText cg, "    mov dword " & X64FormatRbpRef(localOffset) & ", eax"
+        Case Else
+            X64EmitText cg, "    mov " & X64FormatRbpRef(localOffset) & ", rax"
+        End Select
         Exit Sub
     End If
 
     Dim labelText As String
     labelText = X64EnsureVar(cg, varName)
-    X64EmitText cg, "    mov [rel " & labelText & "], rax"
+    Select Case storeBytes
+    Case 1
+        X64EmitText cg, "    mov byte [rel " & labelText & "], al"
+    Case 2
+        X64EmitText cg, "    mov word [rel " & labelText & "], ax"
+    Case 4
+        X64EmitText cg, "    mov dword [rel " & labelText & "], eax"
+    Case Else
+        X64EmitText cg, "    mov [rel " & labelText & "], rax"
+    End Select
 End Sub
 
 Private Function X64EmitAddrOfVar(ByRef cg As X64CodegenContext, ByRef varName As String, ByRef errText As String) As Integer
@@ -2856,7 +3467,7 @@ Private Function X64BuildFieldPath(ByRef ps As ParseState, ByVal nodeIdx As Inte
     Return IIf(rootNameOut <> "" And pathOut <> "", 1, 0)
 End Function
 
-Private Function X64ResolveFieldInfo(ByRef ps As ParseState, ByVal fieldNode As Integer, ByRef rootNameOut As String, ByRef pathTextOut As String, ByRef rootNodeOut As Integer, ByRef rootTypeOut As String, ByRef fieldOffsetOut As Integer, ByRef fieldTypeOut As String, ByRef fieldSizeOut As Integer, ByRef errText As String) As Integer
+Private Function X64ResolveFieldInfo(ByRef ps As ParseState, ByVal fieldNode As Integer, ByRef cg As X64CodegenContext, ByRef rootNameOut As String, ByRef pathTextOut As String, ByRef rootNodeOut As Integer, ByRef rootTypeOut As String, ByRef fieldOffsetOut As Integer, ByRef fieldTypeOut As String, ByRef fieldSizeOut As Integer, ByRef errText As String) As Integer
     rootNameOut = ""
     pathTextOut = ""
     rootNodeOut = -1
@@ -2931,9 +3542,20 @@ Private Function X64ResolveFieldInfo(ByRef ps As ParseState, ByVal fieldNode As 
     End If
 
     If X64FindDeclaredTypeName(ps, rootNameOut, rootTypeOut) = 0 Then
-        errText = "x64-codegen: field root type missing for " & rootNameOut
-        Return 0
+        If X64TryGetVarType(cg, rootNameOut, rootTypeOut) = 0 Then
+            If rootNameOut = "THIS" Or rootNameOut = "ME" Then
+                If X64ResolveCurrentReceiverClass(ps, cg, rootTypeOut) = 0 Then
+                    errText = "x64-codegen: field root type missing for " & rootNameOut
+                    Return 0
+                End If
+            Else
+                errText = "x64-codegen: field root type missing for " & rootNameOut
+                Return 0
+            End If
+        End If
     End If
+
+    rootTypeOut = X64Upper(Trim(rootTypeOut))
 
     Dim layoutErr As String
     If TypeLayoutResolvePath(ps, rootTypeOut, pathTextOut, fieldOffsetOut, fieldTypeOut, fieldSizeOut, layoutErr) = 0 Then
@@ -2952,7 +3574,7 @@ Private Function X64EmitAddrOfFieldExpr(ByRef ps As ParseState, ByVal fieldNode 
     Dim rootType As String
     Dim fieldOffset As Integer
 
-    If X64ResolveFieldInfo(ps, fieldNode, rootName, pathText, rootNode, rootType, fieldOffset, fieldTypeOut, fieldSizeOut, errText) = 0 Then
+    If X64ResolveFieldInfo(ps, fieldNode, cg, rootName, pathText, rootNode, rootType, fieldOffset, fieldTypeOut, fieldSizeOut, errText) = 0 Then
         Return 0
     End If
 
@@ -3031,7 +3653,7 @@ Private Function X64EmitStoreFieldFromRhs(ByRef ps As ParseState, ByVal fieldNod
     Dim fieldType As String
     Dim fieldSize As Integer
 
-    If X64ResolveFieldInfo(ps, fieldNode, rootName, pathText, rootNode, rootType, fieldOffset, fieldType, fieldSize, errText) = 0 Then
+    If X64ResolveFieldInfo(ps, fieldNode, cg, rootName, pathText, rootNode, rootType, fieldOffset, fieldType, fieldSize, errText) = 0 Then
         Return 0
     End If
 
@@ -4006,7 +4628,7 @@ Private Function X64EmitExprToRax(ByRef ps As ParseState, ByVal nodeIdx As Integ
             Return 0
         End If
         If classSize <= 0 Then
-            errText = "x64-codegen: NEW_EXPR invalid class size " & classTypeName
+            errText = "x64-codegen: unresolved class layout: " & classTypeName
             Return 0
         End If
 
@@ -4016,6 +4638,10 @@ Private Function X64EmitExprToRax(ByRef ps As ParseState, ByVal nodeIdx As Integ
         X64EmitText cg, "    sub rsp, 32"
         X64EmitText cg, "    call calloc"
         X64EmitText cg, "    add rsp, 32"
+
+        ' initialize vptr to class vtable
+        X64EmitText cg, "    lea rdx, [rel " & X64ClassVTableLabel(classTypeName) & "]"
+        X64EmitText cg, "    mov [rax], rdx"
 
         Dim ctorName As String
         ctorName = classTypeName & "_CTOR"
@@ -4285,6 +4911,126 @@ Private Function X64EmitExprToRax(ByRef ps As ParseState, ByVal nodeIdx As Integ
             Return 1
         End If
 
+        ' Operator-overload hook: if LHS is class instance and class defines OP_ADD/ADD, call method instead
+        If opKey = "+" Or opKey = "ADD" Then
+            Dim lhsKind As String
+            lhsKind = X64Upper(ps.ast.nodes(lhs).kind)
+            Dim lhsType As String
+            lhsType = ""
+            If lhsKind = "IDENT" Or lhsKind = "IDENTIFIER" Or lhsKind = "VAR" Or lhsKind = "VAR_REF" Or lhsKind = "KEYWORD_REF" Then
+                If X64TryGetVarType(cg, Trim(ps.ast.nodes(lhs).value), lhsType) = 0 Then
+                    X64FindDeclaredTypeName ps, Trim(ps.ast.nodes(lhs).value), lhsType
+                End If
+            ElseIf lhsKind = "FIELD_EXPR" Then
+                Dim rootName As String
+                Dim pathText As String
+                Dim rootNode As Integer
+                Dim fieldOffset As Integer
+                Dim fieldType As String
+                Dim fieldSize As Integer
+                Dim resolveErr As String
+                If X64ResolveFieldInfo(ps, lhs, cg, rootName, pathText, rootNode, lhsType, fieldOffset, fieldType, fieldSize, resolveErr) <> 0 Then
+                    lhsType = X64Upper(Trim(lhsType))
+                End If
+            End If
+
+            If lhsType <> "" Then lhsType = X64Upper(Trim(lhsType))
+            If lhsType <> "" And X64FindClassDeclNode(ps, lhsType) <> -1 Then
+                Dim candidate As String
+                candidate = ""
+                If X64FindClassMethodDeclNode(ps, lhsType, "OP_ADD") <> -1 Then candidate = "OP_ADD"
+                If candidate = "" And X64FindClassMethodDeclNode(ps, lhsType, "ADD") <> -1 Then candidate = "ADD"
+                If candidate <> "" Then
+                    ' emit method call: receiver + rhs
+                    Dim calleeSym As String
+                    calleeSym = lhsType & "_" & candidate
+                    Dim exactSym As String
+                    If X64FindRoutineSymbolName(ps, calleeSym, exactSym) <> 0 Then calleeSym = exactSym Else calleeSym = LCase(calleeSym)
+
+                    Dim actualArgCount As Integer
+                    actualArgCount = 2
+                    Dim stackArgCount As Integer
+                    stackArgCount = 0
+                    If actualArgCount > 4 Then stackArgCount = actualArgCount - 4
+                    Dim regSpillSlots As Integer
+                    regSpillSlots = actualArgCount
+                    If regSpillSlots > 4 Then regSpillSlots = 4
+                    Dim reserveBytes As Integer
+                    reserveBytes = 32
+                    reserveBytes += stackArgCount * 8
+                    reserveBytes += regSpillSlots * 8
+                    If (reserveBytes Mod 16) <> 0 Then reserveBytes += 8
+
+                    X64EmitText cg, "    sub rsp, " & X64ToStr(reserveBytes)
+
+                    Dim recvSpillOffset As Integer
+                    recvSpillOffset = 32 + (stackArgCount * 8)
+
+                    ' evaluate receiver
+                    If X64EmitExprToRax(ps, lhs, cg, errText) = 0 Then Return 0
+                    X64EmitText cg, "    mov [rsp + " & X64ToStr(recvSpillOffset) & "], rax"
+
+                    ' evaluate rhs
+                    If X64EmitExprToRax(ps, rhs, cg, errText) = 0 Then Return 0
+                    Dim spillOffset As Integer
+                    spillOffset = 32 + (stackArgCount * 8) + (1 * 8)
+                    X64EmitText cg, "    mov [rsp + " & X64ToStr(spillOffset) & "], rax"
+
+                    Dim regOrder(0 To 3) As String
+                    regOrder(0) = "rcx"
+                    regOrder(1) = "rdx"
+                    regOrder(2) = "r8"
+                    regOrder(3) = "r9"
+                    Dim i As Integer
+                    For i = 0 To regSpillSlots - 1
+                        Dim loadOffset As Integer
+                        loadOffset = 32 + (stackArgCount * 8) + (i * 8)
+                        X64EmitText cg, "    mov " & regOrder(i) & ", [rsp + " & X64ToStr(loadOffset) & "]"
+                    Next i
+
+                    ' virtual dispatch if available
+                    Dim vslot As Integer
+                    vslot = -1
+                    If X64FindVTableSlot(cg, lhsType, candidate, vslot) <> 0 Then
+                        Dim vcallNullObjLbl2 As String
+                        Dim vcallNullVtblLbl2 As String
+                        Dim vcallNullSlotLbl2 As String
+                        Dim vcallAfterLbl2 As String
+                        vcallNullObjLbl2 = X64NextLabel(cg, "vcall_null_obj")
+                        vcallNullVtblLbl2 = X64NextLabel(cg, "vcall_null_vtbl")
+                        vcallNullSlotLbl2 = X64NextLabel(cg, "vcall_null_slot")
+                        vcallAfterLbl2 = X64NextLabel(cg, "vcall_after")
+
+                        X64EmitText cg, "    test rcx, rcx"
+                        X64EmitText cg, "    jz " & vcallNullObjLbl2
+                        X64EmitText cg, "    mov rax, [rcx]"
+                        X64EmitText cg, "    test rax, rax"
+                        X64EmitText cg, "    jz " & vcallNullVtblLbl2
+                        X64EmitText cg, "    mov r11, [rax + " & X64ToStr(vslot * 8) & "]"
+                        X64EmitText cg, "    test r11, r11"
+                        X64EmitText cg, "    jz " & vcallNullSlotLbl2
+                        X64EmitText cg, "    call r11"
+                        X64EmitText cg, "    jmp " & vcallAfterLbl2
+
+                        X64EmitLabel cg, vcallNullObjLbl2
+                        X64EmitText cg, "    xor rax, rax"
+                        X64EmitText cg, "    jmp " & vcallAfterLbl2
+                        X64EmitLabel cg, vcallNullVtblLbl2
+                        X64EmitText cg, "    xor rax, rax"
+                        X64EmitText cg, "    jmp " & vcallAfterLbl2
+                        X64EmitLabel cg, vcallNullSlotLbl2
+                        X64EmitText cg, "    xor rax, rax"
+                        X64EmitLabel cg, vcallAfterLbl2
+                    Else
+                        X64EmitText cg, "    call " & calleeSym
+                    End If
+
+                    If reserveBytes > 0 Then X64EmitText cg, "    add rsp, " & X64ToStr(reserveBytes)
+                    Return 1
+                End If
+            End If
+        End If
+
         If GenerateExpression(ps, lhs, cg, errText) = 0 Then Return 0
         X64EmitText cg, "    push rax"
         If GenerateExpression(ps, rhs, cg, errText) = 0 Then Return 0
@@ -4437,6 +5183,22 @@ Private Function GenerateRoutine(ByRef ps As ParseState, ByVal nodeIdx As Intege
     cg.currentEpilogLabel = ""
     cg.currentRoutineIsFunction = isFunction
 
+    Dim routineKindUpper As String
+    routineKindUpper = X64Upper(Trim(ps.ast.nodes(nodeIdx).kind))
+
+    Dim receiverClassType As String
+    receiverClassType = ""
+
+    Dim hiddenReceiverShift As Integer
+    hiddenReceiverShift = 0
+
+    If routineKindUpper = "CLASS_METHOD_DECL" Or routineKindUpper = "CLASS_CONSTRUCTOR_DECL" Or routineKindUpper = "CLASS_DESTRUCTOR_DECL" Then
+        hiddenReceiverShift = 1
+        If X64FindOwningClassName(ps, nodeIdx, receiverClassType) = 0 Then receiverClassType = ""
+    Else
+        If X64InferRoutineReceiverClass(ps, routineName, receiverClassType) = 0 Then receiverClassType = ""
+    End If
+
     X64RegisterProcedureParams ps, nodeIdx, cg
 
     Dim scanNode As Integer
@@ -4445,6 +5207,17 @@ Private Function GenerateRoutine(ByRef ps As ParseState, ByVal nodeIdx As Intege
         X64CollectRoutineLocals(ps, scanNode, cg)
         scanNode = ps.ast.nodes(scanNode).nextSibling
     Loop
+
+    If receiverClassType <> "" Then
+        Dim thisOffsetPre As Integer
+        Dim meOffsetPre As Integer
+        thisOffsetPre = X64EnsureLocalSlot(cg, "THIS", 1, 8)
+        meOffsetPre = X64EnsureLocalSlot(cg, "ME", 1, 8)
+        VarMappingAddLocal(cg.localVars, cg.currentRoutineLabel, "THIS", thisOffsetPre, 1)
+        VarMappingAddLocal(cg.localVars, cg.currentRoutineLabel, "ME", meOffsetPre, 1)
+        X64RegisterVarType cg, "THIS", receiverClassType
+        X64RegisterVarType cg, "ME", receiverClassType
+    End If
 
     Dim frameBytes As Integer
     frameBytes = X64Align16(cg.localFrameBytes)
@@ -4467,16 +5240,25 @@ Private Function GenerateRoutine(ByRef ps As ParseState, ByVal nodeIdx As Intege
     For paramIndex = 0 To cg.paramCount - 1
         Dim paramOffset As Integer
         If X64TryFindLocalOffset(cg, gX64ParamNames(paramIndex), paramOffset) <> 0 Then
-            If paramIndex <= 3 Then
-                X64EmitText cg, "    mov " & X64FormatRbpRef(paramOffset) & ", " & paramRegs(paramIndex)
+            Dim incomingIndex As Integer
+            incomingIndex = paramIndex + hiddenReceiverShift
+            If incomingIndex <= 3 Then
+                X64EmitText cg, "    mov " & X64FormatRbpRef(paramOffset) & ", " & paramRegs(incomingIndex)
             Else
                 Dim stackOffset As Integer
-                stackOffset = 48 + ((paramIndex - 4) * 8)
+                stackOffset = 48 + ((incomingIndex - 4) * 8)
                 X64EmitText cg, "    mov rax, [rbp + " & X64ToStr(stackOffset) & "]"
                 X64EmitText cg, "    mov " & X64FormatRbpRef(paramOffset) & ", rax"
             End If
         End If
     Next paramIndex
+
+    If receiverClassType <> "" Then
+        Dim thisOffset As Integer
+        Dim meOffset As Integer
+        If X64TryFindLocalOffset(cg, "THIS", thisOffset) <> 0 Then X64EmitText cg, "    mov " & X64FormatRbpRef(thisOffset) & ", rcx"
+        If X64TryFindLocalOffset(cg, "ME", meOffset) <> 0 Then X64EmitText cg, "    mov " & X64FormatRbpRef(meOffset) & ", rcx"
+    End If
 
     Dim body As Integer
     body = ps.ast.nodes(nodeIdx).firstChild
@@ -4603,38 +5385,7 @@ End Function
 
 Private Function GeneratePrint(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
     X64EmitComment cg, "stmt: PRINT"
-    X64EmitComment cg, "legacy marker: call __uxb_runtime_print"
-
-    Dim itemNode As Integer
-    itemNode = ps.ast.nodes(nodeIdx).firstChild
-
-    Do While itemNode <> -1
-        Dim exprNode As Integer
-        exprNode = ps.ast.nodes(itemNode).left
-        If exprNode = -1 Then exprNode = X64ChildAt(ps, itemNode, 0)
-
-        If exprNode <> -1 Then
-            If GenerateExpression(ps, exprNode, cg, errText) = 0 Then Return 0
-
-            X64EmitText cg, "    mov rdx, rax"
-
-            If X64ExprReturnsString(ps, exprNode) <> 0 Then
-                X64EmitText cg, "    lea rcx, [rel format_str]"
-            Else
-                X64EmitText cg, "    lea rcx, [rel format_int]"
-            End If
-
-            X64EmitText cg, "    sub rsp, 32"
-            X64EmitText cg, "    call printf"
-            X64EmitText cg, "    add rsp, 32"
-            X64EmitText cg, "    xor rcx, rcx"
-            X64EmitCall0 cg, "fflush"
-        End If
-
-        itemNode = ps.ast.nodes(itemNode).nextSibling
-    Loop
-
-    Return 1
+    Return X64EmitPrintStmt(ps, nodeIdx, cg, errText)
 End Function
 
 Private Function X64EmitClsStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
@@ -5328,6 +6079,11 @@ Private Function X64EmitNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, B
         Return X64EmitSubStmt(ps, nodeIdx, cg, errText)
     Case "FUNCTION_STMT", "FUNCTION_DECL", "FUNCTION"
         Return X64EmitFunctionStmt(ps, nodeIdx, cg, errText)
+    Case "CLASS_STMT", "CLASS_FIELD", "CLASS_METHOD_FLAG", "CLASS_ACCESS", "CLASS_BASE_REF", "CLASS_IMPLEMENTS_REF", "CLASS_FRIEND_STMT", "FRIEND_ITEM", "INTERFACE_STMT", "INTERFACE_METHOD_DECL"
+        ' Class/interface metadata is consumed by semantic/layout and call resolution.
+        Return 1
+    Case "CLASS_METHOD_DECL", "CLASS_CONSTRUCTOR_DECL", "CLASS_DESTRUCTOR_DECL"
+        Return X64EmitClassRoutineNode(ps, nodeIdx, cg, errText)
     Case "DIM_STMT", "DIM", "REDIM_STMT", "REDIM"
         Return GenerateStatement(ps, nodeIdx, cg, errText)
     Case "IF_STMT", "IF"
@@ -5490,6 +6246,20 @@ Private Function X64EmitProgram(ByRef ps As ParseState, ByVal nodeIdx As Integer
         sigKind = X64Upper(ps.ast.nodes(sigScan).kind)
         If sigKind = "SUB_STMT" Or sigKind = "FUNCTION_STMT" Then
             X64RegisterRoutineSignature ps, sigScan, cg
+        ElseIf sigKind = "CLASS_STMT" Then
+            Dim sigMember As Integer
+            sigMember = ps.ast.nodes(sigScan).firstChild
+            Do While sigMember <> -1
+                Dim sigMemberKind As String
+                sigMemberKind = X64Upper(ps.ast.nodes(sigMember).kind)
+                If sigMemberKind = "CLASS_METHOD_DECL" Or sigMemberKind = "CLASS_CONSTRUCTOR_DECL" Or sigMemberKind = "CLASS_DESTRUCTOR_DECL" Then
+                    X64RegisterClassRoutineSignature ps, sigMember, cg
+                End If
+                sigMember = ps.ast.nodes(sigMember).nextSibling
+            Loop
+            ' Emit vtable data for the class
+            Dim errText As String
+            If X64EmitClassVTable(ps, sigScan, cg, errText) = 0 Then Return 0
         End If
         sigScan = ps.ast.nodes(sigScan).nextSibling
     Loop
@@ -5522,7 +6292,7 @@ Private Function X64EmitProgram(ByRef ps As ParseState, ByVal nodeIdx As Integer
     Do While ch <> -1
         Dim k As String
         k = X64Upper(ps.ast.nodes(ch).kind)
-        If k <> "SUB_STMT" And k <> "FUNCTION_STMT" Then
+        If k <> "SUB_STMT" And k <> "FUNCTION_STMT" And k <> "CLASS_STMT" Then
             If X64EmitNode(ps, ch, cg, errText) = 0 Then Return 0
         End If
         ch = ps.ast.nodes(ch).nextSibling
@@ -5546,6 +6316,18 @@ Private Function X64EmitProgram(ByRef ps As ParseState, ByVal nodeIdx As Integer
         If k = "SUB_STMT" Or k = "FUNCTION_STMT" Then
             If X64EmitNode(ps, ch, cg, errText) = 0 Then Return 0
             X64EmitText cg, ""
+        ElseIf k = "CLASS_STMT" Then
+            Dim classMember As Integer
+            classMember = ps.ast.nodes(ch).firstChild
+            Do While classMember <> -1
+                Dim classMemberKind As String
+                classMemberKind = X64Upper(ps.ast.nodes(classMember).kind)
+                If classMemberKind = "CLASS_METHOD_DECL" Or classMemberKind = "CLASS_CONSTRUCTOR_DECL" Or classMemberKind = "CLASS_DESTRUCTOR_DECL" Then
+                    If X64EmitClassRoutineNode(ps, classMember, cg, errText) = 0 Then Return 0
+                    If X64ClassRoutineHasBody(ps, classMember) <> 0 Then X64EmitText cg, ""
+                End If
+                classMember = ps.ast.nodes(classMember).nextSibling
+            Loop
         End If
         ch = ps.ast.nodes(ch).nextSibling
     Loop
@@ -5567,6 +6349,24 @@ Private Function X64EmitFunctionStmt(ByRef ps As ParseState, ByVal nodeIdx As In
     Return GenerateRoutine(ps, nodeIdx, cg, errText, 1, fnName)
 End Function
 
+Private Function X64EmitClassRoutineNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim nodeKind As String
+    nodeKind = X64Upper(Trim(ps.ast.nodes(nodeIdx).kind))
+    If nodeKind <> "CLASS_METHOD_DECL" And nodeKind <> "CLASS_CONSTRUCTOR_DECL" And nodeKind <> "CLASS_DESTRUCTOR_DECL" Then Return 1
+
+    If X64ClassRoutineHasBody(ps, nodeIdx) = 0 Then Return 1
+
+    Dim routineName As String
+    If X64ResolveClassRoutineName(ps, nodeIdx, routineName) = 0 Then
+        errText = "x64-codegen: class routine name resolve failed"
+        Return 0
+    End If
+
+    Dim isFunction As Integer
+    isFunction = IIf(nodeKind = "CLASS_METHOD_DECL" And X64NodeHasReturnType(ps, nodeIdx) <> 0, 1, 0)
+    Return GenerateRoutine(ps, nodeIdx, cg, errText, isFunction, routineName)
+End Function
+
 Private Function X64EmitDimStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
     Dim ch As Integer
     ch = ps.ast.nodes(nodeIdx).firstChild
@@ -5586,21 +6386,34 @@ Private Function X64EmitDimStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer
         elemBytes = 8
         Dim declTypeName As String
         declTypeName = ""
+        Dim declIsClass As Integer
+        Dim declIsObject As Integer
+        declIsClass = 0
+        declIsObject = 0
         If X64FindDeclaredTypeName(ps, declName, declTypeName) <> 0 Then
-            Dim aggSize As Integer
-            Dim aggErr As String
-            If TypeLayoutSizeOf(ps, declTypeName, aggSize, aggErr) <> 0 Then
-                If aggSize > 0 Then elemBytes = aggSize
+            declTypeName = X64Upper(Trim(declTypeName))
+            declIsClass = IIf(X64FindClassDeclNode(ps, declTypeName) <> -1, 1, 0)
+            declIsObject = IIf(declTypeName = "OBJECT", 1, 0)
+
+            If declIsClass <> 0 Or declIsObject <> 0 Then
+                ' CLASS/OBJECT variables are pointer slots in x64 lane.
+                elemBytes = 8
             Else
-                ' fallback for float kinds
-                Select Case X64TypeToFloatKind(declTypeName)
-                Case UXF_F80
-                    elemBytes = 10
-                Case UXF_F32
-                    elemBytes = 4
-                Case Else
-                    elemBytes = 8
-                End Select
+                Dim aggSize As Integer
+                Dim aggErr As String
+                If TypeLayoutSizeOf(ps, declTypeName, aggSize, aggErr) <> 0 Then
+                    If aggSize > 0 Then elemBytes = aggSize
+                Else
+                    ' fallback for float kinds
+                    Select Case X64TypeToFloatKind(declTypeName)
+                    Case UXF_F80
+                        elemBytes = 10
+                    Case UXF_F32
+                        elemBytes = 4
+                    Case Else
+                        elemBytes = 8
+                    End Select
+                End If
             End If
         End If
 
@@ -5619,9 +6432,19 @@ Private Function X64EmitDimStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer
         End If
 
         Dim subNode As Integer
+        Dim hasInitExpr As Integer
+        hasInitExpr = 0
+        Dim hasBounds As Integer
+        hasBounds = 0
         subNode = ps.ast.nodes(ch).firstChild
         Do While subNode <> -1
-            If X64Upper(ps.ast.nodes(subNode).kind) = "INIT_EXPR" And ps.ast.nodes(subNode).left <> -1 Then
+            Dim subKind As String
+            subKind = X64Upper(ps.ast.nodes(subNode).kind)
+
+            If subKind = "DIM_BOUNDS" Then hasBounds = 1
+
+            If subKind = "INIT_EXPR" And ps.ast.nodes(subNode).left <> -1 Then
+                hasInitExpr = 1
                 Dim initExpr As Integer
                 initExpr = ps.ast.nodes(subNode).left
                 Dim declType As String
@@ -5651,6 +6474,30 @@ Private Function X64EmitDimStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer
             End If
             subNode = ps.ast.nodes(subNode).nextSibling
         Loop
+
+        If declIsClass <> 0 And hasInitExpr = 0 And hasBounds = 0 Then
+            Dim classSize As Integer
+            Dim classErr As String
+            If TypeLayoutSizeOf(ps, declTypeName, classSize, classErr) = 0 Then
+                errText = "x64-codegen: DIM class layout resolve failed " & classErr
+                Return 0
+            End If
+            If classSize <= 0 Then
+                errText = "x64-codegen: unresolved class layout: " & declTypeName
+                Return 0
+            End If
+
+            X64EmitComment cg, "DIM class default allocation"
+            X64EmitText cg, "    mov rcx, 1"
+            X64EmitText cg, "    mov rdx, " & X64ToStr(classSize)
+            X64EmitText cg, "    sub rsp, 32"
+            X64EmitText cg, "    call calloc"
+            X64EmitText cg, "    add rsp, 32"
+            ' initialize vptr for class instance
+            X64EmitText cg, "    lea rdx, [rel " & X64ClassVTableLabel(declTypeName) & "]"
+            X64EmitText cg, "    mov [rax], rdx"
+            X64EmitStoreVar cg, declName
+        End If
 
         ch = ps.ast.nodes(ch).nextSibling
     Loop
@@ -6228,30 +7075,53 @@ Private Function X64EmitCallNode(ByRef ps As ParseState, ByVal nodeIdx As Intege
 
     Dim methodPrependReceiver As Integer
     Dim methodReceiverOwner As String
+    Dim methodReceiverType As String
     methodPrependReceiver = 0
     methodReceiverOwner = ""
+    methodReceiverType = ""
 
     Dim methodOwner As String
     Dim methodName As String
     If X64SplitMethodCallName(calleeName, methodOwner, methodName) <> 0 Then
         Dim ownerUpper As String
+        Dim methodUpper As String
         ownerUpper = X64Upper(methodOwner)
+        methodUpper = X64Upper(methodName)
 
         If X64FindClassDeclNode(ps, ownerUpper) <> -1 Then
-            calleeName = ownerUpper & "_" & X64Upper(methodName)
+            Dim staticOwner As String
+            staticOwner = ownerUpper
+            If X64ResolveMethodOwnerType(ps, ownerUpper, methodUpper, staticOwner) = 0 Then staticOwner = ownerUpper
+            calleeName = staticOwner & "_" & methodUpper
         Else
             Dim receiverType As String
             If X64FindDeclaredTypeName(ps, ownerUpper, receiverType) = 0 Then
-                errText = "x64-codegen: unknown method receiver " & ownerUpper
-                Return 0
+                If X64TryGetVarType(cg, ownerUpper, receiverType) = 0 Then
+                    If ownerUpper = "THIS" Or ownerUpper = "ME" Then
+                        If X64ResolveCurrentReceiverClass(ps, cg, receiverType) = 0 Then
+                            errText = "x64-codegen: unknown method receiver " & ownerUpper
+                            Return 0
+                        End If
+                    Else
+                        errText = "x64-codegen: unknown method receiver " & ownerUpper
+                        Return 0
+                    End If
+                End If
             End If
+            receiverType = X64Upper(Trim(receiverType))
             If receiverType = "" Or X64FindClassDeclNode(ps, receiverType) = -1 Then
                 errText = "x64-codegen: method receiver is not class instance " & ownerUpper
                 Return 0
             End If
-            calleeName = receiverType & "_" & X64Upper(methodName)
+
+            Dim resolvedOwner As String
+            resolvedOwner = receiverType
+            If X64ResolveMethodOwnerType(ps, receiverType, methodUpper, resolvedOwner) = 0 Then resolvedOwner = receiverType
+
+            calleeName = resolvedOwner & "_" & methodUpper
             methodPrependReceiver = 1
             methodReceiverOwner = ownerUpper
+            methodReceiverType = receiverType
         End If
 
         Dim exactMethodSymbol As String
@@ -6369,7 +7239,11 @@ Private Function X64EmitCallNode(ByRef ps As ParseState, ByVal nodeIdx As Intege
     If reserveBytes > 0 Then X64EmitText cg, "    sub rsp, " & X64ToStr(reserveBytes)
 
     If methodPrependReceiver <> 0 Then
-        If X64EmitAddrOfVar(cg, methodReceiverOwner, errText) = 0 Then Return 0
+        If methodReceiverType = "" Or methodReceiverType = "OBJECT" Or X64FindClassDeclNode(ps, methodReceiverType) <> -1 Then
+            X64EmitLoadVar cg, methodReceiverOwner
+        Else
+            If X64EmitAddrOfVar(cg, methodReceiverOwner, errText) = 0 Then Return 0
+        End If
 
         Dim recvSpillOffset As Integer
         recvSpillOffset = 32 + (stackArgCount * 8)
@@ -6403,6 +7277,50 @@ Private Function X64EmitCallNode(ByRef ps As ParseState, ByVal nodeIdx As Intege
         loadOffset = 32 + (stackArgCount * 8) + (i * 8)
         X64EmitText cg, "    mov " & regOrder(i) & ", [rsp + " & X64ToStr(loadOffset) & "]"
     Next i
+
+    ' If this is a method call with a receiver, and the method is virtual, emit vtable indirect call
+    If methodPrependReceiver <> 0 Then
+        Dim methodUpperLookup As String
+        methodUpperLookup = X64Upper(Trim(methodName))
+        Dim vslot As Integer
+        vslot = -1
+        If methodUpperLookup <> "" And methodReceiverType <> "" Then
+            If X64FindVTableSlot(cg, methodReceiverType, methodUpperLookup, vslot) <> 0 Then
+                ' rcx currently holds receiver after reg loads; perform indirect vtable call
+                Dim vcallNullObjLbl As String
+                Dim vcallNullVtblLbl As String
+                Dim vcallNullSlotLbl As String
+                Dim vcallAfterLbl As String
+                vcallNullObjLbl = X64NextLabel(cg, "vcall_null_obj")
+                vcallNullVtblLbl = X64NextLabel(cg, "vcall_null_vtbl")
+                vcallNullSlotLbl = X64NextLabel(cg, "vcall_null_slot")
+                vcallAfterLbl = X64NextLabel(cg, "vcall_after")
+
+                X64EmitText cg, "    test rcx, rcx"
+                X64EmitText cg, "    jz " & vcallNullObjLbl
+                X64EmitText cg, "    mov rax, [rcx]"
+                X64EmitText cg, "    test rax, rax"
+                X64EmitText cg, "    jz " & vcallNullVtblLbl
+                X64EmitText cg, "    mov r11, [rax + " & X64ToStr(vslot * 8) & "]"
+                X64EmitText cg, "    test r11, r11"
+                X64EmitText cg, "    jz " & vcallNullSlotLbl
+                X64EmitText cg, "    call r11"
+                X64EmitText cg, "    jmp " & vcallAfterLbl
+
+                X64EmitLabel cg, vcallNullObjLbl
+                X64EmitText cg, "    xor rax, rax"
+                X64EmitText cg, "    jmp " & vcallAfterLbl
+                X64EmitLabel cg, vcallNullVtblLbl
+                X64EmitText cg, "    xor rax, rax"
+                X64EmitText cg, "    jmp " & vcallAfterLbl
+                X64EmitLabel cg, vcallNullSlotLbl
+                X64EmitText cg, "    xor rax, rax"
+                X64EmitLabel cg, vcallAfterLbl
+                If reserveBytes > 0 Then X64EmitText cg, "    add rsp, " & X64ToStr(reserveBytes)
+                Return 1
+            End If
+        End If
+    End If
 
     X64EmitText cg, "    call " & calleeName
     If reserveBytes > 0 Then X64EmitText cg, "    add rsp, " & X64ToStr(reserveBytes)
@@ -6446,7 +7364,7 @@ Private Function X64InferFloatKindOfExpr(ByRef ps As ParseState, ByVal nodeIdx A
             Dim fieldType As String
             Dim fieldSize As Integer
             Dim resolveErr As String
-            If X64ResolveFieldInfo(ps, nodeIdx, rootName, pathText, rootNode, rootType, fieldOffset, fieldType, fieldSize, resolveErr) <> 0 Then
+            If X64ResolveFieldInfo(ps, nodeIdx, cg, rootName, pathText, rootNode, rootType, fieldOffset, fieldType, fieldSize, resolveErr) <> 0 Then
                 Return X64TypeToFloatKind(fieldType)
             End If
         End If
@@ -6466,7 +7384,7 @@ Private Function X64InferFloatKindOfExpr(ByRef ps As ParseState, ByVal nodeIdx A
         Dim fieldType As String
         Dim fieldSize As Integer
         Dim resolveErr As String
-        If X64ResolveFieldInfo(ps, nodeIdx, rootName, pathText, rootNode, rootType, fieldOffset, fieldType, fieldSize, resolveErr) <> 0 Then
+        If X64ResolveFieldInfo(ps, nodeIdx, cg, rootName, pathText, rootNode, rootType, fieldOffset, fieldType, fieldSize, resolveErr) <> 0 Then
             Return X64TypeToFloatKind(fieldType)
         End If
         Return 0
@@ -6533,7 +7451,7 @@ Private Function X64EmitPrintStmt(ByRef ps As ParseState, ByVal nodeIdx As Integ
                     Dim inferFieldType As String
                     Dim inferFieldSize As Integer
                     Dim inferErr As String
-                    If X64ResolveFieldInfo(ps, exprNode, inferRootName, inferPathText, inferRootNode, inferRootType, inferFieldOffset, inferFieldType, inferFieldSize, inferErr) <> 0 Then
+                    If X64ResolveFieldInfo(ps, exprNode, cg, inferRootName, inferPathText, inferRootNode, inferRootType, inferFieldOffset, inferFieldType, inferFieldSize, inferErr) <> 0 Then
                         inferredFloatKind = X64TypeToFloatKind(inferFieldType)
                     End If
                 End If
@@ -6563,9 +7481,11 @@ Private Function X64EmitPrintStmt(ByRef ps As ParseState, ByVal nodeIdx As Integ
 
                 X64EmitText cg, "    lea rcx, [rel __uxb_str_buf]"
                 X64EmitText cg, "    lea rdx, [rel __uxb_fmt_f64]"
-                X64EmitText cg, "    sub rsp, 40"
+                X64EmitText cg, "    movapd xmm2, xmm0"
+                X64EmitText cg, "    movq r8, xmm0"
+                X64EmitText cg, "    sub rsp, 32"
                 X64EmitText cg, "    call sprintf"
-                X64EmitText cg, "    add rsp, 40"
+                X64EmitText cg, "    add rsp, 32"
                 X64EmitText cg, "    lea rax, [rel __uxb_str_buf]"
                 X64EmitText cg, "    mov rcx, rax"
                 X64EmitText cg, "    call __uxb_runtime_print"
@@ -6573,15 +7493,23 @@ Private Function X64EmitPrintStmt(ByRef ps As ParseState, ByVal nodeIdx As Integ
                 If X64EmitExprToXmm0As(ps, exprNode, cg, UXF_F64, errText) = 0 Then Return 0
                 X64EmitText cg, "    lea rcx, [rel __uxb_str_buf]"
                 X64EmitText cg, "    lea rdx, [rel __uxb_fmt_f64]"
-                X64EmitText cg, "    sub rsp, 40"
+                X64EmitText cg, "    movapd xmm2, xmm0"
+                X64EmitText cg, "    movq r8, xmm0"
+                X64EmitText cg, "    sub rsp, 32"
                 X64EmitText cg, "    call sprintf"
-                X64EmitText cg, "    add rsp, 40"
+                X64EmitText cg, "    add rsp, 32"
                 X64EmitText cg, "    lea rax, [rel __uxb_str_buf]"
                 X64EmitText cg, "    mov rcx, rax"
                 X64EmitText cg, "    call __uxb_runtime_print"
             Else
                 If X64EmitExprToRax(ps, exprNode, cg, errText) = 0 Then Return 0
-                X64EmitText cg, "    mov rcx, rax"
+                X64EmitText cg, "    mov r8, rax"
+                X64EmitText cg, "    lea rcx, [rel __uxb_str_buf]"
+                X64EmitText cg, "    lea rdx, [rel __uxb_fmt_num]"
+                X64EmitText cg, "    sub rsp, 32"
+                X64EmitText cg, "    call sprintf"
+                X64EmitText cg, "    add rsp, 32"
+                X64EmitText cg, "    lea rcx, [rel __uxb_str_buf]"
                 X64EmitText cg, "    call __uxb_runtime_print"
             End If
             hadItems = 1
@@ -6821,7 +7749,7 @@ Private Function X64EmitAssignStmt(ByRef ps As ParseState, ByVal nodeIdx As Inte
         Dim cmpDummyRootNode As Integer
         Dim cmpDummyRootType As String
         Dim cmpDummyOffset As Integer
-        If X64ResolveFieldInfo(ps, lhs, cmpDummyRoot, cmpDummyPath, cmpDummyRootNode, cmpDummyRootType, cmpDummyOffset, cmpFieldType, cmpFieldSize, errText) = 0 Then
+        If X64ResolveFieldInfo(ps, lhs, cg, cmpDummyRoot, cmpDummyPath, cmpDummyRootNode, cmpDummyRootType, cmpDummyOffset, cmpFieldType, cmpFieldSize, errText) = 0 Then
             Return 0
         End If
         Dim cmpFk As Integer
@@ -7022,6 +7950,8 @@ Private Function GenerateX64Code(ByRef ps As ParseState, ByRef outputText As Str
     X64EmitData cg, "__uxb_scan_int: db " & Chr(34) & "%lld" & Chr(34) & ", 0"
     X64EmitData cg, "__uxb_fmt_num: db " & Chr(34) & "%lld" & Chr(34) & ", 0"
     X64EmitData cg, "__uxb_fmt_f64: db " & Chr(34) & "%g" & Chr(34) & ", 0"
+    X64EmitData cg, "__uxb_print_space: db " & Chr(34) & " " & Chr(34) & ", 0"
+    X64EmitData cg, "__uxb_print_newline: db 10, 0"
     X64EmitData cg, "__uxb_chr_buf: times 2 db 0"
     X64EmitData cg, "__uxb_str_buf: times 64 db 0"
     X64EmitData cg, "__uxb_ltrim_buf: times 4096 db 0"
@@ -7048,6 +7978,7 @@ Private Function GenerateX64Code(ByRef ps As ParseState, ByRef outputText As Str
     X64EmitData cg, "__uxb_file_tmp_value: dq 0"
     X64EmitData cg, "__uxb_file_tmp_result: dq 0"
     X64EmitData cg, "__uxb_file_io_tmp: dq 0"
+    X64EmitData cg, "__uxb_print_col: dq 0"
     X64EmitData cg, "__uxb_mem_space: times 1048576 db 0"
 
     If X64EmitNode(ps, ps.rootNode, cg, errText) = 0 Then Return 0

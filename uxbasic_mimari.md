@@ -20,6 +20,29 @@ Bu mimari "tek backend" degil, paralel yeteneklerden olusur:
 - IMPORT / INLINE / FFI build lane
 - x64 asm -> obj -> link -> exe pipeline
 
+## 1.1 Anahtarlamali Yurutme (ARGE Parse Komutlari)
+
+Yeni CLI katmani ile pipeline hem hibrit kalir hem de asama-verisi uretir.
+
+Temel anahtarlar:
+
+- `--interpreter-backend AST|MIR`
+- `--codegen-source AST|MIR`
+- `--ast-json-out <dosya>`
+- `--hir-json-out <dosya>` (envanter cikisi)
+- `--mir-pipeline-json-out <dosya>`
+- `--mir-surface-json-out <dosya>`
+- `--artifact-report-json-out <dosya>`
+
+Bu modelde `--codegen-source MIR` secildiginde MIR build+opt kosulur, sonra mevcut proven AST emitter yolu kullanilir.
+Yani rota: `MIR verified -> AST emitter`.
+
+Bu sayede:
+
+1. Eski AST->codegen yolu kapatilmaz.
+2. MIR arakatmani devreye alinabilir.
+3. Interpreter-only, compiler-only ve hibrit calisma profilleri tek binary ile surdurulur.
+
 ## 2. Dizin Bazli Katmanlar
 
 ### `src/parser/`
@@ -200,6 +223,10 @@ Bu depo durumunda x64 build lane su kabiliyetleri saglar:
 - linker cagirma
 - final exe uretimi
 
+Native x64 build lane artik ayni workspace icinde tek bir global build slot uzerinden siralanir.
+Amaç ortak `dist` ve toolchain artefact alanlarinda paralel surec cakismasini engellemektir.
+Bu model derleyici icinde "tek native slot, sirali yurume" mantigi ile calisir.
+
 Uretilen tipik cikti agaci:
 
 - `dist/x64build/program.asm`
@@ -227,6 +254,52 @@ Uretilen tipik cikti agaci:
 - GUI window class / callback / message loop gibi Win32 senaryolari bugunku saf `CALL(DLL)` modeli ile kisitli.
 - MPFR, Arb, Lua, Python, Prolog gibi kutuphanelerde basit bootstrap cagrilari kolay; derin entegrasyon icin wrapper katmani daha saglikli.
 
+## 7.1 Modulerlesme ve Dosya Boyutu Politikasi
+
+Yeni refactor politikasi `FILE_MANIFEST.md` dosyasinda kanonik hale getirildi.
+
+Ozet kurallar:
+
+- Kod kaybi olmayacak; once tasima ve test, sonra temizlik.
+- Her modul yalnizca kendi gorevini icerecek.
+- Hedef dosya boyutu 900 satir.
+- 901-1000 satir tolerans bandi.
+- 1000+ satir zorunlu bolunme adayi.
+- Asiri dosya sayisi olusturmamak icin bolme islemi sorumluluk gruplarina gore yapilacak.
+
+Bugunku en kritik bolunme adaylari:
+
+- `src/semantic/mir.fbs`
+- `src/codegen/x64/code_generator.fbs`
+- `src/runtime/exec/exec_eval_support_helpers.fbs`
+- `src/runtime/memory_exec.fbs`
+- `src/semantic/semantic_pass.fbs`
+
+## 7.2 Yeni Planlanan Cagri ve Slot Mimarisi
+
+Yeni plan `UXBASIC_EVENT_PIPE_THREAD_PLAN.md` dosyasinda ayrintilandirildi.
+
+Planlanan yeni yuzey:
+
+- `CALL(API, ...)`
+- `EVENT ... END EVENT`
+- `THREAD ... END THREAD`
+- `THREAT ... END THREAT` alias yazimi
+- `PARALEL ... END PARALEL`
+- `PIPE ... END PIPE`
+- pipe operatoru `|`
+- `SLOT`
+- `<BYTE slotsayisi>`
+- `ON`
+- `OFF`
+- `TRIGGER`
+
+Bu yuzey henuz mevcut calisan dil yuzeyinin parcasi degil; `PLANNED` durumundadir. Ilk hedef AST runtime MVP, sonraki hedef MIR parity ve x64 runtime helper lowering'dir.
+
+Slot modeli byte tabanli tasarlanmistir: her slot ailesi icin 0..255 arasi en fazla 256 slot.
+
+`CALL(API, ...)`, `CALL(DLL, ...)` modelinden farkli olarak onceden kayitli API registry uzerinden guvenli/disiplinli dis API cagirma sistemi olarak tasarlanacaktir.
+
 ## 8. Tavsiye Edilen Kullanım Modeli
 
 Bugunku uXBasic mimarisiyle en verimli kullanim:
@@ -236,6 +309,12 @@ Bugunku uXBasic mimarisiyle en verimli kullanim:
 3. Dis C/CPP/ASM artefaktlari icin `IMPORT`
 4. Basit DLL bootstrap/probe icin `CALL(DLL)`
 5. Karma API'ler icin ince C shim + BASIC tarafinda ince wrapper
+
+Native build notu:
+
+- Ayni anda birden fazla `--build-x64` cagrisi yapilabilir.
+- Derleyici bunlari ayni workspace icinde tek native slot'ta siraya alir.
+- Boylece yalanci fail ureten paralel artefact cakismasi engellenir.
 
 ## 9. Bu Turda Eklenen Mimari Iyilestirmeler
 
@@ -247,4 +326,3 @@ Bu repo turunda ozellikle asagidaki iyilestirmeler yapildi:
 - import batch/rsp goreli yol sorunlari cozuldu
 - MinGW/NASM fallback lane duzeltildi
 - AST JSON cikisi eklendi
-

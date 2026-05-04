@@ -28,3 +28,21 @@ Odak: Hamle 5 x64 backend
 
 x64 lane Hamle 5 sonunda `DONE`.
 H5: TYPE System & Field Access Verified.
+
+## Hamle 6 Durumu (2026-04-30)
+
+- CLASS method/ctor/dtor inline routine emit x64 lane'e baglandi.
+- Method call mapping class hiyerarsisiyle cozuluyor; receiver RCX'e object pointer olarak geciliyor.
+- Method prologue'da THIS/ME local slotlari RCX ile baglaniyor.
+- FIELD resolver THIS/ME icin routine-class fallback ile calisiyor.
+- DIM class variable lane'i pointer-slot semantigine cekildi (default allocation + calloc).
+- NEW class allocation lane'i bos classlarda min-size fallback ile sertlestirildi.
+
+Kanit (x64 build+run):
+- `tests/basicCodeTests/60_class_this_me_binding.bas` -> `111`, `222`
+- `tests/basicCodeTests/61_class_inline_ctor_method.bas` -> `25`
+- `tests/basicCodeTests/62_class_dim_pointer_storage.bas` -> `2`
+- `tests/basicCodeTests/63_class_inheritance_method_resolution.bas` -> `42`, `7`
+
+Karar:
+- H6 x64 lane: DONE.

@@ -1,0 +1,8 @@
+PIPE Normalize, 5
+    PRINT INPUT
+END PIPE
+ON PIPE Normalize
+TRIGGER PIPE Normalize
+MAIN
+PRINT 1
+END MAIN

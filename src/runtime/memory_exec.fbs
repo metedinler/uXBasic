@@ -335,7 +335,19 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
             End If
 
             Dim elemSize As Integer
+            Dim aggregateArrayElem As Integer
+            aggregateArrayElem = 0
+
             elemSize = ExecTypeElemSizeBytes(declType)
+            If elemSize <= 0 Then
+                Dim aggElemErr As String
+                If TypeLayoutSizeOf(ps, declType, elemSize, aggElemErr) <> 0 Then
+                    If ExecFindClassDeclNode(ps, declType) = -1 And declType <> "OBJECT" Then
+                        aggregateArrayElem = 1
+                    End If
+                End If
+            End If
+
             If elemSize <= 0 Then
                 errText = "DIM: unsupported array element type " & declType
                 Return 0
@@ -354,6 +366,28 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
             If ExecArrayResizeVar(es, varName, lowerBound, upperBound, 0) = 0 Then
                 errText = "DIM: array storage init failed"
                 Return 0
+            End If
+
+            If aggregateArrayElem <> 0 Then
+                Dim arrVarIdx As Integer
+                arrVarIdx = ExecFindVar(es, varName)
+                If arrVarIdx = -1 Then
+                    errText = "DIM: aggregate array variable allocation failed " & varName
+                    Return 0
+                End If
+
+                Dim arrBase As UInteger
+                arrBase = es.nextVarAddr
+                es.vars(arrVarIdx).addr = arrBase
+
+                If VMemFillB(arrBase, 0, CUInt(totalBytes)) = 0 Then
+                    errText = "DIM: aggregate array allocation out of range"
+                    Return 0
+                End If
+
+                Dim arrEnd As UInteger
+                arrEnd = arrBase + CUInt(totalBytes)
+                If arrEnd > es.nextVarAddr Then es.nextVarAddr = arrEnd
             End If
         Else
             Dim initNode As Integer
@@ -732,7 +766,7 @@ Private Function ExecEvalBinaryValues(ByRef leftVal As ExecValue, ByRef rightVal
             Return 0
         End If
         ExecValueSetFloat result, ExecValueToFloat(leftVal) / ExecValueToFloat(rightVal)
-    Case "\\"
+    Case "\"
         Dim divInt As Integer
         divInt = ExecValueToInteger(rightVal)
         If divInt = 0 Then
@@ -1268,9 +1302,10 @@ Private Function ExecResolveThisMeIdentAddr(ByRef es As ExecState, ByRef identTe
     Return 1
 End Function
 
-Private Function ExecBuildFieldPath(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef rootNameOut As String, ByRef pathOut As String, ByRef errText As String) As Integer
+Private Function ExecBuildFieldPath(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef rootNameOut As String, ByRef pathOut As String, ByRef rootNodeOut As Integer, ByRef errText As String) As Integer
     rootNameOut = ""
     pathOut = ""
+    rootNodeOut = -1
 
     If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then
         errText = "exec: field access invalid node"
@@ -1284,19 +1319,37 @@ Private Function ExecBuildFieldPath(ByRef ps As ParseState, ByVal nodeIdx As Int
 
     If k = "IDENT" Or k = "KEYWORD_REF" Then
         rootNameOut = UCase(Trim(n.value))
+        rootNodeOut = nodeIdx
+        Return IIf(rootNameOut <> "", 1, 0)
+    End If
+
+    If k = "CALL_EXPR" Then
+        Dim idxVar As Integer
+        Dim idxElem As Integer
+        Dim idxTry As Integer
+        idxTry = ExecTryResolveArrayAccess(ps, es, nodeIdx, idxVar, idxElem, errText)
+        If idxTry <= 0 Then
+            If idxTry = 0 Then errText = "exec: field access base must be identifier, array access or field"
+            Return 0
+        End If
+
+        rootNameOut = UCase(Trim(n.value))
+        rootNodeOut = nodeIdx
         Return IIf(rootNameOut <> "", 1, 0)
     End If
 
     If k <> "FIELD_EXPR" Then
-        errText = "exec: field access base must be identifier or field"
+        errText = "exec: field access base must be identifier, array access or field"
         Return 0
     End If
 
     Dim parentRoot As String
     Dim parentPath As String
-    If ExecBuildFieldPath(ps, n.left, parentRoot, parentPath, errText) = 0 Then Return 0
+    Dim parentRootNode As Integer
+    If ExecBuildFieldPath(ps, es, n.left, parentRoot, parentPath, parentRootNode, errText) = 0 Then Return 0
 
     rootNameOut = parentRoot
+    rootNodeOut = parentRootNode
     If parentPath = "" Then
         pathOut = UCase(Trim(n.value))
     Else
@@ -1309,7 +1362,8 @@ End Function
 Private Function ExecResolveFieldAccess(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef baseAddrOut As UInteger, ByRef targetTypeOut As String, ByRef targetSizeOut As Integer, ByRef errText As String) As Integer
     Dim rootName As String
     Dim pathText As String
-    If ExecBuildFieldPath(ps, nodeIdx, rootName, pathText, errText) = 0 Then Return 0
+    Dim rootNode As Integer
+    If ExecBuildFieldPath(ps, es, nodeIdx, rootName, pathText, rootNode, errText) = 0 Then Return 0
 
     Dim rootIdx As Integer
     rootIdx = ExecFindVar(es, rootName)
@@ -1326,7 +1380,48 @@ Private Function ExecResolveFieldAccess(ByRef ps As ParseState, ByRef es As Exec
     Dim rootType As String
     Dim baseAddr As UInteger
 
-    If rootDeclType = "OBJECT" Or ExecFindClassDeclNode(ps, rootDeclType) <> -1 Then
+    Dim rootNodeKind As String
+    rootNodeKind = ""
+    If rootNode >= 0 And rootNode < ps.ast.count Then rootNodeKind = UCase(Trim(ps.ast.nodes(rootNode).kind))
+
+    If rootNodeKind = "CALL_EXPR" Then
+        Dim arrayVarIdx As Integer
+        Dim elemIndex As Integer
+        Dim arrayTry As Integer
+        arrayTry = ExecTryResolveArrayAccess(ps, es, rootNode, arrayVarIdx, elemIndex, errText)
+        If arrayTry <= 0 Then
+            If arrayTry = 0 Then errText = "exec: indexed field root must be DIM array access"
+            Return 0
+        End If
+
+        If arrayVarIdx <> rootIdx Then
+            errText = "exec: indexed field root variable mismatch"
+            Return 0
+        End If
+
+        rootType = rootDeclType
+        If rootType = "" Then
+            errText = "exec: field root type missing for " & rootName
+            Return 0
+        End If
+
+        Dim elemSize As Integer
+        elemSize = ExecTypeElemSizeBytes(rootType)
+        If elemSize <= 0 Then
+            Dim elemLayoutErr As String
+            If TypeLayoutSizeOf(ps, rootType, elemSize, elemLayoutErr) = 0 Then
+                errText = "exec: indexed field element layout missing " & elemLayoutErr
+                Return 0
+            End If
+        End If
+
+        If elemSize <= 0 Then
+            errText = "exec: indexed field element size invalid"
+            Return 0
+        End If
+
+        baseAddr = es.vars(rootIdx).addr + CUInt(elemIndex * elemSize)
+    ElseIf rootDeclType = "OBJECT" Or ExecFindClassDeclNode(ps, rootDeclType) <> -1 Then
         rootType = IIf(rootRuntimeType <> "", rootRuntimeType, rootDeclType)
         baseAddr = CUInt(ExecValueToInteger(es.vars(rootIdx).value))
         If baseAddr = 0 Then baseAddr = es.vars(rootIdx).addr
@@ -1691,7 +1786,7 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
                 acc *= lv
             Next p
             Return acc
-        Case "/", "\\"
+        Case "/", "\"
             If rv2 = 0 Then
                 errText = "exec: division by zero"
                 Return 0
@@ -2064,6 +2159,12 @@ Function ExecRunMemoryProgram(ByRef ps As ParseState, ByRef errText As String) A
         Return 0
     End If
 
+    ' Ensure runtime vtable map is built so interpreter can resolve handles
+    If ExecBuildVTableMap(ps, es, errText) = 0 Then
+        ExecNormalizeError errText
+        UxbFileCloseAll es.fileIo
+        Return 0
+    End If
     Dim callStack(Any) As Integer
     Dim callDepth As Integer
 

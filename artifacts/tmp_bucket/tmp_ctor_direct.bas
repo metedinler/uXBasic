@@ -1,0 +1,6 @@
+DIM g AS I32
+SUB C_CTOR(self AS I32)
+  g = 7
+END SUB
+CALL C_CTOR(0)
+PRINT g

@@ -39,12 +39,15 @@ Private Function ExecFindChildByKind(ByRef ps As ParseState, ByVal nodeIdx As In
     Return -1
 End Function
 
+Declare Function ExecBuildVTableMap(ByRef ps As ParseState, ByRef es As ExecState, ByRef errText As String) As Integer
+
+
 Private Function ExecTypeElemSizeBytes(ByVal typeNameRaw As String) As Integer
     Dim typeName As String
     typeName = UCase(Trim(typeNameRaw))
 
     Select Case typeName
-    Case "I8", "U8", "BYTE"
+    Case "I8", "U8"
         Return 1
     Case "I16", "U16", "SHORT"
         Return 2
@@ -106,6 +109,194 @@ Private Function ExecParseBoundRange(ByRef ps As ParseState, ByRef es As ExecSta
         errText = "exec: DIM/REDIM invalid array bounds (lower > upper)"
         Return 0
     End If
+
+    Return 1
+End Function
+
+Private Function ExecBuildVTableMap(ByRef ps As ParseState, ByRef es As ExecState, ByRef errText As String) As Integer
+    errText = ""
+    es.runtime.vtableClassCount = 0
+    es.runtime.vtableEntryCount = 0
+    Erase es.runtime.vtableClassNames
+    Erase es.runtime.vtableClassHandles
+    es.runtime.vtableNextHandle = &h1000
+    Erase es.runtime.vtableClassSlotCounts
+    Erase es.runtime.vtableClassSlotStart
+    Erase es.runtime.vtableEntryKeys
+    Erase es.runtime.vtableEntrySlots
+    Erase es.runtime.vtableEntryClassIndex
+    Erase es.runtime.vtableEntryRoutineIdx
+
+    Dim st As Integer
+    st = ps.ast.nodes(ps.rootNode).firstChild
+    Do While st <> -1
+        If UCase(ps.ast.nodes(st).kind) = "CLASS_STMT" Then
+            Dim className As String
+            className = UCase(Trim(ps.ast.nodes(st).value))
+            If className <> "" Then
+                ' Build base-chain list (derived-first) then iterate reverse for base-first processing
+                Dim typesList() As String
+                Dim typeCount As Integer
+                typeCount = 0
+
+                Dim curType As String
+                curType = className
+                Do While curType <> ""
+                    If typeCount = 0 Then
+                        ReDim typesList(0)
+                    Else
+                        ReDim Preserve typesList(typeCount)
+                    End If
+                    typesList(typeCount) = UCase(Trim(curType))
+                    typeCount += 1
+
+                    Dim cnode As Integer
+                    cnode = SemFindClassNode(ps, curType)
+                    If cnode = -1 Then Exit Do
+
+                    Dim nextBase As String
+                    If SemClassBaseName(ps, cnode, nextBase) = 0 Then Exit Do
+                    curType = nextBase
+                Loop
+
+                ' Find max slot index in chain
+                Dim maxSlot As Integer
+                maxSlot = -1
+                Dim ti As Integer
+                For ti = typeCount - 1 To 0 Step -1
+                    Dim cnode2 As Integer
+                    cnode2 = SemFindClassNode(ps, typesList(ti))
+                    If cnode2 = -1 Then Continue For
+                    Dim ch As Integer
+                    ch = ps.ast.nodes(cnode2).firstChild
+                    Do While ch <> -1
+                        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+                            Dim meta As Integer
+                            meta = -1
+                            Dim mch As Integer
+                            mch = ps.ast.nodes(ch).firstChild
+                            Do While mch <> -1
+                                If UCase(ps.ast.nodes(mch).kind) = "CLASS_METHOD_SLOT" Then
+                                    meta = mch
+                                    Exit Do
+                                End If
+                                mch = ps.ast.nodes(mch).nextSibling
+                            Loop
+                            If meta <> -1 Then
+                                Dim si As Integer
+                                si = Val(ps.ast.nodes(meta).value)
+                                If si > maxSlot Then maxSlot = si
+                            End If
+                        End If
+                        ch = ps.ast.nodes(ch).nextSibling
+                    Loop
+                Next ti
+
+                Dim slotCount As Integer
+                If maxSlot < 0 Then
+                    slotCount = 0
+                Else
+                    slotCount = maxSlot + 1
+                End If
+
+                ' register class mapping
+                Dim classIdx As Integer
+                classIdx = es.runtime.vtableClassCount
+                If es.runtime.vtableClassCount = 0 Then
+                    ReDim es.runtime.vtableClassNames(0)
+                    ReDim es.runtime.vtableClassSlotCounts(0)
+                    ReDim es.runtime.vtableClassSlotStart(0)
+                    ReDim es.runtime.vtableClassHandles(0)
+                Else
+                    ReDim Preserve es.runtime.vtableClassNames(es.runtime.vtableClassCount)
+                    ReDim Preserve es.runtime.vtableClassSlotCounts(es.runtime.vtableClassCount)
+                    ReDim Preserve es.runtime.vtableClassSlotStart(es.runtime.vtableClassCount)
+                    ReDim Preserve es.runtime.vtableClassHandles(es.runtime.vtableClassCount)
+                End If
+                es.runtime.vtableClassNames(classIdx) = className
+                es.runtime.vtableClassSlotCounts(classIdx) = slotCount
+                es.runtime.vtableClassSlotStart(classIdx) = es.runtime.vtableEntryCount
+                ' assign runtime handle for class (unique per runtime)
+                es.runtime.vtableClassHandles(classIdx) = es.runtime.vtableNextHandle
+                es.runtime.vtableNextHandle += 8
+                es.runtime.vtableClassCount += 1
+
+                ' prepare implementer arrays (base-first so later overrides replace earlier)
+                If slotCount > 0 Then
+                    Dim implOwner() As String
+                    Dim implMethod() As String
+                    ReDim implOwner(slotCount - 1)
+                    ReDim implMethod(slotCount - 1)
+
+                    For ti = typeCount - 1 To 0 Step -1
+                        Dim cnode3 As Integer
+                        cnode3 = SemFindClassNode(ps, typesList(ti))
+                        If cnode3 = -1 Then Continue For
+                        Dim ch2 As Integer
+                        ch2 = ps.ast.nodes(cnode3).firstChild
+                        Do While ch2 <> -1
+                            If UCase(ps.ast.nodes(ch2).kind) = "CLASS_METHOD_DECL" Then
+                                Dim mname As String
+                                mname = UCase(Trim(ps.ast.nodes(ch2).value))
+                                Dim mch2 As Integer
+                                mch2 = ps.ast.nodes(ch2).firstChild
+                                Do While mch2 <> -1
+                                    If UCase(ps.ast.nodes(mch2).kind) = "CLASS_METHOD_SLOT" Then
+                                        Dim si2 As Integer
+                                        si2 = Val(ps.ast.nodes(mch2).value)
+                                        If si2 >= 0 And si2 < slotCount Then
+                                            implOwner(si2) = typesList(ti)
+                                            implMethod(si2) = mname
+                                        End If
+                                    End If
+                                    mch2 = ps.ast.nodes(mch2).nextSibling
+                                Loop
+                            End If
+                            ch2 = ps.ast.nodes(ch2).nextSibling
+                        Loop
+                    Next ti
+
+                    ' add entries
+                    Dim i As Integer
+                    For i = 0 To slotCount - 1
+                        Dim key As String
+                        key = className & "_" & UCase(Trim(implMethod(i)))
+
+                        Dim eidx As Integer
+                        eidx = es.runtime.vtableEntryCount
+                        If es.runtime.vtableEntryCount = 0 Then
+                            ReDim es.runtime.vtableEntryKeys(0)
+                            ReDim es.runtime.vtableEntrySlots(0)
+                            ReDim es.runtime.vtableEntryClassIndex(0)
+                            ReDim es.runtime.vtableEntryRoutineIdx(0)
+                        Else
+                            ReDim Preserve es.runtime.vtableEntryKeys(es.runtime.vtableEntryCount)
+                            ReDim Preserve es.runtime.vtableEntrySlots(es.runtime.vtableEntryCount)
+                            ReDim Preserve es.runtime.vtableEntryClassIndex(es.runtime.vtableEntryCount)
+                            ReDim Preserve es.runtime.vtableEntryRoutineIdx(es.runtime.vtableEntryCount)
+                        End If
+
+                        es.runtime.vtableEntryKeys(eidx) = UCase(Trim(key))
+                        es.runtime.vtableEntrySlots(eidx) = i
+                        es.runtime.vtableEntryClassIndex(eidx) = classIdx
+
+                        Dim implRoutineName As String
+                        implRoutineName = ""
+                        If implOwner(i) <> "" And implMethod(i) <> "" Then
+                            implRoutineName = UCase(Trim(implOwner(i) & "_" & implMethod(i)))
+                            es.runtime.vtableEntryRoutineIdx(eidx) = ExecRoutineIndexOf(es, implRoutineName)
+                        Else
+                            es.runtime.vtableEntryRoutineIdx(eidx) = -1
+                        End If
+
+                        es.runtime.vtableEntryCount += 1
+                    Next i
+                End If
+            End If
+        End If
+
+        st = ps.ast.nodes(st).nextSibling
+    Loop
 
     Return 1
 End Function
@@ -212,6 +403,70 @@ Private Function ExecRol32(ByVal v As UInteger, ByVal s As Integer) As UInteger
     Return (v Shl shiftBits) Or (v Shr (32 - shiftBits))
 End Function
 
+' Runtime vtable handle helpers (8A-3)
+Private Function ExecFindRuntimeVTableClassIndex(ByRef es As ExecState, ByRef classTypeName As String) As Integer
+    Dim classUpper As String
+    classUpper = UCase(Trim(classTypeName))
+    If classUpper = "" Then Return -1
+
+    Dim ci As Integer
+    For ci = 0 To es.runtime.vtableClassCount - 1
+        If es.runtime.vtableClassNames(ci) = classUpper Then Return ci
+    Next ci
+
+    Return -1
+End Function
+
+Private Function ExecFindRuntimeVTableHandle(ByRef es As ExecState, ByRef classTypeName As String, ByRef handleOut As UInteger) As Integer
+    handleOut = 0
+    Dim ci As Integer
+    ci = ExecFindRuntimeVTableClassIndex(es, classTypeName)
+    If ci < 0 Then Return 0
+    handleOut = es.runtime.vtableClassHandles(ci)
+    If handleOut = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function ExecFindRuntimeVTableClassByHandle(ByRef es As ExecState, ByVal handleValue As UInteger, ByRef classNameOut As String) As Integer
+    classNameOut = ""
+    Dim ci As Integer
+    For ci = 0 To es.runtime.vtableClassCount - 1
+        If es.runtime.vtableClassHandles(ci) = handleValue Then
+            classNameOut = es.runtime.vtableClassNames(ci)
+            Return 1
+        End If
+    Next ci
+    Return 0
+End Function
+
+' Resolve runtime class name by object address (reads object header handle/classIdx)
+Private Function ExecResolveRuntimeClassByObjectAddr(ByVal objAddr As ULongInt, ByRef classNameOut As String) As Integer
+    classNameOut = ""
+    If objAddr = 0UL Then Return 0
+    If gActiveRuntimeCtx = 0 Then Return 0
+
+    Dim hval As UInteger
+    hval = CUInt(VMemPeekD(CUInt(objAddr)))
+    If hval = 0 Then Return 0
+
+    ' Quick path: if header value looks like a direct classIdx
+    If hval < gActiveRuntimeCtx->vtableClassCount Then
+        classNameOut = gActiveRuntimeCtx->vtableClassNames(hval)
+        If classNameOut <> "" Then Return 1
+    End If
+
+    ' Otherwise try to match as runtime handle
+    Dim ci As Integer
+    For ci = 0 To gActiveRuntimeCtx->vtableClassCount - 1
+        If gActiveRuntimeCtx->vtableClassHandles(ci) = hval Then
+            classNameOut = gActiveRuntimeCtx->vtableClassNames(ci)
+            Return 1
+        End If
+    Next ci
+
+    Return 0
+End Function
+
 Private Function ExecRor32(ByVal v As UInteger, ByVal s As Integer) As UInteger
     Dim shiftBits As Integer
     shiftBits = s And 31
@@ -233,17 +488,77 @@ Private Function ExecDebugKeyQueuePop(ByRef keyOut As Integer) As Integer
     Return 1
 End Function
 
-Private Function ExecRoutineIndexOf(ByRef needle As String) As Integer
+Private Function ExecRoutineIndexOf(ByRef es As ExecState, ByRef needle As String) As Integer
     Dim i As Integer
-    For i = 0 To gRoutineDefCount - 1
-        If gRoutineDefs(i).nameText = needle Then Return i
+    For i = 0 To es.runtime.routineDefCount - 1
+        If es.runtime.routineDefs(i).nameText = needle Then Return i
     Next i
     Return -1
 End Function
 
-Private Function ExecBuildTopLevelRoutineMap(ByRef ps As ParseState, ByVal rootNode As Integer, ByRef errText As String) As Integer
-    gRoutineDefCount = 0
-    Erase gRoutineDefs
+Private Function ExecRegisterRoutineDef(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef routineNameRaw As String, ByRef routineKindRaw As String, ByRef errText As String) As Integer
+    Dim routineName As String
+    routineName = UCase(Trim(routineNameRaw))
+    If routineName = "" Then
+        errText = "exec: routine name missing"
+        Return 0
+    End If
+
+    If ExecRoutineIndexOf(es, routineName) <> -1 Then
+        errText = "exec: duplicate routine " & routineName
+        Return 0
+    End If
+
+    If es.runtime.routineDefCount = 0 Then
+        ReDim es.runtime.routineDefs(0)
+    Else
+        ReDim Preserve es.runtime.routineDefs(es.runtime.routineDefCount)
+    End If
+
+    es.runtime.routineDefs(es.runtime.routineDefCount).nameText = routineName
+    es.runtime.routineDefs(es.runtime.routineDefCount).nodeIdx = nodeIdx
+    es.runtime.routineDefs(es.runtime.routineDefCount).routineKind = UCase(Trim(routineKindRaw))
+    es.runtime.routineDefCount += 1
+    Return 1
+End Function
+
+Private Function ExecBuildRoutineMapFromClass(ByRef ps As ParseState, ByRef es As ExecState, ByVal classNodeIdx As Integer, ByRef errText As String) As Integer
+    Dim className As String
+    className = UCase(Trim(ps.ast.nodes(classNodeIdx).value))
+    If className = "" Then
+        errText = "exec: class name missing"
+        Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNodeIdx).firstChild
+    Do While ch <> -1
+        Dim ck As String
+        ck = UCase(Trim(ps.ast.nodes(ch).kind))
+
+        If ck = "CLASS_METHOD_DECL" Then
+            Dim methodName As String
+            methodName = UCase(Trim(ps.ast.nodes(ch).value))
+            If methodName = "" Then
+                errText = "exec: class method name missing in " & className
+                Return 0
+            End If
+            If ExecRegisterRoutineDef(ps, es, ch, className & "_" & methodName, "CLASS_METHOD_DECL", errText) = 0 Then Return 0
+        ElseIf ck = "CLASS_CONSTRUCTOR_DECL" Then
+            If ExecRegisterRoutineDef(ps, es, ch, className & "_CTOR", "CLASS_CONSTRUCTOR_DECL", errText) = 0 Then Return 0
+        ElseIf ck = "CLASS_DESTRUCTOR_DECL" Then
+            If ExecRegisterRoutineDef(ps, es, ch, className & "_DTOR", "CLASS_DESTRUCTOR_DECL", errText) = 0 Then Return 0
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ExecBuildTopLevelRoutineMap(ByRef ps As ParseState, ByRef es As ExecState, ByVal rootNode As Integer, ByRef errText As String) As Integer
+    es.runtime.routineDefCount = 0
+    Erase es.runtime.routineDefs
 
     Dim st As Integer
     st = ps.ast.nodes(rootNode).firstChild
@@ -252,28 +567,9 @@ Private Function ExecBuildTopLevelRoutineMap(ByRef ps As ParseState, ByVal rootN
         stKind = UCase(ps.ast.nodes(st).kind)
 
         If stKind = "SUB_STMT" Or stKind = "FUNCTION_STMT" Then
-            Dim routineName As String
-            routineName = UCase(Trim(ps.ast.nodes(st).value))
-            If routineName = "" Then
-                errText = "exec: routine name missing"
-                Return 0
-            End If
-
-            If ExecRoutineIndexOf(routineName) <> -1 Then
-                errText = "exec: duplicate routine " & routineName
-                Return 0
-            End If
-
-            If gRoutineDefCount = 0 Then
-                ReDim gRoutineDefs(0)
-            Else
-                ReDim Preserve gRoutineDefs(gRoutineDefCount)
-            End If
-
-            gRoutineDefs(gRoutineDefCount).nameText = routineName
-            gRoutineDefs(gRoutineDefCount).nodeIdx = st
-            gRoutineDefs(gRoutineDefCount).routineKind = stKind
-            gRoutineDefCount += 1
+            If ExecRegisterRoutineDef(ps, es, st, ps.ast.nodes(st).value, stKind, errText) = 0 Then Return 0
+        ElseIf stKind = "CLASS_STMT" Then
+            If ExecBuildRoutineMapFromClass(ps, es, st, errText) = 0 Then Return 0
         End If
 
         st = ps.ast.nodes(st).nextSibling
@@ -282,1377 +578,6 @@ Private Function ExecBuildTopLevelRoutineMap(ByRef ps As ParseState, ByVal rootN
     Return 1
 End Function
 
-Sub ExecSetFfiPolicyPath(ByRef pathText As String)
-    Dim p As String
-    p = Trim(pathText)
-    If p = "" Then
-        gFfiPolicyPath = "dist/config/ffi_allowlist.txt"
-    Else
-        gFfiPolicyPath = p
-    End If
-
-    gFfiAllowlistLoaded = 0
-    gFfiAllowlistLoadFailed = 0
-    gFfiAllowlistLoadFailReason = ""
-    gFfiAllowEntryCount = 0
-    Erase gFfiAllowEntries
-End Sub
-
-Private Function ExecGetFfiPolicyPath() As String
-    If Trim(gFfiPolicyPath) = "" Then
-        gFfiPolicyPath = "dist/config/ffi_allowlist.txt"
-    End If
-    Return gFfiPolicyPath
-End Function
-
-Sub ExecSetFfiPolicyMode(ByRef modeText As String)
-    Dim m As String
-    m = UCase(Trim(modeText))
-    If m = "ENFORCE" Then
-        gFfiPolicyEnforce = 1
-    Else
-        gFfiPolicyEnforce = 0
-    End If
-End Sub
-
-Private Function ExecGetFfiPolicyMode() As String
-    If gFfiPolicyEnforce <> 0 Then Return "ENFORCE"
-    Return "REPORT_ONLY"
-End Function
-
-Sub ExecSetFfiResolverPath(ByRef pathText As String)
-    Dim p As String
-    p = Trim(pathText)
-    If p = "" Then
-        gFfiResolverPath = "dist/interop/ffi_call_x86_resolver.csv"
-    Else
-        gFfiResolverPath = p
-    End If
-
-    gFfiX86ResolverLoaded = 0
-    gFfiX86ResolverLoadFailed = 0
-    gFfiX86ResolverLoadFailReason = ""
-    gFfiX86ResolverEntryCount = 0
-    Erase gFfiX86ResolverEntries
-    gFfiX86ResolvedEntryCount = 0
-    Erase gFfiX86ResolvedEntries
-    gFfiX86SymptrMapEntryCount = 0
-    Erase gFfiX86SymptrMapEntries
-    gFfiX86InvokeCount = 0
-    gFfiX86LastInvokeStubId = 0
-    gFfiX86LastInvokeConv = ""
-    gFfiX86CallerCleanupBytes = 0
-    gFfiX86CalleeCleanupBytes = 0
-    gFfiX86SymptrWriteCount = 0
-End Sub
-
-Sub ExecSetFfiResolverMode(ByRef modeText As String)
-    Dim m As String
-    m = UCase(Trim(modeText))
-    If m = "ENFORCE" Then
-        gFfiResolverEnforce = 1
-    Else
-        gFfiResolverEnforce = 0
-    End If
-End Sub
-
-Private Function ExecGetFfiResolverMode() As String
-    If gFfiResolverEnforce <> 0 Then Return "ENFORCE"
-    Return "REPORT_ONLY"
-End Function
-
-Private Function ExecGetFfiResolverPath() As String
-    If Trim(gFfiResolverPath) = "" Then
-        gFfiResolverPath = "dist/interop/ffi_call_x86_resolver.csv"
-    End If
-    Return gFfiResolverPath
-End Function
-
-Private Function ExecFindX86ResolvedProc(ByVal stubId As Integer, ByRef procOut As Any Ptr) As Integer
-    Dim i As Integer
-    For i = 0 To gFfiX86ResolvedEntryCount - 1
-        If gFfiX86ResolvedEntries(i).stubId = stubId Then
-            procOut = gFfiX86ResolvedEntries(i).procAddr
-            If procOut <> 0 Then Return 1
-            Return 0
-        End If
-    Next i
-
-    procOut = 0
-    Return 0
-End Function
-
-Private Function ExecFindX86SymptrMapIndex(ByVal stubId As Integer) As Integer
-    Dim i As Integer
-    For i = 0 To gFfiX86SymptrMapEntryCount - 1
-        If gFfiX86SymptrMapEntries(i).stubId = stubId Then Return i
-    Next i
-
-    Return -1
-End Function
-
-Private Sub ExecUpsertX86SymptrMap(ByVal stubId As Integer, ByVal procAddr As Any Ptr)
-    Dim idx As Integer
-    idx = ExecFindX86SymptrMapIndex(stubId)
-
-    If idx <> -1 Then
-        gFfiX86SymptrMapEntries(idx).procAddr = procAddr
-        gFfiX86SymptrWriteCount += 1
-        Exit Sub
-    End If
-
-    If gFfiX86SymptrMapEntryCount = 0 Then
-        ReDim gFfiX86SymptrMapEntries(0)
-    Else
-        ReDim Preserve gFfiX86SymptrMapEntries(gFfiX86SymptrMapEntryCount)
-    End If
-
-    gFfiX86SymptrMapEntries(gFfiX86SymptrMapEntryCount).stubId = stubId
-    gFfiX86SymptrMapEntries(gFfiX86SymptrMapEntryCount).symptrLabel = "__uxb_ffi_x86_symptr_" & LTrim(Str(stubId))
-    gFfiX86SymptrMapEntries(gFfiX86SymptrMapEntryCount).procAddr = procAddr
-    gFfiX86SymptrMapEntryCount += 1
-    gFfiX86SymptrWriteCount += 1
-End Sub
-
-Private Sub ExecAppendX86ResolvedProc(ByVal stubId As Integer, ByVal procAddr As Any Ptr)
-    If gFfiX86ResolvedEntryCount = 0 Then
-        ReDim gFfiX86ResolvedEntries(0)
-    Else
-        ReDim Preserve gFfiX86ResolvedEntries(gFfiX86ResolvedEntryCount)
-    End If
-
-    gFfiX86ResolvedEntries(gFfiX86ResolvedEntryCount).stubId = stubId
-    gFfiX86ResolvedEntries(gFfiX86ResolvedEntryCount).procAddr = procAddr
-    gFfiX86ResolvedEntryCount += 1
-End Sub
-
-Function ExecDebugGetFfiX86ResolvedCount() As Integer
-    Return gFfiX86ResolvedEntryCount
-End Function
-
-Function ExecDebugGetFfiX86SymptrMapCount() As Integer
-    Return gFfiX86SymptrMapEntryCount
-End Function
-
-Function ExecDebugGetFfiX86InvokeCount() As Integer
-    Return gFfiX86InvokeCount
-End Function
-
-Function ExecDebugGetFfiX86LastInvokeStubId() As Integer
-    Return gFfiX86LastInvokeStubId
-End Function
-
-Function ExecDebugGetFfiX86LastInvokeConv() As String
-    Return gFfiX86LastInvokeConv
-End Function
-
-Function ExecDebugGetFfiX86CallerCleanupBytes() As Integer
-    Return gFfiX86CallerCleanupBytes
-End Function
-
-Function ExecDebugGetFfiX86CalleeCleanupBytes() As Integer
-    Return gFfiX86CalleeCleanupBytes
-End Function
-
-Function ExecDebugGetFfiX86SymptrWriteCount() As Integer
-    Return gFfiX86SymptrWriteCount
-End Function
-
-Function ExecDebugGetFfiX86SymptrLabelByStubId(ByVal stubId As Integer) As String
-    Dim idx As Integer
-    idx = ExecFindX86SymptrMapIndex(stubId)
-    If idx = -1 Then Return ""
-    Return gFfiX86SymptrMapEntries(idx).symptrLabel
-End Function
-
-Function ExecDebugGetFfiX86SymptrProcAddrByStubId(ByVal stubId As Integer) As UInteger
-    Dim idx As Integer
-    idx = ExecFindX86SymptrMapIndex(stubId)
-    If idx = -1 Then Return 0
-    Return CUInt(gFfiX86SymptrMapEntries(idx).procAddr)
-End Function
-
-Private Function ExecFindX86ResolverEntryIndex(ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer) As Integer
-    Dim dllKey As String
-    Dim symbolKey As String
-    Dim sigKey As String
-    Dim convKey As String
-    dllKey = UCase(Trim(dllName))
-    symbolKey = UCase(Trim(symbolName))
-    sigKey = UCase(Trim(signatureText))
-    convKey = UCase(Trim(callingConventionText))
-
-    Dim fallbackWildcardIdx As Integer
-    Dim fallbackCompatIdx As Integer
-    fallbackWildcardIdx = -1
-    fallbackCompatIdx = -1
-
-    Dim i As Integer
-    For i = 0 To gFfiX86ResolverEntryCount - 1
-        Dim sameDll As Integer
-        Dim sameSymbol As Integer
-        Dim sameSig As Integer
-        Dim allowConv As String
-        Dim reqConv As String
-
-        sameDll = IIf(gFfiX86ResolverEntries(i).dllName = dllKey, 1, 0)
-        sameSymbol = IIf(gFfiX86ResolverEntries(i).symbolName = symbolKey, 1, 0)
-        sameSig = IIf(gFfiX86ResolverEntries(i).signatureText = sigKey, 1, 0)
-
-        If sameDll <> 0 And sameSymbol <> 0 And sameSig <> 0 Then
-            reqConv = convKey
-            allowConv = UCase(Trim(gFfiX86ResolverEntries(i).callingConventionText))
-            If reqConv = "" Then reqConv = "CDECL"
-
-            If gFfiX86ResolverEntries(i).argCount = argCount Then
-                If allowConv = reqConv Then
-                    Return i
-                End If
-
-                If (allowConv = "" Or allowConv = "*") And fallbackWildcardIdx = -1 Then
-                    fallbackWildcardIdx = i
-                End If
-
-#Ifdef __FB_64BIT__
-                If (allowConv = "CDECL" Or allowConv = "STDCALL") And (reqConv = "CDECL" Or reqConv = "STDCALL") Then
-                    If fallbackCompatIdx = -1 Then fallbackCompatIdx = i
-                End If
-#EndIf
-            End If
-        End If
-    Next i
-
-    If fallbackWildcardIdx <> -1 Then Return fallbackWildcardIdx
-    If fallbackCompatIdx <> -1 Then Return fallbackCompatIdx
-
-    Return -1
-End Function
-
-Function ExecX86FfiValidateCleanupContract(ByRef errText As String) As Integer
-    Dim i As Integer
-    For i = 0 To gFfiX86ResolverEntryCount - 1
-        Dim conv As String
-        Dim cleanup As String
-        conv = UCase(Trim(gFfiX86ResolverEntries(i).callingConventionText))
-        cleanup = UCase(Trim(gFfiX86ResolverEntries(i).cleanupType))
-
-        If gFfiX86ResolverEntries(i).argStackBytes <> gFfiX86ResolverEntries(i).argCount * 4 Then
-            errText = "exec: x86 cleanup contract arg_stack_bytes mismatch"
-            Return 0
-        End If
-
-        If conv = "STDCALL" Then
-            If cleanup <> "CALLEE" Then
-                errText = "exec: x86 cleanup contract stdcall must be CALLEE"
-                Return 0
-            End If
-        Else
-            If cleanup <> "CALLER" Then
-                errText = "exec: x86 cleanup contract cdecl must be CALLER"
-                Return 0
-            End If
-        End If
-    Next i
-
-    Return 1
-End Function
-
-Declare Function LoadLibraryA Lib "kernel32" Alias "LoadLibraryA" (ByVal lpLibFileName As ZString Ptr) As Any Ptr
-Declare Function GetProcAddress Lib "kernel32" Alias "GetProcAddress" (ByVal hModule As Any Ptr, ByVal lpProcName As ZString Ptr) As Any Ptr
-Type ExecFnNoArgCdeclI32 As Function Cdecl () As Integer
-Type ExecFnNoArgStdcallI32 As Function Stdcall () As Integer
-Type ExecFnArg1CdeclI32 As Function Cdecl (ByVal a0 As Integer) As Integer
-Type ExecFnArg2CdeclI32 As Function Cdecl (ByVal a0 As Integer, ByVal a1 As Integer) As Integer
-Type ExecFnArg3CdeclI32 As Function Cdecl (ByVal a0 As Integer, ByVal a1 As Integer, ByVal a2 As Integer) As Integer
-Type ExecFnArg4CdeclI32 As Function Cdecl (ByVal a0 As Integer, ByVal a1 As Integer, ByVal a2 As Integer, ByVal a3 As Integer) As Integer
-Type ExecFnArg1StdcallI32 As Function Stdcall (ByVal a0 As Integer) As Integer
-Type ExecFnArg2StdcallI32 As Function Stdcall (ByVal a0 As Integer, ByVal a1 As Integer) As Integer
-Type ExecFnArg3StdcallI32 As Function Stdcall (ByVal a0 As Integer, ByVal a1 As Integer, ByVal a2 As Integer) As Integer
-Type ExecFnArg4StdcallI32 As Function Stdcall (ByVal a0 As Integer, ByVal a1 As Integer, ByVal a2 As Integer, ByVal a3 As Integer) As Integer
-Type ExecFnNoArgCdeclU64 As Function Cdecl () As ULongInt
-Type ExecFnArg1CdeclU64 As Function Cdecl (ByVal a0 As ULongInt) As ULongInt
-Type ExecFnArg2CdeclU64 As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt) As ULongInt
-Type ExecFnArg3CdeclU64 As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As ULongInt) As ULongInt
-Type ExecFnArg4CdeclU64 As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As ULongInt, ByVal a3 As ULongInt) As ULongInt
-Type ExecFnNoArgCdeclF64 As Function Cdecl () As Double
-Type ExecFnArg1CdeclF64 As Function Cdecl (ByVal a0 As Double) As Double
-Type ExecFnArg2CdeclF64 As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double) As Double
-Type ExecFnArg3CdeclF64 As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As Double) As Double
-Type ExecFnArg4CdeclF64 As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As Double, ByVal a3 As Double) As Double
-Type ExecFnNoArgCdeclStrPtr As Function Cdecl () As Integer
-Type ExecFnArg1CdeclStrPtr As Function Cdecl (ByVal a0 As ZString Ptr) As Integer
-Type ExecFnArg2CdeclStrPtr As Function Cdecl (ByVal a0 As ZString Ptr, ByVal a1 As ZString Ptr) As Integer
-Type ExecFnArg3CdeclStrPtr As Function Cdecl (ByVal a0 As ZString Ptr, ByVal a1 As ZString Ptr, ByVal a2 As ZString Ptr) As Integer
-Type ExecFnArg4CdeclStrPtr As Function Cdecl (ByVal a0 As ZString Ptr, ByVal a1 As ZString Ptr, ByVal a2 As ZString Ptr, ByVal a3 As ZString Ptr) As Integer
-Declare Function ExecGetActiveFfiAbiName() As String
-Declare Function ExecClampI32(ByVal valueIn As Double) As Integer
-
-Private Sub ExecFfiX86ResolverAppend(ByVal stubId As Integer, ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer, ByVal argStackBytes As Integer, ByRef cleanupType As String, ByRef symptrLabel As String)
-    If gFfiX86ResolverEntryCount = 0 Then
-        ReDim gFfiX86ResolverEntries(0)
-    Else
-        ReDim Preserve gFfiX86ResolverEntries(gFfiX86ResolverEntryCount)
-    End If
-
-    gFfiX86ResolverEntries(gFfiX86ResolverEntryCount).stubId = stubId
-    gFfiX86ResolverEntries(gFfiX86ResolverEntryCount).dllName = UCase(Trim(dllName))
-    gFfiX86ResolverEntries(gFfiX86ResolverEntryCount).symbolName = UCase(Trim(symbolName))
-    gFfiX86ResolverEntries(gFfiX86ResolverEntryCount).signatureText = UCase(Trim(signatureText))
-    gFfiX86ResolverEntries(gFfiX86ResolverEntryCount).callingConventionText = UCase(Trim(callingConventionText))
-    gFfiX86ResolverEntries(gFfiX86ResolverEntryCount).argCount = argCount
-    gFfiX86ResolverEntries(gFfiX86ResolverEntryCount).argStackBytes = argStackBytes
-    gFfiX86ResolverEntries(gFfiX86ResolverEntryCount).cleanupType = UCase(Trim(cleanupType))
-    gFfiX86ResolverEntries(gFfiX86ResolverEntryCount).symptrLabel = Trim(symptrLabel)
-    gFfiX86ResolverEntryCount += 1
-End Sub
-
-Private Sub ExecLoadFfiX86ResolverIfNeeded()
-    If gFfiX86ResolverLoaded <> 0 Then Exit Sub
-
-    gFfiX86ResolverLoaded = 1
-    gFfiX86ResolverLoadFailed = 0
-    gFfiX86ResolverLoadFailReason = ""
-    gFfiX86ResolverEntryCount = 0
-    Erase gFfiX86ResolverEntries
-    gFfiX86ResolvedEntryCount = 0
-    Erase gFfiX86ResolvedEntries
-    gFfiX86SymptrMapEntryCount = 0
-    Erase gFfiX86SymptrMapEntries
-    gFfiX86InvokeCount = 0
-    gFfiX86LastInvokeStubId = 0
-    gFfiX86LastInvokeConv = ""
-    gFfiX86CallerCleanupBytes = 0
-    gFfiX86CalleeCleanupBytes = 0
-    gFfiX86SymptrWriteCount = 0
-
-    Dim resolverPath As String
-    resolverPath = ExecGetFfiResolverPath()
-
-    If Dir(resolverPath) = "" Then
-        gFfiX86ResolverLoadFailed = 1
-        gFfiX86ResolverLoadFailReason = "file-not-found"
-        Exit Sub
-    End If
-
-    Dim f As Integer
-    f = FreeFile
-    Open resolverPath For Input As #f
-    If Err <> 0 Then
-        gFfiX86ResolverLoadFailed = 1
-        gFfiX86ResolverLoadFailReason = "open-failed"
-        Exit Sub
-    End If
-
-    Dim headerSeen As Integer
-    Dim headerValid As Integer
-    headerSeen = 0
-    headerValid = 0
-
-    Do While Not Eof(f)
-        Dim lineText As String
-        Line Input #f, lineText
-        lineText = Trim(lineText)
-        If lineText <> "" Then
-            If headerSeen = 0 Then
-                headerSeen = 1
-                Dim headerText As String
-                headerText = UCase(lineText)
-                If headerText = "STUB_ID,DLL,SYMBOL,SIGNATURE,CONVENTION,ARG_COUNT,ARG_STACK_BYTES,CLEANUP_TYPE,SYMPTR_LABEL" Then
-                    headerValid = 1
-                Else
-                    Close #f
-                    gFfiX86ResolverLoadFailed = 1
-                    gFfiX86ResolverLoadFailReason = "header-invalid"
-                    Exit Sub
-                End If
-            Else
-                Dim p1 As Integer, p2 As Integer, p3 As Integer, p4 As Integer
-                Dim p5 As Integer, p6 As Integer, p7 As Integer, p8 As Integer
-                p1 = Instr(1, lineText, ",")
-                p2 = Instr(p1 + 1, lineText, ",")
-                p3 = Instr(p2 + 1, lineText, ",")
-                p4 = Instr(p3 + 1, lineText, ",")
-                p5 = Instr(p4 + 1, lineText, ",")
-                p6 = Instr(p5 + 1, lineText, ",")
-                p7 = Instr(p6 + 1, lineText, ",")
-                p8 = Instr(p7 + 1, lineText, ",")
-
-                If p1 > 0 And p2 > p1 And p3 > p2 And p4 > p3 And p5 > p4 And p6 > p5 And p7 > p6 And p8 > p7 Then
-                    Dim c0 As String, c1 As String, c2 As String, c3 As String, c4 As String
-                    Dim c5 As String, c6 As String, c7 As String, c8 As String
-                    c0 = Trim(Left(lineText, p1 - 1))
-                    c1 = Trim(Mid(lineText, p1 + 1, p2 - p1 - 1))
-                    c2 = Trim(Mid(lineText, p2 + 1, p3 - p2 - 1))
-                    c3 = Trim(Mid(lineText, p3 + 1, p4 - p3 - 1))
-                    c4 = Trim(Mid(lineText, p4 + 1, p5 - p4 - 1))
-                    c5 = Trim(Mid(lineText, p5 + 1, p6 - p5 - 1))
-                    c6 = Trim(Mid(lineText, p6 + 1, p7 - p6 - 1))
-                    c7 = Trim(Mid(lineText, p7 + 1, p8 - p7 - 1))
-                    c8 = Trim(Mid(lineText, p8 + 1))
-
-                    Dim stubId As Integer
-                    Dim argCount As Integer
-                    Dim argStackBytes As Integer
-                    stubId = ValInt(c0)
-                    argCount = ValInt(c5)
-                    argStackBytes = ValInt(c6)
-
-                    If stubId > 0 And c1 <> "" And c2 <> "" And c3 <> "" Then
-                        ExecFfiX86ResolverAppend stubId, c1, c2, c3, c4, argCount, argStackBytes, c7, c8
-                    End If
-                End If
-            End If
-        End If
-    Loop
-
-    Close #f
-
-    If headerValid = 0 Then
-        gFfiX86ResolverLoadFailed = 1
-        gFfiX86ResolverLoadFailReason = "header-missing"
-        Exit Sub
-    End If
-
-    If gFfiX86ResolverEntryCount = 0 Then
-        gFfiX86ResolverLoadFailed = 1
-        gFfiX86ResolverLoadFailReason = "no-valid-entries"
-        Exit Sub
-    End If
-End Sub
-
-Private Function ExecResolveX86InteropTarget(ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer, ByRef cleanupTypeOut As String, ByRef errText As String) As Integer
-    cleanupTypeOut = ""
-
-    ExecLoadFfiX86ResolverIfNeeded
-    If gFfiX86ResolverLoadFailed <> 0 Then
-        errText = "exec: CALL(DLL) x86 resolver plan missing/invalid (" & LTrim(Str(UXB_FFI_ERR_RESOLVER_PLAN_MISSING)) & ")"
-        Return 0
-    End If
-
-    Dim foundIdx As Integer
-    foundIdx = ExecFindX86ResolverEntryIndex(dllName, symbolName, signatureText, callingConventionText, argCount)
-
-    If foundIdx = -1 Then
-        errText = "exec: CALL(DLL) x86 resolver no matching entry (" & LTrim(Str(UXB_FFI_ERR_RESOLVER_NO_MATCH)) & ")"
-        Return 0
-    End If
-
-    cleanupTypeOut = gFfiX86ResolverEntries(foundIdx).cleanupType
-
-    Dim resolvedAddr As Any Ptr
-    If ExecFindX86ResolvedProc(gFfiX86ResolverEntries(foundIdx).stubId, resolvedAddr) <> 0 Then
-        Return 1
-    End If
-
-    Dim hModule As Any Ptr
-    hModule = LoadLibraryA(StrPtr(dllName))
-    If hModule = 0 Then
-        errText = "exec: CALL(DLL) x86 resolver LoadLibrary failed (" & LTrim(Str(UXB_FFI_ERR_DLL_LOAD_FAILED)) & ")"
-        Return 0
-    End If
-
-    Dim procAddr As Any Ptr
-    procAddr = GetProcAddress(hModule, StrPtr(symbolName))
-    If procAddr = 0 Then
-        errText = "exec: CALL(DLL) x86 resolver GetProcAddress failed (" & LTrim(Str(UXB_FFI_ERR_SYMBOL_RESOLVE_FAILED)) & ")"
-        Return 0
-    End If
-
-    ExecAppendX86ResolvedProc gFfiX86ResolverEntries(foundIdx).stubId, procAddr
-    ExecUpsertX86SymptrMap gFfiX86ResolverEntries(foundIdx).stubId, procAddr
-
-    Return 1
-End Function
-
-Private Function ExecTryInvokeResolvedX86I32(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByVal argStartPos As Integer, ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer, ByRef valueOut As Integer, ByRef invokedOut As Integer, ByRef errText As String) As Integer
-    invokedOut = 0
-    valueOut = 0
-
-    If UCase(Trim(signatureText)) <> "I32" Then Return 1
-    If argCount < 0 Or argCount > 4 Then Return 1
-
-    Dim resolverIdx As Integer
-    resolverIdx = ExecFindX86ResolverEntryIndex(dllName, symbolName, signatureText, callingConventionText, argCount)
-    If resolverIdx = -1 Then Return 1
-
-    Dim stubId As Integer
-    stubId = gFfiX86ResolverEntries(resolverIdx).stubId
-
-    Dim symMapIdx As Integer
-    symMapIdx = ExecFindX86SymptrMapIndex(stubId)
-    If symMapIdx = -1 Or gFfiX86SymptrMapEntries(symMapIdx).procAddr = 0 Then
-        errText = "exec: x86 symptr map entry missing for stub " & LTrim(Str(stubId))
-        Return 0
-    End If
-
-    Dim procAddr As Any Ptr
-    procAddr = gFfiX86SymptrMapEntries(symMapIdx).procAddr
-
-    Dim argValues(0 To 3) As Integer
-    Dim ai As Integer
-    For ai = 0 To argCount - 1
-        Dim argNode As Integer
-        argNode = ExecChildAt(ps, callNodeIdx, argStartPos + ai)
-        If argNode = -1 Then
-            errText = "exec: x86 invoke proof argument missing"
-            Return 0
-        End If
-
-        argValues(ai) = ExecEvalNode(ps, es, argNode, errText)
-        If errText <> "" Then
-            errText = "exec: x86 invoke proof argument eval failed: " & errText
-            Return 0
-        End If
-    Next ai
-
-    Dim conv As String
-    conv = UCase(Trim(callingConventionText))
-    If conv = "" Then conv = "CDECL"
-
-    If conv = "STDCALL" Then
-        Select Case argCount
-        Case 0
-            Dim fnStd0 As ExecFnNoArgStdcallI32
-            fnStd0 = procAddr
-            valueOut = fnStd0()
-        Case 1
-            Dim fnStd1 As ExecFnArg1StdcallI32
-            fnStd1 = procAddr
-            valueOut = fnStd1(argValues(0))
-        Case 2
-            Dim fnStd2 As ExecFnArg2StdcallI32
-            fnStd2 = procAddr
-            valueOut = fnStd2(argValues(0), argValues(1))
-        Case 3
-            Dim fnStd3 As ExecFnArg3StdcallI32
-            fnStd3 = procAddr
-            valueOut = fnStd3(argValues(0), argValues(1), argValues(2))
-        Case 4
-            Dim fnStd4 As ExecFnArg4StdcallI32
-            fnStd4 = procAddr
-            valueOut = fnStd4(argValues(0), argValues(1), argValues(2), argValues(3))
-        End Select
-    Else
-        Select Case argCount
-        Case 0
-            Dim fnC0 As ExecFnNoArgCdeclI32
-            fnC0 = procAddr
-            valueOut = fnC0()
-        Case 1
-            Dim fnC1 As ExecFnArg1CdeclI32
-            fnC1 = procAddr
-            valueOut = fnC1(argValues(0))
-        Case 2
-            Dim fnC2 As ExecFnArg2CdeclI32
-            fnC2 = procAddr
-            valueOut = fnC2(argValues(0), argValues(1))
-        Case 3
-            Dim fnC3 As ExecFnArg3CdeclI32
-            fnC3 = procAddr
-            valueOut = fnC3(argValues(0), argValues(1), argValues(2))
-        Case 4
-            Dim fnC4 As ExecFnArg4CdeclI32
-            fnC4 = procAddr
-            valueOut = fnC4(argValues(0), argValues(1), argValues(2), argValues(3))
-        End Select
-    End If
-
-    gFfiX86InvokeCount += 1
-    gFfiX86LastInvokeStubId = stubId
-    gFfiX86LastInvokeConv = conv
-    If UCase(Trim(gFfiX86ResolverEntries(resolverIdx).cleanupType)) = "CALLER" Then
-        gFfiX86CallerCleanupBytes += gFfiX86ResolverEntries(resolverIdx).argStackBytes
-    Else
-        gFfiX86CalleeCleanupBytes += gFfiX86ResolverEntries(resolverIdx).argStackBytes
-    End If
-
-    invokedOut = 1
-    Return 1
-End Function
-
-#include once "exec_ffi_x64_invoke_helpers.fbs"
-
-Private Function ExecTryInvokeResolvedX64I32(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByVal argStartPos As Integer, ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal argCount As Integer, ByRef valueOut As Integer, ByRef invokedOut As Integer, ByRef errText As String) As Integer
-    invokedOut = 0
-    valueOut = 0
-
-    If ExecGetActiveFfiAbiName() <> "WIN64-MSABI" Then Return 1
-
-    Dim sig As String
-    sig = UCase(Trim(signatureText))
-    If sig <> "I32" And sig <> "U64" And sig <> "F64" And sig <> "PTR" And sig <> "STRPTR" And sig <> "BYREF" And sig <> "BYVAL" Then Return 1
-    If argCount < 0 Or argCount > 4 Then Return 1
-
-    Dim hModule As Any Ptr
-    hModule = LoadLibraryA(StrPtr(dllName))
-    If hModule = 0 Then
-        errText = "exec: CALL(DLL) x64 LoadLibrary failed (" & LTrim(Str(UXB_FFI_ERR_DLL_LOAD_FAILED)) & ")"
-        Return 0
-    End If
-
-    Dim procAddr As Any Ptr
-    procAddr = GetProcAddress(hModule, StrPtr(symbolName))
-    If procAddr = 0 Then
-        errText = "exec: CALL(DLL) x64 GetProcAddress failed (" & LTrim(Str(UXB_FFI_ERR_SYMBOL_RESOLVE_FAILED)) & ")"
-        Return 0
-    End If
-
-    Dim argValuesI32(0 To 3) As Integer
-    Dim argValuesU64(0 To 3) As ULongInt
-    Dim argValuesF64(0 To 3) As Double
-    Dim argValuesStr(0 To 3) As String
-    Dim argValuesStrPtr(0 To 3) As ZString Ptr
-    If ExecX64EvalArgs(ps, es, callNodeIdx, argStartPos, sig, argCount, argValuesI32(), argValuesU64(), argValuesF64(), argValuesStr(), argValuesStrPtr(), errText) = 0 Then
-        Return 0
-    End If
-
-    ExecX64DispatchInvoke procAddr, sig, argCount, argValuesI32(), argValuesU64(), argValuesF64(), argValuesStrPtr(), valueOut
-
-    invokedOut = 1
-    Return 1
-End Function
-
-Private Sub ExecNormalizeError(ByRef errText As String)
-    If errText = "" Then Exit Sub
-
-    Dim t As String
-    t = LCase(LTrim(errText))
-    If Left(t, Len(EXEC_ERR_PREFIX)) <> EXEC_ERR_PREFIX Then
-        errText = EXEC_ERR_PREFIX & errText
-    End If
-End Sub
-
-Private Function ExecConsumeLoopExit(ByRef loopKind As String) As Integer
-    If gExitRequest = "" Then Return 0
-
-    Dim req As String
-    req = UCase(gExitRequest)
-
-    If req = "ANY" Or req = UCase(loopKind) Then
-        gExitRequest = ""
-        Return 1
-    End If
-
-    Return 2
-End Function
-
-Private Function ExecIsStmtNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
-    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
-
-    Dim kindUpper As String
-    kindUpper = UCase(ps.ast.nodes(nodeIdx).kind)
-
-    If Len(kindUpper) < 5 Then Return 0
-    If Right(kindUpper, 5) = "_STMT" Then Return 1
-    Return 0
-End Function
-
-Private Function ExecClampI32(ByVal valueIn As Double) As Integer
-    If valueIn > 2147483647# Then Return 2147483647
-    If valueIn < -2147483648# Then Return -2147483648
-    Return CInt(valueIn)
-End Function
-
-Private Function ExecTimerUnitScale(ByRef unitText As String, ByRef scaleOut As Double) As Integer
-    Dim u As String
-    u = LCase(Trim(unitText))
-
-    Select Case u
-    Case "ns"
-        scaleOut = 1000000000#
-    Case "us"
-        scaleOut = 1000000#
-    Case "ms"
-        scaleOut = 1000#
-    Case "s"
-        scaleOut = 1#
-    Case "min"
-        scaleOut = 1# / 60#
-    Case "h"
-        scaleOut = 1# / 3600#
-    Case "day"
-        scaleOut = 1# / 86400#
-    Case "year"
-        scaleOut = 1# / (86400# * 365#)
-    Case Else
-        scaleOut = 0#
-        Return 0
-    End Select
-
-    Return 1
-End Function
-
-Private Function ExecBuiltinArgAsTypeName(ByRef ps As ParseState, ByVal callNodeIdx As Integer, ByRef callName As String, ByRef typeNameOut As String, ByRef errText As String) As Integer
-    Dim a0 As Integer
-    a0 = ExecChildAt(ps, callNodeIdx, 0)
-    If a0 = -1 Then
-        errText = "exec: " & callName & " type arg missing"
-        Return 0
-    End If
-
-    Dim n As ASTNode
-    n = ps.ast.nodes(a0)
-    If UCase(n.kind) <> "IDENT" And UCase(n.kind) <> "KEYWORD_REF" Then
-        errText = "exec: " & callName & " expects type name"
-        Return 0
-    End If
-
-    typeNameOut = n.value
-    Return 1
-End Function
-
-Private Function ExecIsAllowedDllSignature(ByRef signatureText As String) As Integer
-    Dim s As String
-    s = UCase(Trim(signatureText))
-
-    Select Case s
-    Case "I32", "U64", "F64", "PTR", "STRPTR", "BYREF", "BYVAL", "CDECL", "STDCALL"
-        Return 1
-    End Select
-
-    Return 0
-End Function
-
-Private Function ExecIsDllCallingConvention(ByRef conventionText As String) As Integer
-    Dim s As String
-    s = UCase(Trim(conventionText))
-
-    Select Case s
-    Case "CDECL", "STDCALL"
-        Return 1
-    End Select
-
-    Return 0
-End Function
-
-Private Function ExecGetActiveFfiAbiName() As String
-#Ifdef __FB_64BIT__
-    Return "WIN64-MSABI"
-#Else
-    Return "X86-32"
-#EndIf
-End Function
-
-Private Function ExecAreDllCallingConventionsCompatible(ByRef requestedConventionText As String, ByRef allowedConventionText As String) As Integer
-    Dim req As String
-    Dim allow As String
-    req = UCase(Trim(requestedConventionText))
-    allow = UCase(Trim(allowedConventionText))
-
-    If req = "" Then req = "CDECL"
-    If allow = "" Or allow = "*" Then Return 1
-    If allow = req Then Return 1
-
-#Ifdef __FB_64BIT__
-    If (allow = "CDECL" Or allow = "STDCALL") And (req = "CDECL" Or req = "STDCALL") Then
-        Return 1
-    End If
-#EndIf
-
-    Return 0
-End Function
-
-Private Function ExecContainsInvalidDllChars(ByRef dllName As String) As Integer
-    Dim i As Integer
-    For i = 1 To Len(dllName)
-        Dim ch As Integer
-        ch = Asc(Mid(dllName, i, 1))
-
-        If ch < 32 Then Return 1
-
-        Select Case ch
-        Case 34, 42, 59, 60, 62, 63, 124
-            Return 1
-        End Select
-    Next i
-
-    Return 0
-End Function
-
-Private Function ExecIsAbsoluteDllPath(ByRef dllName As String) As Integer
-    Dim s As String
-    s = Trim(dllName)
-
-    If s = "" Then Return 0
-    If Left(s, 1) = "\" Or Left(s, 1) = "/" Then Return 1
-
-    If Len(s) >= 2 Then
-        Dim firstCh As Integer
-        firstCh = Asc(UCase(Left(s, 1)))
-        If firstCh >= Asc("A") And firstCh <= Asc("Z") Then
-            If Mid(s, 2, 1) = ":" Then Return 1
-        End If
-    End If
-
-    Return 0
-End Function
-
-Private Function ExecHasDllPathSegments(ByRef dllName As String) As Integer
-    If Instr(dllName, "..") > 0 Then Return 1
-    If Instr(dllName, "\") > 0 Then Return 1
-    If Instr(dllName, "/") > 0 Then Return 1
-    Return 0
-End Function
-
-Private Function ExecNormalizeDllName(ByRef dllNameIn As String, ByRef dllNameOut As String, ByRef errText As String) As Integer
-    dllNameOut = Trim(dllNameIn)
-
-    If dllNameOut = "" Then
-        errText = "exec: CALL(DLL) library cannot be empty (" & LTrim(Str(UXB_FFI_ERR_BAD_LIB)) & ")"
-        Return 0
-    End If
-
-    If ExecIsAbsoluteDllPath(dllNameOut) <> 0 Then
-        errText = "exec: CALL(DLL) library must not be absolute path (" & LTrim(Str(UXB_FFI_ERR_DLL_ABSOLUTE_PATH)) & ")"
-        Return 0
-    End If
-
-    If ExecHasDllPathSegments(dllNameOut) <> 0 Then
-        errText = "exec: CALL(DLL) library path segments not allowed (" & LTrim(Str(UXB_FFI_ERR_DLL_PATH_SEGMENTS)) & ")"
-        Return 0
-    End If
-
-    If ExecContainsInvalidDllChars(dllNameOut) <> 0 Then
-        errText = "exec: CALL(DLL) library contains invalid chars (" & LTrim(Str(UXB_FFI_ERR_DLL_INVALID_CHARS)) & ")"
-        Return 0
-    End If
-
-    dllNameOut = UCase(dllNameOut)
-    Return 1
-End Function
-
-Private Function ExecNormalizeFfiHashToken(ByRef hashIn As String, ByRef hashOut As String) As Integer
-    hashOut = UCase(Trim(hashIn))
-    If hashOut = "" Then Return 0
-    If hashOut = "*" Then Return 1
-    If Len(hashOut) <> 64 Then Return 0
-
-    Dim i As Integer
-    For i = 1 To Len(hashOut)
-        Dim ch As Integer
-        ch = Asc(Mid(hashOut, i, 1))
-        If (ch >= Asc("0") And ch <= Asc("9")) Or (ch >= Asc("A") And ch <= Asc("F")) Then
-            ' valid
-        Else
-            Return 0
-        End If
-    Next i
-
-    Return 1
-End Function
-
-Private Function ExecNormalizeFfiSignerToken(ByRef signerIn As String, ByRef signerOut As String) As Integer
-    signerOut = UCase(Trim(signerIn))
-    If signerOut = "" Then Return 0
-    If Instr(signerOut, "|") > 0 Then Return 0
-    Return 1
-End Function
-
-Private Sub ExecFfiAllowlistAppend(ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByRef hashText As String, ByRef signerText As String)
-    If gFfiAllowEntryCount = 0 Then
-        ReDim gFfiAllowEntries(0)
-    Else
-        ReDim Preserve gFfiAllowEntries(gFfiAllowEntryCount)
-    End If
-
-    gFfiAllowEntries(gFfiAllowEntryCount).dllName = UCase(Trim(dllName))
-    gFfiAllowEntries(gFfiAllowEntryCount).symbolName = UCase(Trim(symbolName))
-    gFfiAllowEntries(gFfiAllowEntryCount).signatureText = UCase(Trim(signatureText))
-    gFfiAllowEntries(gFfiAllowEntryCount).callingConventionText = UCase(Trim(callingConventionText))
-    gFfiAllowEntries(gFfiAllowEntryCount).hashText = UCase(Trim(hashText))
-    gFfiAllowEntries(gFfiAllowEntryCount).signerText = UCase(Trim(signerText))
-    gFfiAllowEntryCount += 1
-End Sub
-
-Private Sub ExecSeedDefaultFfiAllowlist()
-    Dim dll0 As String
-    Dim symbol0 As String
-    Dim sig0 As String
-    Dim conv0 As String
-    Dim hash0 As String
-    Dim signer0 As String
-    dll0 = "KERNEL32.DLL"
-    symbol0 = "GETTICKCOUNT"
-    sig0 = "I32"
-    conv0 = "*"
-    hash0 = "1111111111111111111111111111111111111111111111111111111111111111"
-    signer0 = "CN=MICROSOFT WINDOWS"
-    ExecFfiAllowlistAppend dll0, symbol0, sig0, conv0, hash0, signer0
-
-    Dim dll1 As String
-    Dim symbol1 As String
-    Dim sig1 As String
-    Dim conv1 As String
-    Dim hash1 As String
-    Dim signer1 As String
-    dll1 = "USER32.DLL"
-    symbol1 = "MESSAGEBOXA"
-    sig1 = "I32"
-    conv1 = "*"
-    hash1 = "2222222222222222222222222222222222222222222222222222222222222222"
-    signer1 = "CN=MICROSOFT WINDOWS"
-    ExecFfiAllowlistAppend dll1, symbol1, sig1, conv1, hash1, signer1
-End Sub
-
-Private Function ExecParseFfiAllowlistLine(ByRef lineText As String, ByRef dllOut As String, ByRef symbolOut As String, ByRef sigOut As String, ByRef convOut As String, ByRef hashOut As String, ByRef signerOut As String) As Integer
-    Dim lineTrim As String
-    lineTrim = Trim(lineText)
-    If lineTrim = "" Then Return 0
-    If Left(lineTrim, 1) = "#" Then Return 0
-
-    Dim p1 As Integer
-    Dim p2 As Integer
-    Dim p3 As Integer
-    Dim p4 As Integer
-    Dim p5 As Integer
-    p1 = Instr(lineTrim, "|")
-    If p1 <= 1 Then Return 0
-
-    p2 = Instr(p1 + 1, lineTrim, "|")
-    If p2 <= p1 + 1 Then Return 0
-
-    p3 = Instr(p2 + 1, lineTrim, "|")
-    p4 = 0
-    p5 = 0
-    If p3 > 0 Then
-        p4 = Instr(p3 + 1, lineTrim, "|")
-        If p4 <= p3 + 1 Then Return 0
-        p5 = Instr(p4 + 1, lineTrim, "|")
-        If p5 > 0 Then
-            If p5 <= p4 + 1 Then Return 0
-            If Instr(p5 + 1, lineTrim, "|") > 0 Then Return 0
-        End If
-    End If
-
-    Dim dllCandidate As String
-    dllCandidate = Trim(Left(lineTrim, p1 - 1))
-
-    symbolOut = UCase(Trim(Mid(lineTrim, p1 + 1, p2 - p1 - 1)))
-
-    If p3 > 0 Then
-        Dim hashCandidate As String
-        Dim signerCandidate As String
-        sigOut = UCase(Trim(Mid(lineTrim, p2 + 1, p3 - p2 - 1)))
-
-        If p5 > 0 Then
-            Dim convCandidate As String
-            convCandidate = UCase(Trim(Mid(lineTrim, p3 + 1, p4 - p3 - 1)))
-            If convCandidate = "" Then
-                convOut = "*"
-            Else
-                convOut = convCandidate
-            End If
-            hashCandidate = Mid(lineTrim, p4 + 1, p5 - p4 - 1)
-            signerCandidate = Mid(lineTrim, p5 + 1)
-        Else
-            convOut = "*"
-            hashCandidate = Mid(lineTrim, p3 + 1, p4 - p3 - 1)
-            signerCandidate = Mid(lineTrim, p4 + 1)
-        End If
-
-        If ExecNormalizeFfiHashToken(hashCandidate, hashOut) = 0 Then Return 0
-        If ExecNormalizeFfiSignerToken(signerCandidate, signerOut) = 0 Then Return 0
-    Else
-        sigOut = UCase(Trim(Mid(lineTrim, p2 + 1)))
-        convOut = "*"
-        hashOut = ""
-        signerOut = ""
-    End If
-
-    Dim normalizeErr As String
-    If ExecNormalizeDllName(dllCandidate, dllOut, normalizeErr) = 0 Then Return 0
-
-    If symbolOut = "" Or sigOut = "" Then Return 0
-    If ExecIsAllowedDllSignature(sigOut) = 0 Then Return 0
-    If convOut <> "*" And ExecIsDllCallingConvention(convOut) = 0 Then Return 0
-
-    Return 1
-End Function
-
-Private Sub ExecLoadFfiAllowlistIfNeeded()
-    If gFfiAllowlistLoaded <> 0 Then Exit Sub
-    gFfiAllowlistLoaded = 1
-    gFfiAllowlistLoadFailed = 0
-    gFfiAllowlistLoadFailReason = ""
-    gFfiAllowEntryCount = 0
-    Erase gFfiAllowEntries
-
-    Dim policyPath As String
-    policyPath = ExecGetFfiPolicyPath()
-
-    If Dir(policyPath) = "" Then
-        If ExecGetFfiPolicyMode() = "ENFORCE" Then
-            gFfiAllowlistLoadFailed = 1
-            gFfiAllowlistLoadFailReason = "file-not-found"
-            DiagUyari "FFI policy file not found, enforce deny path=" & policyPath
-        Else
-            ExecSeedDefaultFfiAllowlist
-            DiagUyari "FFI policy file not found, defaults active path=" & policyPath
-        End If
-        Exit Sub
-    End If
-
-    Dim f As Integer
-    f = FreeFile
-    Open policyPath For Input As #f
-    If Err <> 0 Then
-        If ExecGetFfiPolicyMode() = "ENFORCE" Then
-            gFfiAllowlistLoadFailed = 1
-            gFfiAllowlistLoadFailReason = "open-failed"
-            DiagUyari "FFI policy open failed, enforce deny path=" & policyPath
-        Else
-            ExecSeedDefaultFfiAllowlist
-            DiagUyari "FFI policy open failed, defaults active path=" & policyPath
-        End If
-        Exit Sub
-    End If
-
-    Dim headerSeen As Integer
-    Dim headerValid As Integer
-    headerSeen = 0
-    headerValid = 0
-
-    Do While Not Eof(f)
-        Dim lineText As String
-        Line Input #f, lineText
-
-        Dim lineTrim As String
-        lineTrim = Trim(lineText)
-
-        If lineTrim <> "" Then
-            If headerSeen = 0 Then
-                headerSeen = 1
-
-                Dim headerText As String
-                headerText = UCase(lineTrim)
-                If Left(headerText, 1) = "#" Then
-                    headerText = UCase(Trim(Mid(lineTrim, 2)))
-                End If
-
-                If headerText <> UXB_FFI_POLICY_HEADER_V1 Then
-                    Close #f
-                    If ExecGetFfiPolicyMode() = "ENFORCE" Then
-                        gFfiAllowlistLoadFailed = 1
-                        gFfiAllowlistLoadFailReason = "header-invalid"
-                        DiagUyari "FFI policy header invalid, enforce deny path=" & policyPath
-                    Else
-                        ExecSeedDefaultFfiAllowlist
-                        DiagUyari "FFI policy header invalid, defaults active path=" & policyPath
-                    End If
-                    Exit Sub
-                End If
-
-                headerValid = 1
-            Else
-                Dim dllName As String
-                Dim symbolName As String
-                Dim signatureText As String
-                Dim callingConventionText As String
-                Dim hashText As String
-                Dim signerText As String
-                If ExecParseFfiAllowlistLine(lineText, dllName, symbolName, signatureText, callingConventionText, hashText, signerText) <> 0 Then
-                    ExecFfiAllowlistAppend dllName, symbolName, signatureText, callingConventionText, hashText, signerText
-                End If
-            End If
-        End If
-    Loop
-
-    Close #f
-
-    If headerValid = 0 Then
-        If ExecGetFfiPolicyMode() = "ENFORCE" Then
-            gFfiAllowlistLoadFailed = 1
-            gFfiAllowlistLoadFailReason = "header-missing"
-            DiagUyari "FFI policy header missing, enforce deny path=" & policyPath
-        Else
-            ExecSeedDefaultFfiAllowlist
-            DiagUyari "FFI policy header missing, defaults active path=" & policyPath
-        End If
-        Exit Sub
-    End If
-
-    If gFfiAllowEntryCount = 0 Then
-        If ExecGetFfiPolicyMode() = "ENFORCE" Then
-            gFfiAllowlistLoadFailed = 1
-            gFfiAllowlistLoadFailReason = "no-valid-entries"
-            DiagUyari "FFI policy had no valid entries, enforce deny path=" & policyPath
-        Else
-            ExecSeedDefaultFfiAllowlist
-            DiagUyari "FFI policy had no valid entries, defaults active path=" & policyPath
-        End If
-        Exit Sub
-    End If
-
-    DiagBilgi "FFI policy loaded path=" & policyPath & " entries=" & LTrim(Str(gFfiAllowEntryCount))
-End Sub
-
-Private Function ExecPolicyDenyCode(ByRef reasonText As String) As Integer
-    Select Case LCase(Trim(reasonText))
-    Case "deny-policy-load-failed"
-        Return UXB_FFI_ERR_POLICY_LOAD_FAILED
-    Case "deny-attestation-required"
-        Return UXB_FFI_ERR_POLICY_ATTEST_REQUIRED
-    Case "deny-hash-mismatch"
-        Return UXB_FFI_ERR_POLICY_HASH_MISMATCH
-    Case "deny-signer-mismatch"
-        Return UXB_FFI_ERR_POLICY_SIGNER_MISMATCH
-    Case "deny-hash-extract-failed"
-        Return UXB_FFI_ERR_POLICY_HASH_EXTRACT_FAILED
-    Case "deny-signer-extract-failed"
-        Return UXB_FFI_ERR_POLICY_SIGNER_EXTRACT_FAILED
-    Case "deny-not-allowlisted"
-        Return UXB_FFI_ERR_POLICY_DENY
-    Case Else
-        Return 0
-    End Select
-End Function
-
-Private Function ExecPolicyDenyPhase(ByRef reasonText As String) As String
-    Select Case LCase(Trim(reasonText))
-    Case "deny-policy-load-failed"
-        Return "policy-load"
-    Case "deny-hash-mismatch", "deny-hash-extract-failed"
-        Return "hash-verify"
-    Case "deny-signer-mismatch", "deny-signer-extract-failed"
-        Return "signer-verify"
-    Case "deny-attestation-required"
-        Return "attestation-required"
-    Case "deny-not-allowlisted"
-        Return "allowlist-lookup"
-    Case Else
-        Return "policy"
-    End Select
-End Function
-
-Private Function ExecValidateDllMarshalArg(ByRef ps As ParseState, ByRef es As ExecState, ByVal argNode As Integer, ByRef signatureText As String, ByRef errText As String) As Integer
-    Dim argValue As ExecValue
-    If ExecEvalExpression(ps, argNode, es, argValue, errText) = 0 Then Return 0
-
-    Dim sig As String
-    sig = UCase(Trim(signatureText))
-
-    Select Case sig
-    Case "I32"
-        If argValue.valueType <> "INTEGER" Then
-            errText = "exec: CALL(DLL) I32 requires integer argument"
-            Return 0
-        End If
-
-    Case "U64"
-        If argValue.valueType <> "INTEGER" Then
-            errText = "exec: CALL(DLL) U64 requires integer argument"
-            Return 0
-        End If
-        If argValue.intValue < 0 Then
-            errText = "exec: CALL(DLL) U64 argument cannot be negative"
-            Return 0
-        End If
-
-    Case "F64"
-        If argValue.valueType = "STRING" Then
-            errText = "exec: CALL(DLL) F64 requires numeric argument"
-            Return 0
-        End If
-
-    Case "PTR"
-        If argValue.valueType <> "INTEGER" Then
-            errText = "exec: CALL(DLL) PTR requires pointer/integer argument"
-            Return 0
-        End If
-
-    Case "STRPTR"
-        If argValue.valueType <> "STRING" Then
-            errText = "exec: CALL(DLL) STRPTR requires string argument"
-            Return 0
-        End If
-
-    Case "BYVAL"
-        ' BYVAL is value-passing marker; no extra runtime type guard here.
-
-    Case "BYREF"
-        If UCase(ps.ast.nodes(argNode).kind) <> "IDENT" Then
-            errText = "exec: CALL(DLL) BYREF requires addressable target argument"
-            Return 0
-        End If
-    End Select
-
-    Return 1
-End Function
-
-Private Function ExecTryParseAliasDllTarget(ByRef targetText As String, ByRef dllNameOut As String, ByRef symbolNameOut As String, ByRef signatureOut As String, ByRef conventionOut As String) As Integer
-    dllNameOut = ""
-    symbolNameOut = ""
-    signatureOut = ""
-    conventionOut = "CDECL"
-
-    Dim lx As LexerState
-    LexerInit lx, targetText
-
-    Dim i As Integer
-    i = 0
-
-    While i < lx.tokens.count And (lx.tokens.items(i).kind = "EOL")
-        i += 1
-    Wend
-
-    If i >= lx.tokens.count Then Return 0
-    Dim headKind As String
-    headKind = UCase(lx.tokens.items(i).kind)
-    If (headKind <> "KEYWORD" And headKind <> "IDENT") Or UCase(lx.tokens.items(i).lexeme) <> "CALL" Then Return 0
-    i += 1
-
-    If i >= lx.tokens.count Or lx.tokens.items(i).kind <> "OP" Or lx.tokens.items(i).lexeme <> "(" Then Return 0
-    i += 1
-
-    If i >= lx.tokens.count Then Return 0
-    Dim dllHeadKind As String
-    dllHeadKind = UCase(lx.tokens.items(i).kind)
-    If (dllHeadKind <> "KEYWORD" And dllHeadKind <> "IDENT") Or UCase(lx.tokens.items(i).lexeme) <> "DLL" Then Return 0
-    i += 1
-
-    If i >= lx.tokens.count Or lx.tokens.items(i).kind <> "OP" Or lx.tokens.items(i).lexeme <> "," Then Return 0
-    i += 1
-
-    dllNameOut = ""
-    Do While i < lx.tokens.count
-        If lx.tokens.items(i).kind = "OP" And lx.tokens.items(i).lexeme = "," Then Exit Do
-        dllNameOut &= lx.tokens.items(i).lexeme
-        i += 1
-    Loop
-    dllNameOut = Trim(dllNameOut)
-    If dllNameOut = "" Then Return 0
-
-    If i >= lx.tokens.count Or lx.tokens.items(i).kind <> "OP" Or lx.tokens.items(i).lexeme <> "," Then Return 0
-    i += 1
-
-    symbolNameOut = ""
-    Do While i < lx.tokens.count
-        If lx.tokens.items(i).kind = "OP" And lx.tokens.items(i).lexeme = "," Then Exit Do
-        symbolNameOut &= lx.tokens.items(i).lexeme
-        i += 1
-    Loop
-    symbolNameOut = Trim(symbolNameOut)
-    If symbolNameOut = "" Then Return 0
-
-    If i >= lx.tokens.count Or lx.tokens.items(i).kind <> "OP" Or lx.tokens.items(i).lexeme <> "," Then Return 0
-    i += 1
-
-    If i >= lx.tokens.count Then Return 0
-    If UCase(lx.tokens.items(i).kind) <> "KEYWORD" And UCase(lx.tokens.items(i).kind) <> "IDENT" Then Return 0
-    signatureOut = UCase(Trim(lx.tokens.items(i).lexeme))
-    i += 1
-
-    If i < lx.tokens.count And lx.tokens.items(i).kind = "OP" And lx.tokens.items(i).lexeme = "," Then
-        i += 1
-        If i < lx.tokens.count Then
-            Dim conv As String
-            conv = UCase(Trim(lx.tokens.items(i).lexeme))
-            If ExecIsDllCallingConvention(conv) <> 0 Then
-                conventionOut = conv
-            End If
-        End If
-    End If
-
-    Return ExecIsAllowedDllSignature(signatureOut)
-End Function
-
-Private Function ExecDllCallIsAllowlisted(ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal requireAttestation As Integer, ByRef denyReasonOut As String) As Integer
-    ExecLoadFfiAllowlistIfNeeded
-
-    If gFfiAllowlistLoadFailed <> 0 Then
-        denyReasonOut = "deny-policy-load-failed"
-        Return 0
-    End If
-
-    Dim dllKey As String
-    Dim symbolKey As String
-    Dim sigKey As String
-    Dim convKey As String
-
-    dllKey = UCase(Trim(dllName))
-    symbolKey = UCase(Trim(symbolName))
-    sigKey = UCase(Trim(signatureText))
-    convKey = UCase(Trim(callingConventionText))
-
-    Dim i As Integer
-    For i = 0 To gFfiAllowEntryCount - 1
-        If dllKey = gFfiAllowEntries(i).dllName And symbolKey = gFfiAllowEntries(i).symbolName And sigKey = gFfiAllowEntries(i).signatureText Then
-            Dim allowConv As String
-            allowConv = UCase(Trim(gFfiAllowEntries(i).callingConventionText))
-            If ExecAreDllCallingConventionsCompatible(convKey, allowConv) = 0 Then
-                GoTo NextAllowEntry
-            End If
-
-            If requireAttestation <> 0 Then
-                If gFfiAllowEntries(i).hashText = "" Or gFfiAllowEntries(i).signerText = "" Then
-                    denyReasonOut = "deny-attestation-required"
-                    Return 0
-                End If
-
-                If gFfiAllowEntries(i).hashText = "*" Or gFfiAllowEntries(i).signerText = "*" Then
-                    denyReasonOut = "deny-attestation-required"
-                    Return 0
-                End If
-
-                Dim hashState As Integer
-                hashState = FfiHashMatchState(gFfiAllowEntries(i).hashText, dllName)
-                If hashState < 0 Then
-                    denyReasonOut = "deny-hash-extract-failed"
-                    Return 0
-                End If
-
-                If hashState = 0 Then
-                    denyReasonOut = "deny-hash-mismatch"
-                    Return 0
-                End If
-
-                Dim signerState As Integer
-                signerState = FfiSignerMatchState(gFfiAllowEntries(i).signerText, dllName)
-                If signerState < 0 Then
-                    denyReasonOut = "deny-signer-extract-failed"
-                    Return 0
-                End If
-
-                If signerState = 0 Then
-                    denyReasonOut = "deny-signer-mismatch"
-                    Return 0
-                End If
-            End If
-
-            denyReasonOut = ""
-            Return 1
-        End If
-NextAllowEntry:
-    Next i
-
-    denyReasonOut = "deny-not-allowlisted"
-    Return 0
-End Function
-
-Private Sub ExecAuditDllPolicy(ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByRef modeText As String, ByVal allowDecision As Integer, ByRef reasonText As String)
-    Dim msgText As String
-    Dim denyCode As Integer
-    denyCode = ExecPolicyDenyCode(reasonText)
-
-    Dim phaseText As String
-    phaseText = ExecPolicyDenyPhase(reasonText)
-
-    msgText = "FFI CALL(DLL) event=ffi_policy_decision mode=" & modeText & " decision="
-    If allowDecision <> 0 Then
-        msgText &= "allow"
-    Else
-        msgText &= "deny"
-    End If
-
-    msgText &= " lib=" & dllName & " symbol=" & symbolName & " sig=" & signatureText & " conv=" & callingConventionText
-    msgText &= " abi=" & ExecGetActiveFfiAbiName()
-    msgText &= " allow=" & LTrim(Str(allowDecision)) & " deny_code=" & LTrim(Str(denyCode))
-    msgText &= " phase=" & phaseText
-    If reasonText <> "" Then msgText &= " reason=" & reasonText
-
-    If allowDecision <> 0 Then
-        DiagBilgi msgText
-    Else
-        DiagUyari msgText
-    End If
-End Sub
+' FFI policy/resolver/invoke flow is split out so this file stays focused on
+' shared eval helpers and routine/label support.
+#include once "exec_ffi_runtime.fbs"

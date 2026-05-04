@@ -6,20 +6,35 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
         Return 0
     End If
 
-    If UCase(ps.ast.nodes(lhs).kind) <> "IDENT" Then
-        errText = "exec: assign lhs must be ident"
-        Return 0
-    End If
-
     Dim rhsValue As ExecValue
     If ExecEvalExpression(ps, st.right, es, rhsValue, errText) = 0 Then Return 0
 
-    Dim targetName As String
-    targetName = ps.ast.nodes(lhs).value
-
     Dim curValue As ExecValue
-    If ExecGetVarValue(es, targetName, curValue) = 0 Then
-        ExecValueInit curValue
+    Dim targetName As String
+    Dim targetIdx As Integer
+    Dim arrayVarIdx As Integer
+    Dim arrayElemIdx As Integer
+    Dim isArrayTarget As Integer
+    isArrayTarget = 0
+
+    If UCase(ps.ast.nodes(lhs).kind) = "IDENT" Then
+        targetName = ps.ast.nodes(lhs).value
+        If ExecGetVarValue(es, targetName, curValue) = 0 Then
+            ExecValueInit curValue
+        End If
+    ElseIf ExecTryResolveArrayAccess(ps, es, lhs, arrayVarIdx, arrayElemIdx, errText) <> 0 Then
+        isArrayTarget = 1
+        targetName = es.vars(arrayVarIdx).nameText
+        If ExecGetArrayElement(es, arrayVarIdx, arrayElemIdx, curValue) = 0 Then
+            errText = "exec: array element read failed"
+            Return 0
+        End If
+    ElseIf UCase(ps.ast.nodes(lhs).kind) = "FIELD_EXPR" Then
+        If ExecReadFieldValue(ps, es, lhs, curValue, errText) = 0 Then Return 0
+        targetName = "__FIELD__"
+    Else
+        If errText = "" Then errText = "exec: assign lhs must be ident, indexed array, or field"
+        Return 0
     End If
 
     Dim opText As String
@@ -54,7 +69,7 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
             Return 0
         End If
         ExecValueSetFloat outValue, ExecValueToFloat(curValue) / ExecValueToFloat(rhsValue)
-    Case "\\="
+    Case "\="
         If ExecValueToInteger(rhsValue) = 0 Then
             errText = "exec: integer division by zero"
             Return 0
@@ -73,9 +88,17 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
         Return 0
     End Select
 
-    ExecSetVarValue es, targetName, outValue
+    If UCase(ps.ast.nodes(lhs).kind) = "FIELD_EXPR" Then
+        If ExecWriteFieldValue(ps, es, lhs, outValue, errText) = 0 Then Return 0
+    ElseIf isArrayTarget <> 0 Then
+        If ExecSetArrayElement(es, arrayVarIdx, arrayElemIdx, outValue) = 0 Then
+            errText = "exec: array element write failed"
+            Return 0
+        End If
+    Else
+        ExecSetVarValue es, targetName, outValue
+    End If
 
-    Dim targetIdx As Integer
     targetIdx = ExecFindVar(es, targetName)
     If targetIdx <> -1 Then
         Dim targetDeclType As String
@@ -118,21 +141,49 @@ End Function
 Private Function ExecRunIncDecStmt(ByRef ps As ParseState, ByRef es As ExecState, ByRef st As ASTNode, ByRef errText As String) As Integer
     Dim lhs2 As Integer
     lhs2 = st.left
-    If lhs2 = -1 Or UCase(ps.ast.nodes(lhs2).kind) <> "IDENT" Then
-        errText = "exec: inc/dec target must be ident"
+    If lhs2 = -1 Then
+        errText = "exec: inc/dec target missing"
         Return 0
     End If
 
     Dim curVal As Integer
-    curVal = ExecGetVar(es, ps.ast.nodes(lhs2).value)
+    Dim nextValue As ExecValue
+    Dim arrayVarIdx2 As Integer
+    Dim arrayElemIdx2 As Integer
+    If UCase(ps.ast.nodes(lhs2).kind) = "IDENT" Then
+        curVal = ExecGetVar(es, ps.ast.nodes(lhs2).value)
+    ElseIf ExecTryResolveArrayAccess(ps, es, lhs2, arrayVarIdx2, arrayElemIdx2, errText) <> 0 Then
+        If ExecGetArrayElement(es, arrayVarIdx2, arrayElemIdx2, nextValue) = 0 Then
+            errText = "exec: inc/dec array read failed"
+            Return 0
+        End If
+        curVal = ExecValueToInteger(nextValue)
+    ElseIf UCase(ps.ast.nodes(lhs2).kind) = "FIELD_EXPR" Then
+        If ExecReadFieldValue(ps, es, lhs2, nextValue, errText) = 0 Then Return 0
+        curVal = ExecValueToInteger(nextValue)
+    Else
+        If errText = "" Then errText = "exec: inc/dec target must be ident, indexed array, or field"
+        Return 0
+    End If
 
     If st.op = "++" Then
-        ExecSetVar es, ps.ast.nodes(lhs2).value, curVal + 1
+        ExecValueSetInteger nextValue, curVal + 1
     ElseIf st.op = "--" Then
-        ExecSetVar es, ps.ast.nodes(lhs2).value, curVal - 1
+        ExecValueSetInteger nextValue, curVal - 1
     Else
         errText = "exec: unknown inc/dec op"
         Return 0
+    End If
+
+    If UCase(ps.ast.nodes(lhs2).kind) = "IDENT" Then
+        ExecSetVar es, ps.ast.nodes(lhs2).value, nextValue.intValue
+    ElseIf UCase(ps.ast.nodes(lhs2).kind) = "FIELD_EXPR" Then
+        If ExecWriteFieldValue(ps, es, lhs2, nextValue, errText) = 0 Then Return 0
+    Else
+        If ExecSetArrayElement(es, arrayVarIdx2, arrayElemIdx2, nextValue) = 0 Then
+            errText = "exec: inc/dec array write failed"
+            Return 0
+        End If
     End If
 
     Return 1

@@ -1,0 +1,3 @@
+DIM a AS I32
+INPUT a
+PRINT a

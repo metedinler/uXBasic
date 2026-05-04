@@ -5,6 +5,8 @@ Kapsam: Dilin tum katmanlarindaki eksikleri sistematik olarak kapatma plani
 
 ## 1) Referans Dokumanlar
 
+> Not: Snapshot oluşturuldu: `.copilot/plans_update.md` ve `.copilot/todo.md` (2026-05-02). Devam noktası ve özet için bu dosyalara bakınız.
+
 1. Operasyonel bosluk matrisi: reports/uxbasic_operasyonel_eksiklik_matrisi.md
 2. IR + Runtime master plan: spec/IR_RUNTIME_MASTER_PLAN.md
 3. Giris kriterleri: spec/NEXT_PHASE_ENTRY_CRITERIA.md

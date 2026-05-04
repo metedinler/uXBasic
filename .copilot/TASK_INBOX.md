@@ -29,6 +29,17 @@ Candidate files:
 Evidence required:
 - prompt and value parity across AST/MIR/x64
 
+3. 8A-0 test80 gate stabilization
+Owner: Agent-B
+Priority: P0
+Candidate files:
+- tests/basicCodeTests/80_h8a_operator_numeric_parity.bas
+Evidence required:
+- self-build + AST JSON + semantic + AST/MIR/x64 gate rerun
+
 ## Hold
 
 - EVENT/THREAD/PARALEL/PIPE/SLOT closure starts after #1 and #2.
+
+Claimed in this cycle:
+- tests/basicCodeTests/80_h8a_operator_numeric_parity.bas

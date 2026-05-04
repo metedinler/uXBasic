@@ -18,11 +18,15 @@ Private Sub Main()
         "MODULE Net" & Chr(10) & _
         "USING Core.IO" & Chr(10) & _
         "ALIAS Tick = CALL ( DLL , ""kernel32.dll"" , ""GetTickCount"" , I32, STDCALL )" & Chr(10) & _
+        "ALIAS TickAs AS CALL ( DLL , ""kernel32.dll"" , ""GetTickCount"" , I32, STDCALL )" & Chr(10) & _
+        "ALIAS TickBare CALL ( DLL , ""kernel32.dll"" , ""GetTickCount"" , I32, STDCALL )" & Chr(10) & _
         "END MODULE" & Chr(10) & _
         "END NAMESPACE" & Chr(10) & _
         "MAIN" & Chr(10) & _
         "a = 33" & Chr(10) & _
         "CALL(Tick, a)" & Chr(10) & _
+        "CALL(TickAs, a)" & Chr(10) & _
+        "CALL(TickBare, a)" & Chr(10) & _
         "POKED 4320, a" & Chr(10) & _
         "END MAIN"
 

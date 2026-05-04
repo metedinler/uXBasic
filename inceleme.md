@@ -123,27 +123,6 @@ Durum etiketleri:
 - `PCK2.MD`: tarihsel + plan + guncel metin karisik oldugu icin tek basina kaynak gercek olmaya uygun degil.
 - `ProgramcininElKitabi.md`: PCK2 ile benzer sekilde karisik/miras unsurlar tasiyor.
 
-## 7) Sonuc
-
-PCK2.MD, "tamamen yanlis" degil; fakat su anki haliyle "tek referans" olarak guvenilir degil. En buyuk sorun teknik eksiklikten cok dokuman drift'i:
-- Kodda olanlarin "yok" yazilmasi,
-- Miras/planned kisimlarin aktifmis gibi sunulmasi,
-- Tekrarlayan append-only parcalar nedeniyle celiski uretmesi.
-
-## 8) Aksiyon Onerisi (Kisa)
-
-1. PCK2'ye bir "durum sozlugu" tablosu eklenmeli: `implemented | partial | planned | legacy-disabled | legacy-only`.
-2. Her komut satiri icin tek kanonik referans verilmeli:
-- kod: ilgili `src/*` dosyasi,
-- test: ilgili `tests/manifest.csv` test id,
-- plan: `tests/plan/command_compatibility_win11.csv` satiri.
-3. PCK2 duplicate temizligi tek seferde degil, append-only kurali bozulmadan "deprecated section" isaretlemesiyle yapilmali.
-4. Donanima yakin komutlar acikca "miras/disabled on Win11 user-mode" etiketiyle ayrilmali.
-
----
-
-Not: Bu inceleme, PCK2'nin tum satirlarinin okunmasi ve kod/test dokumanlariyla capraz kontrolune dayanir; ozellikle phase19/phase20 memory+inline alaninda PCK2 iddialarinin bir kismi guncel kodla uyumsuzdur.
-
 ## EK-01: Tablolu Kanit Ozeti (Append-Only)
 
 Bu ek bolum, "yalnizca yok komutlar" degil, hem kodda olan hem kodda olmayan komut gruplarini birlikte ve tek tabloda gostermek icin eklendi.

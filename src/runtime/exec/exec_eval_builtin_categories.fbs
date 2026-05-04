@@ -2,9 +2,19 @@ Private Function ExecEvalDllCallCore(ByRef ps As ParseState, ByRef es As ExecSta
     Dim ffiArgCount As Integer
     ffiArgCount = ExecChildCount(ps, callNodeIdx)
 
+    Dim effectiveArgStartPos As Integer
+    effectiveArgStartPos = argStartPos
+
+    Dim mixedArgTypes(0 To 15) As String
+    Dim mixedArgTypeCount As Integer
+    Dim mixedTypeStatus As Integer
+    mixedTypeStatus = ExecTryReadDllArgTypeList(ps, callNodeIdx, argStartPos, ffiArgCount, mixedArgTypes(), mixedArgTypeCount, errText)
+    If mixedTypeStatus < 0 Then Return 0
+    If mixedTypeStatus > 0 Then effectiveArgStartPos = argStartPos + 1
+
     If signatureText = "BYREF" Then
         Dim byrefNode As Integer
-        byrefNode = ExecChildAt(ps, callNodeIdx, argStartPos)
+        byrefNode = ExecChildAt(ps, callNodeIdx, effectiveArgStartPos)
         If byrefNode = -1 Or UCase(ps.ast.nodes(byrefNode).kind) <> "IDENT" Then
             errText = "exec: CALL(DLL) BYREF requires addressable target argument (" & LTrim(Str(UXB_FFI_ERR_BYREF_TARGET)) & ")"
             Return 0
@@ -12,7 +22,7 @@ Private Function ExecEvalDllCallCore(ByRef ps As ParseState, ByRef es As ExecSta
     End If
 
     Dim ai As Integer
-    For ai = argStartPos To ffiArgCount - 1
+    For ai = effectiveArgStartPos To ffiArgCount - 1
         Dim argNode As Integer
         argNode = ExecChildAt(ps, callNodeIdx, ai)
         If argNode = -1 Then
@@ -20,7 +30,14 @@ Private Function ExecEvalDllCallCore(ByRef ps As ParseState, ByRef es As ExecSta
             Return 0
         End If
 
-        If ExecValidateDllMarshalArg(ps, es, argNode, signatureText, errText) = 0 Then Return 0
+        Dim argSig As String
+        If mixedTypeStatus > 0 Then
+            argSig = mixedArgTypes(ai - effectiveArgStartPos)
+        Else
+            argSig = signatureText
+        End If
+
+        If ExecValidateDllMarshalArg(ps, es, argNode, argSig, errText) = 0 Then Return 0
     Next ai
 
     Dim denyReason As String
@@ -65,19 +82,28 @@ Private Function ExecEvalDllCallCore(ByRef ps As ParseState, ByRef es As ExecSta
     resolverMode = ExecGetFfiResolverMode()
 
     Dim ffiArgRuntimeCount As Integer
-    ffiArgRuntimeCount = ffiArgCount - argStartPos
+    ffiArgRuntimeCount = ffiArgCount - effectiveArgStartPos
     If ffiArgRuntimeCount < 0 Then ffiArgRuntimeCount = 0
 
-    If ExecGetActiveFfiAbiName() = "WIN64-MSABI" And resolverMode <> "ENFORCE" Then
+    If ExecGetActiveFfiAbiName() = "WIN64-MSABI" Then
         Dim x64InvokedValue As Integer
         Dim x64InvokedOut As Integer
         Dim x64InvokeErr As String
-        If ExecTryInvokeResolvedX64I32(ps, es, callNodeIdx, argStartPos, dllName, symbolName, signatureText, callingConventionText, ffiArgRuntimeCount, x64InvokedValue, x64InvokedOut, x64InvokeErr) = 0 Then
+        If mixedTypeStatus > 0 Then
+            If ExecTryInvokeResolvedX64Mixed(ps, es, callNodeIdx, effectiveArgStartPos, dllName, symbolName, signatureText, callingConventionText, mixedArgTypes(), ffiArgRuntimeCount, x64InvokedValue, x64InvokedOut, x64InvokeErr) = 0 Then
+                If resolverMode = "ENFORCE" Then
+                    errText = x64InvokeErr
+                    Return 0
+                End If
+                If x64InvokeErr <> "" Then UxbWarn "FFI x64 invoke report-only: " & x64InvokeErr
+                Return 0
+            End If
+        ElseIf ExecTryInvokeResolvedX64I32(ps, es, callNodeIdx, effectiveArgStartPos, dllName, symbolName, signatureText, callingConventionText, ffiArgRuntimeCount, x64InvokedValue, x64InvokedOut, x64InvokeErr) = 0 Then
             If resolverMode = "ENFORCE" Then
                 errText = x64InvokeErr
                 Return 0
             End If
-            If x64InvokeErr <> "" Then DiagUyari "FFI x64 invoke report-only: " & x64InvokeErr
+            If x64InvokeErr <> "" Then UxbWarn "FFI x64 invoke report-only: " & x64InvokeErr
             Return 0
         End If
 
@@ -95,9 +121,18 @@ Private Function ExecEvalDllCallCore(ByRef ps As ParseState, ByRef es As ExecSta
             errText = resolverErr
             Return 0
         End If
-        If resolverErr <> "" Then DiagUyari "FFI x86 resolver report-only: " & resolverErr
+        If resolverErr <> "" Then UxbWarn "FFI x86 resolver report-only: " & resolverErr
+
+        Dim directInvokedValue As Integer
+        Dim directInvokedOut As Integer
+        Dim directInvokeErr As String
+        If ExecTryInvokeDirectX86I32(ps, es, callNodeIdx, effectiveArgStartPos, dllName, symbolName, signatureText, callingConventionText, ffiArgRuntimeCount, directInvokedValue, directInvokedOut, directInvokeErr) = 0 Then
+            If directInvokeErr <> "" Then UxbWarn "FFI x86 direct invoke report-only: " & directInvokeErr
+        ElseIf directInvokedOut <> 0 Then
+            Return directInvokedValue
+        End If
     Else
-        DiagBilgi "FFI x86 resolver matched cleanup=" & cleanupType & " args=" & LTrim(Str(ffiArgRuntimeCount))
+        UxbInfo "FFI x86 resolver matched cleanup=" & cleanupType & " args=" & LTrim(Str(ffiArgRuntimeCount))
 
         Dim invokedValue As Integer
         Dim invokedOut As Integer
@@ -107,7 +142,7 @@ Private Function ExecEvalDllCallCore(ByRef ps As ParseState, ByRef es As ExecSta
                 errText = invokeErr
                 Return 0
             End If
-            If invokeErr <> "" Then DiagUyari "FFI x86 invoke proof report-only: " & invokeErr
+            If invokeErr <> "" Then UxbWarn "FFI x86 invoke proof report-only: " & invokeErr
         ElseIf invokedOut <> 0 Then
             Return invokedValue
         End If
@@ -122,16 +157,28 @@ Private Function ExecEvalBuiltinFfiCategory(ByRef ps As ParseState, ByRef es As 
     callKey = UCase(Trim(callName))
 
     Select Case callKey
-    Case "DLL"
+    Case "DLL", "CALL"
         Dim ffiArgCount As Integer
         ffiArgCount = ExecChildCount(ps, callNodeIdx)
-        If ffiArgCount < 4 Then
+        Dim ffiBasePos As Integer
+        ffiBasePos = 0
+        If callKey = "CALL" Then
+            Dim markerNode As Integer
+            markerNode = ExecChildAt(ps, callNodeIdx, 0)
+            If markerNode = -1 Or UCase(ps.ast.nodes(markerNode).value) <> "DLL" Then
+                errText = "exec: unsupported call CALL"
+                Return 0
+            End If
+            ffiBasePos = 1
+        End If
+
+        If ffiArgCount < ffiBasePos + 3 Then
             errText = "exec: CALL(DLL) expects at least 4 arguments (" & LTrim(Str(UXB_FFI_ERR_BAD_ARITY)) & ")"
             Return 0
         End If
 
         Dim dllNode As Integer
-        dllNode = ExecChildAt(ps, callNodeIdx, 0)
+        dllNode = ExecChildAt(ps, callNodeIdx, ffiBasePos)
         If dllNode = -1 Or UCase(ps.ast.nodes(dllNode).kind) <> "STRING" Then
             errText = "exec: CALL(DLL) library must be string literal (" & LTrim(Str(UXB_FFI_ERR_BAD_LIB)) & ")"
             Return 0
@@ -143,7 +190,7 @@ Private Function ExecEvalBuiltinFfiCategory(ByRef ps As ParseState, ByRef es As 
         End If
 
         Dim symbolNode As Integer
-        symbolNode = ExecChildAt(ps, callNodeIdx, 1)
+        symbolNode = ExecChildAt(ps, callNodeIdx, ffiBasePos + 1)
         If symbolNode = -1 Or UCase(ps.ast.nodes(symbolNode).kind) <> "STRING" Then
             errText = "exec: CALL(DLL) symbol must be string literal (" & LTrim(Str(UXB_FFI_ERR_BAD_SYMBOL)) & ")"
             Return 0
@@ -157,7 +204,7 @@ Private Function ExecEvalBuiltinFfiCategory(ByRef ps As ParseState, ByRef es As 
         End If
 
         Dim sigNode As Integer
-        sigNode = ExecChildAt(ps, callNodeIdx, 2)
+        sigNode = ExecChildAt(ps, callNodeIdx, ffiBasePos + 2)
         If sigNode = -1 Or UCase(ps.ast.nodes(sigNode).kind) <> "KEYWORD_REF" Then
             errText = "exec: CALL(DLL) signature token must be keyword (" & LTrim(Str(UXB_FFI_ERR_BAD_SIGNATURE)) & ")"
             Return 0
@@ -174,11 +221,11 @@ Private Function ExecEvalBuiltinFfiCategory(ByRef ps As ParseState, ByRef es As 
         callingConventionText = "CDECL"
 
         Dim argStartPos As Integer
-        argStartPos = 3
+        argStartPos = ffiBasePos + 3
 
-        If ffiArgCount >= 5 Then
+        If ffiArgCount >= ffiBasePos + 5 Then
             Dim convNode As Integer
-            convNode = ExecChildAt(ps, callNodeIdx, 3)
+            convNode = ExecChildAt(ps, callNodeIdx, ffiBasePos + 3)
             If convNode <> -1 And UCase(ps.ast.nodes(convNode).kind) = "KEYWORD_REF" Then
                 Dim convCandidate As String
                 convCandidate = UCase(Trim(ps.ast.nodes(convNode).value))
@@ -187,7 +234,7 @@ Private Function ExecEvalBuiltinFfiCategory(ByRef ps As ParseState, ByRef es As 
                     Return 0
                 End If
                 callingConventionText = convCandidate
-                argStartPos = 4
+                argStartPos = ffiBasePos + 4
             End If
         End If
 

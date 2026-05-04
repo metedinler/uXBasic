@@ -26,6 +26,7 @@ Dim Shared gX64SymbolLabels(0 To 4095) As String
 Dim Shared gX64GlobalKeys(0 To 4095) As String
 Dim Shared gX64GlobalLabels(0 To 4095) As String
 Dim Shared gX64GlobalSlots(0 To 4095) As Integer
+Dim Shared gX64GlobalElemBytes(0 To 4095) As Integer
 Dim Shared gX64LoopVars(0 To 255) As String
 Dim Shared gX64LoopStartLabels(0 To 255) As String
 Dim Shared gX64LoopEndLabels(0 To 255) As String
@@ -36,12 +37,27 @@ Dim Shared gX64IfDepth As Integer
 Dim Shared gX64LocalKeys(0 To 2047) As String
 Dim Shared gX64LocalOffsets(0 To 2047) As Integer
 Dim Shared gX64LocalSlots(0 To 2047) As Integer
+Dim Shared gX64LocalElemBytes(0 To 2047) As Integer
 Dim Shared gX64ParamNames(0 To 255) As String
+Dim Shared gX64VarTypeKeys(0 To 4095) As String
+Dim Shared gX64VarTypeNames(0 To 4095) As String
+Dim Shared gX64VarTypeCount As Integer
 Dim Shared gX64RoutineKeys(0 To 1023) As String
 Dim Shared gX64RoutineArgCounts(0 To 1023) As Integer
 Dim Shared gX64RoutineIsFunction(0 To 1023) As Integer
+Dim Shared gX64RoutineReturnTypes(0 To 1023) As String
 Dim Shared gX64GlobalLabelCounter As Integer
 Dim Shared gX64FfiArgCounts(0 To 1023) As Integer
+
+' VTable mapping: class -> slot counts and entries
+Dim Shared gX64VTableClassKeys(0 To 1023) As String
+Dim Shared gX64VTableClassSlots(0 To 1023) As Integer
+Dim Shared gX64VTableClassCount As Integer
+
+Dim Shared gX64VTableEntryKeys(0 To 4095) As String ' format: CLASS_METHOD (e.g. MYCLASS_SPEAK)
+Dim Shared gX64VTableEntrySlots(0 To 4095) As Integer
+Dim Shared gX64VTableEntryClassIndex(0 To 4095) As Integer
+Dim Shared gX64VTableEntryCount As Integer
 
 Declare Function X64EmitNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function GenerateStatement(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
@@ -91,7 +107,15 @@ Declare Function X64EmitInputFileStmt(ByRef ps As ParseState, ByVal nodeIdx As I
 Declare Function X64EmitUnknownNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function X64EmitCallNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Function X64EmitExprToRax(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+Declare Function X64EmitExprToXmm0(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+Declare Function X64EmitExprToXmm0As(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByVal targetKind As Integer, ByRef errText As String) As Integer
+Declare Function X64EmitCallNodeToXmm0(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByVal targetKind As Integer, ByRef errText As String) As Integer
+Declare Function X64EmitCallNodeToXmm0As(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByVal targetKind As Integer, ByRef errText As String) As Integer
 Declare Function X64ComputeDimSlotCount(ByRef ps As ParseState, ByVal declNode As Integer) As Integer
+Declare Function X64TryGetLocalElemBytes(ByRef cg As X64CodegenContext, ByRef varName As String, ByRef elemBytesOut As Integer) As Integer
+Declare Function X64TryGetGlobalElemBytes(ByRef cg As X64CodegenContext, ByRef varName As String, ByRef elemBytesOut As Integer) As Integer
+Declare Function X64TryGetRoutineReturnType(ByRef cg As X64CodegenContext, ByRef routineName As String, ByRef returnTypeOut As String) As Integer
+Declare Function X64GetElemBytesForDeclaredType(ByRef ps As ParseState, ByRef typeName As String) As Integer
 Declare Function X64ExprReturnsString(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
 Declare Sub X64EmitBuiltinSupport(ByRef cg As X64CodegenContext)
 Declare Sub X64EmitFfiSupport(ByRef cg As X64CodegenContext)
@@ -99,12 +123,27 @@ Declare Sub X64CollectRoutineLocals(ByRef ps As ParseState, ByVal nodeIdx As Int
 Declare Function X64TryExtractIndexedTarget(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef baseNameOut As String, ByRef indexExprOut As Integer) As Integer
 Declare Function X64TryFindGlobalInfo(ByRef cg As X64CodegenContext, ByRef varName As String, ByRef labelOut As String, ByRef slotCountOut As Integer) As Integer
 Declare Function X64EmitLoadIndexedGlobal(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef varName As String, ByVal indexExpr As Integer, ByRef errText As String) As Integer
+Declare Function X64EmitLoadIndexedLocalXmm(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef varName As String, ByVal indexExpr As Integer, ByRef errText As String) As Integer
+Declare Function X64EmitLoadIndexedGlobalXmm(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef varName As String, ByVal indexExpr As Integer, ByRef errText As String) As Integer
+Declare Function X64EmitStoreIndexedLocalXmm(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef varName As String, ByVal indexExpr As Integer, ByRef errText As String) As Integer
+Declare Function X64EmitStoreIndexedGlobalXmm(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef varName As String, ByVal indexExpr As Integer, ByRef errText As String) As Integer
+Declare Sub X64EmitStoreVarXmm(ByRef cg As X64CodegenContext, ByRef varName As String)
 Declare Function X64EmitStoreIndexedGlobal(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef varName As String, ByVal indexExpr As Integer, ByRef errText As String) As Integer
-Declare Function X64EnsureLocalSlot(ByRef cg As X64CodegenContext, ByRef varName As String, ByVal slotCount As Integer) As Integer
+Declare Function X64EnsureLocalSlot(ByRef cg As X64CodegenContext, ByRef varName As String, ByVal elemCount As Integer, ByVal elemBytes As Integer = 8) As Integer
 Declare Sub X64RegisterRoutineSignature(ByRef ps As ParseState, ByVal routineNode As Integer, ByRef cg As X64CodegenContext)
 Declare Function X64TryGetRoutineSignature(ByRef cg As X64CodegenContext, ByRef routineName As String, ByRef argCountOut As Integer, ByRef isFunctionOut As Integer) As Integer
 Declare Sub X64RegisterProcedureParams(ByRef ps As ParseState, ByVal routineNode As Integer, ByRef cg As X64CodegenContext)
+Declare Sub X64RegisterVarType(ByRef cg As X64CodegenContext, ByRef varName As String, ByRef typeName As String)
+Declare Function X64TryGetVarType(ByRef cg As X64CodegenContext, ByRef varName As String, ByRef typeNameOut As String) As Integer
 Declare Function X64CollectDllCallPlan(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext) As Integer
 Declare Function X64EmitDllCallNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
 Declare Sub X64EmitDllExterns(ByRef cg As X64CodegenContext)
+
+' VTable helpers
+Declare Function X64ClassVTableLabel(ByRef className As String) As String
+Declare Function X64EmitClassVTable(ByRef ps As ParseState, ByVal classNode As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+Declare Function X64FindVTableSlot(ByRef cg As X64CodegenContext, ByRef className As String, ByRef methodName As String, ByRef slotOut As Integer) As Integer
+Declare Function X64RegisterClassVTable(ByRef ps As ParseState, ByVal classNodeIdx As Integer, ByRef cg As X64CodegenContext) As Integer
+Declare Function X64FindClassDeclNode(ByRef ps As ParseState, ByRef classTypeName As String) As Integer
+Declare Function X64FindRoutineSymbolName(ByRef ps As ParseState, ByRef routineNameRaw As String, ByRef symbolOut As String) As Integer
 

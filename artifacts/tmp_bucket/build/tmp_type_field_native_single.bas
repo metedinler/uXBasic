@@ -1,0 +1,7 @@
+TYPE V2
+    X AS I32
+    Y AS I32
+END TYPE
+DIM p AS V2
+p.X = 10
+PRINT p.X

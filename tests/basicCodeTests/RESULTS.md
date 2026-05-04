@@ -1,5 +1,25 @@
 # basicCodeTests Sonuc Raporu
 
+## 2026-04-23 FFI/GUI guncellemesi
+
+Bu turda `CALL(DLL)` artik yalnizca stub/no-op seviyesinde degil:
+
+- AST interpreter `kernel32.GetTickCount`, `kernel32.Sleep`, `user32.GetSystemMetrics` ve `user32.MessageBeep` icin gercek Windows DLL cagrisi yapabiliyor.
+- MIR interpreter ayni `CALL(DLL, ...)` wrapper syntax'ini `DLL` opcode yoluna normalize edip gercek DLL sonucu donduruyor.
+- Native x64 build `ffi_resolver.c` uretip `LoadLibraryA` + `GetProcAddress` ile `__uxb_ffi_symptr_N` alanlarini dolduruyor.
+- `MessageBoxA` icin karisik imza syntax'i destekleniyor: `"PTR,STRPTR,STRPTR,I32"`.
+- GUI smoke icin `MessageBeep` otomatik calisir; `MessageBoxA` interaktif oldugu icin exe build edilir ama otomatik testte calistirilmaz.
+
+Son dogrulanan smoke sonuclari:
+
+| Ornek | AST interpreter | MIR interpreter | x64 build/run | Not |
+|---|---|---|---|---|
+| `31_uxb_windows_kernel_sleep_tick.bas` | OK, pozitif delta | OK, pozitif delta | OK, pozitif delta | `GetTickCount` + `Sleep` gercek DLL cagrisi |
+| `32_uxb_windows_user32_metrics.bas` | OK, `1920x1080` | OK, `1920x1080` | OK, `1920x1080` | `GetSystemMetrics` + `MessageBeep` |
+| `33_uxb_windows_user32_messagebox_interactive.bas` | SKIP | SKIP | BUILD OK | Interaktif `MessageBoxA`, otomatik kosuda calistirilmaz |
+
+Kalan not: x64 string/print codegen yuzeyinde uzun iki string'in ayni FFI smoke icinde birlikte kullanilmasiyla tetiklenen ayri bir kirilganlik gozlemlendi; 31 no'lu smoke label'lari bu nedenle kisa tutuldu. FFI resolver/native DLL cagrisi bundan bagimsiz olarak calisiyor.
+
 ## Uretilen artefact yapisi
 
 Her yeni ornek icin su ciktilar yazildi:
@@ -22,9 +42,9 @@ Native x64 build gecen orneklerde ek olarak:
 
 | Ornek | AST JSON | Inventory JSON | Pipeline JSON | Interpreter | x64 build | Not |
 |---|---|---|---|---|---|---|
-| `31_uxb_windows_kernel_sleep_tick.bas` | OK | OK | OK | FAIL | OK | `CALL(DLL)` asm lane'e iniyor ve exe uretiliyor; fakat native resolver olmadigi icin stub no-op ve `0` donuyor |
-| `32_uxb_windows_user32_metrics.bas` | OK | OK | OK | FAIL | OK | `CALL(DLL)` user32 probe artik link oluyor; gercek API sonucu yerine resolver eksigi nedeniyle `0` beklenmeli |
-| `33_uxb_windows_user32_messagebox_interactive.bas` | OK | OK | OK | SKIP | OK | interaktif GUI demo exe uretiyor; runtime davranisi bugun stub lane ile sinirli |
+| `31_uxb_windows_kernel_sleep_tick.bas` | OK | OK | OK | OK | OK | AST/MIR/native x64 gercek `GetTickCount` + `Sleep` sonucu donduruyor |
+| `32_uxb_windows_user32_metrics.bas` | OK | OK | OK | OK | OK | AST/MIR/native x64 `GetSystemMetrics` icin gercek ekran olcusu donduruyor |
+| `33_uxb_windows_user32_messagebox_interactive.bas` | OK | OK | OK | SKIP | OK | interaktif GUI demo exe uretiyor; otomatik testte calistirilmaz |
 | `34_uxb_mpfr_probe.bas` | OK | OK | OK | FAIL | OK | MPFR probe derlenebilir; gercek DLL sembol cozumleme henuz yok |
 | `35_uxb_arb_flint_probe.bas` | OK | OK | OK | FAIL | OK | Arb/FLINT probe derlenebilir; runtime no-op fallback calisir |
 | `36_uxb_lua54_probe.bas` | OK | OK | OK | FAIL | OK | Lua probe derlenebilir; native FFI resolver eksik |
@@ -124,28 +144,28 @@ uretildi.
 
 uretildi ve exe'ler calisti.
 
-### 3. `CALL(DLL)` native lane artik derleniyor, ama tam calismiyor
+### 3. `CALL(DLL)` native lane artik gercek resolver ile calisiyor
 
-Yeni DLL probe orneklerinde parse ve JSON katmani basarili. Son turda native x64 emitter bu dugumleri asm'e indirmeye basladi ve exe zinciri artik kopmuyor. Ancak:
+Yeni DLL probe orneklerinde parse ve JSON katmani basarili. Son turda native x64 emitter bu dugumleri asm'e indiriyor, `ffi_resolver.c` uretiyor ve build sirasinda resolver objesini linkliyor.
 
-- compiler driver uzerinden `--execmem` kosulari nonzero dondu
-- x64 native build artik asm + obj + exe uretiyor
-- gercek `LoadLibrary` / `GetProcAddress` tabanli resolver henuz eklenmedigi icin stub lane sembol baglayamazsa kontrollu no-op yapip `0` donuyor
+- `__uxb_ffi_symptr_N` sembolleri resolver tarafindan dolduruluyor.
+- Native x64 exe `GetSystemMetrics` gibi Windows API cagrilarindan gercek deger donduruyor.
+- Stub lane hala kontrollu fallback olarak duruyor; sembol cozulmezse crash yerine `0` donuyor.
 
 Bu, repodaki mevcut durumun su oldugunu gosterir:
 
-- `CALL(DLL)` icin native lowering boslugu kapatildi
-- `source.bas -> --build-x64 -> program.exe` yolu artik `CALL(DLL)` ornekleri icin de acik
-- fakat bu yol bugun tam FFI invocation degil; "derlenebilir stub lane" seviyesinde
+- `CALL(DLL)` icin native lowering ve resolver boslugu kapatildi.
+- `source.bas -> --build-x64 -> program.exe` yolu Windows sistem DLL ornekleri icin gercek calisma seviyesinde.
+- Harici DLL ornekleri DLL yoksa skip/fallback davranisi ile ele alinmali.
 
 ### 4. GUI API kullanimi icin bugunku pratik yol
 
 Win32 GUI tarafinda bugunku repo ile iki seviye vardir:
 
-1. parse/json/template seviyesi
-2. gercek GUI runtime icin ek FFI marshalling ve resolver ihtiyaci
+1. otomatik smoke: `MessageBeep`
+2. interaktif smoke: `MessageBoxA`
 
-`MessageBoxA` gibi karisik tipli API'ler bugunku saf `CALL(DLL)` marshalling modeli icin darbogaz olusturur.
+`MessageBoxA` gibi karisik tipli API'ler icin `"PTR,STRPTR,STRPTR,I32"` arguman tip listesi kullanilir.
 
 ## Sonuc
 
@@ -156,4 +176,4 @@ Bu test turu sonunda repo icin net operasyonel sonuc:
 - Her ornek icin JSON ciktilari uretildi.
 - FFI disi native x64 zinciri obj + exe + run seviyesinde dogrulandi.
 - DLL/FFI ornekleri artik asm + obj + exe seviyesine kadar derlenebiliyor.
-- DLL/FFI runtime davranisi ise halen gecis asamasinda; stub lane sayesinde derleme kirilmiyor ama resolver tamamlanana kadar gercek DLL etkisi beklenmemeli.
+- Windows sistem DLL smoke ornekleri AST, MIR ve native x64 tarafinda gercek DLL etkisi uretiyor.

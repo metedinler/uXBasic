@@ -1,0 +1,6 @@
+CLASS A
+END CLASS
+
+DIM a AS A
+a = NEW A
+Print "OBJADDR="; a

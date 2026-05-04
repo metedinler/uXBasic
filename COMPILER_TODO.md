@@ -2,6 +2,12 @@
 
 Bu not, `src` taramasi sonrasinda compiler katmanlarinin mevcut durumunu ve bu turde yapilan kapatma islerini ozetler.
 
+## Hamle 6 Kapanis Notu (2026-04-30)
+
+- H6 hedefi (CLASS basic object model x64/MIR/AST parity): KAPALI.
+- Kapanis kaniti: `tests/basicCodeTests/60..63` AST/MIR/x64 lane'lerinde PASS.
+- H7 kapsamina gecis icin H6 tarafinda acik kalan blocker yok.
+
 ## Pipeline Ozeti
 
 1. `src/parser/lexer/*`

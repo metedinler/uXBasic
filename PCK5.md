@@ -27,6 +27,29 @@ Aciklama:
 - Programin acik giris noktasi olarak kullanilir.
 - x64 build lane'de final `main`/entry yapisina baglanir.
 
+### `ALIAS`
+
+Syntax:
+
+```basic
+ALIAS Yeni = Eski
+ALIAS Yeni AS Eski
+ALIAS Yeni Eski
+```
+
+Ornek:
+
+```basic
+ALIAS Yaz = PRINT
+ALIAS Tick AS CALL(DLL, "kernel32.dll", "GetTickCount", I32, STDCALL)
+ALIAS SleepMs CALL(DLL, "kernel32.dll", "Sleep", I32, STDCALL)
+```
+
+Aciklama:
+
+- Uc yuzey de ayni `ALIAS_STMT` modeline iner.
+- Alias hedefi basit sembol, qualified ad veya `CALL(DLL, ...)` ifadesi olabilir.
+
 ## 3. Komutlar
 
 ### `PRINT`
@@ -493,7 +516,7 @@ Durum: `OK`
 
 ### Sayisal
 
-`ABS`, `INT`, `FIX`, `SGN`, `SQR`, `SQRT`, `SIN`, `COS`, `TAN`, `ATN`, `EXP`, `LOG`, `CINT`, `CLNG`, `CDBL`, `CSNG`
+`ABS`, `INT`, `FIX`, `SGN`, `SQR`, `SIN`, `COS`, `TAN`, `ATN`, `EXP`, `LOG`, `CINT`, `CLNG`, `CDBL`, `CSNG`
 
 Ornek:
 
@@ -510,6 +533,9 @@ Durum: `OK`
 ### Rastgelelik / Zaman / Tus
 
 `RND`, `RANDOMIZE`, `TIMER`, `INKEY`, `GETKEY`
+
+- `INKEY(flags[,state])`: devamli/queue tabanli tus okuma ve opsiyonel durum ciktisi
+- `GETKEY()`: tek adimlik tus cekme yuzeyi
 
 Ornek:
 
@@ -570,7 +596,9 @@ Durum: `OK`
 ### Karsilastirma
 
 - `=`
+- `==`
 - `<>`
+- `!=`
 - `<`
 - `<=`
 - `>`
@@ -580,6 +608,8 @@ Ornek:
 
 ```basic
 ok = (x >= y)
+same = (x == y)
+diff = (x != y)
 ```
 
 Durum: `OK`
@@ -590,14 +620,27 @@ Durum: `OK`
 - `OR`
 - `XOR`
 - `NOT`
+- `^`
+- unary `!`
+- unary `~`
 
 Ornek:
 
 ```basic
 mask = (1 SHL 4) OR 1
+flip = 6 ^ 3
+empty = !0
+bits = ~0
 ```
 
 Durum: `OK`
+
+Not:
+
+- `==` ve `!=` parserdan native emit'e baglandi.
+- `^` sembolü `XOR` ile ayni islemi ifade eder.
+- unary `!` mantiksal tersleme yuzeyidir.
+- unary `~` bitwise tersleme yuzeyidir.
 
 ### Kaydirma / rotate
 
@@ -681,7 +724,8 @@ Asagidaki tipler kod ve testlerle teyit edilmis cekirdek tip ailesidir:
 - `F64`
 - `BOOLEAN`
 - `STRING`
-- `POINTER` / `PTR` baglamlari
+- `POINTER`: tip sistemi/veri tipi baglami
+- `PTR`: FFI imza tokeni ve pointer-benzeri cagrı baglami
 
 Ornek:
 
@@ -886,6 +930,121 @@ Onerilen kutuphane modeli:
 - `uxb_http_libcurl_template.bas`
 - `uxb_http_winhttp_template.bas`
 - karisik tipli API'ler icin ince C shim
+
+## 12.1 Planlanan Modern API ve Slot Yuzeyi
+
+Asagidaki komutlar yeni tasarim planina alinmistir. Parser/AST MVP'si `EVENT`, `THREAD`, `PARALEL`, `PIPE`, `SLOT`, `ON`, `OFF`, `TRIGGER` ve `|` operatoru icin baslatildi; semantic/runtime/MIR/x64 katmanlari henuz planli durumdadir. Ayrintili teknik plan:
+
+- `UXBASIC_EVENT_PIPE_THREAD_PLAN.md`
+- `COMPILER_COVERAGE.md`
+- `FILE_MANIFEST.md`
+
+### `CALL(API, ...)`
+
+Amac:
+
+- `CALL(DLL, ...)` gibi ham DLL sembolu yerine, kayitli API registry uzerinden dis sistem API'leri cagirmak.
+
+Planlanan syntax:
+
+```basic
+rc = CALL(API, "windows.user32.MessageBoxA", I32, "PTR,STRPTR,STRPTR,I32", 0, "Mesaj", "Baslik", 0)
+```
+
+Durum: `PLANNED`
+
+### `EVENT ... END EVENT`
+
+Planlanan syntax:
+
+```basic
+EVENT OnTick, 1
+    PRINT "tick"
+END EVENT
+
+ON EVENT OnTick
+TRIGGER EVENT OnTick
+OFF EVENT OnTick
+```
+
+Aciklama:
+
+- Event bloklari slot tablosuna kaydedilir.
+- `ON` aktif eder, `OFF` pasif eder, `TRIGGER` calistirir.
+
+Durum: `PARSER-OK, AST-RUNTIME-MVP`
+
+### `THREAD ... END THREAD`
+
+Planlanan syntax:
+
+```basic
+THREAD Worker, 2
+    PRINT "worker"
+END THREAD
+```
+
+Not:
+
+- Canonical ad `THREAD`'dir.
+- `THREAT` kullanimi kaldirilmistir.
+- Ilk MVP deterministik sirali calisma olabilir; gercek OS thread ikinci fazdir.
+
+Durum: `PARSER-OK, AST-RUNTIME-MVP`
+
+### `PARALEL ... END PARALEL`
+
+Planlanan syntax:
+
+```basic
+PARALEL Job, 3
+    PRINT "job"
+END PARALEL
+```
+
+Durum: `PARSER-OK, AST-RUNTIME-MVP`
+
+### `PIPE ... END PIPE` ve pipe operatoru `|`
+
+Planlanan syntax:
+
+```basic
+PIPE Normalize, 4
+    value = INPUT
+    value = value + 1
+    OUTPUT = value
+END PIPE
+
+sonuc = 10 | Normalize
+```
+
+Aciklama:
+
+- Pipe disaridan veri alir.
+- Iceride sirali uXBasic komutlari calisir.
+- Disariya tek cikti sunar.
+
+Durum: `PARSER-OK, AST-RUNTIME-MVP`
+
+### `SLOT`, `<I8/U8 slotsayisi>`, `ON`, `OFF`, `TRIGGER`
+
+Planlanan syntax:
+
+```basic
+SLOT EVENT <U8 32>
+SLOT PIPE <U8 16>
+
+ON EVENT OnTick
+TRIGGER EVENT OnTick
+OFF EVENT OnTick
+```
+
+Aciklama:
+
+- Slot id byte tabanlidir.
+- Her aile icin 0..255 arasi en fazla 256 slot hedeflenir.
+
+Durum: `PARSER-OK, AST-RUNTIME-MVP`
 
 ## 13. Bu Belgede Referanslanan Ornek Dosyalar
 

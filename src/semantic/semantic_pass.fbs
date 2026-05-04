@@ -161,6 +161,57 @@ Private Function SemValidateInputNodes(ByRef ps As ParseState, ByRef errText As 
     Return 1
 End Function
 
+Private Function SemValidateSlotLaneNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        Select Case k
+        Case "EVENT_STMT", "THREAD_STMT", "PARALEL_STMT", "PIPE_STMT"
+            If Trim(ps.ast.nodes(i).value) = "" Then
+                errText = "semantic: " & k & " adi bos olamaz"
+                Return 0
+            End If
+
+            Dim headerNode As Integer
+            headerNode = SemChildAt(ps, i, 0)
+            If headerNode <> -1 And UCase(ps.ast.nodes(headerNode).kind) = "SLOT_HEADER_ARGS" Then
+                If SemChildCount(ps, headerNode) > 1 Then
+                    errText = "semantic: " & k & " en fazla bir slot id alir"
+                    Return 0
+                End If
+            End If
+
+        Case "SLOT_STMT"
+            Dim slotKind As String
+            slotKind = UCase(Trim(ps.ast.nodes(i).value))
+            If slotKind <> "EVENT" And slotKind <> "THREAD" And slotKind <> "PARALEL" And slotKind <> "PIPE" Then
+                errText = "semantic: SLOT turu gecersiz " & ps.ast.nodes(i).value
+                Return 0
+            End If
+            If SemChildCount(ps, i) > 1 Then
+                errText = "semantic: SLOT en fazla bir kapasite ifadesi alir"
+                Return 0
+            End If
+
+        Case "SLOT_CONTROL_STMT", "TRIGGER_STMT"
+            Dim laneKind As String
+            laneKind = UCase(Trim(ps.ast.nodes(i).value))
+            If laneKind <> "EVENT" And laneKind <> "THREAD" And laneKind <> "PARALEL" And laneKind <> "PIPE" Then
+                errText = "semantic: slot kontrol turu gecersiz " & ps.ast.nodes(i).value
+                Return 0
+            End If
+            If SemChildCount(ps, i) < 1 Then
+                errText = "semantic: slot kontrol hedefi eksik"
+                Return 0
+            End If
+        End Select
+    Next i
+
+    Return 1
+End Function
+
 Private Function SemValidateIfSelectNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
     Dim i As Integer
 
@@ -522,11 +573,20 @@ Private Function SemValidateThisMeNode(ByRef ps As ParseState, ByVal nodeIdx As 
     Dim k As String
     k = UCase(ps.ast.nodes(nodeIdx).kind)
 
+    Dim nodeMethodContext As Integer
+    nodeMethodContext = inMethodContext
+    Select Case k
+    Case "CLASS_METHOD_DECL", "CLASS_CONSTRUCTOR_DECL", "CLASS_DESTRUCTOR_DECL"
+        nodeMethodContext = 1
+    Case "SUB_STMT", "FUNCTION_STMT"
+        nodeMethodContext = SemIsMethodRoutineName(ps, ps.ast.nodes(nodeIdx).value)
+    End Select
+
     If k = "IDENT" Then
         Dim identText As String
         identText = UCase(Trim(ps.ast.nodes(nodeIdx).value))
         If identText = "THIS" Or identText = "ME" Then
-            If inMethodContext = 0 Then
+            If nodeMethodContext = 0 Then
                 errText = "semantic: THIS/ME sadece method baglaminda kullanilabilir"
                 Return 0
             End If
@@ -534,17 +594,17 @@ Private Function SemValidateThisMeNode(ByRef ps As ParseState, ByVal nodeIdx As 
     End If
 
     If ps.ast.nodes(nodeIdx).left <> -1 Then
-        If SemValidateThisMeNode(ps, ps.ast.nodes(nodeIdx).left, inMethodContext, errText) = 0 Then Return 0
+        If SemValidateThisMeNode(ps, ps.ast.nodes(nodeIdx).left, nodeMethodContext, errText) = 0 Then Return 0
     End If
 
     If ps.ast.nodes(nodeIdx).right <> -1 Then
-        If SemValidateThisMeNode(ps, ps.ast.nodes(nodeIdx).right, inMethodContext, errText) = 0 Then Return 0
+        If SemValidateThisMeNode(ps, ps.ast.nodes(nodeIdx).right, nodeMethodContext, errText) = 0 Then Return 0
     End If
 
     Dim ch As Integer
     ch = ps.ast.nodes(nodeIdx).firstChild
     Do While ch <> -1
-        If SemValidateThisMeNode(ps, ch, inMethodContext, errText) = 0 Then Return 0
+        If SemValidateThisMeNode(ps, ch, nodeMethodContext, errText) = 0 Then Return 0
         ch = ps.ast.nodes(ch).nextSibling
     Loop
 
@@ -557,16 +617,7 @@ Private Function SemValidateThisMeUsage(ByRef ps As ParseState, ByRef errText As
     Dim st As Integer
     st = ps.ast.nodes(ps.rootNode).firstChild
     Do While st <> -1
-        Dim kindText As String
-        kindText = UCase(ps.ast.nodes(st).kind)
-
-        If kindText = "SUB_STMT" Or kindText = "FUNCTION_STMT" Then
-            Dim isMethodContext As Integer
-            isMethodContext = SemIsMethodRoutineName(ps, ps.ast.nodes(st).value)
-            If SemValidateThisMeNode(ps, st, isMethodContext, errText) = 0 Then Return 0
-        Else
-            If SemValidateThisMeNode(ps, st, 0, errText) = 0 Then Return 0
-        End If
+        If SemValidateThisMeNode(ps, st, 0, errText) = 0 Then Return 0
 
         st = ps.ast.nodes(st).nextSibling
     Loop
@@ -838,6 +889,211 @@ Private Function SemValidateInterfaceContracts(ByRef ps As ParseState, ByRef err
     Return 1
 End Function
 
+' Assign vtable slots for every class (base-first). This annotates
+' CLASS_METHOD_DECL nodes with a child node of kind "CLASS_METHOD_SLOT"
+' whose value is the slot index (decimal). The algorithm matches the
+' collector used by x64 codegen: collect virtual/override methods from
+' the base chain then assign slot indices 0..n-1 in that order.
+'Helper routines for processed keys passed by caller
+Private Function SemVTableIsProcessed(processedKeys() As String, ByRef processedCount As Integer, ByRef cname As String) As Integer
+    Dim i As Integer
+    For i = 0 To processedCount - 1
+        If processedKeys(i) = cname Then Return 1
+    Next
+    Return 0
+End Function
+
+Private Sub SemVTableMarkProcessed(processedKeys() As String, ByRef processedCount As Integer, ByRef cname As String)
+    If processedCount = 0 Then
+        ReDim processedKeys(0)
+    Else
+        ReDim Preserve processedKeys(0 To processedCount)
+    End If
+    processedKeys(processedCount) = cname
+    processedCount += 1
+End Sub
+
+'' SemVTableCollectVMethods removed — logic inlined in SemVTableAssignSlotsForClass
+
+Private Function SemVTableAssignSlotsForClass(ByRef ps As ParseState, ByRef className As String, processedKeys() As String, ByRef processedCount As Integer, ByRef errText As String) As Integer
+    Dim cname As String
+        cname = UCase(Trim(className))
+    If cname = "" Then Return 1
+    If SemVTableIsProcessed(processedKeys(), processedCount, cname) <> 0 Then Return 1
+
+    Dim classNode As Integer
+        classNode = SemFindClassNode(ps, cname)
+    If classNode = -1 Then
+        SemVTableMarkProcessed(processedKeys(), processedCount, cname)
+        Return 1
+    End If
+
+    ' ensure base processed first
+    Dim baseName As String
+    If SemClassBaseName(ps, classNode, baseName) <> 0 Then
+        If SemVTableAssignSlotsForClass(ps, baseName, processedKeys(), processedCount, errText) = 0 Then Return 0
+    End If
+
+    Dim methodNames() As String
+    Dim methodOwners() As String
+    Dim methodCount As Integer
+    methodCount = 0
+
+    ' build inheritance chain and collect virtual/override methods base-first
+    Dim inheritChain() As String
+    Dim inheritChainCount As Integer
+    inheritChainCount = 0
+    Dim cur As String
+    cur = cname
+    Do
+        If inheritChainCount = 0 Then
+            ReDim inheritChain(0)
+        Else
+            ReDim Preserve inheritChain(0 To inheritChainCount)
+        End If
+        inheritChain(inheritChainCount) = cur
+        inheritChainCount = inheritChainCount + 1
+
+        Dim nodeIdx2 As Integer
+        nodeIdx2 = SemFindClassNode(ps, cur)
+        If nodeIdx2 = -1 Then Exit Do
+
+        Dim nextBase As String
+        If SemClassBaseName(ps, nodeIdx2, nextBase) = 0 Then Exit Do
+        If Trim(nextBase) = "" Then Exit Do
+        cur = nextBase
+    Loop
+
+    Dim inci As Integer
+    For inci = inheritChainCount - 1 To 0 Step -1
+        Dim t As String
+        t = inheritChain(inci)
+        Dim nodeIdx3 As Integer
+        nodeIdx3 = SemFindClassNode(ps, t)
+        If nodeIdx3 = -1 Then Continue For
+
+        Dim ch2 As Integer
+        ch2 = ps.ast.nodes(nodeIdx3).firstChild
+        Do While ch2 <> -1
+            If UCase(ps.ast.nodes(ch2).kind) = "CLASS_METHOD_DECL" Then
+                Dim mname As String
+                mname = UCase(Trim(ps.ast.nodes(ch2).value))
+                If mname <> "" Then
+                    Dim isVirt As Integer
+                    isVirt = IIf(SemClassMethodHasFlag(ps, ch2, "VIRTUAL") <> 0 Or SemClassMethodHasFlag(ps, ch2, "OVERRIDE") <> 0, 1, 0)
+                    If isVirt <> 0 Then
+                        Dim found As Integer
+                        found = 0
+                        Dim i As Integer
+                        For i = 0 To methodCount - 1
+                            If methodNames(i) = mname Then found = 1
+                        Next i
+                        If found = 0 Then
+                            If methodCount = 0 Then
+                                ReDim methodNames(0)
+                                ReDim methodOwners(0)
+                            Else
+                                ReDim Preserve methodNames(0 To methodCount)
+                                ReDim Preserve methodOwners(0 To methodCount)
+                            End If
+                            methodNames(methodCount) = mname
+                            methodOwners(methodCount) = t
+                            methodCount = methodCount + 1
+                        End If
+                    End If
+                End If
+            End If
+            ch2 = ps.ast.nodes(ch2).nextSibling
+        Loop
+    Next inci
+
+    ' annotate each method node in this class with its slot if virtual/override
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+            Dim mname As String
+            mname = UCase(Trim(ps.ast.nodes(ch).value))
+            If mname <> "" Then
+                ' If this method overrides a virtual method from base, require explicit OVERRIDE
+                If baseName <> "" Then
+                    Dim baseMethodNode As Integer
+                    If SemFindBaseMethod(ps, baseName, mname, baseMethodNode) <> 0 Then
+                        If SemClassMethodHasFlag(ps, baseMethodNode, "VIRTUAL") <> 0 Or SemClassMethodHasFlag(ps, baseMethodNode, "OVERRIDE") <> 0 Then
+                            If SemClassMethodHasFlag(ps, ch, "OVERRIDE") = 0 Then
+                                errText = "semantic: CLASS OVERRIDE required for overriding virtual base method " & cname & "." & mname
+                                Return 0
+                            End If
+                        End If
+                    End If
+                End If
+
+                Dim hasVirt As Integer
+                hasVirt = IIf(SemClassMethodHasFlag(ps, ch, "VIRTUAL") <> 0 Or SemClassMethodHasFlag(ps, ch, "OVERRIDE") <> 0, 1, 0)
+                If hasVirt <> 0 Then
+                    ' find slot index for this method in methodNames
+                    Dim si As Integer
+                    si = -1
+                    Dim i As Integer
+                    For i = 0 To methodCount - 1
+                        If methodNames(i) = mname Then
+                            si = i
+                            Exit For
+                        End If
+                    Next i
+
+                    If si >= 0 Then
+                        ' if slot child already present, update; else add
+                        Dim metaCh As Integer
+                        metaCh = ps.ast.nodes(ch).firstChild
+                        Dim foundMeta As Integer
+                        foundMeta = 0
+                        Do While metaCh <> -1
+                            If UCase(ps.ast.nodes(metaCh).kind) = "CLASS_METHOD_SLOT" Then
+                                ps.ast.nodes(metaCh).value = LTrim(Str(si))
+                                foundMeta = 1
+                                Exit Do
+                            End If
+                            metaCh = ps.ast.nodes(metaCh).nextSibling
+                        Loop
+                        If foundMeta = 0 Then
+                            Dim slotNode As Integer
+                            slotNode = ASTNewNode(ps.ast, "CLASS_METHOD_SLOT", LTrim(Str(si)), "", ps.ast.nodes(ch).lineNo, ps.ast.nodes(ch).colNo)
+                            ASTAddRoleChild ps.ast, ch, slotNode, "VTABLE_SLOT"
+                        End If
+                    End If
+                End If
+            End If
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    SemVTableMarkProcessed(processedKeys(), processedCount, cname)
+    Return 1
+End Function
+
+' Orchestrator: Walk all class declarations and assign slots
+Private Function SemAssignVtableSlots(ByRef ps As ParseState, ByRef errText As String) As Integer
+    errText = ""
+
+    Dim processedKeys() As String
+    Dim processedCount As Integer
+    processedCount = 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CLASS_STMT" Then
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                If SemVTableAssignSlotsForClass(ps, UCase(Trim(ps.ast.nodes(i).value)), processedKeys(), processedCount, errText) = 0 Then
+                    Return 0
+                End If
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
 Private Function SemCountRoutineParams(ByRef ps As ParseState, ByVal routineNode As Integer) As Integer
     Dim cnt As Integer
     Dim ch As Integer
@@ -998,7 +1254,9 @@ Private Function SemTryEvalConstNumber(ByRef ps As ParseState, ByVal nodeIdx As 
         If t = "" Then Return 0
 
         valueOut = Val(t)
-        isIntOut = IIf(InStr(t, ".") = 0 And InStr(UCase(t), "E") = 0, 1, 0)
+        ' Default numeric literal kind: treat as floating point (F64) by default.
+        ' This makes plain literals (e.g. 123) be considered floats unless context forces integer.
+        isIntOut = 0
         Return 1
     End If
 
@@ -1060,9 +1318,9 @@ Private Function SemTryEvalConstNumber(ByRef ps As ParseState, ByVal nodeIdx As 
             valueOut = lv / rv
             isIntOut = 0
             Return 1
-        Case "\\", "%", "MOD"
+        Case "\", "%", "MOD"
             If rv = 0 Then Return 0
-            If opText = "\\" Then
+            If opText = "\" Then
                 valueOut = CLng(lv) \ CLng(rv)
             Else
                 valueOut = CLng(lv) Mod CLng(rv)
@@ -1301,6 +1559,7 @@ Function SemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Int
     If SemValidateCallNodes(ps, errText) = 0 Then Return 0
     If SemValidateImportNodes(ps, errText) = 0 Then Return 0
     If SemValidateInputNodes(ps, errText) = 0 Then Return 0
+    If SemValidateSlotLaneNodes(ps, errText) = 0 Then Return 0
     If SemValidateIfSelectNodes(ps, errText) = 0 Then Return 0
     If SemValidateRoutineNodes(ps, errText) = 0 Then Return 0
     If SemValidateConstNodes(ps, errText) = 0 Then Return 0
@@ -1314,6 +1573,7 @@ Function SemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Int
     If SemValidateThisMeUsage(ps, errText) = 0 Then Return 0
     If SemValidateClassOverrideContracts(ps, errText) = 0 Then Return 0
     If SemValidateInterfaceContracts(ps, errText) = 0 Then Return 0
+    If SemAssignVtableSlots(ps, errText) = 0 Then Return 0
 
     Return 1
 End Function
