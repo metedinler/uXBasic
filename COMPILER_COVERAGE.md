@@ -6343,3 +6343,18 @@ TYPE variable = by-value storage
 ```
 
 Bu ayrım netleşirse Hamle 6 toparlanır. Netleşmezse `TYPE`, `CLASS`, `NEW`, `field access`, `DELETE`, `constructor/destructor` birbirine karışır.
+
+---
+
+### 2026-05-02 8A-0 test80 Operator Numeric Parity Kapanisi
+
+- Test: 	ests/basicCodeTests/80_h8a_operator_numeric_parity.bas
+- Commit: 24e4ffe (send-c-tarzi-op-20260425)
+- Duzeltmeler:
+  - X64CreateFloatConstant: float literal normalizasyonu (tamsayi "2" -> "2.0")
+  - X64EmitLoadVar: elemBytes-aware movsx/movsxd/mov secimi
+  - X64EmitStoreVar: elemBytes-aware byte/word/dword/qword store secimi
+- AST ciktisi : 5 3 3
+- MIR ciktisi : 5 3 3
+- Native ciktisi: 5 3 3
+- Parity: PASS (AST = MIR = native)
