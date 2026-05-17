@@ -1,0 +1,519 @@
+' uXBasiC AST Contract Layer - Stage 2
+' ------------------------------------------------------------
+' Purpose:
+'   This file adds a stable, read-only traversal and validation layer
+'   on top of the existing ASTNode / ASTPool model.
+'
+' Design rules:
+'   1) Do not change ASTNode layout.
+'   2) Do not change parser behavior.
+'   3) Do not replace left/right or firstChild/nextSibling yet.
+'   4) Provide one safe API for semantic, MIR and codegen layers.
+'   5) Produce a contract report so "AST reality" can be tested.
+'
+' Include order:
+'   #include "parser/ast.fbs"
+'   #include "parser/ast_contract.fbs"
+'
+#ifndef UXBASIC_AST_CONTRACT_FBS
+#define UXBASIC_AST_CONTRACT_FBS
+
+Const UXB_AST_ROLE_BODY As String = "BODY"
+Const UXB_AST_ROLE_CONDITION As String = "CONDITION"
+Const UXB_AST_ROLE_THEN As String = "THEN"
+Const UXB_AST_ROLE_ELSE As String = "ELSE"
+Const UXB_AST_ROLE_ELSEIF As String = "ELSEIF"
+Const UXB_AST_ROLE_INIT As String = "INIT"
+Const UXB_AST_ROLE_STEP As String = "STEP"
+Const UXB_AST_ROLE_PARAMS As String = "PARAMS"
+Const UXB_AST_ROLE_ARGS As String = "ARGS"
+Const UXB_AST_ROLE_BASE As String = "BASE"
+Const UXB_AST_ROLE_INDEX As String = "INDEX"
+Const UXB_AST_ROLE_TYPE As String = "TYPE"
+Const UXB_AST_ROLE_RETURN_TYPE As String = "RETURN_TYPE"
+Const UXB_AST_ROLE_DECLS As String = "DECLS"
+Const UXB_AST_ROLE_MEMBERS As String = "MEMBERS"
+Const UXB_AST_ROLE_UNKNOWN As String = ""
+
+Type UXBAstContractStats
+    nodeCount As Integer
+    edgeCount As Integer
+    leftEdges As Integer
+    rightEdges As Integer
+    listEdges As Integer
+    invalidEdges As Integer
+    parentMismatch As Integer
+    orphanCount As Integer
+    cycleCount As Integer
+    unknownFamilyCount As Integer
+    exprCount As Integer
+    stmtCount As Integer
+    declCount As Integer
+    typeCount As Integer
+    paramCount As Integer
+    metaCount As Integer
+    programCount As Integer
+End Type
+
+Private Function UXBAstTrimUpper(ByRef s As String) As String
+    Return UCase(Trim(s))
+End Function
+
+Private Function UXBAstJsonEscape(ByRef textIn As String) As String
+    Dim outText As String = ""
+    Dim i As Integer
+    For i = 1 To Len(textIn)
+        Dim ch As String = Mid(textIn, i, 1)
+        Select Case Asc(ch)
+        Case 8
+            outText &= "\b"
+        Case 9
+            outText &= "\t"
+        Case 10
+            outText &= "\n"
+        Case 13
+            outText &= "\r"
+        Case 34
+            outText &= "\"""
+        Case 92
+            outText &= "\\"
+        Case Else
+            If Asc(ch) < 32 Then
+                outText &= "?"
+            Else
+                outText &= ch
+            End If
+        End Select
+    Next i
+    Return outText
+End Function
+
+Function UXBAstIsValidIndex(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Then Return 0
+    If nodeIdx >= p.count Then Return 0
+    Return 1
+End Function
+
+Function UXBAstKindEquals(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef kindName As String) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    Return IIf(UXBAstTrimUpper(p.nodes(nodeIdx).kind) = UXBAstTrimUpper(kindName), 1, 0)
+End Function
+
+Function UXBAstRoleEquals(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef roleName As String) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    Return IIf(UXBAstTrimUpper(p.nodes(nodeIdx).role) = UXBAstTrimUpper(roleName), 1, 0)
+End Function
+
+Function UXBAstFamilyName(ByVal familyValue As Integer) As String
+    Select Case familyValue
+    Case AST_FAMILY_PROGRAM
+        Return "PROGRAM"
+    Case AST_FAMILY_DECL
+        Return "DECL"
+    Case AST_FAMILY_STMT
+        Return "STMT"
+    Case AST_FAMILY_EXPR
+        Return "EXPR"
+    Case AST_FAMILY_TYPE
+        Return "TYPE"
+    Case AST_FAMILY_PARAM
+        Return "PARAM"
+    Case AST_FAMILY_META
+        Return "META"
+    Case Else
+        Return "UNKNOWN"
+    End Select
+End Function
+
+Function UXBAstNodeLabel(ByRef p As ASTPool, ByVal nodeIdx As Integer) As String
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return "<invalid>"
+    Dim s As String
+    s = "#" & LTrim(Str(nodeIdx)) & " " & p.nodes(nodeIdx).kind
+    If Trim(p.nodes(nodeIdx).role) <> "" Then s &= " role=" & p.nodes(nodeIdx).role
+    If Trim(p.nodes(nodeIdx).op) <> "" Then s &= " op=" & p.nodes(nodeIdx).op
+    If Trim(p.nodes(nodeIdx).value) <> "" Then s &= " value=" & p.nodes(nodeIdx).value
+    Return s
+End Function
+
+Function UXBAstNodeLocation(ByRef p As ASTPool, ByVal nodeIdx As Integer) As String
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return "?:?"
+    Dim s As String
+    If Trim(p.nodes(nodeIdx).sourceFile) <> "" Then s = p.nodes(nodeIdx).sourceFile & ":" Else s = ""
+    s &= LTrim(Str(p.nodes(nodeIdx).lineNo)) & ":" & LTrim(Str(p.nodes(nodeIdx).colNo))
+    Return s
+End Function
+
+Function UXBAstIsExpression(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    If p.nodes(nodeIdx).family = AST_FAMILY_EXPR Then Return 1
+    If p.nodes(nodeIdx).kind = ASTK_BINARY Then Return 1
+    If p.nodes(nodeIdx).kind = ASTK_UNARY Then Return 1
+    If p.nodes(nodeIdx).kind = ASTK_IDENTIFIER Then Return 1
+    If p.nodes(nodeIdx).kind = ASTK_NUMBER Then Return 1
+    If p.nodes(nodeIdx).kind = ASTK_STRING Then Return 1
+    If Instr(p.nodes(nodeIdx).kind, "_EXPR") > 0 Then Return 1
+    Return 0
+End Function
+
+Function UXBAstIsStatement(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    If p.nodes(nodeIdx).family = AST_FAMILY_STMT Then Return 1
+    If Instr(p.nodes(nodeIdx).kind, "_STMT") > 0 Then Return 1
+    If p.nodes(nodeIdx).kind = "BLOCK" Then Return 1
+    Return 0
+End Function
+
+Function UXBAstIsDeclaration(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    If p.nodes(nodeIdx).family = AST_FAMILY_DECL Then Return 1
+    If Instr(p.nodes(nodeIdx).kind, "_DECL") > 0 Then Return 1
+    If Instr(p.nodes(nodeIdx).kind, "CLASS_") = 1 Then Return 1
+    If Instr(p.nodes(nodeIdx).kind, "INTERFACE_") = 1 Then Return 1
+    If Instr(p.nodes(nodeIdx).kind, "TYPE_") = 1 Then Return 1
+    Return 0
+End Function
+
+Function UXBAstIsTypeNode(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    If p.nodes(nodeIdx).family = AST_FAMILY_TYPE Then Return 1
+    If p.nodes(nodeIdx).kind = ASTK_TYPE_REF Then Return 1
+    If p.nodes(nodeIdx).kind = ASTK_RETURN_TYPE Then Return 1
+    Return 0
+End Function
+
+Function UXBAstHasLeft(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    Return UXBAstIsValidIndex(p, p.nodes(nodeIdx).left)
+End Function
+
+Function UXBAstHasRight(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    Return UXBAstIsValidIndex(p, p.nodes(nodeIdx).right)
+End Function
+
+Function UXBAstHasListChildren(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    Return UXBAstIsValidIndex(p, p.nodes(nodeIdx).firstChild)
+End Function
+
+Function UXBAstChildCount(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    Dim n As Integer = 0
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While UXBAstIsValidIndex(p, ch)
+        n += 1
+        ch = p.nodes(ch).nextSibling
+        If n > p.count Then Exit Do
+    Loop
+    Return n
+End Function
+
+Function UXBAstChildAt(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByVal childOrdinal As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return AST_NULL
+    If childOrdinal < 0 Then Return AST_NULL
+    Dim childPos As Integer = 0
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While UXBAstIsValidIndex(p, ch)
+        If childPos = childOrdinal Then Return ch
+        childPos += 1
+        ch = p.nodes(ch).nextSibling
+        If childPos > p.count Then Exit Do
+    Loop
+    Return AST_NULL
+End Function
+
+Function UXBAstChildCountByRole(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef roleName As String) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    Dim n As Integer = 0
+    Dim safety As Integer = 0
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While UXBAstIsValidIndex(p, ch)
+        If UXBAstRoleEquals(p, ch, roleName) Then n += 1
+        ch = p.nodes(ch).nextSibling
+        safety += 1
+        If safety > p.count Then Exit Do
+    Loop
+    Return n
+End Function
+
+Function UXBAstChildByRoleAt(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef roleName As String, ByVal roleOrdinal As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return AST_NULL
+    If roleOrdinal < 0 Then Return AST_NULL
+    Dim rolePos As Integer = 0
+    Dim safety As Integer = 0
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While UXBAstIsValidIndex(p, ch)
+        If UXBAstRoleEquals(p, ch, roleName) Then
+            If rolePos = roleOrdinal Then Return ch
+            rolePos += 1
+        End If
+        ch = p.nodes(ch).nextSibling
+        safety += 1
+        If safety > p.count Then Exit Do
+    Loop
+    Return AST_NULL
+End Function
+
+Function UXBAstFirstChildByRoleCI(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef roleName As String) As Integer
+    Return UXBAstChildByRoleAt(p, nodeIdx, roleName, 0)
+End Function
+
+Function UXBAstFirstChildByKindCI(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef kindName As String) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return AST_NULL
+    Dim safety As Integer = 0
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While UXBAstIsValidIndex(p, ch)
+        If UXBAstKindEquals(p, ch, kindName) Then Return ch
+        ch = p.nodes(ch).nextSibling
+        safety += 1
+        If safety > p.count Then Exit Do
+    Loop
+    Return AST_NULL
+End Function
+
+Function UXBAstBinaryLeft(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return AST_NULL
+    If p.nodes(nodeIdx).left <> AST_NULL Then Return p.nodes(nodeIdx).left
+    Return UXBAstFirstChildByRoleCI(p, nodeIdx, "LEFT")
+End Function
+
+Function UXBAstBinaryRight(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return AST_NULL
+    If p.nodes(nodeIdx).right <> AST_NULL Then Return p.nodes(nodeIdx).right
+    Return UXBAstFirstChildByRoleCI(p, nodeIdx, "RIGHT")
+End Function
+
+Function UXBAstUnaryExpr(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return AST_NULL
+    If p.nodes(nodeIdx).left <> AST_NULL Then Return p.nodes(nodeIdx).left
+    Return UXBAstFirstChildByRoleCI(p, nodeIdx, "EXPR")
+End Function
+
+Function UXBAstEffectiveFirstChild(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return AST_NULL
+    If p.nodes(nodeIdx).firstChild <> AST_NULL Then Return p.nodes(nodeIdx).firstChild
+    If p.nodes(nodeIdx).left <> AST_NULL Then Return p.nodes(nodeIdx).left
+    If p.nodes(nodeIdx).right <> AST_NULL Then Return p.nodes(nodeIdx).right
+    Return AST_NULL
+End Function
+
+Function UXBAstEdgeCount(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Return 0
+    Dim n As Integer = 0
+    If UXBAstIsValidIndex(p, p.nodes(nodeIdx).left) Then n += 1
+    If UXBAstIsValidIndex(p, p.nodes(nodeIdx).right) Then n += 1
+    n += UXBAstChildCount(p, nodeIdx)
+    Return n
+End Function
+
+Private Sub UXBAstStatsAddFamily(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef st As UXBAstContractStats)
+    Select Case p.nodes(nodeIdx).family
+    Case AST_FAMILY_PROGRAM
+        st.programCount += 1
+    Case AST_FAMILY_DECL
+        st.declCount += 1
+    Case AST_FAMILY_STMT
+        st.stmtCount += 1
+    Case AST_FAMILY_EXPR
+        st.exprCount += 1
+    Case AST_FAMILY_TYPE
+        st.typeCount += 1
+    Case AST_FAMILY_PARAM
+        st.paramCount += 1
+    Case AST_FAMILY_META
+        st.metaCount += 1
+    Case Else
+        st.unknownFamilyCount += 1
+    End Select
+End Sub
+
+Private Sub UXBAstValidateEdge(ByRef p As ASTPool, ByVal parentIdx As Integer, ByVal childIdx As Integer, ByRef st As UXBAstContractStats)
+    If childIdx = AST_NULL Then Exit Sub
+    st.edgeCount += 1
+    If UXBAstIsValidIndex(p, childIdx) = 0 Then
+        st.invalidEdges += 1
+        Exit Sub
+    End If
+    If p.nodes(childIdx).parent <> parentIdx Then st.parentMismatch += 1
+End Sub
+
+Private Sub UXBAstDfsVisit(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByVal state As Integer Ptr, ByRef st As UXBAstContractStats)
+    If UXBAstIsValidIndex(p, nodeIdx) = 0 Then Exit Sub
+    If state[nodeIdx] = 1 Then
+        st.cycleCount += 1
+        Exit Sub
+    End If
+    If state[nodeIdx] = 2 Then Exit Sub
+    state[nodeIdx] = 1
+
+    If UXBAstIsValidIndex(p, p.nodes(nodeIdx).left) Then UXBAstDfsVisit p, p.nodes(nodeIdx).left, state, st
+    If UXBAstIsValidIndex(p, p.nodes(nodeIdx).right) Then UXBAstDfsVisit p, p.nodes(nodeIdx).right, state, st
+
+    Dim safety As Integer = 0
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While UXBAstIsValidIndex(p, ch)
+        UXBAstDfsVisit p, ch, state, st
+        ch = p.nodes(ch).nextSibling
+        safety += 1
+        If safety > p.count Then
+            st.cycleCount += 1
+            Exit Do
+        End If
+    Loop
+
+    state[nodeIdx] = 2
+End Sub
+
+Function UXBAstCollectContractStats(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef st As UXBAstContractStats) As Integer
+    st.nodeCount = p.count
+    st.edgeCount = 0
+    st.leftEdges = 0
+    st.rightEdges = 0
+    st.listEdges = 0
+    st.invalidEdges = 0
+    st.parentMismatch = 0
+    st.orphanCount = 0
+    st.cycleCount = 0
+    st.unknownFamilyCount = 0
+    st.exprCount = 0
+    st.stmtCount = 0
+    st.declCount = 0
+    st.typeCount = 0
+    st.paramCount = 0
+    st.metaCount = 0
+    st.programCount = 0
+
+    If p.count <= 0 Then Return 1
+
+    Dim i As Integer
+    For i = 0 To p.count - 1
+        UXBAstStatsAddFamily p, i, st
+
+        If p.nodes(i).parent = AST_NULL And i <> rootIdx Then st.orphanCount += 1
+
+        If p.nodes(i).left <> AST_NULL Then st.leftEdges += 1
+        If p.nodes(i).right <> AST_NULL Then st.rightEdges += 1
+
+        UXBAstValidateEdge p, i, p.nodes(i).left, st
+        UXBAstValidateEdge p, i, p.nodes(i).right, st
+
+        Dim safety As Integer = 0
+        Dim ch As Integer = p.nodes(i).firstChild
+        Do While ch <> AST_NULL
+            st.listEdges += 1
+            UXBAstValidateEdge p, i, ch, st
+            If UXBAstIsValidIndex(p, ch) = 0 Then Exit Do
+            ch = p.nodes(ch).nextSibling
+            safety += 1
+            If safety > p.count Then
+                st.cycleCount += 1
+                Exit Do
+            End If
+        Loop
+    Next i
+
+    Dim state(Any) As Integer
+    ReDim state(p.count - 1)
+    For i = 0 To p.count - 1
+        state(i) = 0
+    Next i
+    If UXBAstIsValidIndex(p, rootIdx) Then UXBAstDfsVisit p, rootIdx, @state(0), st
+
+    Return 1
+End Function
+
+Function UXBAstValidateContract(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef errText As String) As Integer
+    Dim st As UXBAstContractStats
+    UXBAstCollectContractStats p, rootIdx, st
+
+    errText = ""
+    If UXBAstIsValidIndex(p, rootIdx) = 0 Then errText &= "invalid root index; "
+    If st.invalidEdges > 0 Then errText &= "invalid edges=" & LTrim(Str(st.invalidEdges)) & "; "
+    If st.cycleCount > 0 Then errText &= "cycles/sibling-loop=" & LTrim(Str(st.cycleCount)) & "; "
+
+    If errText <> "" Then Return 0
+    Return 1
+End Function
+
+Function UXBAstContractReportJson(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef jsonOut As String) As Integer
+    Dim st As UXBAstContractStats
+    UXBAstCollectContractStats p, rootIdx, st
+
+    Dim okText As String
+    Dim errText As String
+    If UXBAstValidateContract(p, rootIdx, errText) Then okText = "true" Else okText = "false"
+
+    jsonOut = "{" & Chr(10)
+    jsonOut &= "  ""contract_version"": ""uxb-ast-contract-1""," & Chr(10)
+    jsonOut &= "  ""ok"": " & okText & "," & Chr(10)
+    jsonOut &= "  ""root_index"": " & LTrim(Str(rootIdx)) & "," & Chr(10)
+    jsonOut &= "  ""error"": """ & UXBAstJsonEscape(errText) & """," & Chr(10)
+    jsonOut &= "  ""stats"": {" & Chr(10)
+    jsonOut &= "    ""node_count"": " & LTrim(Str(st.nodeCount)) & "," & Chr(10)
+    jsonOut &= "    ""edge_count"": " & LTrim(Str(st.edgeCount)) & "," & Chr(10)
+    jsonOut &= "    ""left_edges"": " & LTrim(Str(st.leftEdges)) & "," & Chr(10)
+    jsonOut &= "    ""right_edges"": " & LTrim(Str(st.rightEdges)) & "," & Chr(10)
+    jsonOut &= "    ""list_edges"": " & LTrim(Str(st.listEdges)) & "," & Chr(10)
+    jsonOut &= "    ""invalid_edges"": " & LTrim(Str(st.invalidEdges)) & "," & Chr(10)
+    jsonOut &= "    ""parent_mismatch"": " & LTrim(Str(st.parentMismatch)) & "," & Chr(10)
+    jsonOut &= "    ""orphan_count"": " & LTrim(Str(st.orphanCount)) & "," & Chr(10)
+    jsonOut &= "    ""cycle_count"": " & LTrim(Str(st.cycleCount)) & "," & Chr(10)
+    jsonOut &= "    ""unknown_family_count"": " & LTrim(Str(st.unknownFamilyCount)) & "," & Chr(10)
+    jsonOut &= "    ""program_count"": " & LTrim(Str(st.programCount)) & "," & Chr(10)
+    jsonOut &= "    ""decl_count"": " & LTrim(Str(st.declCount)) & "," & Chr(10)
+    jsonOut &= "    ""stmt_count"": " & LTrim(Str(st.stmtCount)) & "," & Chr(10)
+    jsonOut &= "    ""expr_count"": " & LTrim(Str(st.exprCount)) & "," & Chr(10)
+    jsonOut &= "    ""type_count"": " & LTrim(Str(st.typeCount)) & "," & Chr(10)
+    jsonOut &= "    ""param_count"": " & LTrim(Str(st.paramCount)) & "," & Chr(10)
+    jsonOut &= "    ""meta_count"": " & LTrim(Str(st.metaCount)) & Chr(10)
+    jsonOut &= "  }," & Chr(10)
+    jsonOut &= "  ""rules"": [" & Chr(10)
+    jsonOut &= "    ""left/right are expression edges and must point to valid nodes or AST_NULL""," & Chr(10)
+    jsonOut &= "    ""firstChild/nextSibling are statement/block/list edges and must not form sibling loops""," & Chr(10)
+    jsonOut &= "    ""every child edge should have parent set to the owning node""," & Chr(10)
+    jsonOut &= "    ""role names are metadata, not parser behavior; codegen must tolerate empty role fields""," & Chr(10)
+    jsonOut &= "    ""semantic/MIR/codegen should use UXBAst* helpers instead of direct traversal where possible""" & Chr(10)
+    jsonOut &= "  ]" & Chr(10)
+    jsonOut &= "}" & Chr(10)
+    Return 1
+End Function
+
+Function UXBAstWriteContractReportJson(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef outPath As String, ByRef errText As String) As Integer
+    Dim jsonText As String
+    If UXBAstContractReportJson(p, rootIdx, jsonText) = 0 Then
+        errText = "ast contract: json conversion failed"
+        Return 0
+    End If
+
+    Dim f As Integer = FreeFile
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errText = "ast contract: json write open failed: " & outPath
+        Return 0
+    End If
+    Print #f, jsonText;
+    Close #f
+    Return 1
+End Function
+
+Sub UXBAstPrintContractSummary(ByRef p As ASTPool, ByVal rootIdx As Integer)
+    Dim st As UXBAstContractStats
+    Dim errText As String
+    UXBAstCollectContractStats p, rootIdx, st
+    Print "AST contract summary"
+    Print "  nodes             : "; st.nodeCount
+    Print "  edges             : "; st.edgeCount
+    Print "  left/right/list   : "; st.leftEdges; "/"; st.rightEdges; "/"; st.listEdges
+    Print "  invalid edges     : "; st.invalidEdges
+    Print "  parent mismatch   : "; st.parentMismatch
+    Print "  orphans           : "; st.orphanCount
+    Print "  cycles            : "; st.cycleCount
+    Print "  families P/D/S/E  : "; st.programCount; "/"; st.declCount; "/"; st.stmtCount; "/"; st.exprCount
+    If UXBAstValidateContract(p, rootIdx, errText) Then
+        Print "  status            : OK"
+    Else
+        Print "  status            : FAIL - "; errText
+    End If
+End Sub
+
+#endif
