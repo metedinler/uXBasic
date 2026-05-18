@@ -161,6 +161,9 @@ $compatRows = Import-Csv $compatPath
 for ($j = 0; $j -lt $compatRows.Count; $j++) {
     $cmd = [string]$compatRows[$j].command
     if ([string]::IsNullOrWhiteSpace($cmd)) {
+        $cmd = [string]$compatRows[$j].komut
+    }
+    if ([string]::IsNullOrWhiteSpace($cmd)) {
         $errors.Add("empty command value at command_compatibility row $($j + 2)")
         continue
     }
