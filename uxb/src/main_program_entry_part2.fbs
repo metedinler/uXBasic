@@ -1,0 +1,186 @@
+' Extracted tail of main program entry flow
+If execMemMode Then
+    UxbTraceBegin "EXECMEM", interpreterBackend
+    If interpreterBackend = "MIR" Then
+        Dim mirRunErr As String
+        Dim mirResult As MIRValue
+
+        If mirModuleReady = 0 Then
+            UxbError "MIR backend secili ama MIR module hazirlanamadi"
+            End 11
+        End If
+
+        If MIRRunModule(mirModule, mirResult, mirRunErr) = 0 Then
+            UxbError "MIR interpreter basarisiz: " & LocalizeErrorMessage(mirRunErr)
+            UxbTraceEnd "EXECMEM", "FAIL", mirRunErr
+            End 13
+        End If
+        UxbTraceMetric "EXECMEM", "mir_result_type", mirResult.valueType
+
+        If debugMode Then
+            UxbInfo "MIR backend calisti; result type=" & mirResult.valueType
+        End If
+    Else
+        Dim execErr As String
+        If ExecRunMemoryProgram(ps, execErr) = 0 Then
+            UxbError "Bellek yurutme basarisiz: " & LocalizeErrorMessage(execErr)
+            UxbTraceEnd "EXECMEM", "FAIL", execErr
+            End 5
+        End If
+        UxbTraceMetric "EXECMEM", "ast_runtime", "complete"
+    End If
+    UxbInfo "Bellek yurutme basarili"
+    UxbTraceEnd "EXECMEM", "OK", "memory execution complete"
+End If
+
+If interopMode Then
+    UxbTraceBegin "INTEROP", "interop artifacts"
+    Dim manifest As InteropManifest
+    Dim interopErr As String
+
+    If ResolveInteropManifestForSource(sourcePath, manifest, interopErr) = 0 Then
+        UxbError "Baglanti cozumleme basarisiz: " & LocalizeErrorMessage(interopErr)
+        End 3
+    End If
+
+    If EmitInteropArtifacts(manifest, "dist\interop", interopErr) = 0 Then
+        UxbError "Baglanti cikti yazimi basarisiz: " & LocalizeErrorMessage(interopErr)
+        End 4
+    End If
+
+    If FfiX64BackendEmitArtifacts(ps, "dist\interop", interopErr) = 0 Then
+        UxbError "FFI x64 codegen cikti yazimi basarisiz: " & LocalizeErrorMessage(interopErr)
+        End 4
+    End If
+
+    If FfiX86BackendEmitArtifacts(ps, "dist\interop", interopErr) = 0 Then
+        UxbError "FFI x86 codegen cikti yazimi basarisiz: " & LocalizeErrorMessage(interopErr)
+        End 4
+    End If
+
+    If debugMode Then
+        UxbInfo "Interop include sayisi: " & Str(manifest.includeCount)
+        UxbInfo "Interop import sayisi: " & Str(manifest.importCount)
+    End If
+    UxbTraceOutput "INTEROP", "interop_dir", "dist\interop"
+    UxbTraceEnd "INTEROP", "OK", "interop artifacts emitted"
+End If
+
+If x64EmitMode Then
+    UxbTraceBegin "X64_EMIT", x64OutPath
+    Dim asmText As String
+    Dim codegenErr As String
+
+    ' Route emit-only NASM generation through the same direct path used by
+    ' --codegen so emit/build stay on one proven code path.
+    If codegenSourceMode = "MIR" Then
+        UxbInfo "Codegen route: MIR verified -> AST emitter"
+    End If
+    If GenerateX64Code(ps, asmText, codegenErr) = 0 Then
+        UxbError "x64 NASM codegen basarisiz: " & LocalizeErrorMessage(codegenErr)
+        UxbTraceEnd "X64_EMIT", "FAIL", codegenErr
+        End 6
+    End If
+
+    If SaveTextFile(x64OutPath, asmText) = 0 Then
+        UxbError "x64 NASM cikti dosyasi yazilamadi: " & x64OutPath
+        UxbTraceEnd "X64_EMIT", "FAIL", "write failed: " & x64OutPath
+        End 7
+    End If
+
+    If debugMode Then
+        UxbInfo "x64 NASM cikti yazildi: " & x64OutPath
+    End If
+    UxbTraceOutput "X64_EMIT", "asm", x64OutPath
+    UxbTraceEnd "X64_EMIT", "OK", "asm emitted"
+End If
+
+If codegenMode Then
+    UxbTraceBegin "X64_CODEGEN", "dist\\uxb_output.asm"
+    Dim codegenAsmText As String
+    Dim codegenAsmErr As String
+
+    If codegenSourceMode = "MIR" Then
+        UxbInfo "Codegen route: MIR verified -> AST emitter"
+    End If
+    If GenerateX64Code(ps, codegenAsmText, codegenAsmErr) = 0 Then
+        UxbError "x64 codegen basarisiz: " & LocalizeErrorMessage(codegenAsmErr)
+        UxbTraceEnd "X64_CODEGEN", "FAIL", codegenAsmErr
+        End 6
+    End If
+
+    If SaveTextFile("dist\\uxb_output.asm", codegenAsmText) = 0 Then
+        UxbError "x64 codegen cikti dosyasi yazilamadi: dist\\uxb_output.asm"
+        UxbTraceEnd "X64_CODEGEN", "FAIL", "write failed: dist\\uxb_output.asm"
+        End 7
+    End If
+
+    UxbInfo "x64 codegen cikti yazildi: dist\\uxb_output.asm"
+    UxbTraceOutput "X64_CODEGEN", "asm", "dist\\uxb_output.asm"
+    UxbTraceEnd "X64_CODEGEN", "OK", "codegen asm emitted"
+End If
+
+If x64BuildMode Then
+    UxbTraceBegin "X64_BUILD", x64BuildOutPath
+    Dim x64BuildErr As String
+    If codegenSourceMode = "MIR" Then
+        UxbInfo "Build route: MIR verified -> AST emitter -> x64 pipeline"
+    End If
+    If X64BuildRunArtifacts(ps, x64BuildSourcePath, x64BuildOutPath, x64BuildErr) = 0 Then
+        UxbError "x64 build basarisiz: " & LocalizeErrorMessage(x64BuildErr)
+        UxbTraceEnd "X64_BUILD", "FAIL", x64BuildErr
+        End 14
+    End If
+
+    UxbInfo "x64 build tamamlandi: " & x64BuildOutPath & "\program.exe"
+    UxbTraceOutput "X64_BUILD", "exe", x64BuildOutPath & "\program.exe"
+    UxbTraceEnd "X64_BUILD", "OK", "x64 build complete"
+End If
+
+Dim As String selected
+Dim As Integer n
+n = LegacyGetCommands(sourceText, 0, selected)
+If debugMode Then
+    UxbInfo "Legacy ayrim sayisi: " & Str(n)
+    UxbInfo "Legacy parcasi[0]: " & selected
+End If
+
+If Trim(runReportJsonOutPath) <> "" Then
+    UxbTraceBegin "RUN_REPORT", runReportJsonOutPath
+    Dim runReportJson As String
+    runReportJson = BuildRunReportJson( _
+        sourcePath, _
+        runSemanticPass, _
+        mirModuleReady, _
+        interpreterBackend, _
+        execMemMode, _
+        interopMode, _
+        x64EmitMode, _
+        codegenMode, _
+        x64BuildMode, _
+        codegenSourceMode, _
+        astJsonOutPath, _
+        inventoryJsonOutPath, _
+        pipelineJsonOutPath, _
+        mirOpcodesJsonOutPath, _
+        x64OutPath, _
+        x64BuildOutPath _
+    )
+
+    If SaveTextFile(runReportJsonOutPath, runReportJson) = 0 Then
+        UxbError "Calisma raporu JSON yazilamadi: " & runReportJsonOutPath
+        UxbTraceEnd "RUN_REPORT", "FAIL", "write failed: " & runReportJsonOutPath
+        End 15
+    End If
+    UxbTraceOutput "RUN_REPORT", "artifact_report", runReportJsonOutPath
+    UxbTraceEnd "RUN_REPORT", "OK", "run report json written"
+End If
+
+Dim consoleFlushErr As String
+If UxbConsoleFlushOutputs(consoleFlushErr) = 0 Then
+    UxbError consoleFlushErr
+    End 16
+End If
+
+UxbTraceFinish 0
+End 0

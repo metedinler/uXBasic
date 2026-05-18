@@ -1,0 +1,1950 @@
+Type MIRMemByteEntry
+    addr As ULongInt
+    value As UByte
+End Type
+
+Type MIRVarPtrEntry
+    nameText As String
+    addrValue As ULongInt
+End Type
+
+Type MIRObjectClassEntry
+    addrValue As ULongInt
+    className As String
+End Type
+
+Type MIRCollection
+    kind As String
+    count As Integer
+    listItems(Any) As MIRValue
+    dictKeys(Any) As String
+    dictValues(Any) As MIRValue
+    setItems(Any) As String
+End Type
+
+Type MIRSlotLaneEntry
+    kindText As String
+    nameText As String
+    slotId As Integer
+    routineName As String
+    active As Integer
+End Type
+
+Private Const MIR_MEM_LOW_LIMIT As ULongInt = 1048576
+Private Const MIR_PRINT_ZONE_WIDTH As Integer = 14
+
+Dim Shared gMirMemLow(0 To 1048575) As UByte
+Dim Shared gMirMemHigh(Any) As MIRMemByteEntry
+Dim Shared gMirMemHighCount As Integer
+Dim Shared gMirVarPtrEntries(Any) As MIRVarPtrEntry
+Dim Shared gMirVarPtrCount As Integer
+Dim Shared gMirVarPtrNextAddr As ULongInt
+Dim Shared gMirObjectClassEntries(Any) As MIRObjectClassEntry
+Dim Shared gMirObjectClassCount As Integer
+Dim Shared gMirCollections(Any) As MIRCollection
+Dim Shared gMirCollectionCount As Integer
+Dim Shared gMirSlotEntries(Any) As MIRSlotLaneEntry
+Dim Shared gMirSlotEntryCount As Integer
+Dim Shared gMirSlotCapEvent As Integer
+Dim Shared gMirSlotCapThread As Integer
+Dim Shared gMirSlotCapParalel As Integer
+Dim Shared gMirSlotCapPipe As Integer
+Dim Shared gMirPrintColumnPos As Integer
+Dim Shared gMirInputQueue(Any) As String
+Dim Shared gMirInputQueueCount As Integer
+Dim Shared gMirInputQueueReadPos As Integer
+
+Private Sub MIREvaluatorStateInit(ByRef state As MIREvaluatorState)
+    state.currentFunction = -1
+    state.currentBlock = -1
+    state.currentInstruction = -1
+    state.varCount = 0
+    state.arrayCount = 0
+    state.callStackDepth = 0
+    state.exitRequested = 0
+
+    gMirMemHighCount = 0
+    Erase gMirMemHigh
+    gMirVarPtrCount = 0
+    Erase gMirVarPtrEntries
+    gMirVarPtrNextAddr = &h21000000UL
+    gMirObjectClassCount = 0
+    Erase gMirObjectClassEntries
+    gMirCollectionCount = 0
+    Erase gMirCollections
+    gMirSlotEntryCount = 0
+    Erase gMirSlotEntries
+    gMirSlotCapEvent = 0
+    gMirSlotCapThread = 0
+    gMirSlotCapParalel = 0
+    gMirSlotCapPipe = 0
+    gMirPrintColumnPos = 0
+    UxbConsoleReset
+End Sub
+
+Declare Function MIREvalOperandValue(ByRef state As MIREvaluatorState, ByRef operandText As String, ByRef valueOut As MIRValue) As Integer
+Declare Function MIRAsInteger(ByRef v As MIRValue, ByRef outValue As LongInt) As Integer
+Declare Function MIREvaluateInstruction(ByRef state As MIREvaluatorState, ByRef errMsg As String) As Integer
+Declare Function MIRFindFunctionIndex(ByRef module As MIRModule, ByRef functionName As String) As Integer
+Declare Function MIRInvokeUserFunction(ByRef state As MIREvaluatorState, ByVal fnIdx As Integer, ByRef ret As MIRValue, ByRef errMsg As String) As Integer
+Declare Function ExecResolveRuntimeClassByObjectAddr(ByVal objAddr As ULongInt, ByRef classNameOut As String) As Integer
+
+#include once "mir_evaluator_memory_helpers.fbs"
+
+Private Function MIRArrayBoundsToCount(ByVal lowerBound As Integer, ByVal upperBound As Integer) As Integer
+    Return (upperBound - lowerBound) + 1
+End Function
+
+Private Function MIRGetArrayStore(ByRef state As MIREvaluatorState, ByVal arrayId As Integer) As MIRArrayStorage Ptr
+    If arrayId < 0 Or arrayId >= state.arrayCount Then Return 0
+    Return @state.arrays(arrayId)
+End Function
+
+Private Function MIREnsureArrayStore(ByRef state As MIREvaluatorState, ByRef arrayValue As MIRValue) As MIRArrayStorage Ptr
+    If arrayValue.arrayId >= 0 And arrayValue.arrayId < state.arrayCount Then
+        Return @state.arrays(arrayValue.arrayId)
+    End If
+
+    If state.arrayCount = 0 Then
+        ReDim state.arrays(0)
+    Else
+        ReDim Preserve state.arrays(state.arrayCount)
+    End If
+
+    arrayValue.arrayId = state.arrayCount
+    state.arrayCount += 1
+    state.arrays(arrayValue.arrayId).lowerBound = 0
+    state.arrays(arrayValue.arrayId).elementCount = 0
+    Erase state.arrays(arrayValue.arrayId).elements
+    Return @state.arrays(arrayValue.arrayId)
+End Function
+
+Private Function MIRResizeArrayValue(ByRef state As MIREvaluatorState, ByRef arrayValue As MIRValue, ByVal lowerBound As Integer, ByVal upperBound As Integer, ByVal preserveMode As Integer) As Integer
+    Dim newCount As Integer
+    newCount = MIRArrayBoundsToCount(lowerBound, upperBound)
+    If newCount < 0 Then Return 0
+
+    Dim arrStore As MIRArrayStorage Ptr
+    arrStore = MIREnsureArrayStore(state, arrayValue)
+    If arrStore = 0 Then Return 0
+
+    Dim oldLower As Integer
+    Dim oldCount As Integer
+    Dim oldElements(Any) As MIRValue
+    oldLower = arrStore->lowerBound
+    oldCount = arrStore->elementCount
+
+    If preserveMode <> 0 And oldCount > 0 Then
+        ReDim oldElements(oldCount - 1)
+        Dim oldPos As Integer
+        For oldPos = 0 To oldCount - 1
+            oldElements(oldPos) = arrStore->elements(oldPos)
+        Next oldPos
+    End If
+
+    Erase arrStore->elements
+    arrayValue.arrayLower = lowerBound
+    arrayValue.arraySize = newCount
+    arrStore->lowerBound = lowerBound
+    arrStore->elementCount = newCount
+
+    If newCount > 0 Then
+        ReDim arrStore->elements(newCount - 1)
+        Dim initPos As Integer
+        Dim initValue As MIRValue
+        For initPos = 0 To newCount - 1
+            initValue.valueType = "INTEGER"
+            initValue.intValue = 0
+            initValue.floatValue = 0
+            initValue.stringValue = ""
+            initValue.arrayId = -1
+            initValue.arrayLower = 0
+            initValue.arraySize = 0
+            arrStore->elements(initPos) = initValue
+        Next initPos
+    End If
+
+    If preserveMode <> 0 And oldCount > 0 And newCount > 0 Then
+        Dim oldUpper As Integer
+        Dim overlapLower As Integer
+        Dim overlapUpper As Integer
+        oldUpper = oldLower + oldCount - 1
+        overlapLower = IIf(lowerBound > oldLower, lowerBound, oldLower)
+        overlapUpper = IIf(upperBound < oldUpper, upperBound, oldUpper)
+        If overlapUpper >= overlapLower Then
+            Dim keepIdx As Integer
+            For keepIdx = overlapLower To overlapUpper
+                arrStore->elements(keepIdx - lowerBound) = oldElements(keepIdx - oldLower)
+            Next keepIdx
+        End If
+    End If
+
+    Return 1
+End Function
+
+Private Function MIRTryGetIndexed(ByRef state As MIREvaluatorState, ByRef arrayName As String, ByRef indexName As String, ByRef valueOut As MIRValue, ByRef errMsg As String) As Integer
+    Dim arrayValue As MIRValue
+    Dim indexValue As MIRValue
+    Dim rawIndex As LongInt
+    If MIRGetVarValue(state, arrayName, arrayValue) = 0 Then
+        errMsg = "MIR: Dizi bulunamadi: " & arrayName
+        Return 0
+    End If
+    If arrayValue.valueType <> "ARRAY" Then
+        errMsg = "MIR: Indexed erisim ARRAY ister"
+        Return 0
+    End If
+    Dim arrStore As MIRArrayStorage Ptr
+    arrStore = MIRGetArrayStore(state, arrayValue.arrayId)
+    If arrStore = 0 Then
+        errMsg = "MIR: Dizi storage bulunamadi"
+        Return 0
+    End If
+    If MIREvalOperandValue(state, indexName, indexValue) = 0 Then
+        errMsg = "MIR: Dizi indeksi cozumlene medi"
+        Return 0
+    End If
+    If MIRAsInteger(indexValue, rawIndex) = 0 Then
+        errMsg = "MIR: Dizi indeksi sayisal olmali"
+        Return 0
+    End If
+    rawIndex -= arrStore->lowerBound
+    If rawIndex < 0 Or rawIndex >= arrStore->elementCount Then
+        errMsg = "MIR: Dizi indeksi sinir disi"
+        Return 0
+    End If
+    valueOut = arrStore->elements(rawIndex)
+    Return 1
+End Function
+
+Private Function MIRSetIndexed(ByRef state As MIREvaluatorState, ByRef arrayName As String, ByRef indexName As String, ByRef sourceName As String, ByRef errMsg As String) As Integer
+    Dim arrayValue As MIRValue
+    Dim indexValue As MIRValue
+    Dim sourceValue As MIRValue
+    Dim rawIndex As LongInt
+    If MIRGetVarValue(state, arrayName, arrayValue) = 0 Then
+        errMsg = "MIR: Dizi bulunamadi: " & arrayName
+        Return 0
+    End If
+    If arrayValue.valueType <> "ARRAY" Then
+        errMsg = "MIR: Indexed yazim ARRAY ister"
+        Return 0
+    End If
+    Dim arrStore As MIRArrayStorage Ptr
+    arrStore = MIRGetArrayStore(state, arrayValue.arrayId)
+    If arrStore = 0 Then
+        errMsg = "MIR: Dizi storage bulunamadi"
+        Return 0
+    End If
+    If MIREvalOperandValue(state, indexName, indexValue) = 0 Then
+        errMsg = "MIR: Dizi indeksi cozumlene medi"
+        Return 0
+    End If
+    If MIRAsInteger(indexValue, rawIndex) = 0 Then
+        errMsg = "MIR: Dizi indeksi sayisal olmali"
+        Return 0
+    End If
+    rawIndex -= arrStore->lowerBound
+    If rawIndex < 0 Or rawIndex >= arrStore->elementCount Then
+        errMsg = "MIR: Dizi indeksi sinir disi"
+        Return 0
+    End If
+    If MIREvalOperandValue(state, sourceName, sourceValue) = 0 Then
+        errMsg = "MIR: Indexed kaynak cozumlene medi"
+        Return 0
+    End If
+    arrStore->elements(rawIndex) = sourceValue
+    If MIRSetVarValue(state, arrayName, arrayValue) = 0 Then
+        errMsg = "MIR: Dizi yazimi kaydedilemedi"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function MIREvaluateLoadStoreInstruction(ByRef state As MIREvaluatorState, ByRef errMsg As String) As Integer
+    Dim tmpValue As MIRValue
+
+    Select Case gMirInstr.opcode
+        Case MIR_OP_LOAD_CONST
+            ' operand1 = constant value, result = target var
+            If gMirInstr.operandCount < 1 Then
+                errMsg = "MIR: LOAD_CONST için yeterli operand yok"
+                Return 0
+            End If
+            If MIRValueFromString(gMirInstr.operands(0), tmpValue) = 0 Then
+                errMsg = "MIR: Gecersiz constant degeri: " & gMirInstr.operands(0)
+                Return 0
+            End If
+            If MIRSetVarValue(state, gMirInstr.result, tmpValue) = 0 Then
+                errMsg = "MIR: Degisken degeri ayarlanamadi: " & gMirInstr.result
+                Return 0
+            End If
+
+        Case MIR_OP_LOAD_VAR
+            ' operand1 = source var, result = target var
+            If gMirInstr.operandCount < 1 Then
+                errMsg = "MIR: LOAD_VAR için yeterli operand yok"
+                Return 0
+            End If
+            If MIRGetVarValue(state, gMirInstr.operands(0), tmpValue) = 0 Then
+                errMsg = "MIR: Degisken bulunamadi: " & gMirInstr.operands(0)
+                Return 0
+            End If
+            If MIRSetVarValue(state, gMirInstr.result, tmpValue) = 0 Then
+                errMsg = "MIR: Degisken degeri ayarlanamadi: " & gMirInstr.result
+                Return 0
+            End If
+
+        Case MIR_OP_STORE_VAR
+            ' operand1 = source var, result = target var
+            If gMirInstr.operandCount < 1 Then
+                errMsg = "MIR: STORE_VAR için yeterli operand yok"
+                Return 0
+            End If
+            If MIRGetVarValue(state, gMirInstr.operands(0), tmpValue) = 0 Then
+                errMsg = "MIR: Kaynak degisken bulunamadi: " & gMirInstr.operands(0)
+                Return 0
+            End If
+            If MIRSetVarValue(state, gMirInstr.result, tmpValue) = 0 Then
+                errMsg = "MIR: Hedef degisken ayarlanamadi: " & gMirInstr.result
+                Return 0
+            End If
+
+            Dim ptrIdx As Integer
+            ptrIdx = MIRVarPtrFindByName(gMirInstr.result)
+            If ptrIdx <> -1 Then
+                Dim rawStoreInt As LongInt
+                If MIRAsInteger(tmpValue, rawStoreInt) <> 0 Then
+                    MIRMemWriteDword gMirVarPtrEntries(ptrIdx).addrValue, rawStoreInt
+                End If
+            End If
+
+        Case MIR_OP_LOAD_INDEXED
+            If gMirInstr.operandCount < 2 Then
+                errMsg = "MIR: LOAD_INDEXED icin yeterli operand yok"
+                Return 0
+            End If
+            If MIRTryGetIndexed(state, gMirInstr.operands(0), gMirInstr.operands(1), tmpValue, errMsg) = 0 Then Return 0
+            If MIRSetVarValue(state, gMirInstr.result, tmpValue) = 0 Then
+                errMsg = "MIR: Indexed load sonucu yazilamadi: " & gMirInstr.result
+                Return 0
+            End If
+
+        Case MIR_OP_STORE_INDEXED
+            If gMirInstr.operandCount < 3 Then
+                errMsg = "MIR: STORE_INDEXED icin yeterli operand yok"
+                Return 0
+            End If
+            If MIRSetIndexed(state, gMirInstr.operands(0), gMirInstr.operands(1), gMirInstr.operands(2), errMsg) = 0 Then Return 0
+
+        Case MIR_OP_NEW
+            If gMirInstr.operandCount < 1 Then
+                errMsg = "MIR: NEW icin class adi gerekli"
+                Return 0
+            End If
+
+            Dim newResultName As String
+            newResultName = gMirInstr.result
+
+            Dim heapNext As MIRValue
+            If MIRGetVarValue(state, "__mir_heap_next", heapNext) = 0 Then
+                heapNext.valueType = "INTEGER"
+                heapNext.intValue = &h20000000
+            End If
+
+            If heapNext.valueType <> "INTEGER" Then
+                errMsg = "MIR: __mir_heap_next integer olmali"
+                Return 0
+            End If
+
+            Dim newResult As MIRValue
+            newResult.valueType = "INTEGER"
+            newResult.intValue = heapNext.intValue
+
+            heapNext.intValue += 256
+            If MIRSetVarValue(state, "__mir_heap_next", heapNext) = 0 Then
+                errMsg = "MIR: heap pointer guncellenemedi"
+                Return 0
+            End If
+
+            Dim className As String
+            className = UCase(Trim(gMirInstr.operands(0)))
+            If className <> "" Then
+                MIRObjectClassSet CULngInt(newResult.intValue), className
+
+                Dim ctorFnName As String
+                ctorFnName = className & "_CTOR"
+                Dim ctorFnIdx As Integer
+                ctorFnIdx = MIRFindFunctionIndex(state.module, ctorFnName)
+                If ctorFnIdx <> -1 Then
+                    If gMirInstr.operandCount >= 8 Then
+                        errMsg = "MIR: NEW constructor arguman limiti asildi"
+                        Return 0
+                    End If
+
+                    Dim thisVarName As String
+                    thisVarName = "__mir_new_this"
+                    MIRSetVarValue state, thisVarName, newResult
+
+                    Dim savedCallInstr As MIRIRInstruction
+                    savedCallInstr = gMirInstr
+
+                    Dim ctorCall As MIRIRInstruction
+                    ctorCall.opcode = MIR_OP_CALL
+                    ctorCall.operandCount = gMirInstr.operandCount + 1
+                    ctorCall.result = ""
+                    ctorCall.operands(0) = ctorFnName
+                    ctorCall.operands(1) = thisVarName
+                    If gMirInstr.operandCount > 1 Then ctorCall.operands(2) = gMirInstr.operands(1)
+                    If gMirInstr.operandCount > 2 Then ctorCall.operands(3) = gMirInstr.operands(2)
+                    If gMirInstr.operandCount > 3 Then ctorCall.operands(4) = gMirInstr.operands(3)
+                    If gMirInstr.operandCount > 4 Then ctorCall.operands(5) = gMirInstr.operands(4)
+                    If gMirInstr.operandCount > 5 Then ctorCall.operands(6) = gMirInstr.operands(5)
+                    If gMirInstr.operandCount > 6 Then ctorCall.operands(7) = gMirInstr.operands(6)
+
+                    gMirInstr = ctorCall
+                    Dim ctorRet As MIRValue
+                    If MIRInvokeUserFunction(state, ctorFnIdx, ctorRet, errMsg) = 0 Then
+                        gMirInstr = savedCallInstr
+                        Return 0
+                    End If
+                    gMirInstr = savedCallInstr
+                End If
+            End If
+
+            If Trim(newResultName) <> "" Then
+                If MIRSetVarValue(state, newResultName, newResult) = 0 Then
+                    errMsg = "MIR: NEW sonucu yazilamadi: " & newResultName
+                    Return 0
+                End If
+            End If
+
+        Case Else
+            errMsg = "MIR: Bilinmeyen opcode: " & gMirInstr.opcode
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function MIREvaluateArithmeticInstruction(ByRef state As MIREvaluatorState, ByRef errMsg As String) As Integer
+    Dim lhsValue As MIRValue
+    Dim rhsValue As MIRValue
+    Dim operandValue As MIRValue
+    Dim resultValue As MIRValue
+
+    Select Case gMirInstr.opcode
+        Case MIR_OP_ADD, MIR_OP_SUB, MIR_OP_MUL, MIR_OP_DIV, MIR_OP_MOD, MIR_OP_SHL, MIR_OP_SHR, MIR_OP_ROL, MIR_OP_ROR, MIR_OP_FADD, MIR_OP_FSUB, MIR_OP_FMUL, MIR_OP_FDIV
+            ' operand1, operand2 = operands, result = target
+            If gMirInstr.operandCount < 2 Then
+                errMsg = "MIR: İkili işlem için yeterli operand yok"
+                Return 0
+            End If
+            If MIRGetVarValue(state, gMirInstr.operands(0), lhsValue) = 0 Then
+                errMsg = "MIR: Sol operand bulunamadi: " & gMirInstr.operands(0)
+                Return 0
+            End If
+            If MIRGetVarValue(state, gMirInstr.operands(1), rhsValue) = 0 Then
+                errMsg = "MIR: Sag operand bulunamadi: " & gMirInstr.operands(1)
+                Return 0
+            End If
+            If MIRBinaryOp(gMirInstr.opcode, lhsValue, rhsValue, resultValue, errMsg) = 0 Then Return 0
+            If MIRSetVarValue(state, gMirInstr.result, resultValue) = 0 Then
+                errMsg = "MIR: Sonuc degiskeni ayarlanamadi: " & gMirInstr.result
+                Return 0
+            End If
+
+        Case MIR_OP_NEG, MIR_OP_FNEG
+            ' operand1 = operand, result = target
+            If gMirInstr.operandCount < 1 Then
+                errMsg = "MIR: NEG için yeterli operand yok"
+                Return 0
+            End If
+            If MIRGetVarValue(state, gMirInstr.operands(0), operandValue) = 0 Then
+                errMsg = "MIR: Operand bulunamadi: " & gMirInstr.operands(0)
+                Return 0
+            End If
+            If gMirInstr.opcode = MIR_OP_FNEG Then
+                resultValue.valueType = "FLOAT"
+                If operandValue.valueType = "FLOAT" Then
+                    resultValue.floatValue = -operandValue.floatValue
+                ElseIf operandValue.valueType = "INTEGER" Then
+                    resultValue.floatValue = -CDbl(operandValue.intValue)
+                Else
+                    errMsg = "MIR: FNEG sadece sayı tipleri için"
+                    Return 0
+                End If
+            ElseIf operandValue.valueType = "INTEGER" Then
+                resultValue.valueType = "INTEGER"
+                resultValue.intValue = -operandValue.intValue
+            ElseIf operandValue.valueType = "FLOAT" Then
+                resultValue.valueType = "FLOAT"
+                resultValue.floatValue = -operandValue.floatValue
+            Else
+                errMsg = "MIR: NEG sadece sayı tipleri için"
+                Return 0
+            End If
+            If MIRSetVarValue(state, gMirInstr.result, resultValue) = 0 Then
+                errMsg = "MIR: Sonuc degiskeni ayarlanamadi: " & gMirInstr.result
+                Return 0
+            End If
+
+        Case Else
+            errMsg = "MIR: Bilinmeyen opcode: " & gMirInstr.opcode
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function MIREvaluateCompareLogicalInstruction(ByRef state As MIREvaluatorState, ByRef errMsg As String) As Integer
+    Dim lhsValue As MIRValue
+    Dim rhsValue As MIRValue
+    Dim operandValue As MIRValue
+    Dim resultValue As MIRValue
+
+    Select Case gMirInstr.opcode
+        Case MIR_OP_EQ, MIR_OP_NE, MIR_OP_LT, MIR_OP_LE, MIR_OP_GT, MIR_OP_GE
+            ' operand1, operand2 = operands, result = target (boolean)
+            If gMirInstr.operandCount < 2 Then
+                errMsg = "MIR: Karşılaştırma için yeterli operand yok"
+                Return 0
+            End If
+            If MIRGetVarValue(state, gMirInstr.operands(0), lhsValue) = 0 Then
+                errMsg = "MIR: Sol operand bulunamadi: " & gMirInstr.operands(0)
+                Return 0
+            End If
+            If MIRGetVarValue(state, gMirInstr.operands(1), rhsValue) = 0 Then
+                errMsg = "MIR: Sag operand bulunamadi: " & gMirInstr.operands(1)
+                Return 0
+            End If
+            resultValue.valueType = "INTEGER"
+            Dim compareInt As Integer
+            If MIRCompareOp(gMirInstr.opcode, lhsValue, rhsValue, compareInt, errMsg) = 0 Then Return 0
+            resultValue.intValue = compareInt
+            If MIRSetVarValue(state, gMirInstr.result, resultValue) = 0 Then
+                errMsg = "MIR: Sonuc degiskeni ayarlanamadi: " & gMirInstr.result
+                Return 0
+            End If
+
+        Case MIR_OP_AND, MIR_OP_OR, MIR_OP_XOR
+            ' operand1, operand2 = operands, result = target
+            If gMirInstr.operandCount < 2 Then
+                errMsg = "MIR: Mantıksal işlem için yeterli operand yok"
+                Return 0
+            End If
+            If MIRGetVarValue(state, gMirInstr.operands(0), lhsValue) = 0 Then
+                errMsg = "MIR: Sol operand bulunamadı: " & gMirInstr.operands(0)
+                Return 0
+            End If
+            If MIRGetVarValue(state, gMirInstr.operands(1), rhsValue) = 0 Then
+                errMsg = "MIR: Sağ operand bulunamadı: " & gMirInstr.operands(1)
+                Return 0
+            End If
+            If lhsValue.valueType <> "INTEGER" Or rhsValue.valueType <> "INTEGER" Then
+                errMsg = "MIR: Mantıksal işlemler sadece tamsayı için"
+                Return 0
+            End If
+            resultValue.valueType = "INTEGER"
+            Select Case gMirInstr.opcode
+                Case MIR_OP_AND: resultValue.intValue = lhsValue.intValue And rhsValue.intValue
+                Case MIR_OP_OR: resultValue.intValue = lhsValue.intValue Or rhsValue.intValue
+                Case MIR_OP_XOR: resultValue.intValue = lhsValue.intValue Xor rhsValue.intValue
+            End Select
+            If MIRSetVarValue(state, gMirInstr.result, resultValue) = 0 Then
+                errMsg = "MIR: Sonuç değişkeni ayarlanamadı: " & gMirInstr.result
+                Return 0
+            End If
+
+        Case MIR_OP_NOT
+            ' operand1 = operand, result = target
+            If gMirInstr.operandCount < 1 Then
+                errMsg = "MIR: NOT için yeterli operand yok"
+                Return 0
+            End If
+            If MIRGetVarValue(state, gMirInstr.operands(0), operandValue) = 0 Then
+                errMsg = "MIR: Operand bulunamadı: " & gMirInstr.operands(0)
+                Return 0
+            End If
+            If operandValue.valueType <> "INTEGER" Then
+                errMsg = "MIR: NOT sadece tamsayı için"
+                Return 0
+            End If
+            resultValue.valueType = "INTEGER"
+            resultValue.intValue = Not operandValue.intValue
+            If MIRSetVarValue(state, gMirInstr.result, resultValue) = 0 Then
+                errMsg = "MIR: Sonuç değişkeni ayarlanamadı: " & gMirInstr.result
+                Return 0
+            End If
+
+        Case Else
+            errMsg = "MIR: Bilinmeyen opcode: " & gMirInstr.opcode
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function MIREvalOperandValue(ByRef state As MIREvaluatorState, ByRef operandText As String, ByRef valueOut As MIRValue) As Integer
+    If MIRGetVarValue(state, operandText, valueOut) <> 0 Then Return 1
+    If MIRValueFromString(operandText, valueOut) <> 0 Then Return 1
+    Return 0
+End Function
+
+Private Function MIRAsDouble(ByRef v As MIRValue, ByRef outValue As Double) As Integer
+    If v.valueType = "FLOAT" Then
+        outValue = v.floatValue
+        Return 1
+    End If
+    If v.valueType = "INTEGER" Then
+        outValue = CDbl(v.intValue)
+        Return 1
+    End If
+    If v.valueType = "STRING" Then
+        outValue = Val(v.stringValue)
+        Return 1
+    End If
+    Return 0
+End Function
+
+Private Function MIRAsInteger(ByRef v As MIRValue, ByRef outValue As LongInt) As Integer
+    If v.valueType = "INTEGER" Then
+        outValue = v.intValue
+        Return 1
+    End If
+    If v.valueType = "FLOAT" Then
+        outValue = CLng(v.floatValue)
+        Return 1
+    End If
+    If v.valueType = "STRING" Then
+        outValue = CLng(Val(v.stringValue))
+        Return 1
+    End If
+    Return 0
+End Function
+
+Private Function MIRValueToText(ByRef v As MIRValue) As String
+    Select Case UCase(Trim(v.valueType))
+    Case "INTEGER"
+        Return LTrim(Str(v.intValue))
+    Case "FLOAT"
+        Return LTrim(Str(v.floatValue))
+    Case "STRING"
+        Return v.stringValue
+    Case "NULL"
+        Return ""
+    Case Else
+        Return v.stringValue
+    End Select
+End Function
+
+Private Function MIRInputQueuePop(ByRef lineOut As String) As Integer
+    If gMirInputQueueReadPos < gMirInputQueueCount Then
+        lineOut = gMirInputQueue(gMirInputQueueReadPos)
+        gMirInputQueueReadPos += 1
+        Return 1
+    End If
+    lineOut = ""
+    Return 0
+End Function
+
+Private Sub MIRPrintEmitSpace()
+    UxbConsolePrintSpace
+    gMirPrintColumnPos = UxbConsoleGetPrintColumnPos()
+End Sub
+
+Private Sub MIRPrintEmitCommaZone()
+    UxbConsolePrintCommaZone MIR_PRINT_ZONE_WIDTH
+    gMirPrintColumnPos = UxbConsoleGetPrintColumnPos()
+End Sub
+
+Function MIRDebugGetPrintColumnPos() As Integer
+    Return gMirPrintColumnPos
+End Function
+
+Sub MIRDebugInputQueueClear()
+    gMirInputQueueCount = 0
+    gMirInputQueueReadPos = 0
+    Erase gMirInputQueue
+End Sub
+
+Sub MIRDebugInputQueuePush(ByRef lineText As String)
+    If gMirInputQueueCount = 0 Then
+        ReDim gMirInputQueue(0)
+    Else
+        ReDim Preserve gMirInputQueue(gMirInputQueueCount)
+    End If
+
+    gMirInputQueue(gMirInputQueueCount) = lineText
+    gMirInputQueueCount += 1
+End Sub
+
+Function MIRDebugGetInputQueueRemaining() As Integer
+    Return gMirInputQueueCount - gMirInputQueueReadPos
+End Function
+
+Private Function MIRDescribeNodeText(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef textOut As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+    Dim k As String
+    k = UCase(Trim(n.kind))
+
+    Select Case k
+    Case "IDENT", "KEYWORD_REF", "NUMBER", "STRING"
+        textOut = Trim(n.value)
+        Return 1
+    Case "UNARY"
+        Dim rhsText As String
+        Dim opText As String
+        opText = Trim(n.op)
+        If opText = "" Then opText = "+"
+        If MIRDescribeNodeText(ps, n.right, rhsText) = 0 Then Return 0
+        textOut = opText & rhsText
+        Return 1
+    Case "BINARY"
+        Dim leftText As String
+        Dim rightText As String
+        If MIRDescribeNodeText(ps, n.left, leftText) = 0 Then Return 0
+        If MIRDescribeNodeText(ps, n.right, rightText) = 0 Then Return 0
+        textOut = leftText & Trim(n.op) & rightText
+        Return 1
+    Case "FIELD_EXPR"
+        Dim baseText As String
+        If MIRDescribeNodeText(ps, n.left, baseText) = 0 Then Return 0
+        If baseText = "" Then Return 0
+        textOut = baseText & "." & Trim(n.value)
+        Return 1
+    Case "CALL_EXPR"
+        Dim callText As String
+        callText = Trim(n.value)
+        If callText = "" Then Return 0
+        callText &= "("
+        Dim firstArg As Integer
+        firstArg = 1
+        Dim ch As Integer
+        ch = n.firstChild
+        Do While ch <> -1
+            Dim argText As String
+            If MIRDescribeNodeText(ps, ch, argText) = 0 Then Return 0
+            If firstArg = 0 Then callText &= ","
+            callText &= argText
+            firstArg = 0
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+        callText &= ")"
+        textOut = callText
+        Return 1
+    Case "TERNARY_EXPR"
+        Dim condText As String
+        Dim thenText As String
+        Dim elseText As String
+        Dim thenNode As Integer
+        thenNode = n.firstChild
+        If thenNode = -1 Then Return 0
+        If MIRDescribeNodeText(ps, n.left, condText) = 0 Then Return 0
+        If MIRDescribeNodeText(ps, thenNode, thenText) = 0 Then Return 0
+        If MIRDescribeNodeText(ps, n.right, elseText) = 0 Then Return 0
+        textOut = "(" & condText & " ? " & thenText & " : " & elseText & ")"
+        Return 1
+    End Select
+
+    If Trim(n.value) <> "" Then
+        textOut = Trim(n.value)
+        Return 1
+    End If
+
+    Return 0
+End Function
+
+Private Function MIRTryGetCallArg(ByRef state As MIREvaluatorState, ByVal argPos As Integer, ByRef valueOut As MIRValue) As Integer
+    If gMirInstr.operandCount < argPos + 2 Then Return 0
+    Return MIREvalOperandValue(state, gMirInstr.operands(argPos + 1), valueOut)
+End Function
+
+Private Function MIRCollectionCreate(ByRef kindText As String) As Integer
+    If gMirCollectionCount = 0 Then
+        ReDim gMirCollections(0)
+    Else
+        ReDim Preserve gMirCollections(gMirCollectionCount)
+    End If
+
+    Dim idx As Integer
+    idx = gMirCollectionCount
+    gMirCollections(idx).kind = UCase(Trim(kindText))
+    gMirCollections(idx).count = 0
+    Erase gMirCollections(idx).listItems
+    Erase gMirCollections(idx).dictKeys
+    Erase gMirCollections(idx).dictValues
+    Erase gMirCollections(idx).setItems
+
+    gMirCollectionCount += 1
+    Return idx + 1
+End Function
+
+Private Function MIRCollectionEnsureKind(ByVal handleValue As Integer, ByRef expectedKind As String, ByRef idxOut As Integer, ByRef errMsg As String) As Integer
+    If handleValue <= 0 Then
+        errMsg = "MIR: invalid collection handle"
+        Return 0
+    End If
+
+    idxOut = handleValue - 1
+    If idxOut < 0 Or idxOut >= gMirCollectionCount Then
+        errMsg = "MIR: invalid collection handle"
+        Return 0
+    End If
+
+    If UCase(gMirCollections(idxOut).kind) <> UCase(expectedKind) Then
+        errMsg = "MIR: collection kind mismatch"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function MIRCallArgAsInteger(ByRef state As MIREvaluatorState, ByVal argPos As Integer, ByRef outValue As LongInt, ByRef errMsg As String) As Integer
+    Dim v As MIRValue
+    If MIRTryGetCallArg(state, argPos, v) = 0 Then
+        errMsg = "MIR: CALL arguman cozumlene medi"
+        Return 0
+    End If
+    If MIRAsInteger(v, outValue) = 0 Then
+        errMsg = "MIR: sayisal arguman bekleniyor"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function MIRCallArgAsText(ByRef state As MIREvaluatorState, ByVal argPos As Integer, ByRef outText As String, ByRef errMsg As String) As Integer
+    Dim v As MIRValue
+    If MIRTryGetCallArg(state, argPos, v) = 0 Then
+        errMsg = "MIR: CALL arguman cozumlene medi"
+        Return 0
+    End If
+    outText = MIRValueToText(v)
+    Return 1
+End Function
+
+Private Function MIRCallArgAsValue(ByRef state As MIREvaluatorState, ByVal argPos As Integer, ByRef outValue As MIRValue, ByRef errMsg As String) As Integer
+    If MIRTryGetCallArg(state, argPos, outValue) = 0 Then
+        errMsg = "MIR: CALL arguman cozumlene medi"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function MIRTimerUnitScale(ByRef unitText As String, ByRef scaleOut As Double) As Integer
+    Dim unitUpper As String
+    unitUpper = UCase(Trim(unitText))
+
+    Select Case unitUpper
+    Case "", "S"
+        scaleOut = 1#
+    Case "NS"
+        scaleOut = 1000000000#
+    Case "US"
+        scaleOut = 1000000#
+    Case "MS"
+        scaleOut = 1000#
+    Case "MIN"
+        scaleOut = 1# / 60#
+    Case "H"
+        scaleOut = 1# / 3600#
+    Case "DAY"
+        scaleOut = 1# / 86400#
+    Case "YEAR"
+        scaleOut = 1# / 31557600#
+    Case Else
+        Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function MIRKeyStringToCode(ByRef keyText As String) As LongInt
+    If Len(keyText) = 0 Then Return 0
+    If Len(keyText) = 1 Then Return Asc(keyText)
+    Return Asc(Left(keyText, 1))
+End Function
+
+Private Function MIRCallArgText(ByRef state As MIREvaluatorState, ByVal argPos As Integer, ByRef textOut As String) As Integer
+    Dim v As MIRValue
+    If MIRTryGetCallArg(state, argPos, v) = 0 Then Return 0
+    textOut = MIRValueToText(v)
+    Return 1
+End Function
+
+Private Function MIRSlotNormalizeKind(ByRef rawKind As String, ByRef kindOut As String) As Integer
+    kindOut = UCase(Trim(rawKind))
+    Select Case kindOut
+    Case "EVENT", "THREAD", "PARALEL", "PIPE"
+        Return 1
+    End Select
+    kindOut = ""
+    Return 0
+End Function
+
+Private Function MIRSlotFindEntry(ByRef kindRaw As String, ByRef nameRaw As String, ByVal slotId As Integer, ByVal preferId As Integer) As Integer
+    Dim kindText As String
+    If MIRSlotNormalizeKind(kindRaw, kindText) = 0 Then Return -1
+
+    Dim targetName As String
+    targetName = UCase(Trim(nameRaw))
+
+    Dim i As Integer
+    For i = 0 To gMirSlotEntryCount - 1
+        If gMirSlotEntries(i).kindText <> kindText Then Continue For
+        If preferId <> 0 Then
+            If gMirSlotEntries(i).slotId = slotId Then Return i
+        Else
+            If UCase(Trim(gMirSlotEntries(i).nameText)) = targetName Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function MIRSlotParseTarget(ByRef state As MIREvaluatorState, ByVal argPos As Integer, ByRef nameOut As String, ByRef slotIdOut As Integer, ByRef preferIdOut As Integer, ByRef errMsg As String) As Integer
+    Dim v As MIRValue
+    If MIRTryGetCallArg(state, argPos, v) = 0 Then
+        errMsg = "MIR: slot target arguman cozumlene medi"
+        Return 0
+    End If
+
+    nameOut = ""
+    slotIdOut = -1
+    preferIdOut = 0
+
+    If UCase(Trim(v.valueType)) = "STRING" Then
+        nameOut = UCase(Trim(v.stringValue))
+        If nameOut = "" Then
+            errMsg = "MIR: slot target name bos olamaz"
+            Return 0
+        End If
+        Return 1
+    End If
+
+    Dim slotId As LongInt
+    If MIRAsInteger(v, slotId) = 0 Then
+        errMsg = "MIR: slot target name veya id olmalidir"
+        Return 0
+    End If
+
+    If slotId < 0 Or slotId > 255 Then
+        errMsg = "MIR: slot target id out of byte range"
+        Return 0
+    End If
+
+    slotIdOut = CInt(slotId)
+    preferIdOut = 1
+    Return 1
+End Function
+
+Private Sub MIRSlotSetCapacity(ByRef kindRaw As String, ByVal capValue As Integer)
+    Select Case UCase(Trim(kindRaw))
+    Case "EVENT"
+        gMirSlotCapEvent = capValue
+    Case "THREAD"
+        gMirSlotCapThread = capValue
+    Case "PARALEL"
+        gMirSlotCapParalel = capValue
+    Case "PIPE"
+        gMirSlotCapPipe = capValue
+    End Select
+End Sub
+
+Private Function MIRSlotEnsureEntry(ByRef kindRaw As String, ByRef nameRaw As String, ByVal slotId As Integer, ByRef routineRaw As String, ByRef errMsg As String) As Integer
+    Dim kindText As String
+    If MIRSlotNormalizeKind(kindRaw, kindText) = 0 Then
+        errMsg = "MIR: invalid slot lane kind " & kindRaw
+        Return 0
+    End If
+
+    Dim slotName As String
+    slotName = UCase(Trim(nameRaw))
+    If slotName = "" Then
+        errMsg = "MIR: slot lane name cannot be empty"
+        Return 0
+    End If
+
+    Dim routineName As String
+    routineName = UCase(Trim(routineRaw))
+    If routineName = "" Then
+        errMsg = "MIR: slot lane routine cannot be empty"
+        Return 0
+    End If
+
+    If slotId < -1 Or slotId > 255 Then
+        errMsg = "MIR: slot id out of byte range"
+        Return 0
+    End If
+
+    Dim idx As Integer
+    idx = MIRSlotFindEntry(kindText, slotName, slotId, IIf(slotId >= 0, 1, 0))
+    If idx = -1 Then
+        If gMirSlotEntryCount = 0 Then
+            ReDim gMirSlotEntries(0)
+        Else
+            ReDim Preserve gMirSlotEntries(gMirSlotEntryCount)
+        End If
+        idx = gMirSlotEntryCount
+        gMirSlotEntryCount += 1
+    End If
+
+    gMirSlotEntries(idx).kindText = kindText
+    gMirSlotEntries(idx).nameText = slotName
+    gMirSlotEntries(idx).slotId = slotId
+    gMirSlotEntries(idx).routineName = routineName
+    gMirSlotEntries(idx).active = 1
+    Return 1
+End Function
+
+Private Function MIRInvokeRoutineNoArg(ByRef state As MIREvaluatorState, ByRef routineNameRaw As String, ByRef ret As MIRValue, ByRef errMsg As String) As Integer
+    Dim routineName As String
+    routineName = UCase(Trim(routineNameRaw))
+    If routineName = "" Then
+        errMsg = "MIR: slot lane routine is empty"
+        Return 0
+    End If
+
+    Dim fnIdx As Integer
+    fnIdx = MIRFindFunctionIndex(state.module, routineName)
+    If fnIdx = -1 Then
+        errMsg = "MIR: slot lane routine not found " & routineName
+        Return 0
+    End If
+
+    Dim savedInstr As MIRIRInstruction
+    savedInstr = gMirInstr
+
+    Dim callInstr As MIRIRInstruction
+    callInstr.opcode = MIR_OP_CALL
+    callInstr.operandCount = 1
+    callInstr.operands(0) = routineName
+    callInstr.result = ""
+    gMirInstr = callInstr
+
+    Dim ok As Integer
+    ok = MIRInvokeUserFunction(state, fnIdx, ret, errMsg)
+    gMirInstr = savedInstr
+    Return ok
+End Function
+
+Private Function MIRSlotTriggerEntry(ByRef state As MIREvaluatorState, ByVal entryIdx As Integer, ByVal pipeInputReady As Integer, ByRef pipeInput As MIRValue, ByVal pipeOutputWanted As Integer, ByRef ret As MIRValue, ByRef errMsg As String) As Integer
+    If entryIdx < 0 Or entryIdx >= gMirSlotEntryCount Then
+        errMsg = "MIR: slot target not found"
+        Return 0
+    End If
+
+    If gMirSlotEntries(entryIdx).active = 0 Then
+        ret.valueType = "INTEGER"
+        ret.intValue = 0
+        Return 1
+    End If
+
+    If pipeInputReady <> 0 Then
+        MIRSetVarValue state, "INPUT", pipeInput
+    End If
+
+    If pipeOutputWanted <> 0 Then
+        Dim zeroOut As MIRValue
+        zeroOut.valueType = "INTEGER"
+        zeroOut.intValue = 0
+        zeroOut.floatValue = 0
+        zeroOut.stringValue = ""
+        zeroOut.arrayId = -1
+        zeroOut.arrayLower = 0
+        zeroOut.arraySize = 0
+        MIRSetVarValue state, "OUTPUT", zeroOut
+    End If
+
+    If MIRInvokeRoutineNoArg(state, gMirSlotEntries(entryIdx).routineName, ret, errMsg) = 0 Then Return 0
+
+    If pipeOutputWanted <> 0 Then
+        If MIRGetVarValue(state, "OUTPUT", ret) = 0 Then
+            ret.valueType = "INTEGER"
+            ret.intValue = 0
+            ret.floatValue = 0
+            ret.stringValue = ""
+            ret.arrayId = -1
+            ret.arrayLower = 0
+            ret.arraySize = 0
+        End If
+    End If
+
+    Return 1
+End Function
+
+Private Function MIRTryInvokeSlotByCallName(ByRef state As MIREvaluatorState, ByRef fnName As String, ByRef arg1 As MIRValue, ByVal hasArg1 As Integer, ByRef ret As MIRValue, ByRef handledOut As Integer, ByRef errMsg As String) As Integer
+    handledOut = 0
+
+    Dim callName As String
+    callName = UCase(Trim(fnName))
+    If callName = "" Then Return 1
+
+    Dim laneKinds(0 To 3) As String
+    laneKinds(0) = "PIPE"
+    laneKinds(1) = "EVENT"
+    laneKinds(2) = "THREAD"
+    laneKinds(3) = "PARALEL"
+
+    Dim i As Integer
+    For i = 0 To 3
+        Dim idx As Integer
+        idx = MIRSlotFindEntry(laneKinds(i), callName, -1, 0)
+        If idx = -1 Then Continue For
+
+        handledOut = 1
+        If laneKinds(i) = "PIPE" Then
+            If MIRSlotTriggerEntry(state, idx, hasArg1, arg1, 1, ret, errMsg) = 0 Then Return 0
+        Else
+            If MIRSlotTriggerEntry(state, idx, 0, arg1, 0, ret, errMsg) = 0 Then Return 0
+            ret.valueType = "INTEGER"
+            ret.intValue = 0
+        End If
+        Return 1
+    Next i
+
+    Return 1
+End Function
+
+Private Function MIRHandleSlotBuiltinCall(ByRef state As MIREvaluatorState, ByRef fnName As String, ByRef ret As MIRValue, ByRef handledOut As Integer, ByRef errMsg As String) As Integer
+    handledOut = 1
+
+    Select Case fnName
+    Case "SLOT_DEF"
+        If gMirInstr.operandCount < 5 Then
+            errMsg = "MIR: SLOT_DEF kind,name,id,routine ister"
+            Return 0
+        End If
+
+        Dim kindText As String
+        Dim slotName As String
+        Dim routineName As String
+        If MIRCallArgText(state, 0, kindText) = 0 Then errMsg = "MIR: SLOT_DEF kind cozumlene medi": Return 0
+        If MIRCallArgText(state, 1, slotName) = 0 Then errMsg = "MIR: SLOT_DEF name cozumlene medi": Return 0
+        If MIRCallArgText(state, 3, routineName) = 0 Then errMsg = "MIR: SLOT_DEF routine cozumlene medi": Return 0
+
+        Dim idValue As MIRValue
+        Dim slotId As LongInt
+        If MIRTryGetCallArg(state, 2, idValue) = 0 Then errMsg = "MIR: SLOT_DEF id cozumlene medi": Return 0
+        If MIRAsInteger(idValue, slotId) = 0 Then errMsg = "MIR: SLOT_DEF id sayisal olmali": Return 0
+
+        If MIRSlotEnsureEntry(kindText, slotName, CInt(slotId), routineName, errMsg) = 0 Then Return 0
+        ret.valueType = "INTEGER"
+        ret.intValue = 0
+        Return 1
+
+    Case "SLOT_CAP"
+        If gMirInstr.operandCount < 3 Then
+            errMsg = "MIR: SLOT_CAP kind,count ister"
+            Return 0
+        End If
+
+        Dim capKind As String
+        If MIRCallArgText(state, 0, capKind) = 0 Then errMsg = "MIR: SLOT_CAP kind cozumlene medi": Return 0
+        Dim capKindNorm As String
+        If MIRSlotNormalizeKind(capKind, capKindNorm) = 0 Then
+            errMsg = "MIR: SLOT_CAP invalid kind " & capKind
+            Return 0
+        End If
+
+        Dim capValueRaw As MIRValue
+        Dim capValue As LongInt
+        If MIRTryGetCallArg(state, 1, capValueRaw) = 0 Then errMsg = "MIR: SLOT_CAP count cozumlene medi": Return 0
+        If MIRAsInteger(capValueRaw, capValue) = 0 Then errMsg = "MIR: SLOT_CAP count sayisal olmali": Return 0
+        If capValue < 0 Or capValue > 256 Then
+            errMsg = "MIR: SLOT_CAP count out of range"
+            Return 0
+        End If
+
+        MIRSlotSetCapacity capKindNorm, CInt(capValue)
+        ret.valueType = "INTEGER"
+        ret.intValue = CInt(capValue)
+        Return 1
+
+    Case "SLOT_ON", "SLOT_OFF", "SLOT_TRIGGER"
+        If gMirInstr.operandCount < 3 Then
+            errMsg = "MIR: " & fnName & " kind,target ister"
+            Return 0
+        End If
+
+        Dim laneKind As String
+        If MIRCallArgText(state, 0, laneKind) = 0 Then errMsg = "MIR: slot kind cozumlene medi": Return 0
+        If MIRSlotNormalizeKind(laneKind, laneKind) = 0 Then
+            errMsg = "MIR: invalid slot kind " & laneKind
+            Return 0
+        End If
+
+        Dim targetName As String
+        Dim targetId As Integer
+        Dim preferId As Integer
+        If MIRSlotParseTarget(state, 1, targetName, targetId, preferId, errMsg) = 0 Then Return 0
+
+        Dim targetIdx As Integer
+        targetIdx = MIRSlotFindEntry(laneKind, targetName, targetId, preferId)
+        If targetIdx = -1 Then
+            errMsg = "MIR: slot target not found"
+            Return 0
+        End If
+
+        If fnName = "SLOT_ON" Then
+            gMirSlotEntries(targetIdx).active = 1
+            ret.valueType = "INTEGER"
+            ret.intValue = 1
+            Return 1
+        End If
+
+        If fnName = "SLOT_OFF" Then
+            gMirSlotEntries(targetIdx).active = 0
+            ret.valueType = "INTEGER"
+            ret.intValue = 0
+            Return 1
+        End If
+
+        Dim pipeInput As MIRValue
+        Dim hasPipeInput As Integer
+        hasPipeInput = 0
+        If laneKind = "PIPE" And gMirInstr.operandCount >= 4 Then
+            If MIRTryGetCallArg(state, 2, pipeInput) <> 0 Then hasPipeInput = 1
+        End If
+
+        If MIRSlotTriggerEntry(state, targetIdx, hasPipeInput, pipeInput, IIf(laneKind = "PIPE", 1, 0), ret, errMsg) = 0 Then Return 0
+        Return 1
+    End Select
+
+    handledOut = 0
+    Return 1
+End Function
+
+Private Function MIRIsDllConvention(ByRef textIn As String) As Integer
+    Dim t As String
+    t = UCase(Trim(textIn))
+    Return IIf(t = "CDECL" Or t = "STDCALL", 1, 0)
+End Function
+
+' MIR Win64 mixed FFI type aliases (U=integer/pointer class, F=double/XMM class)
+Type MIRFnNoArgF64 As Function Cdecl () As Double
+Type MIRFnArg1U64_U As Function Cdecl (ByVal a0 As ULongInt) As ULongInt
+Type MIRFnArg1U64_F As Function Cdecl (ByVal a0 As Double) As ULongInt
+Type MIRFnArg2U64_UU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt) As ULongInt
+Type MIRFnArg2U64_FU As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt) As ULongInt
+Type MIRFnArg2U64_UF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double) As ULongInt
+Type MIRFnArg2U64_FF As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double) As ULongInt
+Type MIRFnArg3U64_UUU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As ULongInt) As ULongInt
+Type MIRFnArg3U64_FUU As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As ULongInt) As ULongInt
+Type MIRFnArg3U64_UFU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As ULongInt) As ULongInt
+Type MIRFnArg3U64_FFU As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As ULongInt) As ULongInt
+Type MIRFnArg3U64_UUF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As Double) As ULongInt
+Type MIRFnArg3U64_FUF As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As Double) As ULongInt
+Type MIRFnArg3U64_UFF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As Double) As ULongInt
+Type MIRFnArg3U64_FFF As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As Double) As ULongInt
+Type MIRFnArg4U64_UUUU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As ULongInt, ByVal a3 As ULongInt) As ULongInt
+Type MIRFnArg4U64_FUUU As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As ULongInt, ByVal a3 As ULongInt) As ULongInt
+Type MIRFnArg4U64_UFUU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As ULongInt, ByVal a3 As ULongInt) As ULongInt
+Type MIRFnArg4U64_FFUU As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As ULongInt, ByVal a3 As ULongInt) As ULongInt
+Type MIRFnArg4U64_UUFU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As Double, ByVal a3 As ULongInt) As ULongInt
+Type MIRFnArg4U64_FUFU As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As Double, ByVal a3 As ULongInt) As ULongInt
+Type MIRFnArg4U64_UFFU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As Double, ByVal a3 As ULongInt) As ULongInt
+Type MIRFnArg4U64_FFFU As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As Double, ByVal a3 As ULongInt) As ULongInt
+Type MIRFnArg4U64_UUUF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As ULongInt, ByVal a3 As Double) As ULongInt
+Type MIRFnArg4U64_FUUF As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As ULongInt, ByVal a3 As Double) As ULongInt
+Type MIRFnArg4U64_UFUF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As ULongInt, ByVal a3 As Double) As ULongInt
+Type MIRFnArg4U64_FFUF As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As ULongInt, ByVal a3 As Double) As ULongInt
+Type MIRFnArg4U64_UUFF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As Double, ByVal a3 As Double) As ULongInt
+Type MIRFnArg4U64_FUFF As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As Double, ByVal a3 As Double) As ULongInt
+Type MIRFnArg4U64_UFFF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As Double, ByVal a3 As Double) As ULongInt
+Type MIRFnArg4U64_FFFF As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As Double, ByVal a3 As Double) As ULongInt
+Type MIRFnArg1F64_U As Function Cdecl (ByVal a0 As ULongInt) As Double
+Type MIRFnArg1F64_F As Function Cdecl (ByVal a0 As Double) As Double
+Type MIRFnArg2F64_UU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt) As Double
+Type MIRFnArg2F64_FU As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt) As Double
+Type MIRFnArg2F64_UF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double) As Double
+Type MIRFnArg2F64_FF As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double) As Double
+Type MIRFnArg3F64_UUU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As ULongInt) As Double
+Type MIRFnArg3F64_FUU As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As ULongInt) As Double
+Type MIRFnArg3F64_UFU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As ULongInt) As Double
+Type MIRFnArg3F64_FFU As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As ULongInt) As Double
+Type MIRFnArg3F64_UUF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As Double) As Double
+Type MIRFnArg3F64_FUF As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As Double) As Double
+Type MIRFnArg3F64_UFF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As Double) As Double
+Type MIRFnArg3F64_FFF As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As Double) As Double
+Type MIRFnArg4F64_UUUU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As ULongInt, ByVal a3 As ULongInt) As Double
+Type MIRFnArg4F64_FUUU As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As ULongInt, ByVal a3 As ULongInt) As Double
+Type MIRFnArg4F64_UFUU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As ULongInt, ByVal a3 As ULongInt) As Double
+Type MIRFnArg4F64_FFUU As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As ULongInt, ByVal a3 As ULongInt) As Double
+Type MIRFnArg4F64_UUFU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As Double, ByVal a3 As ULongInt) As Double
+Type MIRFnArg4F64_FUFU As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As Double, ByVal a3 As ULongInt) As Double
+Type MIRFnArg4F64_UFFU As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As Double, ByVal a3 As ULongInt) As Double
+Type MIRFnArg4F64_FFFU As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As Double, ByVal a3 As ULongInt) As Double
+Type MIRFnArg4F64_UUUF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As ULongInt, ByVal a3 As Double) As Double
+Type MIRFnArg4F64_FUUF As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As ULongInt, ByVal a3 As Double) As Double
+Type MIRFnArg4F64_UFUF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As ULongInt, ByVal a3 As Double) As Double
+Type MIRFnArg4F64_FFUF As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As ULongInt, ByVal a3 As Double) As Double
+Type MIRFnArg4F64_UUFF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As ULongInt, ByVal a2 As Double, ByVal a3 As Double) As Double
+Type MIRFnArg4F64_FUFF As Function Cdecl (ByVal a0 As Double, ByVal a1 As ULongInt, ByVal a2 As Double, ByVal a3 As Double) As Double
+Type MIRFnArg4F64_UFFF As Function Cdecl (ByVal a0 As ULongInt, ByVal a1 As Double, ByVal a2 As Double, ByVal a3 As Double) As Double
+Type MIRFnArg4F64_FFFF As Function Cdecl (ByVal a0 As Double, ByVal a1 As Double, ByVal a2 As Double, ByVal a3 As Double) As Double
+
+Private Function MIRDispatchX64MixedCall(ByVal procAddr As Any Ptr, ByRef retType As String, ByVal argCount As Integer, ByVal argMask As Integer, argValuesU64() As ULongInt, argValuesF64() As Double, ByRef rvU64 As ULongInt, ByRef rvF64 As Double, ByRef usesF64Return As Integer, ByRef errMsg As String) As Integer
+    Dim retClass As String
+    retClass = UCase(Trim(retType))
+    If retClass = "F64" Then
+        usesF64Return = 1
+    Else
+        usesF64Return = 0
+    End If
+
+    If usesF64Return <> 0 Then
+        Select Case argCount
+        Case 0
+            Dim fn0F As MIRFnNoArgF64
+            fn0F = procAddr
+            rvF64 = fn0F()
+        Case 1
+            Select Case argMask
+            Case 0
+                Dim fn_F64_1_0 As MIRFnArg1F64_U
+                fn_F64_1_0 = procAddr
+                rvF64 = fn_F64_1_0(argValuesU64(0))
+            Case 1
+                Dim fn_F64_1_1 As MIRFnArg1F64_F
+                fn_F64_1_1 = procAddr
+                rvF64 = fn_F64_1_1(argValuesF64(0))
+            Case Else
+                errMsg = "MIR: CALL DLL x64 mixed arg mask unsupported"
+                Return 0
+            End Select
+        Case 2
+            Select Case argMask
+            Case 0
+                Dim fn_F64_2_0 As MIRFnArg2F64_UU
+                fn_F64_2_0 = procAddr
+                rvF64 = fn_F64_2_0(argValuesU64(0), argValuesU64(1))
+            Case 1
+                Dim fn_F64_2_1 As MIRFnArg2F64_FU
+                fn_F64_2_1 = procAddr
+                rvF64 = fn_F64_2_1(argValuesF64(0), argValuesU64(1))
+            Case 2
+                Dim fn_F64_2_2 As MIRFnArg2F64_UF
+                fn_F64_2_2 = procAddr
+                rvF64 = fn_F64_2_2(argValuesU64(0), argValuesF64(1))
+            Case 3
+                Dim fn_F64_2_3 As MIRFnArg2F64_FF
+                fn_F64_2_3 = procAddr
+                rvF64 = fn_F64_2_3(argValuesF64(0), argValuesF64(1))
+            Case Else
+                errMsg = "MIR: CALL DLL x64 mixed arg mask unsupported"
+                Return 0
+            End Select
+        Case 3
+            Select Case argMask
+            Case 0
+                Dim fn_F64_3_0 As MIRFnArg3F64_UUU
+                fn_F64_3_0 = procAddr
+                rvF64 = fn_F64_3_0(argValuesU64(0), argValuesU64(1), argValuesU64(2))
+            Case 1
+                Dim fn_F64_3_1 As MIRFnArg3F64_FUU
+                fn_F64_3_1 = procAddr
+                rvF64 = fn_F64_3_1(argValuesF64(0), argValuesU64(1), argValuesU64(2))
+            Case 2
+                Dim fn_F64_3_2 As MIRFnArg3F64_UFU
+                fn_F64_3_2 = procAddr
+                rvF64 = fn_F64_3_2(argValuesU64(0), argValuesF64(1), argValuesU64(2))
+            Case 3
+                Dim fn_F64_3_3 As MIRFnArg3F64_FFU
+                fn_F64_3_3 = procAddr
+                rvF64 = fn_F64_3_3(argValuesF64(0), argValuesF64(1), argValuesU64(2))
+            Case 4
+                Dim fn_F64_3_4 As MIRFnArg3F64_UUF
+                fn_F64_3_4 = procAddr
+                rvF64 = fn_F64_3_4(argValuesU64(0), argValuesU64(1), argValuesF64(2))
+            Case 5
+                Dim fn_F64_3_5 As MIRFnArg3F64_FUF
+                fn_F64_3_5 = procAddr
+                rvF64 = fn_F64_3_5(argValuesF64(0), argValuesU64(1), argValuesF64(2))
+            Case 6
+                Dim fn_F64_3_6 As MIRFnArg3F64_UFF
+                fn_F64_3_6 = procAddr
+                rvF64 = fn_F64_3_6(argValuesU64(0), argValuesF64(1), argValuesF64(2))
+            Case 7
+                Dim fn_F64_3_7 As MIRFnArg3F64_FFF
+                fn_F64_3_7 = procAddr
+                rvF64 = fn_F64_3_7(argValuesF64(0), argValuesF64(1), argValuesF64(2))
+            Case Else
+                errMsg = "MIR: CALL DLL x64 mixed arg mask unsupported"
+                Return 0
+            End Select
+        Case 4
+            Select Case argMask
+            Case 0
+                Dim fn_F64_4_0 As MIRFnArg4F64_UUUU
+                fn_F64_4_0 = procAddr
+                rvF64 = fn_F64_4_0(argValuesU64(0), argValuesU64(1), argValuesU64(2), argValuesU64(3))
+            Case 1
+                Dim fn_F64_4_1 As MIRFnArg4F64_FUUU
+                fn_F64_4_1 = procAddr
+                rvF64 = fn_F64_4_1(argValuesF64(0), argValuesU64(1), argValuesU64(2), argValuesU64(3))
+            Case 2
+                Dim fn_F64_4_2 As MIRFnArg4F64_UFUU
+                fn_F64_4_2 = procAddr
+                rvF64 = fn_F64_4_2(argValuesU64(0), argValuesF64(1), argValuesU64(2), argValuesU64(3))
+            Case 3
+                Dim fn_F64_4_3 As MIRFnArg4F64_FFUU
+                fn_F64_4_3 = procAddr
+                rvF64 = fn_F64_4_3(argValuesF64(0), argValuesF64(1), argValuesU64(2), argValuesU64(3))
+            Case 4
+                Dim fn_F64_4_4 As MIRFnArg4F64_UUFU
+                fn_F64_4_4 = procAddr
+                rvF64 = fn_F64_4_4(argValuesU64(0), argValuesU64(1), argValuesF64(2), argValuesU64(3))
+            Case 5
+                Dim fn_F64_4_5 As MIRFnArg4F64_FUFU
+                fn_F64_4_5 = procAddr
+                rvF64 = fn_F64_4_5(argValuesF64(0), argValuesU64(1), argValuesF64(2), argValuesU64(3))
+            Case 6
+                Dim fn_F64_4_6 As MIRFnArg4F64_UFFU
+                fn_F64_4_6 = procAddr
+                rvF64 = fn_F64_4_6(argValuesU64(0), argValuesF64(1), argValuesF64(2), argValuesU64(3))
+            Case 7
+                Dim fn_F64_4_7 As MIRFnArg4F64_FFFU
+                fn_F64_4_7 = procAddr
+                rvF64 = fn_F64_4_7(argValuesF64(0), argValuesF64(1), argValuesF64(2), argValuesU64(3))
+            Case 8
+                Dim fn_F64_4_8 As MIRFnArg4F64_UUUF
+                fn_F64_4_8 = procAddr
+                rvF64 = fn_F64_4_8(argValuesU64(0), argValuesU64(1), argValuesU64(2), argValuesF64(3))
+            Case 9
+                Dim fn_F64_4_9 As MIRFnArg4F64_FUUF
+                fn_F64_4_9 = procAddr
+                rvF64 = fn_F64_4_9(argValuesF64(0), argValuesU64(1), argValuesU64(2), argValuesF64(3))
+            Case 10
+                Dim fn_F64_4_10 As MIRFnArg4F64_UFUF
+                fn_F64_4_10 = procAddr
+                rvF64 = fn_F64_4_10(argValuesU64(0), argValuesF64(1), argValuesU64(2), argValuesF64(3))
+            Case 11
+                Dim fn_F64_4_11 As MIRFnArg4F64_FFUF
+                fn_F64_4_11 = procAddr
+                rvF64 = fn_F64_4_11(argValuesF64(0), argValuesF64(1), argValuesU64(2), argValuesF64(3))
+            Case 12
+                Dim fn_F64_4_12 As MIRFnArg4F64_UUFF
+                fn_F64_4_12 = procAddr
+                rvF64 = fn_F64_4_12(argValuesU64(0), argValuesU64(1), argValuesF64(2), argValuesF64(3))
+            Case 13
+                Dim fn_F64_4_13 As MIRFnArg4F64_FUFF
+                fn_F64_4_13 = procAddr
+                rvF64 = fn_F64_4_13(argValuesF64(0), argValuesU64(1), argValuesF64(2), argValuesF64(3))
+            Case 14
+                Dim fn_F64_4_14 As MIRFnArg4F64_UFFF
+                fn_F64_4_14 = procAddr
+                rvF64 = fn_F64_4_14(argValuesU64(0), argValuesF64(1), argValuesF64(2), argValuesF64(3))
+            Case 15
+                Dim fn_F64_4_15 As MIRFnArg4F64_FFFF
+                fn_F64_4_15 = procAddr
+                rvF64 = fn_F64_4_15(argValuesF64(0), argValuesF64(1), argValuesF64(2), argValuesF64(3))
+            Case Else
+                errMsg = "MIR: CALL DLL x64 mixed arg mask unsupported"
+                Return 0
+            End Select
+        Case Else
+            errMsg = "MIR: CALL DLL x64 mixed en fazla 4 arguman destekler"
+            Return 0
+        End Select
+    Else
+        Select Case argCount
+        Case 0
+            Dim fn0U As MIRFnNoArgU64
+            fn0U = procAddr
+            rvU64 = fn0U()
+        Case 1
+            Select Case argMask
+            Case 0
+                Dim fn_U64_1_0 As MIRFnArg1U64_U
+                fn_U64_1_0 = procAddr
+                rvU64 = fn_U64_1_0(argValuesU64(0))
+            Case 1
+                Dim fn_U64_1_1 As MIRFnArg1U64_F
+                fn_U64_1_1 = procAddr
+                rvU64 = fn_U64_1_1(argValuesF64(0))
+            Case Else
+                errMsg = "MIR: CALL DLL x64 mixed arg mask unsupported"
+                Return 0
+            End Select
+        Case 2
+            Select Case argMask
+            Case 0
+                Dim fn_U64_2_0 As MIRFnArg2U64_UU
+                fn_U64_2_0 = procAddr
+                rvU64 = fn_U64_2_0(argValuesU64(0), argValuesU64(1))
+            Case 1
+                Dim fn_U64_2_1 As MIRFnArg2U64_FU
+                fn_U64_2_1 = procAddr
+                rvU64 = fn_U64_2_1(argValuesF64(0), argValuesU64(1))
+            Case 2
+                Dim fn_U64_2_2 As MIRFnArg2U64_UF
+                fn_U64_2_2 = procAddr
+                rvU64 = fn_U64_2_2(argValuesU64(0), argValuesF64(1))
+            Case 3
+                Dim fn_U64_2_3 As MIRFnArg2U64_FF
+                fn_U64_2_3 = procAddr
+                rvU64 = fn_U64_2_3(argValuesF64(0), argValuesF64(1))
+            Case Else
+                errMsg = "MIR: CALL DLL x64 mixed arg mask unsupported"
+                Return 0
+            End Select
+        Case 3
+            Select Case argMask
+            Case 0
+                Dim fn_U64_3_0 As MIRFnArg3U64_UUU
+                fn_U64_3_0 = procAddr
+                rvU64 = fn_U64_3_0(argValuesU64(0), argValuesU64(1), argValuesU64(2))
+            Case 1
+                Dim fn_U64_3_1 As MIRFnArg3U64_FUU
+                fn_U64_3_1 = procAddr
+                rvU64 = fn_U64_3_1(argValuesF64(0), argValuesU64(1), argValuesU64(2))
+            Case 2
+                Dim fn_U64_3_2 As MIRFnArg3U64_UFU
+                fn_U64_3_2 = procAddr
+                rvU64 = fn_U64_3_2(argValuesU64(0), argValuesF64(1), argValuesU64(2))
+            Case 3
+                Dim fn_U64_3_3 As MIRFnArg3U64_FFU
+                fn_U64_3_3 = procAddr
+                rvU64 = fn_U64_3_3(argValuesF64(0), argValuesF64(1), argValuesU64(2))
+            Case 4
+                Dim fn_U64_3_4 As MIRFnArg3U64_UUF
+                fn_U64_3_4 = procAddr
+                rvU64 = fn_U64_3_4(argValuesU64(0), argValuesU64(1), argValuesF64(2))
+            Case 5
+                Dim fn_U64_3_5 As MIRFnArg3U64_FUF
+                fn_U64_3_5 = procAddr
+                rvU64 = fn_U64_3_5(argValuesF64(0), argValuesU64(1), argValuesF64(2))
+            Case 6
+                Dim fn_U64_3_6 As MIRFnArg3U64_UFF
+                fn_U64_3_6 = procAddr
+                rvU64 = fn_U64_3_6(argValuesU64(0), argValuesF64(1), argValuesF64(2))
+            Case 7
+                Dim fn_U64_3_7 As MIRFnArg3U64_FFF
+                fn_U64_3_7 = procAddr
+                rvU64 = fn_U64_3_7(argValuesF64(0), argValuesF64(1), argValuesF64(2))
+            Case Else
+                errMsg = "MIR: CALL DLL x64 mixed arg mask unsupported"
+                Return 0
+            End Select
+        Case 4
+            Select Case argMask
+            Case 0
+                Dim fn_U64_4_0 As MIRFnArg4U64_UUUU
+                fn_U64_4_0 = procAddr
+                rvU64 = fn_U64_4_0(argValuesU64(0), argValuesU64(1), argValuesU64(2), argValuesU64(3))
+            Case 1
+                Dim fn_U64_4_1 As MIRFnArg4U64_FUUU
+                fn_U64_4_1 = procAddr
+                rvU64 = fn_U64_4_1(argValuesF64(0), argValuesU64(1), argValuesU64(2), argValuesU64(3))
+            Case 2
+                Dim fn_U64_4_2 As MIRFnArg4U64_UFUU
+                fn_U64_4_2 = procAddr
+                rvU64 = fn_U64_4_2(argValuesU64(0), argValuesF64(1), argValuesU64(2), argValuesU64(3))
+            Case 3
+                Dim fn_U64_4_3 As MIRFnArg4U64_FFUU
+                fn_U64_4_3 = procAddr
+                rvU64 = fn_U64_4_3(argValuesF64(0), argValuesF64(1), argValuesU64(2), argValuesU64(3))
+            Case 4
+                Dim fn_U64_4_4 As MIRFnArg4U64_UUFU
+                fn_U64_4_4 = procAddr
+                rvU64 = fn_U64_4_4(argValuesU64(0), argValuesU64(1), argValuesF64(2), argValuesU64(3))
+            Case 5
+                Dim fn_U64_4_5 As MIRFnArg4U64_FUFU
+                fn_U64_4_5 = procAddr
+                rvU64 = fn_U64_4_5(argValuesF64(0), argValuesU64(1), argValuesF64(2), argValuesU64(3))
+            Case 6
+                Dim fn_U64_4_6 As MIRFnArg4U64_UFFU
+                fn_U64_4_6 = procAddr
+                rvU64 = fn_U64_4_6(argValuesU64(0), argValuesF64(1), argValuesF64(2), argValuesU64(3))
+            Case 7
+                Dim fn_U64_4_7 As MIRFnArg4U64_FFFU
+                fn_U64_4_7 = procAddr
+                rvU64 = fn_U64_4_7(argValuesF64(0), argValuesF64(1), argValuesF64(2), argValuesU64(3))
+            Case 8
+                Dim fn_U64_4_8 As MIRFnArg4U64_UUUF
+                fn_U64_4_8 = procAddr
+                rvU64 = fn_U64_4_8(argValuesU64(0), argValuesU64(1), argValuesU64(2), argValuesF64(3))
+            Case 9
+                Dim fn_U64_4_9 As MIRFnArg4U64_FUUF
+                fn_U64_4_9 = procAddr
+                rvU64 = fn_U64_4_9(argValuesF64(0), argValuesU64(1), argValuesU64(2), argValuesF64(3))
+            Case 10
+                Dim fn_U64_4_10 As MIRFnArg4U64_UFUF
+                fn_U64_4_10 = procAddr
+                rvU64 = fn_U64_4_10(argValuesU64(0), argValuesF64(1), argValuesU64(2), argValuesF64(3))
+            Case 11
+                Dim fn_U64_4_11 As MIRFnArg4U64_FFUF
+                fn_U64_4_11 = procAddr
+                rvU64 = fn_U64_4_11(argValuesF64(0), argValuesF64(1), argValuesU64(2), argValuesF64(3))
+            Case 12
+                Dim fn_U64_4_12 As MIRFnArg4U64_UUFF
+                fn_U64_4_12 = procAddr
+                rvU64 = fn_U64_4_12(argValuesU64(0), argValuesU64(1), argValuesF64(2), argValuesF64(3))
+            Case 13
+                Dim fn_U64_4_13 As MIRFnArg4U64_FUFF
+                fn_U64_4_13 = procAddr
+                rvU64 = fn_U64_4_13(argValuesF64(0), argValuesU64(1), argValuesF64(2), argValuesF64(3))
+            Case 14
+                Dim fn_U64_4_14 As MIRFnArg4U64_UFFF
+                fn_U64_4_14 = procAddr
+                rvU64 = fn_U64_4_14(argValuesU64(0), argValuesF64(1), argValuesF64(2), argValuesF64(3))
+            Case 15
+                Dim fn_U64_4_15 As MIRFnArg4U64_FFFF
+                fn_U64_4_15 = procAddr
+                rvU64 = fn_U64_4_15(argValuesF64(0), argValuesF64(1), argValuesF64(2), argValuesF64(3))
+            Case Else
+                errMsg = "MIR: CALL DLL x64 mixed arg mask unsupported"
+                Return 0
+            End Select
+        Case Else
+            errMsg = "MIR: CALL DLL x64 mixed en fazla 4 arguman destekler"
+            Return 0
+        End Select
+    End If
+
+    Return 1
+End Function
+
+Private Function MIRNormalizeFfiTypeToken(ByRef tokenText As String, ByRef typeOut As String) As Integer
+    typeOut = UCase(Trim(tokenText))
+    If typeOut = "BYVAL" Then typeOut = "VOID"
+    If typeOut = "CDECL" Or typeOut = "STDCALL" Then Return 0
+
+    Select Case typeOut
+    Case "VOID", "I32", "U64", "F64", "PTR", "STRPTR", "BYREF"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function MIRSplitFfiArgTypes(ByRef listText As String, argTypes() As String, ByRef argTypeCount As Integer) As Integer
+    argTypeCount = 0
+    If Instr(listText, ",") = 0 Then Return 0
+
+    Dim scanPos As Integer
+    scanPos = 1
+    Do While scanPos <= Len(listText)
+        Dim commaPos As Integer
+        commaPos = Instr(scanPos, listText, ",")
+        Dim part As String
+        If commaPos = 0 Then
+            part = Mid(listText, scanPos)
+            scanPos = Len(listText) + 1
+        Else
+            part = Mid(listText, scanPos, commaPos - scanPos)
+            scanPos = commaPos + 1
+        End If
+        If argTypeCount > UBound(argTypes) Then Return 0
+        If MIRNormalizeFfiTypeToken(part, argTypes(argTypeCount)) = 0 Then Return 0
+        argTypeCount += 1
+    Loop
+
+    Return IIf(argTypeCount > 0, 1, 0)
+End Function
+
+Private Function MIREvalFfiArgSlot(ByRef state As MIREvaluatorState, ByVal argPos As Integer, ByRef argType As String, ByRef keepAlive As String, ByRef outValueU64 As ULongInt, ByRef outValueF64 As Double, ByRef isF64Out As Integer, ByRef errMsg As String) As Integer
+    Dim v As MIRValue
+    If MIRTryGetCallArg(state, argPos, v) = 0 Then
+        errMsg = "MIR: CALL DLL arguman cozumlene medi"
+        Return 0
+    End If
+
+    Dim t As String
+    If MIRNormalizeFfiTypeToken(argType, t) = 0 Then
+        errMsg = "MIR: CALL DLL gecersiz arguman tipi " & Trim(argType)
+        Return 0
+    End If
+
+    keepAlive = ""
+    outValueU64 = 0
+    outValueF64 = 0#
+    isF64Out = 0
+
+    Select Case t
+    Case "F64"
+        Select Case v.valueType
+        Case "FLOAT"
+            outValueF64 = v.floatValue
+        Case "INTEGER"
+            outValueF64 = CDbl(v.intValue)
+        Case Else
+            errMsg = "MIR: CALL DLL F64 sayisal arguman ister"
+            Return 0
+        End Select
+        isF64Out = 1
+        Return 1
+
+    Case "STRPTR"
+        keepAlive = MIRValueToText(v)
+#Ifdef __FB_64BIT__
+        outValueU64 = CULngInt(CLngInt(CPtr(Any Ptr, StrPtr(keepAlive))))
+#Else
+        outValueU64 = CULngInt(CULng(CPtr(Any Ptr, StrPtr(keepAlive))))
+#EndIf
+        Return 1
+
+    Case Else
+        Dim li As LongInt
+        If MIRAsInteger(v, li) = 0 Then
+            errMsg = "MIR: CALL DLL sayisal/pointer arguman ister"
+            Return 0
+        End If
+        If t = "U64" And li < 0 Then
+            errMsg = "MIR: CALL DLL U64 arguman negatif olamaz"
+            Return 0
+        End If
+        outValueU64 = CULngInt(li)
+        Return 1
+    End Select
+End Function
+
+Private Function MIRInvokeDllCall(ByRef state As MIREvaluatorState, ByRef ret As MIRValue, ByRef errMsg As String) As Integer
+    If gMirInstr.operandCount < 4 Then
+        errMsg = "MIR: CALL DLL en az library/symbol/signature ister"
+        Return 0
+    End If
+
+    Dim dllName As String, symbolName As String, retType As String
+    If MIRCallArgText(state, 0, dllName) = 0 Then errMsg = "MIR: CALL DLL library cozumlene medi": Return 0
+    If MIRCallArgText(state, 1, symbolName) = 0 Then errMsg = "MIR: CALL DLL symbol cozumlene medi": Return 0
+    If MIRCallArgText(state, 2, retType) = 0 Then errMsg = "MIR: CALL DLL signature cozumlene medi": Return 0
+    If InStr(dllName, ".") = 0 Then dllName &= ".dll"
+
+    Dim conventionText As String
+    conventionText = "CDECL"
+
+    Dim argStartPos As Integer
+    argStartPos = 3
+    If gMirInstr.operandCount >= 5 Then
+        Dim convText As String
+        If MIRCallArgText(state, 3, convText) <> 0 Then
+            If MIRIsDllConvention(convText) <> 0 Then
+                conventionText = UCase(Trim(convText))
+                argStartPos = 4
+            End If
+        End If
+    End If
+
+    Dim argTypes(0 To 15) As String
+    Dim argTypeCount As Integer
+    Dim hasTypeList As Integer
+    hasTypeList = 0
+    If gMirInstr.operandCount >= argStartPos + 2 Then
+        Dim typeListText As String
+        If MIRCallArgText(state, argStartPos, typeListText) <> 0 Then
+            hasTypeList = MIRSplitFfiArgTypes(typeListText, argTypes(), argTypeCount)
+            If hasTypeList <> 0 Then argStartPos += 1
+        End If
+    End If
+
+    Dim runtimeArgCount As Integer
+    runtimeArgCount = gMirInstr.operandCount - 1 - argStartPos
+    If runtimeArgCount < 0 Then runtimeArgCount = 0
+    If runtimeArgCount > 8 Then
+        errMsg = "MIR: CALL DLL en fazla 8 arguman destekler"
+        Return 0
+    End If
+
+    Dim i As Integer
+    If hasTypeList = 0 Then
+        For i = 0 To runtimeArgCount - 1
+            If MIRNormalizeFfiTypeToken(retType, argTypes(i)) = 0 Then
+                errMsg = "MIR: CALL DLL gecersiz signature " & retType
+                Return 0
+            End If
+        Next i
+    ElseIf argTypeCount <> runtimeArgCount Then
+        errMsg = "MIR: CALL DLL arguman tip listesi sayisi uyusmuyor"
+        Return 0
+    End If
+
+    Dim h As Any Ptr
+    h = MIRLoadLibraryA(StrPtr(dllName))
+    If h = 0 Then
+        errMsg = "MIR: CALL DLL LoadLibrary failed " & dllName
+        Return 0
+    End If
+
+    Dim p As Any Ptr
+    p = MIRGetProcAddress(h, StrPtr(symbolName))
+    If p = 0 Then
+        errMsg = "MIR: CALL DLL GetProcAddress failed " & symbolName
+        Return 0
+    End If
+
+    Dim argValuesU64(0 To 7) As ULongInt
+    Dim argValuesF64(0 To 7) As Double
+    Dim keepAlive(0 To 7) As String
+    Dim argF64Mask As Integer
+    Dim hasF64Arg As Integer
+    argF64Mask = 0
+    hasF64Arg = 0
+    For i = 0 To runtimeArgCount - 1
+        Dim isF64 As Integer
+        If MIREvalFfiArgSlot(state, argStartPos + i, argTypes(i), keepAlive(i), argValuesU64(i), argValuesF64(i), isF64, errMsg) = 0 Then Return 0
+        If isF64 <> 0 Then
+            hasF64Arg = 1
+            argF64Mask = argF64Mask Or (1 Shl i)
+        End If
+    Next i
+
+    Dim rv As ULongInt
+    If SizeOf(Any Ptr) = 4 Then
+        If conventionText = "STDCALL" Then
+            Select Case runtimeArgCount
+            Case 0
+                Dim fn0s As MIRFnNoArgU32StdCall
+                fn0s = p
+                rv = fn0s()
+            Case 1
+                Dim fn1s As MIRFnArg1U32StdCall
+                fn1s = p
+                rv = fn1s(CUInt(argValuesU64(0)))
+            Case 2
+                Dim fn2s As MIRFnArg2U32StdCall
+                fn2s = p
+                rv = fn2s(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)))
+            Case 3
+                Dim fn3s As MIRFnArg3U32StdCall
+                fn3s = p
+                rv = fn3s(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)))
+            Case 4
+                Dim fn4s As MIRFnArg4U32StdCall
+                fn4s = p
+                rv = fn4s(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)), CUInt(argValuesU64(3)))
+            Case 5
+                Dim fn5s As MIRFnArg5U32StdCall
+                fn5s = p
+                rv = fn5s(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)), CUInt(argValuesU64(3)), CUInt(argValuesU64(4)))
+            Case 6
+                Dim fn6s As MIRFnArg6U32StdCall
+                fn6s = p
+                rv = fn6s(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)), CUInt(argValuesU64(3)), CUInt(argValuesU64(4)), CUInt(argValuesU64(5)))
+            Case 7
+                Dim fn7s As MIRFnArg7U32StdCall
+                fn7s = p
+                rv = fn7s(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)), CUInt(argValuesU64(3)), CUInt(argValuesU64(4)), CUInt(argValuesU64(5)), CUInt(argValuesU64(6)))
+            Case 8
+                Dim fn8s As MIRFnArg8U32StdCall
+                fn8s = p
+                rv = fn8s(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)), CUInt(argValuesU64(3)), CUInt(argValuesU64(4)), CUInt(argValuesU64(5)), CUInt(argValuesU64(6)), CUInt(argValuesU64(7)))
+            End Select
+        Else
+            Select Case runtimeArgCount
+            Case 0
+                Dim fn0c As MIRFnNoArgU32Cdecl
+                fn0c = p
+                rv = fn0c()
+            Case 1
+                Dim fn1c As MIRFnArg1U32Cdecl
+                fn1c = p
+                rv = fn1c(CUInt(argValuesU64(0)))
+            Case 2
+                Dim fn2c As MIRFnArg2U32Cdecl
+                fn2c = p
+                rv = fn2c(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)))
+            Case 3
+                Dim fn3c As MIRFnArg3U32Cdecl
+                fn3c = p
+                rv = fn3c(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)))
+            Case 4
+                Dim fn4c As MIRFnArg4U32Cdecl
+                fn4c = p
+                rv = fn4c(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)), CUInt(argValuesU64(3)))
+            Case 5
+                Dim fn5c As MIRFnArg5U32Cdecl
+                fn5c = p
+                rv = fn5c(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)), CUInt(argValuesU64(3)), CUInt(argValuesU64(4)))
+            Case 6
+                Dim fn6c As MIRFnArg6U32Cdecl
+                fn6c = p
+                rv = fn6c(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)), CUInt(argValuesU64(3)), CUInt(argValuesU64(4)), CUInt(argValuesU64(5)))
+            Case 7
+                Dim fn7c As MIRFnArg7U32Cdecl
+                fn7c = p
+                rv = fn7c(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)), CUInt(argValuesU64(3)), CUInt(argValuesU64(4)), CUInt(argValuesU64(5)), CUInt(argValuesU64(6)))
+            Case 8
+                Dim fn8c As MIRFnArg8U32Cdecl
+                fn8c = p
+                rv = fn8c(CUInt(argValuesU64(0)), CUInt(argValuesU64(1)), CUInt(argValuesU64(2)), CUInt(argValuesU64(3)), CUInt(argValuesU64(4)), CUInt(argValuesU64(5)), CUInt(argValuesU64(6)), CUInt(argValuesU64(7)))
+            End Select
+        End If
+    Else
+        If hasF64Arg <> 0 Then
+            If runtimeArgCount > 4 Then
+                errMsg = "MIR: CALL DLL x64 mixed en fazla 4 arguman destekler"
+                Return 0
+            End If
+
+            Dim rvF64 As Double
+            Dim usesF64Return As Integer
+            If MIRDispatchX64MixedCall(p, retType, runtimeArgCount, argF64Mask, argValuesU64(), argValuesF64(), rv, rvF64, usesF64Return, errMsg) = 0 Then
+                Return 0
+            End If
+
+            ret.valueType = "INTEGER"
+            If usesF64Return <> 0 Then
+                If rvF64 > 2147483647# Then
+                    ret.intValue = 2147483647
+                ElseIf rvF64 < -2147483648# Then
+                    ret.intValue = -2147483648
+                Else
+                    ret.intValue = CLngInt(rvF64)
+                End If
+            Else
+                If rv > CULngInt(2147483647) Then ret.intValue = 2147483647 Else ret.intValue = CLngInt(rv)
+            End If
+            Return 1
+        End If
+
+        Select Case runtimeArgCount
+        Case 0
+            Dim fn0 As MIRFnNoArgU64
+            fn0 = p
+            rv = fn0()
+        Case 1
+            Dim fn1 As MIRFnArg1U64
+            fn1 = p
+            rv = fn1(argValuesU64(0))
+        Case 2
+            Dim fn2 As MIRFnArg2U64
+            fn2 = p
+            rv = fn2(argValuesU64(0), argValuesU64(1))
+        Case 3
+            Dim fn3 As MIRFnArg3U64
+            fn3 = p
+            rv = fn3(argValuesU64(0), argValuesU64(1), argValuesU64(2))
+        Case 4
+            Dim fn4 As MIRFnArg4U64
+            fn4 = p
+            rv = fn4(argValuesU64(0), argValuesU64(1), argValuesU64(2), argValuesU64(3))
+        Case 5
+            Dim fn5 As MIRFnArg5U64
+            fn5 = p
+            rv = fn5(argValuesU64(0), argValuesU64(1), argValuesU64(2), argValuesU64(3), argValuesU64(4))
+        Case 6
+            Dim fn6 As MIRFnArg6U64
+            fn6 = p
+            rv = fn6(argValuesU64(0), argValuesU64(1), argValuesU64(2), argValuesU64(3), argValuesU64(4), argValuesU64(5))
+        Case 7
+            Dim fn7 As MIRFnArg7U64
+            fn7 = p
+            rv = fn7(argValuesU64(0), argValuesU64(1), argValuesU64(2), argValuesU64(3), argValuesU64(4), argValuesU64(5), argValuesU64(6))
+        Case 8
+            Dim fn8 As MIRFnArg8U64
+            fn8 = p
+            rv = fn8(argValuesU64(0), argValuesU64(1), argValuesU64(2), argValuesU64(3), argValuesU64(4), argValuesU64(5), argValuesU64(6), argValuesU64(7))
+        End Select
+    End If
+
+    ret.valueType = "INTEGER"
+    If rv > CULngInt(2147483647) Then ret.intValue = 2147483647 Else ret.intValue = CLngInt(rv)
+    Return 1
+End Function
+
+#include once "mir_evaluator_tail.fbs"
