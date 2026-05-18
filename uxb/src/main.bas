@@ -19,25 +19,57 @@
 #include "build/x64_build_pipeline.fbs"
 
 Private Function HasArg(ByRef keyText As String) As Integer
+    Dim keyLower As String
+    keyLower = LCase(Trim(keyText))
+
     Dim i As Integer
     For i = 1 To 64
         Dim a As String
         a = Command(i)
         If a = "" Then Exit For
-        If LCase(a) = LCase(keyText) Then Return 1
+
+        Dim aLower As String
+        aLower = LCase(Trim(a))
+        If aLower = keyLower Then Return 1
+
+        Dim eqPos As Integer
+        eqPos = InStr(aLower, "=")
+        If eqPos > 0 Then
+            If Left(aLower, eqPos - 1) = keyLower Then Return 1
+        End If
     Next i
     Return 0
 End Function
 
 Private Function GetArgValue(ByRef keyText As String, ByRef valueOut As String) As Integer
+    Dim keyLower As String
+    keyLower = LCase(Trim(keyText))
+
     Dim i As Integer
     For i = 1 To 64
         Dim a As String
         a = Command(i)
         If a = "" Then Exit For
-        If LCase(a) = LCase(keyText) Then
+
+        Dim aTrim As String
+        aTrim = Trim(a)
+        Dim aLower As String
+        aLower = LCase(aTrim)
+
+        If aLower = keyLower Then
             valueOut = Command(i + 1)
             Return IIf(valueOut <> "", 1, 0)
+        End If
+
+        Dim eqPos As Integer
+        eqPos = InStr(aTrim, "=")
+        If eqPos > 0 Then
+            Dim leftKey As String
+            leftKey = LCase(Trim(Left(aTrim, eqPos - 1)))
+            If leftKey = keyLower Then
+                valueOut = Mid(aTrim, eqPos + 1)
+                Return IIf(valueOut <> "", 1, 0)
+            End If
         End If
     Next i
     valueOut = ""
@@ -87,6 +119,20 @@ Private Function IsOptionLike(ByRef argText As String) As Integer
 End Function
 
 Private Function TryGetSourcePath(ByRef sourcePathOut As String, ByRef errText As String) As Integer
+    sourcePathOut = ""
+
+    ' Explicit source key has highest priority.
+    If GetArgValue("--source", sourcePathOut) <> 0 Then
+        If Trim(sourcePathOut) <> "" Then Return 1
+    End If
+    If GetArgValue("-s", sourcePathOut) <> 0 Then
+        If Trim(sourcePathOut) <> "" Then Return 1
+    End If
+
+    ' Prefer the first non-option token that resolves to an existing path.
+    Dim firstCandidate As String
+    firstCandidate = ""
+
     Dim i As Integer
     i = 1
     Do While i <= 64
@@ -97,12 +143,20 @@ Private Function TryGetSourcePath(ByRef sourcePathOut As String, ByRef errText A
         If IsOptionLike(a) <> 0 Then
             If IsValueArgKey(a) <> 0 Then i += 1
         Else
-            sourcePathOut = a
-            Return 1
+            If firstCandidate = "" Then firstCandidate = a
+            If Dir(a) <> "" Then
+                sourcePathOut = a
+                Return 1
+            End If
         End If
 
         i += 1
     Loop
+
+    If firstCandidate <> "" Then
+        sourcePathOut = firstCandidate
+        Return 1
+    End If
 
     errText = "source file path not provided"
     Return 0
