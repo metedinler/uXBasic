@@ -1,0 +1,262 @@
+#ifndef UXB_MIR_VERIFIER_FBS
+#define UXB_MIR_VERIFIER_FBS
+
+Type UXBMIRVerifyStats
+    functionCount As Integer
+    blockCount As Integer
+    instructionCount As Integer
+    emptyFunctionCount As Integer
+    emptyBlockCount As Integer
+    invalidOpcodeCount As Integer
+    missingTypeCount As Integer
+    invalidEdgeCount As Integer
+End Type
+
+Type UXBMIRVerifyResult
+    ok As Integer
+    errorCount As Integer
+    warningCount As Integer
+    errorsText As String
+    warningsText As String
+    stats As UXBMIRVerifyStats
+End Type
+
+Sub UXBMIRVerifyInit(ByRef r As UXBMIRVerifyResult)
+    r.ok = 1
+    r.errorCount = 0
+    r.warningCount = 0
+    r.errorsText = ""
+    r.warningsText = ""
+    r.stats.functionCount = 0
+    r.stats.blockCount = 0
+    r.stats.instructionCount = 0
+    r.stats.emptyFunctionCount = 0
+    r.stats.emptyBlockCount = 0
+    r.stats.invalidOpcodeCount = 0
+    r.stats.missingTypeCount = 0
+    r.stats.invalidEdgeCount = 0
+End Sub
+
+Sub UXBMIRVerifyAddError(ByRef r As UXBMIRVerifyResult, ByRef msg As String)
+    r.ok = 0
+    r.errorCount += 1
+    If Len(r.errorsText) > 0 Then r.errorsText &= Chr(10)
+    r.errorsText &= msg
+End Sub
+
+Sub UXBMIRVerifyAddWarning(ByRef r As UXBMIRVerifyResult, ByRef msg As String)
+    r.warningCount += 1
+    If Len(r.warningsText) > 0 Then r.warningsText &= Chr(10)
+    r.warningsText &= msg
+End Sub
+
+Function UXBMIRVerifyOpcodeNameIsValid(ByRef opName As String) As Integer
+    Dim As String s = UCase(Trim(opName))
+    If s = "" Then Return 0
+
+    Select Case s
+    Case MIR_OP_LOAD_CONST, MIR_OP_LOAD_VAR, MIR_OP_STORE_VAR
+        Return 1
+    Case MIR_OP_LOAD_INDEXED, MIR_OP_STORE_INDEXED
+        Return 1
+    Case MIR_OP_ADD, MIR_OP_SUB, MIR_OP_MUL, MIR_OP_DIV, MIR_OP_MOD, MIR_OP_NEG
+        Return 1
+    Case MIR_OP_FADD, MIR_OP_FSUB, MIR_OP_FMUL, MIR_OP_FDIV, MIR_OP_FNEG
+        Return 1
+    Case MIR_OP_EQ, MIR_OP_NE, MIR_OP_LT, MIR_OP_LE, MIR_OP_GT, MIR_OP_GE
+        Return 1
+    Case MIR_OP_AND, MIR_OP_OR, MIR_OP_XOR, MIR_OP_NOT, MIR_OP_SHL, MIR_OP_SHR, MIR_OP_ROL, MIR_OP_ROR
+        Return 1
+    Case MIR_OP_CALL, MIR_OP_RET, MIR_OP_JMP, MIR_OP_JZ, MIR_OP_JNZ, MIR_OP_LABEL
+        Return 1
+    Case MIR_OP_NEW, MIR_OP_DIM, MIR_OP_REDIM, MIR_OP_CONST, MIR_OP_DEF_TYPE, MIR_OP_SETSTRINGSIZE
+        Return 1
+    Case Else
+        Return 0
+    End Select
+End Function
+
+Private Function UXBMIRVerifyTryParseInt(ByRef textValue As String, ByRef valueOut As Integer) As Integer
+    Dim t As String
+    t = Trim(textValue)
+    If t = "" Then Return 0
+
+    Dim startPos As Integer
+    startPos = 1
+    If Left(t, 1) = "+" Or Left(t, 1) = "-" Then startPos = 2
+    If startPos > Len(t) Then Return 0
+
+    Dim i As Integer
+    For i = startPos To Len(t)
+        Dim ch As String
+        ch = Mid(t, i, 1)
+        If ch < "0" Or ch > "9" Then Return 0
+    Next i
+
+    valueOut = Val(t)
+    Return 1
+End Function
+
+Private Function UXBMIRFindBlockById(ByRef fn As MIRFunction, ByVal blockId As Integer) As Integer
+    Dim bi As Integer
+    For bi = 0 To fn.blockCount - 1
+        If fn.blocks(bi).id = blockId Then Return bi
+    Next bi
+    Return -1
+End Function
+
+Private Sub UXBMIRVerifyBranchTarget(ByRef fn As MIRFunction, ByRef inst As MIRIRInstruction, ByVal operandIndex As Integer, ByVal fi As Integer, ByVal bi As Integer, ByVal ii As Integer, ByRef r As UXBMIRVerifyResult)
+    If inst.operandCount <= operandIndex Then
+        r.stats.invalidEdgeCount += 1
+        Dim e As String
+        e = "MIR branch target missing (fn=" & LTrim(Str(fi)) & ", block=" & LTrim(Str(bi)) & ", inst=" & LTrim(Str(ii)) & ")"
+        UXBMIRVerifyAddError r, e
+        Exit Sub
+    End If
+
+    Dim targetId As Integer
+    If UXBMIRVerifyTryParseInt(inst.operands(operandIndex), targetId) = 0 Then
+        r.stats.invalidEdgeCount += 1
+        Dim e As String
+        e = "MIR branch target is not integer (fn=" & LTrim(Str(fi)) & ", block=" & LTrim(Str(bi)) & ", inst=" & LTrim(Str(ii)) & ")"
+        UXBMIRVerifyAddError r, e
+        Exit Sub
+    End If
+
+    If UXBMIRFindBlockById(fn, targetId) = -1 Then
+        r.stats.invalidEdgeCount += 1
+        Dim e As String
+        e = "MIR branch target block not found (target=" & LTrim(Str(targetId)) & ", fn=" & LTrim(Str(fi)) & ")"
+        UXBMIRVerifyAddError r, e
+    End If
+End Sub
+
+Function UXBMIRVerifyModule(ByRef m As MIRModule, ByRef r As UXBMIRVerifyResult, ByRef errText As String) As Integer
+    UXBMIRVerifyInit(r)
+    errText = ""
+
+    If m.functionCount <= 0 Then
+        UXBMIRVerifyAddError r, "MIR module has no function"
+        Return 1
+    End If
+
+    Dim fi As Integer
+    For fi = 0 To m.functionCount - 1
+        Dim fn As MIRFunction Ptr
+        fn = @m.functions(fi)
+
+        r.stats.functionCount += 1
+
+        If Trim(fn->name) = "" Then
+            UXBMIRVerifyAddError r, "MIR function name is empty at index " & LTrim(Str(fi))
+        End If
+
+        If fn->blockCount <= 0 Then
+            r.stats.emptyFunctionCount += 1
+            UXBMIRVerifyAddError r, "MIR function has no block: " & IIf(Trim(fn->name) = "", "<unnamed>", fn->name)
+            Continue For
+        End If
+
+        Dim bi As Integer
+        For bi = 0 To fn->blockCount - 1
+            Dim blk As MIRBasicBlock Ptr
+            blk = @fn->blocks(bi)
+
+            r.stats.blockCount += 1
+
+            If blk->instructionCount <= 0 Then
+                r.stats.emptyBlockCount += 1
+                Dim w As String
+                w = "MIR block has no instruction (fn=" & IIf(Trim(fn->name) = "", "<unnamed>", fn->name) & ", blockId=" & LTrim(Str(blk->id)) & ")"
+                UXBMIRVerifyAddWarning r, w
+                Continue For
+            End If
+
+            Dim ii As Integer
+            For ii = 0 To blk->instructionCount - 1
+                Dim inst As MIRIRInstruction Ptr
+                inst = @blk->instructions(ii)
+
+                r.stats.instructionCount += 1
+
+                If Trim(inst->opcode) = "" Then
+                    r.stats.invalidOpcodeCount += 1
+                    UXBMIRVerifyAddError r, "MIR instruction opcode is empty (fn=" & LTrim(Str(fi)) & ", block=" & LTrim(Str(bi)) & ", inst=" & LTrim(Str(ii)) & ")"
+                    Continue For
+                End If
+
+                If UXBMIRVerifyOpcodeNameIsValid(inst->opcode) = 0 Then
+                    r.stats.invalidOpcodeCount += 1
+                    UXBMIRVerifyAddError r, "MIR instruction opcode is unknown: " & inst->opcode
+                End If
+
+                Dim op As String
+                op = UCase(Trim(inst->opcode))
+
+                Select Case op
+                Case MIR_OP_JMP
+                    UXBMIRVerifyBranchTarget *fn, *inst, 0, fi, bi, ii, r
+
+                Case MIR_OP_JZ, MIR_OP_JNZ
+                    UXBMIRVerifyBranchTarget *fn, *inst, 1, fi, bi, ii, r
+
+                Case MIR_OP_CALL
+                    If inst->operandCount < 1 Or Trim(inst->operands(0)) = "" Then
+                        UXBMIRVerifyAddError r, "MIR CALL target missing (fn=" & LTrim(Str(fi)) & ", block=" & LTrim(Str(bi)) & ", inst=" & LTrim(Str(ii)) & ")"
+                    End If
+
+                Case MIR_OP_LOAD_VAR
+                    If inst->operandCount < 1 Or Trim(inst->operands(0)) = "" Then
+                        UXBMIRVerifyAddError r, "MIR LOAD_VAR source symbol missing"
+                    End If
+                    If Trim(inst->result) = "" Then
+                        UXBMIRVerifyAddError r, "MIR LOAD_VAR result symbol missing"
+                    End If
+
+                Case MIR_OP_STORE_VAR
+                    If inst->operandCount < 1 Or Trim(inst->operands(0)) = "" Then
+                        UXBMIRVerifyAddError r, "MIR STORE_VAR source symbol missing"
+                    End If
+                    If Trim(inst->result) = "" Then
+                        UXBMIRVerifyAddError r, "MIR STORE_VAR target symbol missing"
+                    End If
+
+                Case MIR_OP_LOAD_INDEXED
+                    If inst->operandCount < 2 Then
+                        UXBMIRVerifyAddError r, "MIR LOAD_INDEXED requires array and index operands"
+                    Else
+                        If Trim(inst->operands(0)) = "" Then UXBMIRVerifyAddError r, "MIR LOAD_INDEXED array symbol missing"
+                        If Trim(inst->operands(1)) = "" Then UXBMIRVerifyAddError r, "MIR LOAD_INDEXED index symbol missing"
+                    End If
+                    If Trim(inst->result) = "" Then
+                        UXBMIRVerifyAddError r, "MIR LOAD_INDEXED result symbol missing"
+                    End If
+
+                Case MIR_OP_STORE_INDEXED
+                    If inst->operandCount < 3 Then
+                        UXBMIRVerifyAddError r, "MIR STORE_INDEXED requires array,index,value operands"
+                    Else
+                        If Trim(inst->operands(0)) = "" Then UXBMIRVerifyAddError r, "MIR STORE_INDEXED array symbol missing"
+                        If Trim(inst->operands(1)) = "" Then UXBMIRVerifyAddError r, "MIR STORE_INDEXED index symbol missing"
+                        If Trim(inst->operands(2)) = "" Then UXBMIRVerifyAddError r, "MIR STORE_INDEXED value symbol missing"
+                    End If
+                End Select
+
+                If Trim(inst->result) <> "" Then
+                    r.stats.missingTypeCount += 1
+                End If
+            Next ii
+        Next bi
+    Next fi
+
+    If r.stats.missingTypeCount > 0 Then
+        Dim w As String
+        w = "MIR type metadata missing for result-carrying instructions: " & LTrim(Str(r.stats.missingTypeCount))
+        UXBMIRVerifyAddWarning r, w
+    End If
+
+    errText = ""
+    Return 1
+End Function
+
+#endif

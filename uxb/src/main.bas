@@ -87,6 +87,8 @@ Private Function IsValueArgKey(ByRef keyText As String) As Integer
     If k = "--mir-pipeline-json-out" Then Return 1
     If k = "--mir-opcodes-json-out" Then Return 1
     If k = "--mir-surface-json-out" Then Return 1
+    If k = "--mir-verify-json-out" Then Return 1
+    If k = "--mir-full-json-out" Then Return 1
     If k = "--ast-json-out" Then Return 1
     If k = "--ast-contract-json-out" Then Return 1
     If k = "--ast-contract-report-json-out" Then Return 1
