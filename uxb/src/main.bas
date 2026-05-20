@@ -10,6 +10,7 @@
 #include "semantic/mir.fbs"
 #include "semantic/semantic_pass.fbs"
 #include "build/interop_manifest.fbs"
+#include "codegen/x64/x64_codegen_policy.fbs"
 #include "codegen/x64/code_generator.fbs"
 #include "codegen/x86/code_generator.fbs"
 #include "build/main_runtime_include_bundle.fbs"
@@ -89,6 +90,7 @@ Private Function IsValueArgKey(ByRef keyText As String) As Integer
     If k = "--mir-surface-json-out" Then Return 1
     If k = "--mir-verify-json-out" Then Return 1
     If k = "--mir-full-json-out" Then Return 1
+    If k = "--x64-codegen-policy-json-out" Then Return 1
     If k = "--ast-json-out" Then Return 1
     If k = "--ast-contract-json-out" Then Return 1
     If k = "--ast-contract-report-json-out" Then Return 1
@@ -340,7 +342,8 @@ Private Function BuildRunReportJson( _
     ByRef pipelineJsonOutPath As String, _
     ByRef mirOpcodesJsonOutPath As String, _
     ByRef x64OutPath As String, _
-    ByRef x64BuildOutPath As String _
+    ByRef x64BuildOutPath As String, _
+    ByRef x64Policy As UXBX64CodegenPolicy _
 ) As String
     Dim jsonText As String
     Dim q As String
@@ -371,6 +374,17 @@ Private Function BuildRunReportJson( _
     jsonText &= "  }," & Chr(10)
     jsonText &= "  " & q & "routing" & q & ": {" & Chr(10)
     jsonText &= "    " & q & "codegen_source" & q & ": " & q & JsonEscape(codegenRoute) & q & Chr(10)
+    jsonText &= "  }," & Chr(10)
+    jsonText &= "  " & q & "codegen_policy" & q & ": {" & Chr(10)
+    jsonText &= "    " & q & "requested_source" & q & ": " & q & JsonEscape(x64Policy.requestedSource) & q & "," & Chr(10)
+    jsonText &= "    " & q & "actual_emitter" & q & ": " & q & JsonEscape(x64Policy.actualEmitter) & q & "," & Chr(10)
+    jsonText &= "    " & q & "policy" & q & ": " & q & JsonEscape(x64Policy.policyName) & q & "," & Chr(10)
+    jsonText &= "    " & q & "mir_requested" & q & ": " & IIf(x64Policy.mirRequested <> 0, "true", "false") & "," & Chr(10)
+    jsonText &= "    " & q & "mir_built" & q & ": " & IIf(x64Policy.mirBuilt <> 0, "true", "false") & "," & Chr(10)
+    jsonText &= "    " & q & "mir_verified" & q & ": " & IIf(x64Policy.mirVerified <> 0, "true", "false") & "," & Chr(10)
+    jsonText &= "    " & q & "mir_emitter_available" & q & ": " & IIf(x64Policy.mirEmitterAvailable <> 0, "true", "false") & "," & Chr(10)
+    jsonText &= "    " & q & "fallback_used" & q & ": " & IIf(x64Policy.fallbackUsed <> 0, "true", "false") & "," & Chr(10)
+    jsonText &= "    " & q & "fallback_reason" & q & ": " & q & JsonEscape(x64Policy.fallbackReason) & q & Chr(10)
     jsonText &= "  }," & Chr(10)
     jsonText &= "  " & q & "outputs" & q & ": {" & Chr(10)
     jsonText &= "    " & q & "ast_json" & q & ": " & q & JsonEscape(astJsonOutPath) & q & "," & Chr(10)

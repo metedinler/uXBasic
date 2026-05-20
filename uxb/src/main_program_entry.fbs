@@ -36,6 +36,10 @@ Dim As String finalScreenJsonOutPath
 Dim As Integer mirVerifyRequested
 Dim As String mirVerifyJsonOutPath
 Dim As String mirFullJsonOutPath
+Dim As Integer enableMirX64Experimental
+Dim As String x64CodegenPolicyJsonOutPath
+Dim As UXBX64CodegenPolicy x64CodegenPolicy
+Dim As Integer mirVerifiedForPolicy
 
 UxbInit
 
@@ -128,10 +132,16 @@ End If
 mirVerifyRequested = 0
 mirVerifyJsonOutPath = ""
 mirFullJsonOutPath = ""
+enableMirX64Experimental = 0
+x64CodegenPolicyJsonOutPath = ""
+mirVerifiedForPolicy = 0
+UXBX64CodegenPolicyInit(x64CodegenPolicy)
 
 If HasArg("--mir-verify") Then mirVerifyRequested = 1
 If GetArgValue("--mir-verify-json-out", mirVerifyJsonOutPath) <> 0 Then mirVerifyRequested = 1
 If GetArgValue("--mir-full-json-out", mirFullJsonOutPath) <> 0 Then mirVerifyRequested = 1
+If HasArg("--enable-mir-x64-experimental") Then enableMirX64Experimental = 1
+If GetArgValue("--x64-codegen-policy-json-out", x64CodegenPolicyJsonOutPath) = 0 Then x64CodegenPolicyJsonOutPath = ""
 
 consoleMode = "direct"
 If GetArgValue("--console-mode", consoleMode) = 0 Then
@@ -480,6 +490,7 @@ If Trim(mirModuleJsonOutPath) <> "" Then needMirModule = 1
 If mirVerifyRequested <> 0 Then needMirModule = 1
 If Trim(mirVerifyJsonOutPath) <> "" Then needMirModule = 1
 If Trim(mirFullJsonOutPath) <> "" Then needMirModule = 1
+If codegenSourceMode = "MIR" And Trim(x64CodegenPolicyJsonOutPath) <> "" Then needMirModule = 1
 
 Dim mirModule As MIRModule
 If needMirModule <> 0 Then
@@ -522,6 +533,8 @@ If needMirModule <> 0 Then
             UxbError "MIR verify errors: " & mirVerifyResult.errorsText
             End 18
         End If
+
+        mirVerifiedForPolicy = 1
     End If
 
     If Trim(mirVerifyJsonOutPath) <> "" Then
@@ -537,6 +550,55 @@ If needMirModule <> 0 Then
         If UXBMIRWriteFullJson(mirModule, mirFullJsonOutPath, sourcePath, mirFullJsonErr) = 0 Then
             UxbError "MIR full JSON write failed: " & mirFullJsonErr
             End 18
+        End If
+    End If
+
+    If codegenSourceMode = "MIR" And (x64EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0 Or Trim(x64CodegenPolicyJsonOutPath) <> "" Or enableMirX64Experimental <> 0) Then
+        If mirVerifiedForPolicy = 0 Then
+            Dim As UXBMIRVerifyResult policyVerify
+            Dim As String policyVerifyErr
+            If UXBMIRVerifyModule(mirModule, policyVerify, policyVerifyErr) = 0 Then
+                UxbError "MIR verifier failed: " & policyVerifyErr
+                End 18
+            End If
+            If policyVerify.ok = 0 Then
+                UxbError "MIR verify errors: " & policyVerify.errorsText
+                End 18
+            End If
+            mirVerifiedForPolicy = 1
+        End If
+    End If
+End If
+
+Dim As Integer needX64Policy
+needX64Policy = IIf(x64EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0 Or Trim(x64CodegenPolicyJsonOutPath) <> "" Or enableMirX64Experimental <> 0, 1, 0)
+
+If needX64Policy <> 0 Then
+    Dim As Integer x64PolicyId
+    x64PolicyId = UXBX64DeterminePolicy( _
+        codegenSourceMode, _
+        mirModuleReady, _
+        mirVerifiedForPolicy, _
+        enableMirX64Experimental, _
+        x64CodegenPolicy _
+    )
+
+    If x64PolicyId = UXB_X64_POLICY_MIR_EXPERIMENTAL Then
+        If x64CodegenPolicy.mirEmitterAvailable = 0 Then
+            UxbError x64CodegenPolicy.diagnosticText
+            End 19
+        End If
+    End If
+
+    If x64CodegenPolicy.fallbackUsed <> 0 Then
+        UxbInfo "x64 codegen policy: " & x64CodegenPolicy.policyName & " - " & x64CodegenPolicy.fallbackReason
+    End If
+
+    If Trim(x64CodegenPolicyJsonOutPath) <> "" Then
+        Dim As String policyJsonErr
+        If UXBX64WritePolicyJson(x64CodegenPolicy, x64CodegenPolicyJsonOutPath, sourcePath, policyJsonErr) = 0 Then
+            UxbError "x64 codegen policy JSON write failed: " & policyJsonErr
+            End 19
         End If
     End If
 End If
