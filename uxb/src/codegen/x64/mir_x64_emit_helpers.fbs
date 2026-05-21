@@ -1,0 +1,212 @@
+#ifndef UXB_MIR_X64_EMIT_HELPERS_FBS
+#define UXB_MIR_X64_EMIT_HELPERS_FBS
+
+Function MIRX64Upper(ByRef s As String) As String
+    Return UCase(Trim(s))
+End Function
+
+Function MIRX64NormalizeVarName(ByRef s As String) As String
+    Return UCase(Trim(s))
+End Function
+
+Function MIRX64FindLocalOffset(ByRef cg As MIRX64Context, ByRef nameText As String, ByRef offsetOut As Integer) As Integer
+    Dim As String target = MIRX64NormalizeVarName(nameText)
+    Dim i As Integer
+    For i = 0 To cg.localCount - 1
+        If MIRX64NormalizeVarName(cg.locals(i).nameText) = target Then
+            offsetOut = cg.locals(i).offset
+            Return 1
+        End If
+    Next
+    Return 0
+End Function
+
+Function MIRX64EnsureLocalSlot(ByRef cg As MIRX64Context, ByRef nameText As String, ByRef offsetOut As Integer) As Integer
+    Dim As String norm = MIRX64NormalizeVarName(nameText)
+    If norm = "" Then Return 0
+
+    If MIRX64FindLocalOffset(cg, norm, offsetOut) <> 0 Then Return 1
+
+    Dim idx As Integer
+    idx = cg.localCount
+    If cg.localCount = 0 Then
+        ReDim cg.locals(0)
+    Else
+        ReDim Preserve cg.locals(cg.localCount)
+    End If
+
+    cg.localCount += 1
+    cg.locals(idx).nameText = norm
+    cg.locals(idx).sizeBytes = 8
+    cg.locals(idx).typeName = "I64"
+    cg.locals(idx).offset = -(idx + 1) * 8
+
+    offsetOut = cg.locals(idx).offset
+    Return 1
+End Function
+
+Function MIRX64RbpRef(ByVal offsetValue As Integer) As String
+    If offsetValue < 0 Then
+        Return "[rbp-" & MIRX64ToStr(Abs(offsetValue)) & "]"
+    ElseIf offsetValue > 0 Then
+        Return "[rbp+" & MIRX64ToStr(offsetValue) & "]"
+    Else
+        Return "[rbp]"
+    End If
+End Function
+
+Function MIRX64IsIntegerLiteral(ByRef s As String) As Integer
+    Dim As String t = Trim(s)
+    If t = "" Then Return 0
+
+    Dim i As Integer
+    For i = 1 To Len(t)
+        Dim c As Integer
+        c = Asc(Mid(t, i, 1))
+
+        If i = 1 And (c = 45 Or c = 43) Then
+            If Len(t) = 1 Then Return 0
+            Continue For
+        End If
+
+        If c < 48 Or c > 57 Then Return 0
+    Next i
+
+    Return 1
+End Function
+
+Function MIRX64IsQuotedStringLiteral(ByRef s As String) As Integer
+    Dim As String t = Trim(s)
+    If Len(t) < 2 Then Return 0
+    If Left(t, 1) <> Chr(34) Then Return 0
+    If Right(t, 1) <> Chr(34) Then Return 0
+    Return 1
+End Function
+
+Function MIRX64Unquote(ByRef s As String) As String
+    Dim As String t = Trim(s)
+    If MIRX64IsQuotedStringLiteral(t) = 0 Then Return t
+    Return Mid(t, 2, Len(t) - 2)
+End Function
+
+Function MIRX64StringToNasmDb(ByRef rawText As String) As String
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim c As Integer
+        c = Asc(Mid(rawText, i, 1))
+
+        If outText <> "" Then outText &= ","
+        outText &= MIRX64ToStr(c)
+    Next i
+
+    If outText <> "" Then outText &= ","
+    outText &= "0"
+    Return outText
+End Function
+
+Function MIRX64EnsureStringLiteralLabel(ByRef cg As MIRX64Context, ByRef literalText As String, ByRef labelOut As String) As Integer
+    Dim As String raw = MIRX64Unquote(literalText)
+
+    Dim i As Integer
+    For i = 0 To cg.stringCount - 1
+        If cg.stringLiterals(i).rawText = raw Then
+            labelOut = cg.stringLiterals(i).labelText
+            Return 1
+        End If
+    Next
+
+    Dim idx As Integer
+    idx = cg.stringCount
+    If cg.stringCount = 0 Then
+        ReDim cg.stringLiterals(0)
+    Else
+        ReDim Preserve cg.stringLiterals(cg.stringCount)
+    End If
+
+    cg.stringCount += 1
+    cg.stringLiterals(idx).rawText = raw
+    cg.stringLiterals(idx).labelText = "__uxb_mir_str_" & MIRX64ToStr(idx)
+
+    labelOut = cg.stringLiterals(idx).labelText
+    MIRX64EmitData cg, labelOut & ": db " & MIRX64StringToNasmDb(raw)
+    Return 1
+End Function
+
+Function MIRX64TryParseBlockId(ByRef s As String, ByRef blockIdOut As Integer) As Integer
+    Dim As String t = Trim(s)
+    If MIRX64IsIntegerLiteral(t) = 0 Then Return 0
+    blockIdOut = ValInt(t)
+    Return 1
+End Function
+
+Function MIRX64BlockLabel(ByVal blockId As Integer) As String
+    Return ".Lmir_block_" & MIRX64ToStr(blockId)
+End Function
+
+Function MIRX64LoadOperandToReg(ByRef cg As MIRX64Context, ByRef operandText As String, ByRef regName As String, ByRef errText As String) As Integer
+    Dim As String opText = Trim(operandText)
+
+    If MIRX64IsIntegerLiteral(opText) <> 0 Then
+        MIRX64Emit cg, "    mov " & regName & ", " & opText
+        Return 1
+    End If
+
+    If MIRX64IsQuotedStringLiteral(opText) <> 0 Then
+        Dim litLabel As String
+        If MIRX64EnsureStringLiteralLabel(cg, opText, litLabel) = 0 Then
+            errText = "MIR x64 emitter: string literal label creation failed"
+            Return 0
+        End If
+        MIRX64Emit cg, "    lea " & regName & ", [rel " & litLabel & "]"
+        Return 1
+    End If
+
+    Dim off As Integer
+    If MIRX64FindLocalOffset(cg, opText, off) <> 0 Then
+        MIRX64Emit cg, "    mov " & regName & ", qword " & MIRX64RbpRef(off)
+        Return 1
+    End If
+
+    errText = "MIR x64 emitter: unknown operand '" & opText & "'"
+    Return 0
+End Function
+
+Function MIRX64StoreRegToVar(ByRef cg As MIRX64Context, ByRef regName As String, ByRef varName As String, ByRef errText As String) As Integer
+    Dim off As Integer
+    If MIRX64FindLocalOffset(cg, varName, off) = 0 Then
+        If MIRX64EnsureLocalSlot(cg, varName, off) = 0 Then
+            errText = "MIR x64 emitter: cannot allocate target variable '" & Trim(varName) & "'"
+            Return 0
+        End If
+    End If
+
+    MIRX64Emit cg, "    mov qword " & MIRX64RbpRef(off) & ", " & regName
+    Return 1
+End Function
+
+Function MIRX64IsLikelyVariableToken(ByRef tokenText As String) As Integer
+    Dim t As String
+    t = Trim(tokenText)
+
+    If t = "" Then Return 0
+    If MIRX64IsIntegerLiteral(t) <> 0 Then Return 0
+    If MIRX64IsQuotedStringLiteral(t) <> 0 Then Return 0
+
+    Dim i As Integer
+    For i = 1 To Len(t)
+        Dim c As Integer
+        c = Asc(Mid(t, i, 1))
+        If c = 95 Then Continue For
+        If c >= 48 And c <= 57 Then Continue For
+        If c >= 65 And c <= 90 Then Continue For
+        If c >= 97 And c <= 122 Then Continue For
+        Return 0
+    Next i
+
+    Return 1
+End Function
+
+#endif
