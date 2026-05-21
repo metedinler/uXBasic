@@ -1,323 +1,166 @@
 #!/usr/bin/env python3
-"""Stage 4 static source/test/artifact separation audit for uXBasiC."""
+# -*- coding: utf-8 -*-
+"""
+uXBasiC Stage-4 workspace/test/artifact audit tool.
+Default mode is dry-run. No file is moved unless --apply is supplied.
 
+Canonical decisions:
+- uxb/src is canonical source tree.
+- root tests/ is canonical test tree.
+- uxb/tests may be moved back to root tests/.
+- root src/ may be retired only if byte-for-byte duplicate of uxb/src.
+"""
 from __future__ import annotations
-
-import argparse
-import csv
-import json
-from dataclasses import dataclass
-from datetime import datetime, timezone
+import argparse, csv, datetime as _dt, hashlib, json, shutil
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple, Any
 
+SAFE_TEST_SOURCE_EXTS = {".bas", ".bi", ".fbs", ".expect", ".uxb", ".txt", ".md"}
+GENERATED_EXTS_DEFAULT = {".exe", ".obj", ".o", ".asm", ".nasm", ".lst", ".log", ".tmp", ".bak", ".pdb", ".ilk"}
+GENERATED_EXTS_AGGRESSIVE = GENERATED_EXTS_DEFAULT | {".json", ".csv", ".xml", ".html"}
+GENERATED_DIR_NAMES = {"out", "out_h8a", "diag", "diag_out", "diagnostics", "x64build", "interop", "build", "dist", ".pytest_cache", "__pycache__"}
 
-SOURCE_EXTENSIONS = {".fbs", ".bas", ".bi", ".py", ".ps1", ".md"}
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
+def rel(root: Path, path: Path) -> str:
+    return str(path.relative_to(root)).replace("\\", "/")
 
-@dataclass
-class Finding:
-    check_id: str
-    severity: str
-    passed: bool
-    message: str
-    evidence: str
+def find_repo_root(start: Path) -> Path:
+    p = start.resolve()
+    for c in [p] + list(p.parents):
+        if (c / "uxb" / "src").is_dir():
+            return c
+    raise SystemExit("Cannot find repo root containing uxb/src")
 
+def compare_trees(left: Path, right: Path) -> Dict[str, Any]:
+    result = {"left_exists": left.is_dir(), "right_exists": right.is_dir(), "same": False,
+              "left_file_count": 0, "right_file_count": 0, "different": [], "left_only": [], "right_only": []}
+    if not left.is_dir() or not right.is_dir():
+        return result
+    left_files = sorted([p for p in left.rglob("*") if p.is_file()])
+    right_files = sorted([p for p in right.rglob("*") if p.is_file()])
+    result["left_file_count"], result["right_file_count"] = len(left_files), len(right_files)
+    left_map = {rel(left, p): p for p in left_files}
+    right_map = {rel(right, p): p for p in right_files}
+    result["left_only"] = sorted(set(left_map) - set(right_map))
+    result["right_only"] = sorted(set(right_map) - set(left_map))
+    for k in sorted(set(left_map) & set(right_map)):
+        lp, rp = left_map[k], right_map[k]
+        if lp.stat().st_size != rp.stat().st_size or sha256_file(lp) != sha256_file(rp):
+            result["different"].append(k)
+    result["same"] = not result["left_only"] and not result["right_only"] and not result["different"]
+    return result
 
-def _count_files(root: Path, exts: Iterable[str] | None = None) -> int:
-    if not root.exists() or not root.is_dir():
-        return 0
+def is_generated_path(path: Path, aggressive: bool) -> bool:
+    lower_parts = [part.lower() for part in path.parts]
+    if any(part in GENERATED_DIR_NAMES or part.startswith("diag_") or part.startswith("out_") for part in lower_parts):
+        return True
+    ext_set = GENERATED_EXTS_AGGRESSIVE if aggressive else GENERATED_EXTS_DEFAULT
+    return path.suffix.lower() in ext_set
 
-    ext_set = set(exts or [])
-    total = 0
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
-        if ext_set and p.suffix.lower() not in ext_set:
-            continue
-        total += 1
-    return total
+def plan_move(actions: List[Dict[str, Any]], kind: str, source: Path, target: Path, reason: str) -> None:
+    actions.append({"kind": kind, "source": str(source), "target": str(target), "reason": reason})
 
-
-def _list_source_files_under(root: Path, limit: int = 20) -> List[Path]:
-    if not root.exists() or not root.is_dir():
-        return []
-
-    hits: List[Path] = []
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
-        if p.suffix.lower() in SOURCE_EXTENSIONS:
-            hits.append(p)
-            if len(hits) >= limit:
-                break
-    return hits
-
-
-def _rel(path: Path, base: Path) -> str:
-    try:
-        return str(path.relative_to(base)).replace("\\", "/")
-    except ValueError:
-        return str(path).replace("\\", "/")
-
-
-def run_audit(workspace_root: Path, uxb_root: Path) -> Tuple[List[Finding], Dict[str, object]]:
-    findings: List[Finding] = []
-
-    root_src = workspace_root / "src"
-    root_tests = workspace_root / "tests"
-    root_artifacts = workspace_root / "artifacts"
-    root_build = workspace_root / "build"
-    root_dist = workspace_root / "dist"
-
-    uxb_src = uxb_root / "src"
-    uxb_tests = uxb_root / "tests"
-    uxb_dist = uxb_root / "dist"
-
-    required_artifact_dirs = [
-        root_artifacts / "archive",
-        root_artifacts / "logs",
-        root_artifacts / "release-drop",
-        root_artifacts / "tmp_bucket",
-    ]
-
-    findings.append(
-        Finding(
-            check_id="canonical_uxb_src",
-            severity="error",
-            passed=uxb_src.is_dir(),
-            message="Kanonik compiler kaynak dizini uxb/src bulunmali.",
-            evidence=_rel(uxb_src, workspace_root),
-        )
-    )
-
-    findings.append(
-        Finding(
-            check_id="root_src_presence",
-            severity="warning",
-            passed=root_src.is_dir(),
-            message="Workspace kokunde src dizini bulunuyor (overlay veya gecis izi olabilir).",
-            evidence=_rel(root_src, workspace_root),
-        )
-    )
-
-    findings.append(
-        Finding(
-            check_id="root_tests_presence",
-            severity="warning",
-            passed=root_tests.is_dir(),
-            message="Parca 4 hedefi icin root tests dizini beklenir.",
-            evidence=_rel(root_tests, workspace_root),
-        )
-    )
-
-    findings.append(
-        Finding(
-            check_id="uxb_tests_presence",
-            severity="warning",
-            passed=uxb_tests.is_dir(),
-            message="Gecis bitene kadar uxb/tests korunmali.",
-            evidence=_rel(uxb_tests, workspace_root),
-        )
-    )
-
-    findings.append(
-        Finding(
-            check_id="artifacts_root_presence",
-            severity="warning",
-            passed=root_artifacts.is_dir(),
-            message="Artifact ayrimi icin root artifacts dizini bulunmali.",
-            evidence=_rel(root_artifacts, workspace_root),
-        )
-    )
-
-    for req in required_artifact_dirs:
-        findings.append(
-            Finding(
-                check_id=f"artifact_subdir_{req.name}",
-                severity="warning",
-                passed=req.is_dir(),
-                message=f"Zorunlu artifacts alt dizini: {req.name}",
-                evidence=_rel(req, workspace_root),
-            )
-        )
-
-    source_like_under_build = _list_source_files_under(root_build)
-    source_like_under_dist = _list_source_files_under(root_dist)
-
-    findings.append(
-        Finding(
-            check_id="build_contains_source_like_files",
-            severity="warning",
-            passed=len(source_like_under_build) == 0,
-            message="Build altinda kaynak benzeri dosyalar birikmemeli (artifact karisimi riski).",
-            evidence=", ".join(_rel(p, workspace_root) for p in source_like_under_build[:8])
-            if source_like_under_build
-            else "none",
-        )
-    )
-
-    findings.append(
-        Finding(
-            check_id="dist_contains_source_like_files",
-            severity="warning",
-            passed=len(source_like_under_dist) == 0,
-            message="Dist altinda kaynak benzeri dosyalar birikmemeli (artifact karisimi riski).",
-            evidence=", ".join(_rel(p, workspace_root) for p in source_like_under_dist[:8])
-            if source_like_under_dist
-            else "none",
-        )
-    )
-
-    summary: Dict[str, object] = {
-        "workspace_root": _rel(workspace_root, workspace_root),
-        "uxb_root": _rel(uxb_root, workspace_root),
-        "root_src_exists": root_src.is_dir(),
-        "uxb_src_exists": uxb_src.is_dir(),
-        "root_tests_exists": root_tests.is_dir(),
-        "uxb_tests_exists": uxb_tests.is_dir(),
-        "root_tests_file_count": _count_files(root_tests),
-        "uxb_tests_file_count": _count_files(uxb_tests),
-        "root_artifacts_exists": root_artifacts.is_dir(),
-        "required_artifact_dirs_present": sum(1 for p in required_artifact_dirs if p.is_dir()),
-        "required_artifact_dirs_total": len(required_artifact_dirs),
-        "root_build_file_count": _count_files(root_build),
-        "root_dist_file_count": _count_files(root_dist),
-        "uxb_dist_file_count": _count_files(uxb_dist),
-    }
-
-    return findings, summary
-
-
-def _overall_status(findings: List[Finding]) -> str:
-    has_error = any((not f.passed) and f.severity == "error" for f in findings)
-    has_warning = any((not f.passed) and f.severity == "warning" for f in findings)
-    if has_error:
-        return "error"
-    if has_warning:
-        return "warning"
-    return "ok"
-
-
-def write_json(path: Path, payload: Dict[str, object]) -> None:
+def ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+def unique_target(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem, suffix, parent = path.stem, path.suffix, path.parent
+    for i in range(1, 10000):
+        candidate = parent / f"{stem}__dup{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Cannot create unique target for {path}")
 
-def write_csv(path: Path, findings: List[Finding]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["check_id", "severity", "passed", "message", "evidence"])
-        for item in findings:
-            w.writerow([item.check_id, item.severity, "true" if item.passed else "false", item.message, item.evidence])
+def write_reports(repo: Path, report: Dict[str, Any], stamp: str) -> Tuple[Path, Path]:
+    dist = repo / "uxb" / "dist"
+    dist.mkdir(parents=True, exist_ok=True)
+    json_path = dist / f"stage4_workspace_report_{stamp}.json"
+    md_path = dist / f"stage4_workspace_report_{stamp}.md"
+    json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    lines = ["# uXBasiC Stage-4 Workspace Audit", "",
+             f"- dry_run: `{report['dry_run']}`",
+             f"- canonical_source: `{report['canonical_source']}`",
+             f"- canonical_tests: `{report['canonical_tests']}`",
+             f"- root_src_duplicate: `{report['root_src_duplicate']}`",
+             f"- action_count: `{len(report['actions'])}`", "",
+             "## Actions", "",
+             "| # | kind | source | target | reason |",
+             "|---:|---|---|---|---|"]
+    for i, a in enumerate(report["actions"], 1):
+        lines.append(f"| {i} | {a['kind']} | `{a['source']}` | `{a['target']}` | {a['reason']} |")
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    return json_path, md_path
 
-
-def write_md(path: Path, payload: Dict[str, object], findings: List[Finding]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lines: List[str] = []
-    lines.append("# uXBasiC Stage 4 Source/Artifact Audit")
-    lines.append("")
-    lines.append(f"- status: {payload['status']}")
-    lines.append(f"- generated_at_utc: {payload['generated_at_utc']}")
-    lines.append("")
-    lines.append("## Summary")
-    lines.append("")
-    summary = payload["summary"]
-    for k, v in summary.items():
-        lines.append(f"- {k}: {v}")
-    lines.append("")
-    lines.append("## Findings")
-    lines.append("")
-    lines.append("| check_id | severity | passed | message | evidence |")
-    lines.append("|---|---|---|---|---|")
-    for item in findings:
-        lines.append(
-            "| "
-            + item.check_id
-            + " | "
-            + item.severity
-            + " | "
-            + ("true" if item.passed else "false")
-            + " | "
-            + item.message.replace("|", "/")
-            + " | "
-            + item.evidence.replace("|", "/")
-            + " |"
-        )
-
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def parse_args() -> argparse.Namespace:
-    script_path = Path(__file__).resolve()
-    uxb_root = script_path.parents[1]
-    workspace_root = script_path.parents[2]
-
-    parser = argparse.ArgumentParser(description="uXBasiC Stage 4 static source/artifact audit")
-    parser.add_argument("--workspace-root", default=str(workspace_root), help="Workspace root path")
-    parser.add_argument("--uxb-root", default=str(uxb_root), help="uXB root path")
-    parser.add_argument(
-        "--out-json",
-        default=str(uxb_root / "dist" / "uxb_stage4_source_artifact_audit.json"),
-        help="JSON output path",
-    )
-    parser.add_argument(
-        "--out-csv",
-        default=str(uxb_root / "dist" / "uxb_stage4_source_artifact_audit.csv"),
-        help="CSV output path",
-    )
-    parser.add_argument(
-        "--out-md",
-        default=str(uxb_root / "dist" / "uxb_stage4_source_artifact_audit.md"),
-        help="Markdown output path",
-    )
-    return parser.parse_args()
-
+def apply_actions(actions: List[Dict[str, Any]], retired_root: Path) -> Tuple[Path, Path]:
+    retired_root.mkdir(parents=True, exist_ok=True)
+    manifest_path = retired_root / "RETIRE_MANIFEST.csv"
+    undo_path = retired_root / "UNDO_RESTORE_STAGE4.bat"
+    rows, undo_lines = [], ["@echo off", "setlocal", "echo Restoring Stage-4 moved files..."]
+    for a in actions:
+        src, dst = Path(a["source"]), Path(a["target"])
+        if not src.exists():
+            a["status"] = "missing_source"
+            continue
+        ensure_parent(dst)
+        dst = unique_target(dst)
+        shutil.move(str(src), str(dst))
+        a["target"], a["status"] = str(dst), "moved"
+        rows.append([a["kind"], str(src), str(dst), a["reason"]])
+        undo_lines.append(f'if exist "{dst}" move /Y "{dst}" "{src}"')
+    with manifest_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f); w.writerow(["kind", "source", "target", "reason"]); w.writerows(rows)
+    undo_lines += ["echo Done.", "endlocal"]
+    undo_path.write_text("\n".join(undo_lines), encoding="utf-8")
+    return manifest_path, undo_path
 
 def main() -> int:
-    args = parse_args()
-
-    workspace_root = Path(args.workspace_root).resolve()
-    uxb_root = Path(args.uxb_root).resolve()
-
-    findings, summary = run_audit(workspace_root, uxb_root)
-
-    payload: Dict[str, object] = {
-        "schema_version": "uxb-stage4-source-artifact-audit-1",
-        "producer": "uXBasiC",
-        "kind": "stage4_source_artifact_audit",
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "status": _overall_status(findings),
-        "summary": summary,
-        "findings": [
-            {
-                "check_id": item.check_id,
-                "severity": item.severity,
-                "passed": item.passed,
-                "message": item.message,
-                "evidence": item.evidence,
-            }
-            for item in findings
-        ],
-    }
-
-    out_json = Path(args.out_json)
-    out_csv = Path(args.out_csv)
-    out_md = Path(args.out_md)
-
-    write_json(out_json, payload)
-    write_csv(out_csv, findings)
-    write_md(out_md, payload, findings)
-
-    print("Stage 4 statik audit tamamlandi")
-    print(f"status: {payload['status']}")
-    print(f"json: {out_json}")
-    print(f"csv: {out_csv}")
-    print(f"md: {out_md}")
-
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--repo-root", default=".")
+    ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--move-tests-to-root", action="store_true")
+    ap.add_argument("--move-root-src-duplicate", action="store_true")
+    ap.add_argument("--aggressive-artifacts", action="store_true")
+    args = ap.parse_args()
+    repo = find_repo_root(Path(args.repo_root))
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    retired_root = repo / "uxb" / "artifacts" / "stage4_retired" / stamp
+    canonical_src, root_src = repo / "uxb" / "src", repo / "src"
+    root_tests, uxb_tests = repo / "tests", repo / "uxb" / "tests"
+    src_cmp = compare_trees(root_src, canonical_src)
+    actions: List[Dict[str, Any]] = []
+    if args.move_root_src_duplicate and src_cmp["same"]:
+        plan_move(actions, "retire_duplicate_root_src", root_src, retired_root / "root_src_duplicate", "root src is byte-for-byte duplicate of uxb/src")
+    if uxb_tests.is_dir():
+        for p in sorted(uxb_tests.rglob("*")):
+            if p.is_dir(): continue
+            rel_test = p.relative_to(uxb_tests)
+            if is_generated_path(p, args.aggressive_artifacts):
+                plan_move(actions, "retire_test_artifact", p, retired_root / "test_artifacts" / rel_test, "generated test artifact")
+            elif args.move_tests_to_root and p.suffix.lower() in SAFE_TEST_SOURCE_EXTS:
+                plan_move(actions, "move_test_source_to_root", p, root_tests / rel_test, "test source should live under root tests/")
+    report = {"schema_version": "uxb-stage4-workspace-audit-1", "producer": "uXBasiC",
+              "dry_run": not args.apply, "repo_root": str(repo), "canonical_source": "uxb/src",
+              "canonical_tests": "tests", "root_src_duplicate": bool(src_cmp["same"]),
+              "root_src_compare": src_cmp, "move_tests_to_root_requested": bool(args.move_tests_to_root),
+              "move_root_src_duplicate_requested": bool(args.move_root_src_duplicate),
+              "aggressive_artifacts": bool(args.aggressive_artifacts), "actions": actions}
+    json_path, md_path = write_reports(repo, report, stamp)
+    if args.apply and actions:
+        manifest, undo = apply_actions(actions, retired_root)
+        report["manifest"], report["undo_script"] = str(manifest), str(undo)
+        json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"STAGE4_REPORT_JSON={json_path}")
+    print(f"STAGE4_REPORT_MD={md_path}")
+    print(f"ACTION_COUNT={len(actions)}")
+    print(f"DRY_RUN={not args.apply}")
     return 0
-
-
 if __name__ == "__main__":
     raise SystemExit(main())
