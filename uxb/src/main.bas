@@ -9,6 +9,7 @@
 #include "semantic/hir.fbs"
 #include "semantic/mir.fbs"
 #include once "semantic/extfp_type_policy.fbs"
+#include once "runtime/extfp_runtime_status.fbs"
 #include "semantic/semantic_pass.fbs"
 #include "build/interop_manifest.fbs"
 #include "codegen/x64/mir_x64_context.fbs"
@@ -97,6 +98,8 @@ Private Function IsValueArgKey(ByRef keyText As String) As Integer
     If k = "--mir-verify-json-out" Then Return 1
     If k = "--mir-full-json-out" Then Return 1
     If k = "--x64-codegen-policy-json-out" Then Return 1
+    If k = "--extfp-runtime-dir" Then Return 1
+    If k = "--extfp-policy-json-out" Then Return 1
     If k = "--ast-json-out" Then Return 1
     If k = "--ast-contract-json-out" Then Return 1
     If k = "--ast-contract-report-json-out" Then Return 1

@@ -1,0 +1,489 @@
+Private Function CurToken(ByRef ps As ParseState) As Token
+    Return TokenListAt(ps.lx.tokens, ps.cursorIndex)
+End Function
+
+'' ParserLog removed: use ParserDiag -> UxbDebug instead
+
+Private Sub ParserDiag(ByRef ps As ParseState, ByRef msgText As String)
+    If ps.parseDebug <> 0 Then
+        ' Keep parser debug hook local to avoid cross-module dependency.
+        'Print "parser: " & msgText
+    End If
+End Sub
+
+Private Function LookToken(ByRef ps As ParseState, ByVal look As Integer) As Token
+    If look < 0 Then look = 0
+    Return TokenListAt(ps.lx.tokens, ps.cursorIndex + look)
+End Function
+
+Private Sub AdvanceTok(ByRef ps As ParseState)
+    If ps.cursorIndex < ps.lx.tokens.count Then
+        ps.cursorIndex += 1
+    End If
+End Sub
+
+Private Function MatchOp(ByRef ps As ParseState, ByRef opText As String) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+    If tk.kind = "OP" And tk.lexeme = opText Then
+        AdvanceTok ps
+        Return 1
+    End If
+    Return 0
+End Function
+
+Private Function IsKw(ByRef ps As ParseState, ByRef kw As String) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+    Return tk.kind = "KEYWORD" And UCase(tk.lexeme) = UCase(kw)
+End Function
+
+Private Function MatchKeyword(ByRef ps As ParseState, ByRef kw As String) As Integer
+    If IsKw(ps, kw) Then
+        AdvanceTok ps
+        Return 1
+    End If
+    Return 0
+End Function
+
+Private Function IsAssignOrIncDecOp(ByRef tk As Token) As Integer
+    If tk.kind <> "OP" Then Return 0
+    Select Case tk.lexeme
+    Case "=", "+=", "-=", "*=", "/=", "\=", "=+", "=-", "++", "--"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function IsLegacyInlineName(ByRef nameText As String) As Integer
+    Dim u As String
+    u = UCase(nameText)
+    Return u = "_ASM" Or u = "ASM_SUB" Or u = "ASM_FUNCTION"
+End Function
+
+Private Function IsDisabledUnderscoreCommand(ByRef identText As String, ByRef nextTok As Token) As Integer
+    If Left(identText, 1) <> "_" Then Return 0
+    If IsAssignOrIncDecOp(nextTok) Then Return 0
+    Return 1
+End Function
+
+Private Function IsValidTimerUnit(ByRef unitText As String) As Integer
+    Dim u As String
+    u = LCase(unitText)
+
+    Select Case u
+    Case "ns", "us", "ms", "s", "min", "h", "day", "year"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Dim Shared gDeclaredTypeNames() As String
+Dim Shared gDeclaredTypeCount As Integer
+Dim Shared gReferencedTypeNames() As String
+Dim Shared gReferencedTypeCount As Integer
+
+Private Sub AddUniqueTypeName(typeNames() As String, ByRef typeCount As Integer, ByRef rawName As String)
+    Dim normalizedName As String
+    normalizedName = UCase(Trim(rawName))
+    If normalizedName = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To typeCount - 1
+        If typeNames(i) = normalizedName Then Exit Sub
+    Next i
+
+    If typeCount = 0 Then
+        ReDim typeNames(0)
+    Else
+        ReDim Preserve typeNames(typeCount)
+    End If
+
+    typeNames(typeCount) = normalizedName
+    typeCount += 1
+End Sub
+
+Private Function IsRegisteredTypeName(typeNames() As String, ByVal typeCount As Integer, ByRef rawName As String) As Integer
+    Dim normalizedName As String
+    normalizedName = UCase(Trim(rawName))
+    If normalizedName = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To typeCount - 1
+        If typeNames(i) = normalizedName Then Return 1
+    Next i
+
+    Return 0
+End Function
+
+Private Function IsBuiltinTypeKeyword(ByRef typeName As String) As Integer
+    Select Case UCase(typeName)
+    Case "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "F80", "F128", "BIGF", "BIGD", "BALL", "EXTENDED", "EXT", "BOOLEAN", "STRING", "OBJECT", "ARRAY", "LIST", "DICT", "SET"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function CanonicalTypeNameForParser(ByRef rawTypeName As String) As String
+    Dim t As String
+    t = UCase(Trim(rawTypeName))
+
+    Select Case t
+    Case "F80", "EXTENDED", "EXT"
+        Return "F80"
+    Case "F128", "FLOAT128", "QUAD"
+        Return "F128"
+    Case "BIGF", "BIGFLOAT"
+        Return "BIGF"
+    Case "BIGD", "BIGDECIMAL"
+        Return "BIGD"
+    Case "BALL"
+        Return "BALL"
+    Case "DOUBLE", "DBL", "DBLE"
+        Return "F64"
+    Case "SINGLE", "SNG", "SNGLE"
+        Return "F32"
+    Case "INTEGER", "INT"
+        Return "I32"
+    End Select
+
+    Return t
+End Function
+
+Private Sub ResetTypeValidationState()
+    gDeclaredTypeCount = 0
+    gReferencedTypeCount = 0
+End Sub
+
+Private Sub RegisterDeclaredTypeName(ByRef typeName As String)
+    AddUniqueTypeName gDeclaredTypeNames(), gDeclaredTypeCount, typeName
+End Sub
+
+Private Function ValidateTypeToken(ByRef ps As ParseState, ByRef tk As Token) As Integer
+    Dim canonical As String
+    canonical = CanonicalTypeNameForParser(tk.lexeme)
+
+    If tk.kind = "KEYWORD" Then
+        If IsBuiltinTypeKeyword(canonical) Then Return 1
+        ps.lastError = "invalid type name: " & tk.lexeme
+        Return 0
+    End If
+
+    If tk.kind = "IDENT" Then
+        If IsBuiltinTypeKeyword(canonical) Then Return 1
+        AddUniqueTypeName gReferencedTypeNames(), gReferencedTypeCount, tk.lexeme
+        Return 1
+    End If
+
+    ps.lastError = "type expected"
+    Return 0
+End Function
+
+Private Function ValidateTypeReferences(ByRef ps As ParseState) As Integer
+    Dim i As Integer
+    ParserDiag ps, "[PDBG] ValidateTypeReferences declared_count=" & Str(gDeclaredTypeCount) & " referenced_count=" & Str(gReferencedTypeCount)
+    For i = 0 To gReferencedTypeCount - 1
+        ParserDiag ps, "[PDBG] referenced type: " & gReferencedTypeNames(i)
+        If IsRegisteredTypeName(gDeclaredTypeNames(), gDeclaredTypeCount, gReferencedTypeNames(i)) = 0 Then
+            ParserDiag ps, "[PDBG] missing referenced type: " & gReferencedTypeNames(i)
+            ps.lastError = "unknown type: " & gReferencedTypeNames(i)
+            Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function ASTChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim count As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        count += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return count
+End Function
+
+Private Function ASTChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    Dim i As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function ValidateTimerCall(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    Dim argc As Integer
+    argc = ASTChildCount(ps, callNode)
+
+    If argc = 0 Then Return 1
+
+    If argc = 1 Then
+        Dim unitArg As Integer
+        unitArg = ASTChildAt(ps, callNode, 0)
+        If unitArg = -1 Then Return 0
+        If UCase(ps.ast.nodes(unitArg).kind) <> "STRING" Then
+            ps.lastError = "TIMER(unit) expects string unit"
+            Return 0
+        End If
+        If IsValidTimerUnit(ps.ast.nodes(unitArg).value) = 0 Then
+            ps.lastError = "invalid TIMER unit"
+            Return 0
+        End If
+        Return 1
+    End If
+
+    If argc = 3 Then
+        Dim unitArg3 As Integer
+        unitArg3 = ASTChildAt(ps, callNode, 2)
+        If unitArg3 = -1 Then Return 0
+        If UCase(ps.ast.nodes(unitArg3).kind) <> "STRING" Then
+            ps.lastError = "TIMER(start,end,unit) expects string unit"
+            Return 0
+        End If
+        If IsValidTimerUnit(ps.ast.nodes(unitArg3).value) = 0 Then
+            ps.lastError = "invalid TIMER unit"
+            Return 0
+        End If
+        Return 1
+    End If
+
+    ps.lastError = "TIMER expects 0, 1 or 3 arguments"
+    Return 0
+End Function
+
+Private Function ValidateSingleArgCall(ByRef ps As ParseState, ByVal callNode As Integer, ByRef callName As String) As Integer
+    Dim argc As Integer
+    argc = ASTChildCount(ps, callNode)
+
+    If argc <> 1 Then
+        ps.lastError = callName & " expects exactly 1 argument"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ValidateFileInfoCall(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    Dim callName As String
+    callName = UCase(ps.ast.nodes(callNode).value)
+
+    Select Case callName
+    Case "LOF", "EOF"
+        Return ValidateSingleArgCall(ps, callNode, callName)
+    End Select
+
+    Return 1
+End Function
+
+Private Function ValidateArgCountInRange(ByRef ps As ParseState, ByVal callNode As Integer, ByRef callName As String, ByVal minArgs As Integer, ByVal maxArgs As Integer) As Integer
+    Dim argc As Integer
+    argc = ASTChildCount(ps, callNode)
+
+    If argc < minArgs Or argc > maxArgs Then
+        If minArgs = maxArgs Then
+            ps.lastError = callName & " expects exactly " & Str(minArgs) & " argument(s)"
+        Else
+            ps.lastError = callName & " expects " & Str(minArgs) & " to " & Str(maxArgs) & " argument(s)"
+        End If
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function IsTypeRefArgNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx = -1 Then Return 0
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    Select Case UCase(n.kind)
+    Case "IDENT"
+        Return 1
+    Case "KEYWORD_REF"
+        Return IsBuiltinTypeKeyword(n.value)
+    End Select
+
+    Return 0
+End Function
+
+Private Function ValidateSizeOfCall(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    If ValidateArgCountInRange(ps, callNode, "SIZEOF", 1, 1) = 0 Then Return 0
+
+    Dim a0 As Integer
+    a0 = ASTChildAt(ps, callNode, 0)
+    If IsTypeRefArgNode(ps, a0) = 0 Then
+        ps.lastError = "SIZEOF expects a type name argument"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ValidateOffsetOfCall(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    If ValidateArgCountInRange(ps, callNode, "OFFSETOF", 2, 2) = 0 Then Return 0
+
+    Dim a0 As Integer
+    Dim a1 As Integer
+    a0 = ASTChildAt(ps, callNode, 0)
+    a1 = ASTChildAt(ps, callNode, 1)
+
+    If IsTypeRefArgNode(ps, a0) = 0 Then
+        ps.lastError = "OFFSETOF expects a type name as first argument"
+        Return 0
+    End If
+
+    If a1 = -1 Or UCase(ps.ast.nodes(a1).kind) <> "STRING" Then
+        ps.lastError = "OFFSETOF expects a string path as second argument"
+        Return 0
+    End If
+
+    If Len(Trim(ps.ast.nodes(a1).value)) = 0 Then
+        ps.lastError = "OFFSETOF path cannot be empty"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ValidateVarPtrCall(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    If ValidateArgCountInRange(ps, callNode, "VARPTR", 1, 1) = 0 Then Return 0
+
+    Dim a0 As Integer
+    a0 = ASTChildAt(ps, callNode, 0)
+    If a0 = -1 Or UCase(ps.ast.nodes(a0).kind) <> "IDENT" Then
+        ps.lastError = "VARPTR expects an identifier argument"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ValidateSaddCall(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    If ValidateArgCountInRange(ps, callNode, "SADD", 1, 1) = 0 Then Return 0
+
+    Dim a0 As Integer
+    a0 = ASTChildAt(ps, callNode, 0)
+    If a0 = -1 Then
+        ps.lastError = "SADD expects one argument"
+        Return 0
+    End If
+
+    Dim argKind As String
+    argKind = UCase(ps.ast.nodes(a0).kind)
+    If argKind <> "STRING" And argKind <> "IDENT" Then
+        ps.lastError = "SADD expects a string literal or identifier argument"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ValidateLabelPtrCall(ByRef ps As ParseState, ByVal callNode As Integer, ByRef callName As String) As Integer
+    If ValidateArgCountInRange(ps, callNode, callName, 1, 1) = 0 Then Return 0
+
+    Dim a0 As Integer
+    Dim k As String
+    a0 = ASTChildAt(ps, callNode, 0)
+    If a0 = -1 Then
+        ps.lastError = callName & " expects an identifier argument"
+        Return 0
+    End If
+
+    k = UCase(ps.ast.nodes(a0).kind)
+    If k <> "IDENT" And k <> "KEYWORD_REF" Then
+        ps.lastError = callName & " expects an identifier argument"
+        Return 0
+    End If
+
+    If Len(Trim(ps.ast.nodes(a0).value)) = 0 Then
+        ps.lastError = callName & " expects a non-empty identifier argument"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ValidateCoreIntrinsicCall(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    Dim callName As String
+    callName = UCase(ps.ast.nodes(callNode).value)
+
+    Select Case callName
+    Case "SIZEOF"
+        Return ValidateSizeOfCall(ps, callNode)
+    Case "OFFSETOF"
+        Return ValidateOffsetOfCall(ps, callNode)
+    Case "LEN", "STR", "VAL", "ABS", "INT", "UCASE", "LCASE", "ASC", "CHR", "LTRIM", "RTRIM", "SPACE", "SGN", "SIN", "COS", "TAN", "ATN", "EXP", "LOG", "CINT", "CLNG", "CDBL", "CSNG", "FIX", "SQR"
+        Return ValidateArgCountInRange(ps, callNode, callName, 1, 1)
+    Case "SQRT"
+        ps.lastError = "SQRT removed; use SQR"
+        Return 0
+    Case "RND"
+        Return ValidateArgCountInRange(ps, callNode, callName, 0, 1)
+    Case "MID"
+        Return ValidateArgCountInRange(ps, callNode, callName, 2, 3)
+    Case "STRING"
+        Return ValidateArgCountInRange(ps, callNode, callName, 2, 2)
+    Case "INKEY"
+        Return ValidateArgCountInRange(ps, callNode, callName, 1, 2)
+    Case "GETKEY"
+        Return ValidateArgCountInRange(ps, callNode, callName, 0, 0)
+    Case "PEEKB", "PEEKW", "PEEKD"
+        Return ValidateArgCountInRange(ps, callNode, callName, 1, 1)
+    Case "VARPTR"
+        Return ValidateVarPtrCall(ps, callNode)
+    Case "SADD"
+        Return ValidateSaddCall(ps, callNode)
+    Case "LPTR", "CODEPTR"
+        Return ValidateLabelPtrCall(ps, callNode, callName)
+    Case "INKEY_LEGACY"
+        ps.lastError = "INKEY_LEGACY removed; use GETKEY or INKEY"
+        Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function IsEndIfStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "IF")
+End Function
+
+Private Function IsEndSelectStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "SELECT")
+End Function
+
+Private Sub SkipSeparators(ByRef ps As ParseState)
+    Do
+        Dim tk As Token
+        tk = CurToken(ps)
+        If tk.kind = "EOL" Then
+            AdvanceTok ps
+        ElseIf tk.kind = "OP" And tk.lexeme = ":" Then
+            AdvanceTok ps
+        Else
+            Exit Do
+        End If
+    Loop
+End Sub
+
+Private Function MakeNodeFromToken(ByRef ps As ParseState, ByRef kindName As String, ByRef valueText As String, ByRef opText As String, ByRef tk As Token) As Integer
+    Return ASTNewNode(ps.ast, kindName, valueText, opText, tk.lineNo, tk.colNo)
+End Function
+
+Private Function MakeSyntheticNumber(ByRef ps As ParseState, ByRef numberText As String) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+    Return ASTNewNode(ps.ast, "NUMBER", numberText, "", tk.lineNo, tk.colNo)
+End Function
