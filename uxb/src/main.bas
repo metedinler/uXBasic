@@ -210,21 +210,26 @@ Private Function JsonEscape(ByRef rawText As String) As String
 
     Dim i As Integer
     For i = 1 To Len(rawText)
-        Dim ch As String
-        ch = Mid(rawText, i, 1)
-        Select Case ch
-        Case "\\"
-            outText &= "\\\\"
-        Case Chr(34)
+        Dim c As Integer
+        c = Asc(Mid(rawText, i, 1))
+
+        Select Case c
+        Case 34
             outText &= "\\" & Chr(34)
-        Case Chr(13)
+        Case 92
+            outText &= "\\\\"
+        Case 13
             outText &= "\\r"
-        Case Chr(10)
+        Case 10
             outText &= "\\n"
-        Case Chr(9)
+        Case 9
             outText &= "\\t"
         Case Else
-            outText &= ch
+            If c < 32 Then
+                outText &= " "
+            Else
+                outText &= Chr(c)
+            End If
         End Select
     Next i
 
