@@ -1,0 +1,180 @@
+#ifndef UXB_EXTFP_LOWERING_CONTRACT_FBS
+#define UXB_EXTFP_LOWERING_CONTRACT_FBS
+
+' External FP lowering contract.
+' This module does not replace extfp_type_policy.fbs.
+' It centralizes lowering decisions for F80/F128/BIGF/BIGD/BALL.
+
+Const UXB_EXTFP_LOWER_NONE = 0
+Const UXB_EXTFP_LOWER_FROM_STR = 1
+Const UXB_EXTFP_LOWER_TO_STR = 2
+Const UXB_EXTFP_LOWER_COPY = 3
+Const UXB_EXTFP_LOWER_BINARY = 4
+Const UXB_EXTFP_LOWER_CMP = 5
+Const UXB_EXTFP_LOWER_PRINT = 6
+Const UXB_EXTFP_LOWER_DIAGNOSTIC = 7
+
+Type UXBExtFpLoweringDecision
+    typeName As String
+    canonicalType As String
+    operationName As String
+    loweringKind As Integer
+    runtimeFamily As String
+    runtimeSymbol As String
+    storageBytes As Integer
+    usesHandle As Integer
+    requiresAddress As Integer
+    diagnosticCode As String
+    diagnosticText As String
+End Type
+
+Sub UXBExtFpLoweringDecisionInit(ByRef d As UXBExtFpLoweringDecision)
+    d.typeName = ""
+    d.canonicalType = ""
+    d.operationName = ""
+    d.loweringKind = UXB_EXTFP_LOWER_NONE
+    d.runtimeFamily = ""
+    d.runtimeSymbol = ""
+    d.storageBytes = 0
+    d.usesHandle = 0
+    d.requiresAddress = 0
+    d.diagnosticCode = ""
+    d.diagnosticText = ""
+End Sub
+
+Function UXBExtFpCanonicalTypeForLowering(ByRef typeText As String) As String
+    Dim As String t
+    t = UCase(Trim(typeText))
+    If Left(t, 4) = "BIGF" Or t = "BIGFLOAT" Then Return "BIGF"
+    If Left(t, 4) = "BIGD" Or t = "BIGDECIMAL" Then Return "BIGD"
+    If Left(t, 4) = "BALL" Then Return "BALL"
+    Select Case t
+    Case "F80", "EXT", "EXTENDED"
+        Return "F80"
+    Case "F128", "FLOAT128", "QUAD"
+        Return "F128"
+    Case "F64", "DOUBLE"
+        Return "F64"
+    Case "F32", "SINGLE", "FLOAT"
+        Return "F32"
+    Case Else
+        Return t
+    End Select
+End Function
+
+Function UXBExtFpRuntimeFamilyForLowering(ByRef canonicalType As String) As String
+    Select Case UCase(Trim(canonicalType))
+    Case "F80"
+        Return "uxb_f80"
+    Case "F128"
+        Return "uxb_f128"
+    Case "BIGF"
+        Return "uxb_bigf"
+    Case "BIGD"
+        Return "uxb_bigd"
+    Case "BALL"
+        Return "uxb_ball"
+    Case Else
+        Return ""
+    End Select
+End Function
+
+Function UXBExtFpStorageBytesForLowering(ByRef canonicalType As String) As Integer
+    Select Case UCase(Trim(canonicalType))
+    Case "F80", "F128"
+        Return 16
+    Case "BIGF", "BIGD", "BALL"
+        Return 8
+    Case Else
+        Return 0
+    End Select
+End Function
+
+Function UXBExtFpIsHandleLoweringType(ByRef canonicalType As String) As Integer
+    Select Case UCase(Trim(canonicalType))
+    Case "BIGF", "BIGD", "BALL"
+        Return 1
+    Case Else
+        Return 0
+    End Select
+End Function
+
+Function UXBExtFpRuntimeOpSymbol(ByRef canonicalType As String, ByRef opName As String) As String
+    Dim As String fam
+    fam = UXBExtFpRuntimeFamilyForLowering(canonicalType)
+    If fam = "" Then Return ""
+
+    Select Case UCase(Trim(opName))
+    Case "FROM_STR", "FROM_STRING"
+        Return fam & "_from_str"
+    Case "TO_STR", "TO_STRING"
+        Return fam & "_to_str"
+    Case "COPY"
+        Return fam & "_copy"
+    Case "ADD", "+"
+        Return fam & "_add"
+    Case "SUB", "-"
+        Return fam & "_sub"
+    Case "MUL", "*"
+        Return fam & "_mul"
+    Case "DIV", "/"
+        Return fam & "_div"
+    Case "CMP", "COMPARE"
+        Return fam & "_cmp"
+    Case "ZERO"
+        Return fam & "_zero"
+    Case Else
+        Return ""
+    End Select
+End Function
+
+Function UXBExtFpDecideLowering(ByRef typeText As String, ByRef opName As String, ByRef d As UXBExtFpLoweringDecision) As Integer
+    UXBExtFpLoweringDecisionInit d
+    d.typeName = typeText
+    d.canonicalType = UXBExtFpCanonicalTypeForLowering(typeText)
+    d.operationName = UCase(Trim(opName))
+    d.runtimeFamily = UXBExtFpRuntimeFamilyForLowering(d.canonicalType)
+    d.storageBytes = UXBExtFpStorageBytesForLowering(d.canonicalType)
+    d.usesHandle = UXBExtFpIsHandleLoweringType(d.canonicalType)
+    d.requiresAddress = 1
+
+    If d.runtimeFamily = "" Then
+        d.loweringKind = UXB_EXTFP_LOWER_DIAGNOSTIC
+        d.diagnosticCode = "UXB_EXTFP_TYPE_NOT_EXTERNAL"
+        d.diagnosticText = "Type is not external FP: " & typeText
+        Return 0
+    End If
+
+    d.runtimeSymbol = UXBExtFpRuntimeOpSymbol(d.canonicalType, d.operationName)
+
+    Select Case d.operationName
+    Case "FROM_STR", "FROM_STRING"
+        d.loweringKind = UXB_EXTFP_LOWER_FROM_STR
+    Case "TO_STR", "TO_STRING"
+        d.loweringKind = UXB_EXTFP_LOWER_TO_STR
+    Case "COPY"
+        d.loweringKind = UXB_EXTFP_LOWER_COPY
+    Case "ADD", "+", "SUB", "-", "MUL", "*", "DIV", "/"
+        d.loweringKind = UXB_EXTFP_LOWER_BINARY
+    Case "CMP", "COMPARE"
+        d.loweringKind = UXB_EXTFP_LOWER_CMP
+    Case "PRINT"
+        d.loweringKind = UXB_EXTFP_LOWER_PRINT
+        d.runtimeSymbol = UXBExtFpRuntimeOpSymbol(d.canonicalType, "TO_STR")
+    Case Else
+        d.loweringKind = UXB_EXTFP_LOWER_DIAGNOSTIC
+        d.diagnosticCode = "UXB_EXTFP_OP_UNSUPPORTED"
+        d.diagnosticText = "External FP operation unsupported: " & opName
+        Return 0
+    End Select
+
+    If d.runtimeSymbol = "" Then
+        d.diagnosticCode = "UXB_EXTFP_RUNTIME_SYMBOL_MISSING"
+        d.diagnosticText = "Runtime symbol missing for " & d.canonicalType & "." & opName
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+#endif
