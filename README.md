@@ -2,6 +2,14 @@
 
 uXBasic, klasik BASIC hissini korurken Windows odakli modern bir compiler ve deneysel programlama ortami olusturmayi hedefleyen acik kaynak bir projedir.
 
+## Calisilan ana depo
+
+Bu oturumda aktif ve degisiklik yapilacak tek kaynak depo [uXBasic_repo](.).
+
+- Kod degisiklikleri bu kokte yapilir.
+- [UXBc_Clean](../UXBc_Clean) bir snapshot / calisma kopyasidir.
+- Test, artefact ve arastirma notlari kaynak agaci yerine ana depodaki klasorlarda tutulur.
+
 Bu depo ana gelistirme deposudur. Burada:
 
 - compiler kaynak kodu
