@@ -53,6 +53,9 @@ Dim As Integer traceMode
 Dim As Integer debugTokenDumpMode
 Dim As String logOutPath
 Dim As String debugLogOutPath
+Dim As String messageLang
+Dim As String messageLogOutPath
+Dim As String layerEventLogOutPath
 
 quietMode = IIf(HasArg("--quiet") Or HasArg("--sessiz"), 1, 0)
 traceMode = IIf(HasArg("--trace"), 1, 0)
@@ -62,6 +65,13 @@ logOutPath = ""
 debugLogOutPath = ""
 GetArgValue("--log-out", logOutPath)
 GetArgValue("--debug-log-out", debugLogOutPath)
+
+messageLang = "tr"
+If GetArgValue("--message-lang", messageLang) = 0 Then
+    If GetArgValue("--language", messageLang) = 0 Then messageLang = "tr"
+End If
+messageLogOutPath = "dist\compiler_messages.log"
+layerEventLogOutPath = "dist\layer_events.log"
 
 ' Stage-3 Hook / Trace CLI
 sessionLiveJsonOutPath = "dist\session.live.json"
@@ -210,6 +220,14 @@ If UXBValidateArtifactPathPolicy(runReportJsonOutPath, outputPolicyErr) = 0 Then
     UxbError LocalizeErrorMessage(outputPolicyErr)
     End 2
 End If
+If UXBValidateArtifactPathPolicy(messageLogOutPath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
+If UXBValidateArtifactPathPolicy(layerEventLogOutPath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
 
 validateAllMode = HasArg("--validate-all")
 validateAllReportJsonOutPath = "reports\system_health_report.json"
@@ -244,6 +262,17 @@ End If
 UxbConsoleConfigure consoleMode, programOutputOutPath, programOutputJsonOutPath, finalScreenJsonOutPath
 
 UxbConfigure logOutPath, debugLogOutPath, quietMode, debugMode, traceMode, debugTokenDumpMode, ""
+UXBMessageBusInit
+UXBMessageBusSetLogPath(messageLogOutPath)
+If UXBMessageLanguageSupported(messageLang) = 0 Then
+    UXBMessageBusSetLanguage("tr")
+    UXBMessageEmit "I18N", "WARN", "UXB_I18N_LANG_UNSUPPORTED", "Gecersiz mesaj dili istendi; varsayilan tr kullaniliyor", "Unsupported message language requested; falling back to tr"
+    messageLang = "tr"
+Else
+    messageLang = UXBNormalizeMessageLanguage(messageLang)
+    UXBMessageBusSetLanguage(messageLang)
+End If
+UXBLayerEventSetLogPath(layerEventLogOutPath)
 UxbInfo "uXBasic calistirildi"
 UxbTraceInit sessionLiveJsonOutPath, layerTimingJsonOutPath, hookTraceMode, "main"
 UxbTraceMark "SESSION", "START", "uXBasic calistirildi"
@@ -287,12 +316,16 @@ End If
 UxbTraceSetSource sourcePath
 
 UxbTraceBegin "SOURCE_LOAD", sourcePath
+UXBLayerEventBegin "SOURCE_LOAD", sourcePath
 If LoadTextFile(sourcePath, sourceText) = 0 Then
+    UXBLayerEventDiagnostic "SOURCE_LOAD", "UXB_SOURCE_LOAD_FAILED", "Kaynak dosya okunamadi: " & sourcePath
+    UXBLayerEventEnd "SOURCE_LOAD", "fail", "Kaynak dosya okunamadi: " & sourcePath
     UxbTraceEnd "SOURCE_LOAD", "FAIL", "Kaynak dosya okunamadi: " & sourcePath
     UxbError "Kaynak dosya okunamadi: " & sourcePath
     End 2
 End If
 UxbTraceMetric "SOURCE_LOAD", "source_length", LTrim(Str(Len(sourceText)))
+UXBLayerEventEnd "SOURCE_LOAD", "ok", "source loaded"
 UxbTraceEnd "SOURCE_LOAD", "OK", "source loaded"
 
 '-- AST extraction / harness handling
@@ -345,8 +378,10 @@ End If
 
 Dim As LexerState st
 UxbTraceBegin "LEXER", sourcePath
+UXBLayerEventBegin "LEXER", sourcePath
 LexerInit st, sourceText, sourcePath
 UxbTraceMetric "LEXER", "token_count", LTrim(Str(st.tokens.count))
+UXBLayerEventEnd "LEXER", "ok", "tokens=" & LTrim(Str(st.tokens.count))
 UxbTraceEnd "LEXER", "OK", "tokens=" & LTrim(Str(st.tokens.count))
 
     If debugMode Then
@@ -371,6 +406,7 @@ UxbTraceEnd "LEXER", "OK", "tokens=" & LTrim(Str(st.tokens.count))
 
 Dim As ParseState ps
 UxbTraceBegin "PARSER", sourcePath
+UXBLayerEventBegin "PARSER", sourcePath
 ParserInit ps, st
 ps.parseDebug = debugMode
 
@@ -378,11 +414,14 @@ Dim parseOk As Integer
 parseOk = ParseProgram(ps)
 If parseOk <> 0 Then
     UxbTraceMetric "PARSER", "ast_node_count", LTrim(Str(ps.ast.count))
+    UXBLayerEventEnd "PARSER", "ok", "ast_nodes=" & LTrim(Str(ps.ast.count))
     UxbTraceEnd "PARSER", "OK", "ast_nodes=" & LTrim(Str(ps.ast.count))
 End If
 If debugMode Then UxbDebug "parse ok=" & Str(parseOk)
 
 If parseOk = 0 Then
+    UXBLayerEventDiagnostic "PARSER", "UXB_PARSER_FAILED", ps.lastError
+    UXBLayerEventEnd "PARSER", "fail", ps.lastError
     UxbTraceEnd "PARSER", "FAIL", ps.lastError
     If ps.parseErrorCount > 0 Then
         Dim parseReportPath As String
@@ -414,8 +453,11 @@ If interpreterBackend = "MIR" And execMemMode <> 0 Then runSemanticPass = 1
 
 If runSemanticPass <> 0 Then
     UxbTraceBegin "SEMANTIC", "SemanticAnalyze + HIRSemanticAnalyze"
+    UXBLayerEventBegin "SEMANTIC", sourcePath
     Dim semanticErr As String
     If SemanticAnalyze(ps, semanticErr) = 0 Then
+        UXBLayerEventDiagnostic "SEMANTIC", "UXB_SEMANTIC_FAILED", semanticErr
+        UXBLayerEventEnd "SEMANTIC", "fail", semanticErr
         UxbTraceEnd "SEMANTIC", "FAIL", semanticErr
         UxbError "Anlamsal analiz basarisiz: " & LocalizeErrorMessage(semanticErr)
         End 1
@@ -423,10 +465,13 @@ If runSemanticPass <> 0 Then
 
     Dim hirSemanticErr As String
     If HIRSemanticAnalyze(ps, hirSemanticErr) = 0 Then
+        UXBLayerEventDiagnostic "SEMANTIC", "UXB_HIR_SEMANTIC_FAILED", hirSemanticErr
+        UXBLayerEventEnd "SEMANTIC", "fail", hirSemanticErr
         UxbTraceEnd "SEMANTIC", "FAIL", hirSemanticErr
         UxbError "HIR semantik analiz basarisiz: " & LocalizeErrorMessage(hirSemanticErr)
         End 1
     End If
+    UXBLayerEventEnd "SEMANTIC", "ok", "semantic pass complete"
     UxbTraceEnd "SEMANTIC", "OK", "semantic pass complete"
 End If
 
@@ -542,22 +587,28 @@ If codegenSourceMode = "MIR" And Trim(x64CodegenPolicyJsonOutPath) <> "" Then ne
 Dim mirModule As MIRModule
 If needMirModule <> 0 Then
     UxbTraceBegin "MIR_BUILD", "MIRBuildModuleFromAST + MIROptimizeModule"
+    UXBLayerEventBegin "MIR_BUILD", sourcePath
     Dim mirBuildErr As String
     Dim mirOptErr As String
 
     If MIRBuildModuleFromAST(ps, mirModule, mirBuildErr) = 0 Then
+        UXBLayerEventDiagnostic "MIR_BUILD", "UXB_MIR_BUILD_FAILED", mirBuildErr
+        UXBLayerEventEnd "MIR_BUILD", "fail", mirBuildErr
         UxbError "MIR build basarisiz: " & LocalizeErrorMessage(mirBuildErr)
         UxbTraceEnd "MIR_BUILD", "FAIL", mirBuildErr
         End 11
     End If
 
     If MIROptimizeModule(mirModule, mirOptErr) = 0 Then
+        UXBLayerEventDiagnostic "MIR_BUILD", "UXB_MIR_OPTIMIZE_FAILED", mirOptErr
+        UXBLayerEventEnd "MIR_BUILD", "fail", mirOptErr
         UxbError "MIR optimize basarisiz: " & LocalizeErrorMessage(mirOptErr)
         UxbTraceEnd "MIR_BUILD", "FAIL", mirOptErr
         End 12
     End If
 
     mirModuleReady = 1
+    UXBLayerEventEnd "MIR_BUILD", "ok", "mir module ready"
     UxbTraceEnd "MIR_BUILD", "OK", "mir module ready"
     If Trim(mirModuleJsonOutPath) <> "" Then
         Dim mirModuleJsonErr As String

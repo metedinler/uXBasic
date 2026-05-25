@@ -2,6 +2,8 @@
 #include once "runtime/hook_trace.fbs"
 #include once "runtime/console_output.fbs"
 #include once "runtime/project_output_policy.fbs"
+#include once "runtime/compiler_message_bus.fbs"
+#include once "runtime/layer_event_contract.fbs"
 #include "parser/token_kinds.fbs"
 #include "parser/lexer.fbs"
 #include "parser/ast.fbs"
@@ -17,6 +19,9 @@
 #include "codegen/x64/mir_x64_emit_helpers.fbs"
 #include once "codegen/x64/mir_x64_runtime_call_contract.fbs"
 #include once "codegen/x64/mir_x64_runtime_emit_helpers.fbs"
+#include once "semantic/type_class_ffi_backend_contract.fbs"
+#include once "codegen/x64/mir_x64_type_class_ffi_contract.fbs"
+#include once "codegen/x64/mir_x64_type_class_ffi_emit_helpers.fbs"
 #include "codegen/x64/mir_x64_arrays.fbs"
 #include "codegen/x64/mir_x64_builtins.fbs"
 #include "codegen/x64/mir_x64_fp64.fbs"
@@ -125,6 +130,8 @@ Private Function IsValueArgKey(ByRef keyText As String) As Integer
     If k = "--program-output-out" Then Return 1
     If k = "--program-output-json-out" Then Return 1
     If k = "--final-screen-json-out" Then Return 1
+    If k = "--message-lang" Then Return 1
+    If k = "--language" Then Return 1
     If k = "--source" Then Return 1
     If k = "-s" Then Return 1
 
