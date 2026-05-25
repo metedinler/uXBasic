@@ -1,0 +1,111 @@
+#ifndef UXB_MIR_X64_BUILTINS_FBS
+#define UXB_MIR_X64_BUILTINS_FBS
+
+Function MIRX64EmitBuiltinOneArgResult(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+        errText = "MIR x64 builtin: builtin requires one argument and result"
+        Return 0
+    End If
+
+    Dim target As String
+    target = UCase(Trim(ins.operands(0)))
+
+    If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+
+    Select Case target
+    Case "ABS"
+        Dim lAbsOk As String
+        lAbsOk = MIRX64NextLabel(cg, "abs_ok")
+        MIRX64Emit cg, "    cmp rax, 0"
+        MIRX64Emit cg, "    jge " & lAbsOk
+        MIRX64Emit cg, "    neg rax"
+        MIRX64Emit cg, lAbsOk & ":"
+
+    Case "SGN"
+        Dim lDone As String
+        Dim lNeg As String
+        lDone = MIRX64NextLabel(cg, "sgn_done")
+        lNeg = MIRX64NextLabel(cg, "sgn_neg")
+        MIRX64Emit cg, "    cmp rax, 0"
+        MIRX64Emit cg, "    jl " & lNeg
+        MIRX64Emit cg, "    setg al"
+        MIRX64Emit cg, "    movzx rax, al"
+        MIRX64Emit cg, "    jmp " & lDone
+        MIRX64Emit cg, lNeg & ":"
+        MIRX64Emit cg, "    mov rax, -1"
+        MIRX64Emit cg, lDone & ":"
+
+    Case "INT", "FIX", "CINT", "CLNG"
+        ' Integer-only MIR x64 core: argument is already represented as i64.
+
+    Case "LEN"
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeStringLen(cg, "rax", ins.result, errText)
+
+    Case "ASC"
+        If MIRX64IsQuotedStringLiteral(ins.operands(1)) <> 0 Then
+            Dim raw As String
+            raw = MIRX64Unquote(ins.operands(1))
+            If Len(raw) = 0 Then
+                MIRX64Emit cg, "    xor rax, rax"
+            Else
+                MIRX64Emit cg, "    mov rax, " & MIRX64ToStr(Asc(Left(raw, 1)))
+            End If
+        Else
+            errText = "MIR x64 builtin ASC currently supports string literals only"
+            Return 0
+        End If
+
+    Case "VAL"
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeValueI64(cg, "rax", ins.result, errText)
+
+    Case Else
+        errText = "MIR x64 builtin not implemented: " & target
+        Return 0
+    End Select
+
+    Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+End Function
+
+Function MIRX64EmitBuiltinNoArgResult(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+        errText = "MIR x64 builtin: no-arg builtin requires result"
+        Return 0
+    End If
+
+    Select Case UCase(Trim(ins.operands(0)))
+    Case "TIMER"
+        MIRX64Emit cg, "    xor rax, rax"
+    Case "RND"
+        MIRX64Emit cg, "    mov rax, 4"
+    Case "GETKEY", "INKEY"
+        MIRX64Emit cg, "    xor rax, rax"
+    Case Else
+        errText = "MIR x64 no-arg builtin not implemented: " & ins.operands(0)
+        Return 0
+    End Select
+
+    Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+End Function
+
+Function MIRX64TryEmitBuiltinCall(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    handledOut = 0
+    If ins.operandCount < 1 Then Return 1
+
+    Dim target As String
+    target = UCase(Trim(ins.operands(0)))
+
+    Select Case target
+    Case "ABS", "SGN", "INT", "FIX", "CINT", "CLNG", "LEN", "ASC", "VAL"
+        handledOut = 1
+        Return MIRX64EmitBuiltinOneArgResult(ins, cg, errText)
+    Case "TIMER", "RND", "GETKEY", "INKEY"
+        handledOut = 1
+        Return MIRX64EmitBuiltinNoArgResult(ins, cg, errText)
+    Case Else
+        Return 1
+    End Select
+End Function
+
+#endif
