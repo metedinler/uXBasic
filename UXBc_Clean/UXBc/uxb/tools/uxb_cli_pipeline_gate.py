@@ -52,12 +52,19 @@ def find_compiler(repo: Path) -> Path:
 
 def classify_failure(case_id: str, text: str, is_native: bool) -> str:
     t = text.upper()
-    if "TOOLCHAIN_OR_FILE_MISSING" in t:
-        return "TOOLCHAIN_OR_FILE_MISSING"
-    if is_native and ("NASM" in t or "LINKER" in t or "NOT FOUND" in t or "CANNOT FIND" in t):
-        return "TOOLCHAIN_OR_FILE_MISSING"
     if "MIR X64 EXPERIMENTAL BUILD PIPELINE HENUZ BAGLI DEGIL" in t:
         return "EXPECTED_DIAGNOSTIC"
+    if "TOOLCHAIN_OR_FILE_MISSING" in t:
+        return "TOOLCHAIN_OR_FILE_MISSING"
+    if is_native and (
+        "LINKER MISSING" in t
+        or "NASM MISSING" in t
+        or "TOOLCHAIN MISSING" in t
+        or "NOT RECOGNIZED AS AN INTERNAL OR EXTERNAL COMMAND" in t
+        or "CANNOT FIND THE PATH" in t
+        or "CANNOT FIND FILE" in t
+    ):
+        return "TOOLCHAIN_OR_FILE_MISSING"
     return "FAIL"
 
 

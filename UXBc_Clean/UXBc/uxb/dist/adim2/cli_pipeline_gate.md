@@ -7,7 +7,7 @@
 | x64_ast_asm | PASS | 0 | True | True | True | AST_X64 | False |
 | x64_mir_asm | PASS | 0 | True | True | True | MIR_X64 | False |
 | x64_ast_exe | PASS | 0 | True | True | True | AST_X64 | False |
-| x64_mir_exe | TOOLCHAIN_OR_FILE_MISSING | 14 | False | True | False | MIR_X64 | False |
+| x64_mir_exe | EXPECTED_DIAGNOSTIC | 14 | False | True | False | MIR_X64 | False |
 | json_full | PASS | 0 | True | True | True | MIR_X64 | False |
 
 ## Lock and Verify Audit
