@@ -22,6 +22,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -116,6 +117,16 @@ def classify(rc: int, out: str) -> str:
     return "FAIL"
 
 
+def parse_alias_replaced_lines(output: str) -> int:
+    m = re.search(r"ALIAS_REPLACED_LINES\s*=\s*(\d+)", output or "", flags=re.IGNORECASE)
+    if not m:
+        return -1
+    try:
+        return int(m.group(1))
+    except Exception:
+        return -1
+
+
 def run_cmd(
     root: Path,
     name: str,
@@ -188,6 +199,7 @@ def run_cmd(
         "returncode": rc,
         "status": status,
         "log": str(log),
+        "output_tail": output[-4000:],
     }
 
 
@@ -206,9 +218,12 @@ def main() -> int:
     ap.add_argument("--project", default="default")
     ap.add_argument("--run-id", default="")
     ap.add_argument("--timeout", type=int, default=180)
+    ap.add_argument("--alias-layer", action="store_true", help="Apply alias overlay before compile/execute")
+    ap.add_argument("--alias-spec", default="", help="Alias spec file (.csv or .uxalias)")
     args = ap.parse_args()
 
     events: List[Dict[str, Any]] = []
+    checks: List[Dict[str, Any]] = []
 
     root = find_root(Path(args.root))
     source = root / args.source
@@ -226,8 +241,46 @@ def main() -> int:
     shutil.copy2(source, dirs["source"] / source.name)
     append_event(events, "INFO", "source", f"copy {source}", "Kaynak dosya run klasorune kopyalandi", "Source copied to run folder")
 
+    source_effective = source
+    alias_meta: Dict[str, Any] = {
+        "enabled": bool(args.alias_layer),
+        "status": "DISABLED",
+        "spec": "",
+        "replaced_lines": -1,
+        "normalized_source": "",
+    }
+
+    if args.alias_layer:
+        if args.alias_spec:
+            alias_spec = Path(args.alias_spec)
+            if not alias_spec.is_absolute():
+                alias_spec = (root / alias_spec).resolve()
+        else:
+            alias_script = root / "uxb" / "manifests" / "keyword_alias_overlay.uxalias"
+            alias_csv = root / "uxb" / "manifests" / "keyword_alias_overlay.csv"
+            alias_spec = alias_script if alias_script.exists() else alias_csv
+
+        normalized_source = dirs["source"] / f"{source.stem}.alias{source.suffix}"
+        alias_cmd = (
+            f'"{sys.executable}" uxb\\tools\\uxb_alias_overlay_preprocessor.py '
+            f'--source "{source}" --out "{normalized_source}" --alias-spec "{alias_spec}"'
+        )
+        alias_check = run_cmd(root, "alias_normalize", alias_cmd, root, dirs["logs"], args.timeout, events)
+        checks.append(alias_check)
+
+        alias_meta["spec"] = str(alias_spec)
+        alias_meta["replaced_lines"] = parse_alias_replaced_lines(alias_check.get("output_tail", ""))
+        alias_meta["normalized_source"] = str(normalized_source)
+
+        if alias_check["returncode"] == 0 and normalized_source.exists():
+            source_effective = normalized_source
+            alias_meta["status"] = alias_check.get("status", "PASS")
+            append_event(events, "INFO", "alias_normalize", alias_cmd, "Alias normalizasyonu aktif edildi", "Alias normalization enabled")
+        else:
+            alias_meta["status"] = alias_check.get("status", "FAIL")
+            append_event(events, "WARN", "alias_normalize", alias_cmd, "Alias normalizasyonu basarisiz, orijinal kaynak ile devam", "Alias normalization failed, proceeding with original source")
+
     compiler = find_compiler(root)
-    checks: List[Dict[str, Any]] = []
 
     # Build compiler if no compiler exists.
     if compiler is None and (root / "build_compiler_64.bat").exists():
@@ -252,7 +305,7 @@ def main() -> int:
         })
     else:
         comp = str(compiler)
-        src = args.source
+        src = str(source_effective)
 
         ast_out = dirs["ast_interpreter"] / "program_output.txt"
         mir_out = dirs["mir_interpreter"] / "program_output.txt"
@@ -298,6 +351,8 @@ def main() -> int:
         "project": args.project,
         "run_id": layout["run_id"],
         "source": args.source,
+        "source_effective": str(source_effective),
+        "alias_layer": alias_meta,
         "base": str(layout["base"]),
         "checks": checks,
         "summary": status_counts,
@@ -315,6 +370,8 @@ def main() -> int:
 
     md = ["# UXBc Differential Project Run", ""]
     md.append(f"- source: {args.source}")
+    md.append(f"- source_effective: {source_effective}")
+    md.append(f"- alias_layer: {alias_meta}")
     md.append(f"- base: {layout['base']}")
     md.append("- default_language: tr")
     md.append("- secondary_language: en")
