@@ -11,7 +11,7 @@ Reports status; does not fake success.
 
 from __future__ import annotations
 
-import csv, json, subprocess, time, re
+import argparse, csv, json, subprocess, time, re
 from pathlib import Path
 
 
@@ -48,6 +48,11 @@ def run(root: Path, script: Path, timeout: int = 180):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--include-probes", action="store_true", help="Also run module test probe .bat files under uxb/tests/<module>")
+    ap.add_argument("--timeout", type=int, default=180, help="Per-script timeout in seconds")
+    args = ap.parse_args()
+
     root = find_root(Path("."))
     out = root / "uxb" / "dist" / "libraries"
     logs = out / "smoke_logs"
@@ -71,14 +76,16 @@ def main():
         # Library bundle smoke scripts follow run_<module>_smoke.bat naming.
         scripts += list(script_dir.glob(f"run_{mod}*smoke*.bat"))
 
-    for test_dir in (root / "uxb" / "tests").iterdir() if (root / "uxb" / "tests").exists() else []:
-        if test_dir.is_dir() and test_dir.name in imported_modules:
-            scripts += list(test_dir.glob("*.bat"))
+    if args.include_probes:
+        for test_dir in (root / "uxb" / "tests").iterdir() if (root / "uxb" / "tests").exists() else []:
+            if test_dir.is_dir() and test_dir.name in imported_modules:
+                scripts += list(test_dir.glob("*.bat"))
 
     scripts = sorted(set(scripts))
     rows = []
-    for s in scripts:
-        r = run(root, s)
+    for idx, s in enumerate(scripts, start=1):
+        print(f"[SMOKE {idx}/{len(scripts)}] {s}")
+        r = run(root, s, timeout=args.timeout)
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(s.relative_to(root)))
         log_path = logs / (safe + ".log")
         log_path.write_text(r["output_tail"], encoding="utf-8", errors="ignore")
@@ -98,6 +105,7 @@ def main():
         md.append(f"| `{r['script']}` | {r['status']} | {r['returncode']} | `{r['log']}` |")
     (out / "library_smoke_report.md").write_text("\n".join(md), encoding="utf-8")
     print("LIBRARY_SMOKE_REPORT=" + str(out / "library_smoke_report.md"))
+    print("INCLUDE_PROBES=" + str(bool(args.include_probes)))
     return 0
 
 if __name__ == "__main__":
