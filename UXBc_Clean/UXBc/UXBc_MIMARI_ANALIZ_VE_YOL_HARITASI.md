@@ -322,3 +322,43 @@ ADIM 6 — Ekosistem (süregelen)
 Bununla birlikte proje şu an **"derlenebilir kaynak"** aşamasındadır; **"çalıştırılabilir binary"** aşamasına geçiş için en az ADIM 1 ve ADIM 2'nin tamamlanması gerekmektedir. MIR x64 backend experimental statüsünü korumakta, OOP ve FFI native codegen büyük ölçüde eksik kalmaktadır.
 
 En önemli tek eylem önerisi: **FreeBASIC toolchain kurulumu ve NASM/linker entegrasyonunu otomatikleştiren bir CI/CD scripti** yazmak — bu adım olmadan diğer hiçbir geliştirme doğrulanamaz.
+
+---
+
+## 11. ADIM 3 Uygulama Kararı (2026-05-26)
+
+Bu planın ADIM 3 hedefi için yeni Python araç çöplüğü üretmek yerine, mevcut çalışan altyapı korunarak aşağıdaki kararlar alınmıştır:
+
+1. FreeBASIC çekirdek önceliklidir: semantic → type_binding → layout geçidi derleyici içinde gerçek kontrol noktası olarak çalıştırılır.
+2. Python tarafında tekrar eden script açılmaz: mevcut audit araçları genişletilerek kullanılır.
+3. MIR/x64/JS/WASM katmanlarına geçişten önce TYPE_UNKNOWN/TYPE_ERROR sızıntısı kapıda durdurulur.
+4. TYPE/CLASS layout üretimi başarısızsa downstream aşamalara geçiş engellenir.
+
+Bu karar kapsamında eklenen/bağlanan çekirdek dosyalar:
+
+- `uxb/src/semantic/semantic_step3_gate.fbs`
+- `uxb/src/semantic/type_binding.fbs` (user type kaydı ve çözümleme genişletmesi)
+- `uxb/src/semantic/semantic_pass.fbs` (include zinciri)
+- `uxb/src/semantic/semantic_pass_tail.fbs` (SemanticAnalyze içinde Step3 gate çağrısı)
+
+Not: Bu değişiklikler mevcut çalışan semantic/MIR hattını bozmadan, sadece kapı kontrolünü sıkılaştıracak şekilde eklenmiştir.
+
+---
+
+## 12. 268 Yüzey Anahtar Envanteri
+
+Plan kapsamındaki 268 surface anahtarının ayrıntılı listesi ve katman durumları tek dosyada tutulmaktadır:
+
+- `uxb/docs/matrix/UXB_268_YUZEY_ANAHTAR_ENVANTERI.md`
+
+Bu envanterde her öğe için aşağıdaki kolonlar verilmiştir:
+
+- surface_name
+- surface_group / surface_kind
+- ast_node
+- semantic_status / type_binding_status / layout_status
+- mir_status
+- js_transpiler_status / wasm_wat_status / browser_runtime_status
+- final_decision
+
+Ek not: lexer dosyalarındaki doğrudan `Case` literal birleşim sayısı ile matrix surface sayısı aynı kavram değildir. Derleyici katman planında referans sayı matrixteki 268 surface öğesidir.

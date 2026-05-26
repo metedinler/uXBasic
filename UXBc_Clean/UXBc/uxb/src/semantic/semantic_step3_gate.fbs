@@ -1,0 +1,183 @@
+' 2026-05-26 19:40 - Copilot: ADIM 3 semantic+type+layout gecidini yalansiz hale getirmek icin eklendi.
+
+Private Function Step3ChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    Dim i As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function Step3FindChildByKind(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef kindText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    Dim targetKind As String
+    targetKind = UCase(Trim(kindText))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = targetKind Then Return ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function Step3RegisterDeclaredTypes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+
+        Select Case k
+        Case "TYPE_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                If TypeBindingRegisterUserType("TYPE", ps.ast.nodes(i).value, errText) = -1 Then Return 0
+            End If
+        Case "CLASS_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                If TypeBindingRegisterUserType("CLASS", ps.ast.nodes(i).value, errText) = -1 Then Return 0
+            End If
+        Case "INTERFACE_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                If TypeBindingRegisterUserType("INTERFACE", ps.ast.nodes(i).value, errText) = -1 Then Return 0
+            End If
+        End Select
+    Next i
+
+    Return 1
+End Function
+
+Private Function Step3BindNodeTypes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+
+        Select Case k
+        Case "TYPE_REF", "RETURN_TYPE"
+            Dim typeName As String
+            typeName = Trim(ps.ast.nodes(i).value)
+            If typeName = "" Then
+                errText = "step3: bos type referansi"
+                Return 0
+            End If
+
+            If TypeBindingResolve(typeName, errText) = -1 Then
+                errText = "step3: type binding fail [" & k & "] " & typeName & " | " & errText
+                Return 0
+            End If
+
+        Case "PARAM_DECL"
+            Dim paramTypeNode As Integer
+            paramTypeNode = Step3FindChildByKind(ps, i, "TYPE_REF")
+            If paramTypeNode <> -1 Then
+                Dim paramType As String
+                paramType = Trim(ps.ast.nodes(paramTypeNode).value)
+                If TypeBindingResolve(paramType, errText) = -1 Then
+                    errText = "step3: param type binding fail " & paramType & " | " & errText
+                    Return 0
+                End If
+            End If
+
+        Case "DIM_DECL"
+            Dim declTypeNode As Integer
+            declTypeNode = Step3FindChildByKind(ps, i, "TYPE_REF")
+            If declTypeNode <> -1 Then
+                Dim declType As String
+                declType = Trim(ps.ast.nodes(declTypeNode).value)
+                Dim typeIdx As Integer
+                typeIdx = TypeBindingResolve(declType, errText)
+                If typeIdx = -1 Then
+                    errText = "step3: DIM type binding fail " & declType & " | " & errText
+                    Return 0
+                End If
+
+                If Trim(ps.ast.nodes(i).value) <> "" Then
+                    Dim vbErr As String
+                    Dim vbName As String
+                    vbName = Trim(ps.ast.nodes(i).value)
+                    If VarBindingResolve(vbName, vbErr) = -1 Then
+                        If VarBindingCreate(vbName, typeIdx, 0, "", vbErr) = -1 Then
+                            errText = "step3: var binding fail " & vbName & " | " & vbErr
+                            Return 0
+                        End If
+                    End If
+                End If
+            End If
+        End Select
+    Next i
+
+    Return 1
+End Function
+
+Private Function Step3ValidateTypeLeak(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+        Dim v As String
+        v = UCase(Trim(ps.ast.nodes(i).value))
+
+        If k = "TYPE_UNKNOWN" Or k = "TYPE_ERROR" Then
+            errText = "step3: downstream type leak kind=" & k
+            Return 0
+        End If
+
+        If (k = "TYPE_REF" Or k = "RETURN_TYPE") And (v = "TYPE_UNKNOWN" Or v = "TYPE_ERROR") Then
+            errText = "step3: downstream type leak value=" & v
+            Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function Step3ValidateLayoutCoverage(ByRef ps As ParseState, ByRef errText As String) As Integer
+    If BuildTypeLayoutTable(ps) = 0 Then
+        errText = "step3: layout table build fail"
+        Return 0
+    End If
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+
+        If k = "TYPE_STMT" Or k = "CLASS_STMT" Then
+            Dim tName As String
+            tName = Trim(ps.ast.nodes(i).value)
+            If tName <> "" Then
+                Dim sz As Integer
+                Dim layoutErr As String
+                If TypeLayoutSizeOf(ps, tName, sz, layoutErr) = 0 Then
+                    errText = "step3: layout missing " & tName & " | " & layoutErr
+                    Return 0
+                End If
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Function SemStep3SemanticTypeLayoutGate(ByRef ps As ParseState, ByRef errText As String) As Integer
+    errText = ""
+
+    TypeBindingInit
+
+    If Step3RegisterDeclaredTypes(ps, errText) = 0 Then Return 0
+    If Step3BindNodeTypes(ps, errText) = 0 Then Return 0
+    If Step3ValidateTypeLeak(ps, errText) = 0 Then Return 0
+    If Step3ValidateLayoutCoverage(ps, errText) = 0 Then Return 0
+
+    Return 1
+End Function
