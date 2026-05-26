@@ -46,6 +46,26 @@ Private Sub Main()
 
     ok And= RTAssertEq(VMemPeekD(4320), 33, "alias scope call continuation")
 
+    Dim srcDirectNoArgCdecl As String
+    srcDirectNoArgCdecl = _
+        "MAIN" & Chr(10) & _
+        "tick = CALL(DLL, ""kernel32.dll"", ""GetTickCount"", I32, CDECL)" & Chr(10) & _
+        "POKED 4340, 1" & Chr(10) & _
+        "END MAIN"
+
+    Dim psDirectNoArgCdecl As ParseState
+    If RTParseProgram(srcDirectNoArgCdecl, psDirectNoArgCdecl, errText) = 0 Then
+        Print "FAIL call_dll_alias noarg-cdecl parse | "; errText
+        End 1
+    End If
+
+    If RTExecProgram(psDirectNoArgCdecl, errText) = 0 Then
+        Print "FAIL call_dll_alias noarg-cdecl exec | "; errText
+        End 1
+    End If
+
+    ok And= RTAssertEq(VMemPeekD(4340), 1, "direct noarg cdecl continuation")
+
     Dim srcAliasCallRef As String
     srcAliasCallRef = _
         "FUNCTION IncVal(v) AS I32" & Chr(10) & _
