@@ -371,21 +371,27 @@ ADIM 4 hedefi icin sifirdan paralel bir MIR sistemi yazmak yerine, mevcut calisa
 
 1. FreeBASIC cekirdek once gelir: opcode registry ve verify no-unknown kapisi derleyici icine baglandi.
 2. Mevcut MIR lowering bozulmaz: legacy opcode adlari Step4 registry tarafinda geriye donuk uyumlu kabul edilir.
-3. Python tekrarini azalt: Step4 audit icin tek cekirdek (`uxb_step4_mir_core.py`) ve ince wrapper modeli kullanilir.
+3. Python yerine FreeBASIC verifier zinciri kullanilir.
 4. Gate fail-closed calisir: `TYPE_UNKNOWN`, `TYPE_ERROR`, `LAYOUT_MISSING` token sizintisi verifier seviyesinde hata uretir.
 
 Bu karar kapsaminda eklenen/baglanan dosyalar:
 
+- `uxb/src/mir/mir_types.fbs`
+- `uxb/src/mir/mir_error_codes.fbs`
 - `uxb/src/mir/mir_opcode.fbs`
+- `uxb/src/mir/mir_registry.fbs`
+- `uxb/src/mir/verify/mir_verify.fbs`
+- `uxb/src/mir/verify/mir_verify_types.fbs`
+- `uxb/src/mir/verify/mir_verify_operands.fbs`
+- `uxb/src/mir/verify/mir_verify_blocks.fbs`
+- `uxb/src/mir/verify/mir_verify_control_flow.fbs`
+- `uxb/src/mir/verify/mir_verify_calls.fbs`
+- `uxb/src/mir/verify/mir_verify_memory.fbs`
+- `uxb/src/mir/verify/mir_verify_target_support.fbs`
 - `uxb/src/mir/verify/mir_verify_no_unknown.fbs`
+- `uxb/src/mir/verify/mir_verify_json_report.fbs`
 - `uxb/src/mir/mir_step4_bridge.fbs`
 - `uxb/src/semantic/mir.fbs` (Step4 bridge include)
-- `uxb/src/semantic/mir_verifier.fbs` (Step4 registry + no-unknown gate hook)
-
-Step4 audit/batch entegrasyonu:
-
-- `uxb/tools/audit/uxb_step4_mir_core.py`
-- `uxb/tools/audit/uxb_mir_*.py` wrapper scriptleri
-- `uxb/compiler/scripts/run_step4_*.bat`
+- `uxb/src/semantic/mir_verifier.fbs` (Step4 registry + canonical verifier hook)
 
 Not: Bu adim x64 emitter / JS transpiler / WASM emitter yazimini genisletmez. Odak yalnizca AST -> MIR dogruluk kapisi, MIR verify ve matrix/gate raporlamasidir.
