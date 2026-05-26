@@ -362,3 +362,30 @@ Bu envanterde her öğe için aşağıdaki kolonlar verilmiştir:
 - final_decision
 
 Ek not: lexer dosyalarındaki doğrudan `Case` literal birleşim sayısı ile matrix surface sayısı aynı kavram değildir. Derleyici katman planında referans sayı matrixteki 268 surface öğesidir.
+
+---
+
+## 13. ADIM 4 Uygulama Kararı (2026-05-26)
+
+ADIM 4 hedefi icin sifirdan paralel bir MIR sistemi yazmak yerine, mevcut calisan `semantic/mir*` hatti korunarak kanonik `src/mir` katmani asagidaki sekilde baglanmistir:
+
+1. FreeBASIC cekirdek once gelir: opcode registry ve verify no-unknown kapisi derleyici icine baglandi.
+2. Mevcut MIR lowering bozulmaz: legacy opcode adlari Step4 registry tarafinda geriye donuk uyumlu kabul edilir.
+3. Python tekrarini azalt: Step4 audit icin tek cekirdek (`uxb_step4_mir_core.py`) ve ince wrapper modeli kullanilir.
+4. Gate fail-closed calisir: `TYPE_UNKNOWN`, `TYPE_ERROR`, `LAYOUT_MISSING` token sizintisi verifier seviyesinde hata uretir.
+
+Bu karar kapsaminda eklenen/baglanan dosyalar:
+
+- `uxb/src/mir/mir_opcode.fbs`
+- `uxb/src/mir/verify/mir_verify_no_unknown.fbs`
+- `uxb/src/mir/mir_step4_bridge.fbs`
+- `uxb/src/semantic/mir.fbs` (Step4 bridge include)
+- `uxb/src/semantic/mir_verifier.fbs` (Step4 registry + no-unknown gate hook)
+
+Step4 audit/batch entegrasyonu:
+
+- `uxb/tools/audit/uxb_step4_mir_core.py`
+- `uxb/tools/audit/uxb_mir_*.py` wrapper scriptleri
+- `uxb/compiler/scripts/run_step4_*.bat`
+
+Not: Bu adim x64 emitter / JS transpiler / WASM emitter yazimini genisletmez. Odak yalnizca AST -> MIR dogruluk kapisi, MIR verify ve matrix/gate raporlamasidir.
