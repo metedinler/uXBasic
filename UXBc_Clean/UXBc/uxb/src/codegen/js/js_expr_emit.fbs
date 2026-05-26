@@ -1,0 +1,185 @@
+#ifndef UXB_JS_EXPR_EMIT_FBS
+#define UXB_JS_EXPR_EMIT_FBS
+
+' uXBasic JS backend expression helpers.
+' This file is intentionally self-contained and only depends on core FreeBASIC runtime helpers.
+
+Private Function UXBJsStartsWith(ByRef s As String, ByRef prefixText As String) As Integer
+    If Len(s) < Len(prefixText) Then Return 0
+    If Left(s, Len(prefixText)) = prefixText Then Return 1
+    Return 0
+End Function
+
+Private Function UXBJsIsQuoted(ByRef s As String) As Integer
+    Dim t As String
+    t = Trim(s)
+    If Len(t) >= 2 Then
+        If Left(t, 1) = Chr(34) And Right(t, 1) = Chr(34) Then Return 1
+    End If
+    Return 0
+End Function
+
+Private Function UXBJsIsNumericLiteral(ByRef s As String) As Integer
+    Dim t As String
+    Dim i As Integer
+    Dim c As String
+    Dim dotCount As Integer
+
+    t = Trim(s)
+    If t = "" Then Return 0
+    If Left(t, 1) = "-" Or Left(t, 1) = "+" Then t = Mid(t, 2)
+    If t = "" Then Return 0
+
+    dotCount = 0
+    For i = 1 To Len(t)
+        c = Mid(t, i, 1)
+        If c = "." Then
+            dotCount += 1
+            If dotCount > 1 Then Return 0
+        ElseIf c < "0" Or c > "9" Then
+            Return 0
+        End If
+    Next i
+    Return 1
+End Function
+
+Private Function UXBJsUnquote(ByRef s As String) As String
+    Dim t As String
+    t = Trim(s)
+    If UXBJsIsQuoted(t) <> 0 Then Return Mid(t, 2, Len(t) - 2)
+    Return t
+End Function
+
+Public Function UXBJsEscape(ByRef rawText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    Dim c As String
+
+    outText = ""
+    For i = 1 To Len(rawText)
+        c = Mid(rawText, i, 1)
+        Select Case c
+        Case Chr(34)
+            outText &= "\" & Chr(34)
+        Case "\"
+            outText &= "\\"
+        Case Chr(10)
+            outText &= "\n"
+        Case Chr(13)
+            outText &= "\r"
+        Case Chr(9)
+            outText &= "\t"
+        Case Else
+            outText &= c
+        End Select
+    Next i
+
+    Return outText
+End Function
+
+Public Function UXBJsQuote(ByRef rawText As String) As String
+    Return Chr(34) & UXBJsEscape(rawText) & Chr(34)
+End Function
+
+Public Function UXBJsVarKey(ByRef nameText As String) As String
+    Dim n As String
+    n = Trim(nameText)
+    If n = "" Then n = "_"
+    Return UXBJsQuote(n)
+End Function
+
+Public Function UXBJsOperand(ByRef opText As String) As String
+    Dim t As String
+    t = Trim(opText)
+
+    If t = "" Then Return "undefined"
+    If UXBJsIsQuoted(t) <> 0 Then Return UXBJsQuote(UXBJsUnquote(t))
+    If UXBJsIsNumericLiteral(t) <> 0 Then Return t
+
+    If LCase(t) = "true" Then Return "true"
+    If LCase(t) = "false" Then Return "false"
+
+    ' MIR temporaries and variables are stored in the JS vars table.
+    Return "vars[" & UXBJsVarKey(t) & "]"
+End Function
+
+Public Function UXBJsAssignTarget(ByRef nameText As String) As String
+    Return "vars[" & UXBJsVarKey(nameText) & "]"
+End Function
+
+Public Function UXBJsBinaryOp(ByRef opcode As String) As String
+    Select Case UCase(Trim(opcode))
+    Case "ADD", "FADD"
+        Return "+"
+    Case "SUB", "FSUB"
+        Return "-"
+    Case "MUL", "FMUL"
+        Return "*"
+    Case "DIV", "FDIV"
+        Return "/"
+    Case "MOD"
+        Return "%"
+    Case "EQ"
+        Return "==="
+    Case "NE"
+        Return "!=="
+    Case "LT"
+        Return "<"
+    Case "LE"
+        Return "<="
+    Case "GT"
+        Return ">"
+    Case "GE"
+        Return ">="
+    Case "AND"
+        Return "&&"
+    Case "OR"
+        Return "||"
+    Case "XOR"
+        Return "^"
+    Case "SHL"
+        Return "<<"
+    Case "SHR"
+        Return ">>"
+    End Select
+    Return ""
+End Function
+
+Public Function UXBJsIsBinaryOpcode(ByRef opcode As String) As Integer
+    If UXBJsBinaryOp(opcode) <> "" Then Return 1
+    Return 0
+End Function
+
+Public Function UXBJsCallName(ByRef rawName As String) As String
+    Dim n As String
+    n = UCase(Trim(rawName))
+    If Left(n, 1) = Chr(34) And Right(n, 1) = Chr(34) Then n = UCase(UXBJsUnquote(n))
+    Return n
+End Function
+
+
+Public Function UXBJsSafeIdentifier(ByRef rawName As String) As String
+    Dim outText As String
+    Dim i As Integer
+    Dim c As String
+
+    outText = ""
+    For i = 1 To Len(rawName)
+        c = Mid(rawName, i, 1)
+        If (c >= "A" And c <= "Z") Or (c >= "a" And c <= "z") Or (c >= "0" And c <= "9") Or c = "_" Then
+            outText &= c
+        Else
+            outText &= "_"
+        End If
+    Next i
+
+    If outText = "" Then outText = "uxb_fn"
+    If Mid(outText, 1, 1) >= "0" And Mid(outText, 1, 1) <= "9" Then outText = "_" & outText
+    Return outText
+End Function
+
+Public Function UXBJsWasmExportKey(ByRef rawName As String) As String
+    Return UXBJsQuote(UCase(UXBJsSafeIdentifier(rawName)))
+End Function
+
+#endif

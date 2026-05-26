@@ -1,0 +1,218 @@
+#ifndef UXB_WASM_EMITTER_FBS
+#define UXB_WASM_EMITTER_FBS
+
+' uXBasic MIR -> WAT/WASM MVP emitter.
+' V2: parameter/local declarations and simple local.set/local.get support were added.
+
+Private Function UXBWasmDirOf(ByRef filePath As String) As String
+    Dim i As Integer
+    For i = Len(filePath) To 1 Step -1
+        If Mid(filePath, i, 1) = "\" Or Mid(filePath, i, 1) = "/" Then Return Left(filePath, i - 1)
+    Next i
+    Return ""
+End Function
+
+Private Function UXBWasmEnsureDir(ByRef dirPath As String) As Integer
+    Dim cleaned As String
+    Dim part As String
+    Dim current As String
+    Dim i As Integer
+    Dim ch As String
+
+    cleaned = Trim(dirPath)
+    If cleaned = "" Then Return 1
+
+    current = ""
+    part = ""
+    For i = 1 To Len(cleaned)
+        ch = Mid(cleaned, i, 1)
+        If ch = "\" Or ch = "/" Then
+            If part <> "" Then
+                If current <> "" Then current &= "\"
+                current &= part
+                If Dir(current, fbDirectory) = "" Then MkDir current
+                part = ""
+            End If
+        Else
+            part &= ch
+        End If
+    Next i
+
+    If part <> "" Then
+        If current <> "" Then current &= "\"
+        current &= part
+        If Dir(current, fbDirectory) = "" Then MkDir current
+    End If
+
+    Return 1
+End Function
+
+Private Function UXBWasmNameSetHas(ByRef setText As String, ByRef safeName As String) As Integer
+    If InStr(setText, "|" & safeName & "|") > 0 Then Return 1
+    Return 0
+End Function
+
+Private Sub UXBWasmNameSetAdd(ByRef setText As String, ByRef safeName As String)
+    If safeName = "" Then Exit Sub
+    If UXBWasmNameSetHas(setText, safeName) = 0 Then setText &= "|" & safeName & "|"
+End Sub
+
+Private Function UXBWasmEmitLocalSet(ByRef nameText As String) As String
+    Return "    local.set $" & UXBWasmSafeName(nameText) & Chr(10)
+End Function
+
+Private Function UXBWasmEmitFunction(ByRef fn As MIRFunction) As String
+    Dim outText As String
+    Dim b As Integer
+    Dim j As Integer
+    Dim p As Integer
+    Dim ins As MIRIRInstruction
+    Dim instr As String
+    Dim fnName As String
+    Dim knownNames As String
+    Dim localDecls As String
+    Dim safeName As String
+
+    fnName = UXBWasmSafeName(fn.name)
+    knownNames = ""
+    localDecls = ""
+
+    outText = ""
+    outText &= "  (func $" & fnName
+
+    For p = 0 To fn.paramVarCount - 1
+        safeName = UXBWasmSafeName(fn.paramVars(p))
+        UXBWasmNameSetAdd knownNames, safeName
+        outText &= " (param $" & safeName & " i32)"
+    Next p
+
+    outText &= " (result i32)" & Chr(10)
+
+    For p = 0 To fn.localVarCount - 1
+        safeName = UXBWasmSafeName(fn.localVars(p))
+        If UXBWasmNameSetHas(knownNames, safeName) = 0 Then
+            UXBWasmNameSetAdd knownNames, safeName
+            localDecls &= "    (local $" & safeName & " i32)" & Chr(10)
+        End If
+    Next p
+
+    For b = 0 To fn.blockCount - 1
+        For j = 0 To fn.blocks(b).instructionCount - 1
+            ins = fn.blocks(b).instructions(j)
+            If Trim(ins.result) <> "" Then
+                safeName = UXBWasmSafeName(ins.result)
+                If UXBWasmNameSetHas(knownNames, safeName) = 0 Then
+                    UXBWasmNameSetAdd knownNames, safeName
+                    localDecls &= "    (local $" & safeName & " i32)" & Chr(10)
+                End If
+            End If
+            If UCase(Trim(ins.opcode)) = "STORE_VAR" And ins.operandCount >= 1 Then
+                safeName = UXBWasmSafeName(ins.operands(0))
+                If UXBWasmNameSetHas(knownNames, safeName) = 0 Then
+                    UXBWasmNameSetAdd knownNames, safeName
+                    localDecls &= "    (local $" & safeName & " i32)" & Chr(10)
+                End If
+            End If
+        Next j
+    Next b
+
+    outText &= localDecls
+
+    For b = 0 To fn.blockCount - 1
+        For j = 0 To fn.blocks(b).instructionCount - 1
+            ins = fn.blocks(b).instructions(j)
+            Select Case UCase(Trim(ins.opcode))
+            Case "LOAD_CONST"
+                If Trim(ins.result) <> "" And ins.operandCount >= 1 Then
+                    outText &= UXBWasmEmitValue(ins.operands(0))
+                    outText &= UXBWasmEmitLocalSet(ins.result)
+                End If
+            Case "LOAD_VAR"
+                If Trim(ins.result) <> "" And ins.operandCount >= 1 Then
+                    outText &= UXBWasmEmitValue(ins.operands(0))
+                    outText &= UXBWasmEmitLocalSet(ins.result)
+                End If
+            Case "STORE_VAR"
+                If ins.operandCount >= 2 Then
+                    outText &= UXBWasmEmitValue(ins.operands(1))
+                    outText &= UXBWasmEmitLocalSet(ins.operands(0))
+                ElseIf ins.operandCount >= 1 And Trim(ins.result) <> "" Then
+                    outText &= UXBWasmEmitValue(ins.operands(0))
+                    outText &= UXBWasmEmitLocalSet(ins.result)
+                End If
+            Case "ADD", "SUB", "MUL", "DIV", "MOD", "EQ", "NE", "LT", "LE", "GT", "GE"
+                If ins.operandCount >= 2 Then
+                    outText &= UXBWasmEmitValue(ins.operands(0))
+                    outText &= UXBWasmEmitValue(ins.operands(1))
+                    instr = UXBWasmBinaryInstr(ins.opcode)
+                    If instr <> "" Then outText &= "    " & instr & Chr(10)
+                    If Trim(ins.result) <> "" Then outText &= UXBWasmEmitLocalSet(ins.result)
+                End If
+            Case "RET"
+                If ins.operandCount >= 1 Then
+                    outText &= UXBWasmEmitValue(ins.operands(0))
+                ElseIf Trim(ins.result) <> "" Then
+                    outText &= UXBWasmEmitValue(ins.result)
+                Else
+                    outText &= "    i32.const 0" & Chr(10)
+                End If
+                outText &= "    return" & Chr(10)
+            End Select
+        Next j
+    Next b
+
+    outText &= "    i32.const 0" & Chr(10)
+    outText &= "  )" & Chr(10)
+    outText &= "  (export " & Chr(34) & fnName & Chr(34) & " (func $" & fnName & "))" & Chr(10)
+    If UCase(fnName) <> fnName Then
+        outText &= "  (export " & Chr(34) & UCase(fnName) & Chr(34) & " (func $" & fnName & "))" & Chr(10)
+    End If
+    Return outText
+End Function
+
+Public Function UXBWasmEmitWatFromMIR( _
+    ByRef module As MIRModule, _
+    ByRef watOutPath As String, _
+    ByRef manifestOutPath As String, _
+    ByRef errText As String _
+) As Integer
+    Dim outText As String
+    Dim i As Integer
+    Dim ff As Integer
+
+    errText = ""
+    outText = "(module" & Chr(10)
+    outText &= UXBWasmEmitHostImports()
+
+    If module.functionCount <= 0 Then
+        outText &= "  (func $main (result i32) i32.const 0)" & Chr(10)
+        outText &= "  (export " & Chr(34) & "main" & Chr(34) & " (func $main))" & Chr(10)
+    Else
+        For i = 0 To module.functionCount - 1
+            outText &= UXBWasmEmitFunction(module.functions(i))
+        Next i
+    End If
+
+    outText &= ")" & Chr(10)
+
+    UXBWasmEnsureDir UXBWasmDirOf(watOutPath)
+    ff = FreeFile
+    Open watOutPath For Output As #ff
+    Print #ff, outText;
+    Close #ff
+
+    UXBWasmWriteManifest module, watOutPath, manifestOutPath, errText
+    Return 1
+End Function
+
+Public Function UXBWasmTryBuildBinary(ByRef watPath As String, ByRef wasmPath As String, ByRef wat2wasmPath As String) As Integer
+    Dim cmd As String
+    UXBWasmEnsureDir UXBWasmDirOf(wasmPath)
+    If Trim(wasmPath) = "" Then Return 0
+    cmd = Chr(34) & wat2wasmPath & Chr(34) & " " & Chr(34) & watPath & Chr(34) & " -o " & Chr(34) & wasmPath & Chr(34)
+    Shell cmd
+    If Dir(wasmPath) <> "" Then Return 1
+    Return 0
+End Function
+
+#endif

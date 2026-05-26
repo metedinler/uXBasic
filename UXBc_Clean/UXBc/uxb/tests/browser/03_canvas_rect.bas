@@ -1,0 +1,4 @@
+SCREEN 800, 600
+CLS
+FILLRECT 10, 10, 120, 60
+TEXT 20, 100, "uXBasic Canvas"

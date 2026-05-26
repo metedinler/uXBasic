@@ -1,0 +1,162 @@
+#ifndef UXB_JS_STMT_EMIT_FBS
+#define UXB_JS_STMT_EMIT_FBS
+
+' uXBasic MIR instruction -> JavaScript statement emitter.
+
+Public Function UXBJsBlockLabel(ByVal blockId As Integer) As String
+    Return "B" & Str(blockId)
+End Function
+
+Private Function UXBJsEmitCall(ByRef ins As MIRIRInstruction, ByRef outText As String, ByRef errText As String) As Integer
+    Dim callName As String
+    Dim i As Integer
+    Dim args As String
+    Dim expr As String
+
+    If ins.operandCount < 1 Then
+        errText = "JS CALL instruction has no function name"
+        Return 0
+    End If
+
+    callName = UXBJsCallName(ins.operands(0))
+    args = ""
+    For i = 1 To ins.operandCount - 1
+        If i > 1 Then args &= ", "
+        args &= UXBJsOperand(ins.operands(i))
+    Next i
+
+    Select Case callName
+    Case "PRINT"
+        outText &= "      ux.print(" & args & ");" & Chr(10)
+    Case "SCREEN"
+        outText &= "      ux.screen(" & args & ");" & Chr(10)
+    Case "CLS"
+        outText &= "      ux.cls();" & Chr(10)
+    Case "LINE"
+        outText &= "      ux.line(" & args & ");" & Chr(10)
+    Case "RECT"
+        outText &= "      ux.rect(" & args & ");" & Chr(10)
+    Case "FILLRECT"
+        outText &= "      ux.fillRect(" & args & ");" & Chr(10)
+    Case "TEXT"
+        outText &= "      ux.text(" & args & ");" & Chr(10)
+    Case "LOADSPRITE"
+        outText &= "      await ux.loadSprite(" & args & ");" & Chr(10)
+    Case "DRAWSPRITE"
+        outText &= "      ux.drawSprite(" & args & ");" & Chr(10)
+    Case "FLIP"
+        outText &= "      ux.flip();" & Chr(10)
+    Case "KEYDOWN"
+        If Trim(ins.result) <> "" Then
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.keyDown(" & args & ") ? 1 : 0;" & Chr(10)
+        Else
+            outText &= "      ux.keyDown(" & args & ");" & Chr(10)
+        End If
+    Case "AI", "AI$", "AI_PROMPT"
+        If Trim(ins.result) <> "" Then
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = await ux.ai.prompt(" & args & ");" & Chr(10)
+        Else
+            outText &= "      await ux.ai.prompt(" & args & ");" & Chr(10)
+        End If
+    Case Else
+        ' Unknown CALL first tries a WASM export when the hybrid loader exists.
+        ' If no matching export exists, it falls back to ux.callHost so the missing binding is visible.
+        If Trim(ins.result) <> "" Then
+            outText &= "      if (typeof __uxb_load_wasm === 'function') {" & Chr(10)
+            outText &= "        const __w = await __uxb_load_wasm();" & Chr(10)
+            outText &= "        const __f = __w && __w[" & UXBJsWasmExportKey(callName) & "];" & Chr(10)
+            outText &= "        if (typeof __f === 'function') " & UXBJsAssignTarget(ins.result) & " = __f(" & args & ");" & Chr(10)
+            outText &= "        else " & UXBJsAssignTarget(ins.result) & " = await ux.callHost(" & UXBJsQuote(callName) & ", [" & args & "]);" & Chr(10)
+            outText &= "      } else {" & Chr(10)
+            outText &= "        " & UXBJsAssignTarget(ins.result) & " = await ux.callHost(" & UXBJsQuote(callName) & ", [" & args & "]);" & Chr(10)
+            outText &= "      }" & Chr(10)
+        Else
+            outText &= "      if (typeof __uxb_load_wasm === 'function') {" & Chr(10)
+            outText &= "        const __w = await __uxb_load_wasm();" & Chr(10)
+            outText &= "        const __f = __w && __w[" & UXBJsWasmExportKey(callName) & "];" & Chr(10)
+            outText &= "        if (typeof __f === 'function') __f(" & args & ");" & Chr(10)
+            outText &= "        else await ux.callHost(" & UXBJsQuote(callName) & ", [" & args & "]);" & Chr(10)
+            outText &= "      } else {" & Chr(10)
+            outText &= "        await ux.callHost(" & UXBJsQuote(callName) & ", [" & args & "]);" & Chr(10)
+            outText &= "      }" & Chr(10)
+        End If
+    End Select
+
+    Return 1
+End Function
+
+Public Function UXBJsEmitInstruction(ByRef ins As MIRIRInstruction, ByRef outText As String, ByRef errText As String) As Integer
+    Dim op As String
+    Dim jsop As String
+    Dim cond As String
+    Dim targetLabel As String
+
+    op = UCase(Trim(ins.opcode))
+
+    Select Case op
+    Case "LOAD_CONST"
+        If Trim(ins.result) <> "" And ins.operandCount >= 1 Then
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = " & UXBJsOperand(ins.operands(0)) & ";" & Chr(10)
+        End If
+    Case "LOAD_VAR"
+        If Trim(ins.result) <> "" And ins.operandCount >= 1 Then
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = " & UXBJsOperand(ins.operands(0)) & ";" & Chr(10)
+        End If
+    Case "STORE_VAR"
+        If ins.operandCount >= 2 Then
+            outText &= "      " & UXBJsAssignTarget(ins.operands(0)) & " = " & UXBJsOperand(ins.operands(1)) & ";" & Chr(10)
+        ElseIf ins.operandCount >= 1 And Trim(ins.result) <> "" Then
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = " & UXBJsOperand(ins.operands(0)) & ";" & Chr(10)
+        End If
+    Case "DIM", "CONST", "DEF_TYPE", "SETSTRINGSIZE"
+        outText &= "      /* " & op & " handled as metadata in JS MVP. */" & Chr(10)
+    Case "NEG", "FNEG"
+        If Trim(ins.result) <> "" And ins.operandCount >= 1 Then
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = -(" & UXBJsOperand(ins.operands(0)) & ");" & Chr(10)
+        End If
+    Case "NOT"
+        If Trim(ins.result) <> "" And ins.operandCount >= 1 Then
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = !(" & UXBJsOperand(ins.operands(0)) & ") ? 1 : 0;" & Chr(10)
+        End If
+    Case "CALL"
+        If UXBJsEmitCall(ins, outText, errText) = 0 Then Return 0
+    Case "JMP"
+        If ins.operandCount >= 1 Then
+            targetLabel = UXBJsBlockLabel(Val(ins.operands(0)))
+            outText &= "      pc = " & UXBJsQuote(targetLabel) & "; continue;" & Chr(10)
+        End If
+    Case "JZ"
+        If ins.operandCount >= 2 Then
+            cond = UXBJsOperand(ins.operands(0))
+            targetLabel = UXBJsBlockLabel(Val(ins.operands(1)))
+            outText &= "      if (!(" & cond & ")) { pc = " & UXBJsQuote(targetLabel) & "; continue; }" & Chr(10)
+        End If
+    Case "JNZ"
+        If ins.operandCount >= 2 Then
+            cond = UXBJsOperand(ins.operands(0))
+            targetLabel = UXBJsBlockLabel(Val(ins.operands(1)))
+            outText &= "      if (" & cond & ") { pc = " & UXBJsQuote(targetLabel) & "; continue; }" & Chr(10)
+        End If
+    Case "RET"
+        If ins.operandCount >= 1 Then
+            outText &= "      return " & UXBJsOperand(ins.operands(0)) & ";" & Chr(10)
+        ElseIf Trim(ins.result) <> "" Then
+            outText &= "      return " & UXBJsOperand(ins.result) & ";" & Chr(10)
+        Else
+            outText &= "      return;" & Chr(10)
+        End If
+    Case Else
+        If UXBJsIsBinaryOpcode(op) <> 0 Then
+            jsop = UXBJsBinaryOp(op)
+            If Trim(ins.result) <> "" And ins.operandCount >= 2 Then
+                outText &= "      " & UXBJsAssignTarget(ins.result) & " = (" & UXBJsOperand(ins.operands(0)) & " " & jsop & " " & UXBJsOperand(ins.operands(1)) & ");" & Chr(10)
+            End If
+        Else
+            outText &= "      /* unsupported MIR op in JS MVP: " & UXBJsEscape(op) & " */" & Chr(10)
+        End If
+    End Select
+
+    Return 1
+End Function
+
+#endif
