@@ -88,6 +88,7 @@ def main() -> int:
         ("workspace_clean_guard", "uxb\\compiler\\scripts\\run_workspace_clean_guard.bat"),
         ("prior_step_gap_audit", "python uxb\\tools\\uxb_prior_step_gap_audit.py"),
         ("language_surface_full_matrix", "uxb\\compiler\\scripts\\run_language_surface_full_matrix.bat"),
+        ("keyword_layer_matrix", "uxb\\compiler\\scripts\\run_keyword_layer_matrix.bat"),
         ("test_matrix_linker", "python uxb\\tools\\uxb_test_matrix_linker.py"),
         ("expected_runner", expected_cmd),
         ("layer_gate", "python uxb\\tools\\uxb_layer_gate.py"),
@@ -116,6 +117,7 @@ def main() -> int:
     expected = read_json(out / "expected_runner.json")
     layer = read_json(out / "layer_gate.json")
     prior = read_json(out / "prior_step_gap_audit.json")
+    keyword_decision = read_json(out / "keyword_decision_gate.json")
 
     blockers = []
     warnings = []
@@ -130,6 +132,8 @@ def main() -> int:
         blockers.append(f"expected_runner not_accepted={expected.get('not_accepted')}")
     if layer.get("status") == "HAS_BLOCKERS":
         blockers.append("layer_gate has blockers")
+    if keyword_decision.get("status") == "BLOCKED":
+        blockers.append("keyword_decision_gate has blockers")
     if prior.get("summary", {}).get("missing", 0):
         warnings.append(f"prior_step_gap_audit missing={prior.get('summary', {}).get('missing')}")
 
@@ -147,6 +151,10 @@ def main() -> int:
             "not_accepted": expected.get("not_accepted"),
         },
         "layer_summary": layer.get("layer_counts", {}),
+        "keyword_decision_summary": {
+            "status": keyword_decision.get("status"),
+            "blocker_count": len(keyword_decision.get("blockers", []) or []),
+        },
         "prior_step_summary": prior.get("summary", {}),
     }
     (out / "release_gate.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -175,6 +183,7 @@ def main() -> int:
     md.append("## Summaries")
     md.append(f"- expected_runner: `{report['expected_summary']}`")
     md.append(f"- layer_gate: `{report['layer_summary']}`")
+    md.append(f"- keyword_decision_gate: `{report['keyword_decision_summary']}`")
     md.append(f"- prior_step_gap: `{report['prior_step_summary']}`")
     (out / "release_gate.md").write_text("\n".join(md), encoding="utf-8")
 

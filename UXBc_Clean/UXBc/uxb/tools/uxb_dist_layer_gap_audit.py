@@ -8,15 +8,23 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List
 
+TOOL_DIR = Path(__file__).resolve().parent
+if str(TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOL_DIR))
 
-BAD_STATUSES = {
+from uxb_layer_status_policy import CANONICAL_SET
+
+
+BAD_OBSERVED_STATUSES = {
     "missing",
     "diagnostic_only",
     "partial",
+    "policy_only",
     "blocked",
     "pending",
     "unsupported",
@@ -47,10 +55,12 @@ def audit_surface_matrix(path: Path) -> Dict[str, object]:
     if not rows:
         return {"path": str(path), "row_count": 0, "layer_missing": {}, "sample_items": {}}
 
-    core_layers = [
+    base_layers = [
         "lexer", "parser", "ast", "semantic", "hir", "mir",
-        "ast_interpreter", "mir_interpreter", "x64_ast", "x64_mir", "runtime", "ffi", "tests", "docs"
+        "ast_interpreter", "mir_interpreter", "x64_ast", "x64_mir", "runtime", "ffi",
+        "js_transpiler", "wasm_emitter", "browser_runtime", "tests", "docs",
     ]
+    core_layers = [x for x in base_layers if x in rows[0]]
     layer_missing: Dict[str, int] = {k: 0 for k in core_layers}
     sample_items: Dict[str, List[str]] = {k: [] for k in core_layers}
 
@@ -58,7 +68,7 @@ def audit_surface_matrix(path: Path) -> Dict[str, object]:
         item = r.get("name") or r.get("token") or r.get("kind") or "(unknown)"
         for layer in core_layers:
             st = norm(r.get(layer, ""))
-            if st in BAD_STATUSES:
+            if st in BAD_OBSERVED_STATUSES:
                 layer_missing[layer] += 1
                 if len(sample_items[layer]) < 8:
                     sample_items[layer].append(f"{item}:{st}")
@@ -79,24 +89,34 @@ def audit_keyword_layer_matrix(path: Path) -> Dict[str, object]:
     unknown_keywords = []
     ast_mir_mismatch = []
 
+    invalid_decision = []
+    decision_columns = [c for c in rows[0].keys() if c.startswith("decision_")] if rows else []
+
     for r in rows:
         kw = (r.get("keyword") or "").strip()
         cat = norm(r.get("category", ""))
         if cat == "unknown":
             unknown_keywords.append(kw)
 
-        ast_i = norm(r.get("interpreter_ast", ""))
-        mir_i = norm(r.get("interpreter_mir", ""))
+        ast_col = "decision_interpreter_ast" if "decision_interpreter_ast" in decision_columns else "interpreter_ast"
+        mir_col = "decision_interpreter_mir" if "decision_interpreter_mir" in decision_columns else "interpreter_mir"
+        ast_i = norm(r.get(ast_col, ""))
+        mir_i = norm(r.get(mir_col, ""))
         if ast_i != mir_i:
             # Only flag if one is clearly weaker than the other.
-            ast_bad = ast_i in BAD_STATUSES
-            mir_bad = mir_i in BAD_STATUSES
+            ast_bad = ast_i in BAD_OBSERVED_STATUSES
+            mir_bad = mir_i in BAD_OBSERVED_STATUSES
             if ast_bad != mir_bad:
                 ast_mir_mismatch.append({
                     "keyword": kw,
                     "ast": ast_i,
                     "mir": mir_i,
                 })
+
+        for c in decision_columns:
+            st = (r.get(c) or "").strip().upper()
+            if st not in CANONICAL_SET and len(invalid_decision) < 50:
+                invalid_decision.append({"keyword": kw, "column": c, "status": st})
 
     return {
         "path": str(path),
@@ -105,6 +125,10 @@ def audit_keyword_layer_matrix(path: Path) -> Dict[str, object]:
         "unknown_keywords_sample": sorted(set([k for k in unknown_keywords if k]))[:40],
         "ast_mir_mismatch_count": len(ast_mir_mismatch),
         "ast_mir_mismatch_sample": ast_mir_mismatch[:40],
+        "decision_column_count": len(decision_columns),
+        "decision_columns": decision_columns,
+        "invalid_decision_count": len(invalid_decision),
+        "invalid_decision_sample": invalid_decision[:40],
     }
 
 
@@ -147,10 +171,13 @@ def main() -> int:
     kw = audit_keyword_layer_matrix(dist / "keyword_layer_matrix.csv")
     exp = audit_expected_runner(dist / "step6" / "expected_runner.csv")
 
+    kw_decision_cols = set(kw.get("decision_columns", []))
     js_wasm = {
-        "js_transpiler_column_present": False,
-        "wasm_column_present": False,
-        "note": "Dist core matrices do not have dedicated js_transpiler/wasm columns; coverage is not proven by matrix schema.",
+        "js_transpiler_column_present": "decision_js_transpiler" in kw_decision_cols,
+        "wasm_column_present": "decision_wasm_emitter" in kw_decision_cols,
+        "browser_runtime_column_present": "decision_browser_runtime" in kw_decision_cols,
+        "invalid_decision_count": kw.get("invalid_decision_count", 0),
+        "note": "Keyword matrix decision columns are used as architecture contract when present.",
     }
 
     report = {
@@ -180,6 +207,8 @@ def main() -> int:
     if sample_unknown:
         md.append(f"- unknown sample: `{', '.join(sample_unknown[:20])}`")
     md.append(f"- AST/MIR interpreter mismatch count: `{kw.get('ast_mir_mismatch_count', 0)}`")
+    md.append(f"- decision column count: `{kw.get('decision_column_count', 0)}`")
+    md.append(f"- invalid decision count: `{kw.get('invalid_decision_count', 0)}`")
 
     md.append("")
     md.append("## Step6 Expected Runner")
