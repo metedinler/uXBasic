@@ -5,6 +5,7 @@ uXBasic JSON -> Browser JavaScript generator.
 
 Input:
   --mir-json path/to/program.mir.json  (uxb-mir-module-1 or compatible)
+    --ast-output-json path/to/ast_program_output.json (optional fallback)
 Output:
   --out path/to/game.js
 
@@ -19,13 +20,84 @@ import argparse, os, pathlib, shutil
 def ensure_dir(path: pathlib.Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
-def emit_js(mir_path: pathlib.Path, out_path: pathlib.Path, wasm_manifest: str = "", mode: str = "mir-exec") -> str:
+def emit_js(
+    mir_path: pathlib.Path,
+    out_path: pathlib.Path,
+    wasm_manifest: str = "",
+    mode: str = "mir-exec",
+    ast_output_path: pathlib.Path | None = None,
+) -> str:
     ensure_dir(out_path)
     mir_target = out_path.parent / mir_path.name
     if mir_path.resolve() != mir_target.resolve():
         shutil.copy2(mir_path, mir_target)
 
+    ast_target = None
+    if ast_output_path:
+        ast_output_path = pathlib.Path(ast_output_path)
+        if ast_output_path.exists():
+            ast_target = out_path.parent / ast_output_path.name
+            if ast_output_path.resolve() != ast_target.resolve():
+                shutil.copy2(ast_output_path, ast_target)
+
+    if ast_target is None:
+        # If user did not pass AST replay input explicitly, try common sibling names.
+        for candidate_name in ("ast_program_output.json", "ast_output.json"):
+            candidate = mir_path.parent / candidate_name
+            if candidate.exists():
+                ast_target = out_path.parent / candidate.name
+                if candidate.resolve() != ast_target.resolve():
+                    shutil.copy2(candidate, ast_target)
+                break
+
     wasm_block = ""
+    ast_fallback_config = f'const AST_FALLBACK_JSON = "./{ast_target.name}";\n' if ast_target else 'const AST_FALLBACK_JSON = "";\n'
+    ast_fallback_fn = '''
+async function replayAstOutput(path) {
+    if (!path) return false;
+    const astOut = await (await fetch(path)).json();
+    const events = Array.isArray(astOut?.events)
+        ? astOut.events
+        : (Array.isArray(astOut?.program_output?.events) ? astOut.program_output.events : []);
+    if (!events.length) return false;
+
+    for (const ev of events) {
+        const kind = String(ev?.kind ?? ev?.type ?? ev?.event ?? "").toUpperCase();
+        const value = ev?.value ?? ev?.text ?? ev?.message ?? "";
+        if (kind === "PRINT") {
+            await ux.callHost("PRINT", [value]);
+            continue;
+        }
+        if (kind === "PRINTLN") {
+            await ux.callHost("PRINTLN", []);
+            continue;
+        }
+        if (kind === "PRINT_SEP_COMMA") {
+            await ux.callHost("PRINT_SEP_COMMA", []);
+            continue;
+        }
+        if (kind === "PRINT_SEP_SPACE") {
+            await ux.callHost("PRINT_SEP_SPACE", []);
+            continue;
+        }
+        if (kind === "PRINT_SEP_SEMICOLON") {
+            await ux.callHost("PRINT_SEP_SEMICOLON", []);
+            continue;
+        }
+        if (kind === "CALL" && ev?.name) {
+            const args = Array.isArray(ev?.args) ? ev.args : [];
+            await ux.callHost(String(ev.name), args);
+            continue;
+        }
+        if (value !== undefined && value !== null && value !== "") {
+            await ux.callHost("PRINT", [value]);
+        }
+    }
+
+    return true;
+}
+'''
+
     if wasm_manifest:
         wm = pathlib.Path(wasm_manifest)
         target_manifest = out_path.parent / wm.name
@@ -48,13 +120,39 @@ import "./ux_input.js";
 import "./ux_audio.js";
 import "./ux_ai_bridge.js";
 import "./ux_file.js";
+import "./ux_oop_handles.js";
 import "./ux_serial_bluetooth.js";
+import "./ux_webgpu.js";
 import {{ runUxbMirJson }} from "./ux_mir_executor.js";
 {wasm_block}
+{ast_fallback_config}
+{ast_fallback_fn}
 
 export async function main() {{
-  const mir = await (await fetch("./{mir_target.name}")).json();
-  await runUxbMirJson(mir, ux);
+    let mirError = null;
+    try {{
+        const mir = await (await fetch("./{mir_target.name}")).json();
+        await runUxbMirJson(mir, ux);
+        return;
+    }} catch (err) {{
+        mirError = err;
+        console.warn("MIR yürütümünde hata, AST fallback denenecek:", err);
+    }}
+
+    if (AST_FALLBACK_JSON) {{
+        try {{
+            const replayed = await replayAstOutput(AST_FALLBACK_JSON);
+            if (replayed) {{
+                ux.print("AST fallback replay tamamlandı.");
+                return;
+            }}
+        }} catch (astErr) {{
+            console.warn("AST fallback başarısız:", astErr);
+        }}
+    }}
+
+    if (mirError) throw mirError;
+    throw new Error("Program yürütülemedi: MIR ve AST fallback mevcut değil");
 }}
 
 main().catch(err => {{
@@ -70,10 +168,12 @@ def main() -> int:
     ap.add_argument("--mir-json", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--wasm-manifest", default="")
+    ap.add_argument("--ast-output-json", default="")
     ap.add_argument("--mode", default="mir-exec")
     args = ap.parse_args()
 
-    emit_js(pathlib.Path(args.mir_json), pathlib.Path(args.out), args.wasm_manifest, args.mode)
+    ast_output = pathlib.Path(args.ast_output_json) if args.ast_output_json else None
+    emit_js(pathlib.Path(args.mir_json), pathlib.Path(args.out), args.wasm_manifest, args.mode, ast_output)
     return 0
 
 if __name__ == "__main__":

@@ -18,6 +18,12 @@ from typing import Any, Dict, List, Tuple
 
 NUM = re.compile(r"^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$")
 
+WASM_SAFE_OPS = {
+    "NOP", "LOAD_CONST", "CONST", "LOADI", "LOAD", "LOAD_VAR", "STORE", "STORE_VAR", "ASSIGN",
+    "ADD", "SUB", "MUL", "DIV", "IDIV", "MOD", "EQ", "NE", "LT", "LE", "GT", "GE", "AND", "OR", "XOR", "NOT",
+    "RET", "RETURN",
+}
+
 def load_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8-sig") as f:
         return json.load(f)
@@ -79,6 +85,20 @@ def wat_push_operand(token: str, local_names: set, param_names: set) -> List[str
         return [f"    local.get ${safe_name(token)}"]
     return ["    i32.const 0"]
 
+def analyze_fn_wasm_compat(fn: Dict[str, Any]) -> List[str]:
+    issues: List[str] = []
+    for b in blocks_of(fn):
+        for ins in instrs_of(b):
+            op = str(ins.get("opcode") or ins.get("op") or "").upper()
+            if not op:
+                continue
+            if op in {"JMP", "JZ", "JNZ", "GOTO", "JMP_IF_ZERO", "JMP_IF_NOT_ZERO"}:
+                issues.append(f"control-flow opcode {op}")
+                continue
+            if op not in WASM_SAFE_OPS:
+                issues.append(f"unsupported opcode {op}")
+    return issues
+
 def emit_function(fn: Dict[str, Any], diagnostics: List[str]) -> str:
     name = safe_name(fn.get("name", "main"))
     params = [str(x) for x in fn.get("params", [])]
@@ -108,11 +128,28 @@ def emit_function(fn: Dict[str, Any], diagnostics: List[str]) -> str:
                 lines.append(f"    {watop}")
                 if res:
                     lines.append(f"    local.set ${safe_name(res)}")
+            elif op in {"XOR"} and len(ops) >= 2:
+                lines.extend(wat_push_operand(ops[0], local_names, param_names))
+                lines.extend(wat_push_operand(ops[1], local_names, param_names))
+                lines.append("    i32.xor")
+                if res:
+                    lines.append(f"    local.set ${safe_name(res)}")
+            elif op in {"NOT"} and ops:
+                lines.extend(wat_push_operand(ops[0], local_names, param_names))
+                lines.append("    i32.const -1")
+                lines.append("    i32.xor")
+                if res:
+                    lines.append(f"    local.set ${safe_name(res)}")
             elif op in {"LOAD_CONST","CONST","LOADI"} and ops:
                 target = res or (ops[0] if len(ops) > 1 else "")
                 value = ops[1] if len(ops) > 1 else ops[0]
                 if target:
                     lines.extend(wat_push_operand(value, local_names, param_names))
+                    lines.append(f"    local.set ${safe_name(target)}")
+            elif op in {"LOAD", "LOAD_VAR"} and ops:
+                target = res
+                if target:
+                    lines.extend(wat_push_operand(ops[0], local_names, param_names))
                     lines.append(f"    local.set ${safe_name(target)}")
             elif op in {"STORE","STORE_VAR","ASSIGN"} and len(ops) >= 2:
                 target = ops[0]
@@ -142,6 +179,11 @@ def emit_wat(mir: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     parts = ["(module", '  (import "ux" "print_i32" (func $ux_print_i32 (param i32)))']
     for fn in functions_of(mir):
         if not fn.get("name"):
+            continue
+        issues = analyze_fn_wasm_compat(fn)
+        if issues:
+            fname = safe_name(fn.get("name"))
+            diagnostics.append(f"{fname}: JS fallback ({'; '.join(sorted(set(issues)))})")
             continue
         parts.append(emit_function(fn, diagnostics))
         exports.append({"name": safe_name(fn.get("name")), "kind": "function", "params": ["i32"] * len(fn.get("params", [])), "result": "i32"})

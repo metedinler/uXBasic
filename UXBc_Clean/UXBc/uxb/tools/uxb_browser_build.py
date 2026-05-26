@@ -45,6 +45,7 @@ def main() -> int:
     ap.add_argument("--compiler", default="")
     ap.add_argument("--source", default="")
     ap.add_argument("--mir-json", default="")
+    ap.add_argument("--ast-output-json", default="")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--mode", choices=["js","wasm","hybrid"], default="hybrid")
     ap.add_argument("--wat2wasm", default="wat2wasm")
@@ -72,6 +73,14 @@ def main() -> int:
             (out_dir / "browser_build_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
             return res["returncode"]
 
+    ast_output_json = pathlib.Path(args.ast_output_json).resolve() if args.ast_output_json else None
+    if ast_output_json is None:
+        for candidate_name in ("ast_program_output.json", "ast_output.json"):
+            candidate = mir_json.parent / candidate_name
+            if candidate.exists():
+                ast_output_json = candidate.resolve()
+                break
+
     copy_runtime(uxb_root, out_dir)
     shutil.copy2(mir_json, out_dir / mir_json.name)
 
@@ -92,6 +101,8 @@ def main() -> int:
         cmd = [sys.executable, str(tools / "uxb_json_to_js.py"), "--mir-json", str(mir_json), "--out", str(js)]
         if wasm_manifest:
             cmd += ["--wasm-manifest", wasm_manifest]
+        if ast_output_json and ast_output_json.exists():
+            cmd += ["--ast-output-json", str(ast_output_json)]
         res = run(cmd)
         report["steps"].append({"json_to_js": res})
     else:

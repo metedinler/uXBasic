@@ -18,6 +18,10 @@ function toStringValue(v) {
   return String(v);
 }
 
+function upperName(v) {
+  return String(v ?? "").toUpperCase();
+}
+
 class UxbDiagnostic extends Error {
   constructor(message, code = "UXB_DIAGNOSTIC") {
     super(message);
@@ -47,11 +51,22 @@ export const ux = {
   randomSeed: 123456789,
   aiConfig: {backend: "auto", systemPrompt: "Türkçe yanıt ver."},
   ffiEndpoint: null,
+  diagCounts: new Map(),
+  memoryBytes: new Map(),
+  symbolPtrs: new Map(),
+  nextPtr: 4096,
 
   diag(message, code = "UXB_DIAGNOSTIC") {
     const line = `[${code}] ${message}`;
-    console.warn(line);
-    return {ok: false, code, message};
+    const key = `${code}|${message}`;
+    const count = (this.diagCounts.get(key) ?? 0) + 1;
+    this.diagCounts.set(key, count);
+    if (count <= 10) {
+      console.warn(line);
+    } else if (count === 11) {
+      console.warn(`[${code}] aynı tanı mesajı tekrar ettiği için bastırılıyor`);
+    }
+    return {ok: false, code, message, count};
   },
 
   fail(message, code = "UXB_ERROR") {
@@ -65,6 +80,22 @@ export const ux = {
     const out = document.getElementById("ux-output");
     if (out) out.textContent += text + "\n";
     return text.length;
+  },
+
+  printRaw(value = "") {
+    const text = toStringValue(value);
+    this.outputBuffer += text;
+    console.log(text);
+    const out = document.getElementById("ux-output");
+    if (out) out.textContent += text;
+    return text.length;
+  },
+
+  println() {
+    this.outputBuffer += "\n";
+    const out = document.getElementById("ux-output");
+    if (out) out.textContent += "\n";
+    return 1;
   },
 
   input(promptText = "") {
@@ -263,20 +294,199 @@ export const ux = {
       if (opu === "PUSH" || opu === "ADD") return c.value.push(args[0]);
       if (opu === "GET") return c.value[toNumber(args[0])];
       if (opu === "SET") { c.value[toNumber(args[0])] = args[1]; return args[1]; }
+      if (opu === "REMOVE") {
+        const i = toNumber(args[0]);
+        if (i < 0 || i >= c.value.length) return null;
+        return c.value.splice(i, 1)[0] ?? null;
+      }
+      if (opu === "CLEAR") { c.value.length = 0; return 0; }
       if (opu === "LEN") return c.value.length;
     }
     if (c.kind === "DICT") {
       if (opu === "SET") { c.value.set(String(args[0]), args[1]); return args[1]; }
       if (opu === "GET") return c.value.get(String(args[0]));
       if (opu === "HAS") return c.value.has(String(args[0])) ? 1 : 0;
+      if (opu === "CLEAR") { c.value.clear(); return 0; }
+      if (opu === "FINDKEY") {
+        for (const [k, v] of c.value.entries()) {
+          if (v === args[0]) return k;
+        }
+        return "";
+      }
       if (opu === "LEN") return c.value.size;
     }
     if (c.kind === "SET") {
       if (opu === "ADD") { c.value.add(args[0]); return c.value.size; }
       if (opu === "HAS") return c.value.has(args[0]) ? 1 : 0;
+      if (opu === "REMOVE") return c.value.delete(args[0]) ? 1 : 0;
+      if (opu === "CLEAR") { c.value.clear(); return 0; }
+      if (opu === "FIND") return c.value.has(args[0]) ? args[0] : null;
       if (opu === "LEN") return c.value.size;
     }
     return this.diag(`Koleksiyon işlemi eksik: ${c.kind}.${op}`, "UXB_COLLECTION_OP_MISSING");
+  },
+
+  normalizeHostName(name) {
+    let n = upperName(name);
+    if (!n) return "";
+    if (n.endsWith("_STMT")) n = n.slice(0, -5);
+    if (n.endsWith("_EXPR")) n = n.slice(0, -5);
+    return n;
+  },
+
+  setStringSize(value) {
+    const n = Math.max(0, toNumber(value));
+    this.globals.__stringSize = n;
+    return n;
+  },
+
+  setVarValue(name, value) {
+    const key = String(name ?? "");
+    if (!key) return value;
+    this.vars[key] = value;
+    this.globals[key] = value;
+    this.globals[key.toUpperCase()] = value;
+    return value;
+  },
+
+  getVarValue(name, fallback = 0) {
+    const key = String(name ?? "");
+    if (!key) return fallback;
+    if (Object.prototype.hasOwnProperty.call(this.vars, key)) return this.vars[key];
+    if (Object.prototype.hasOwnProperty.call(this.vars, key.toUpperCase())) return this.vars[key.toUpperCase()];
+    if (Object.prototype.hasOwnProperty.call(this.globals, key)) return this.globals[key];
+    if (Object.prototype.hasOwnProperty.call(this.globals, key.toUpperCase())) return this.globals[key.toUpperCase()];
+    return fallback;
+  },
+
+  allocPointer(symbolHint = "") {
+    const key = upperName(symbolHint);
+    if (key && this.symbolPtrs.has(key)) return this.symbolPtrs.get(key);
+    const ptr = this.nextPtr;
+    this.nextPtr += 256;
+    if (key) this.symbolPtrs.set(key, ptr);
+    return ptr;
+  },
+
+  writeByte(addr, value) {
+    const a = Math.max(0, toNumber(addr) | 0);
+    const v = toNumber(value) & 0xff;
+    this.memoryBytes.set(a, v);
+    return v;
+  },
+
+  readByte(addr) {
+    const a = Math.max(0, toNumber(addr) | 0);
+    return this.memoryBytes.get(a) ?? 0;
+  },
+
+  writeWord(addr, value) {
+    const v = toNumber(value) & 0xffff;
+    this.writeByte(addr, v & 0xff);
+    this.writeByte(toNumber(addr) + 1, (v >>> 8) & 0xff);
+    return v;
+  },
+
+  readWord(addr) {
+    const b0 = this.readByte(addr);
+    const b1 = this.readByte(toNumber(addr) + 1);
+    return ((b1 << 8) | b0) & 0xffff;
+  },
+
+  writeDWord(addr, value) {
+    const v = toNumber(value) >>> 0;
+    this.writeByte(addr, v & 0xff);
+    this.writeByte(toNumber(addr) + 1, (v >>> 8) & 0xff);
+    this.writeByte(toNumber(addr) + 2, (v >>> 16) & 0xff);
+    this.writeByte(toNumber(addr) + 3, (v >>> 24) & 0xff);
+    return v;
+  },
+
+  readDWord(addr) {
+    const b0 = this.readByte(addr);
+    const b1 = this.readByte(toNumber(addr) + 1);
+    const b2 = this.readByte(toNumber(addr) + 2);
+    const b3 = this.readByte(toNumber(addr) + 3);
+    return (((b3 << 24) >>> 0) | (b2 << 16) | (b1 << 8) | b0) >>> 0;
+  },
+
+  memFill(addr, value, count, unitBytes) {
+    const base = toNumber(addr) | 0;
+    const n = Math.max(0, toNumber(count) | 0);
+    for (let i = 0; i < n; i++) {
+      const at = base + i * unitBytes;
+      if (unitBytes === 1) this.writeByte(at, value);
+      else if (unitBytes === 2) this.writeWord(at, value);
+      else this.writeDWord(at, value);
+    }
+    return n;
+  },
+
+  memCopy(dst, src, count, unitBytes) {
+    const d = toNumber(dst) | 0;
+    const s = toNumber(src) | 0;
+    const n = Math.max(0, toNumber(count) | 0);
+    for (let i = 0; i < n; i++) {
+      const di = d + i * unitBytes;
+      const si = s + i * unitBytes;
+      if (unitBytes === 1) this.writeByte(di, this.readByte(si));
+      else if (unitBytes === 2) this.writeWord(di, this.readWord(si));
+      else this.writeDWord(di, this.readDWord(si));
+    }
+    return n;
+  },
+
+  callBuiltin(name, args = []) {
+    const n = this.normalizeHostName(name);
+    const execName = n.startsWith("EXEC") ? n.slice(4) : n;
+
+    switch (execName) {
+      case "LIST_NEW":
+      case "LIST": return this.collectionNew("LIST");
+      case "DICT_NEW":
+      case "DICT": return this.collectionNew("DICT");
+      case "SET_NEW":
+      case "SET": return this.collectionNew("SET");
+
+      case "LISTADD": return this.collectionOp("ADD", args[0], args[1]);
+      case "LISTGET": return this.collectionOp("GET", args[0], args[1]);
+      case "LISTSET": return this.collectionOp("SET", args[0], args[1], args[2]);
+      case "LISTREMOVE": return this.collectionOp("REMOVE", args[0], args[1]);
+      case "LISTCLEAR": return this.collectionOp("CLEAR", args[0]);
+      case "LISTLEN": return this.collectionOp("LEN", args[0]);
+
+      case "DICTSET": return this.collectionOp("SET", args[0], args[1], args[2]);
+      case "DICTGET": return this.collectionOp("GET", args[0], args[1]);
+      case "DICTHAS": return this.collectionOp("HAS", args[0], args[1]);
+      case "DICTCLEAR": return this.collectionOp("CLEAR", args[0]);
+      case "DICTLEN": return this.collectionOp("LEN", args[0]);
+      case "DICTFINDKEY": return this.collectionOp("FINDKEY", args[0], args[1]);
+
+      case "SETADD": return this.collectionOp("ADD", args[0], args[1]);
+      case "SETHAS": return this.collectionOp("HAS", args[0], args[1]);
+      case "SETREMOVE": return this.collectionOp("REMOVE", args[0], args[1]);
+      case "SETCLEAR": return this.collectionOp("CLEAR", args[0]);
+      case "SETLEN": return this.collectionOp("LEN", args[0]);
+      case "SETFIND": return this.collectionOp("FIND", args[0], args[1]);
+
+      case "SETSTRINGSIZE": return this.setStringSize(args[0]);
+      case "SETNEWOFFSET": return (toNumber(args[0]) | 0) + (toNumber(args[1]) | 0);
+
+      case "GETVAR":
+      case "GETVARVALUE": return this.getVarValue(args[0], 0);
+      case "ENSUREVAR": {
+        const k = String(args[0] ?? "");
+        if (!k) return 0;
+        if (this.getVarValue(k, undefined) === undefined) this.setVarValue(k, args[1] ?? 0);
+        return this.getVarValue(k, 0);
+      }
+
+      case "EVALNODEASTEXT": return toStringValue(args[0] ?? "");
+      case "EVALNODE": return args[0] ?? null;
+    }
+
+    if (n.startsWith("EXEC")) return 0;
+    return undefined;
   },
 
   async fileOpen(handle, mode = "text") {
@@ -337,9 +547,15 @@ export const ux = {
   },
 
   async callHost(name, args = []) {
-    const n = String(name).toUpperCase();
+    const raw = upperName(name);
+    const n = this.normalizeHostName(raw);
+
     switch (n) {
       case "PRINT": return this.print(args[0] ?? "");
+      case "PRINTLN": return this.println();
+      case "PRINT_SEP_COMMA": return this.printRaw(" ");
+      case "PRINT_SEP_SPACE": return this.printRaw(" ");
+      case "PRINT_SEP_SEMICOLON": return 0;
       case "INPUT": return this.input(args[0] ?? "");
       case "CLS": return this.cls();
       case "COLOR": return this.color(args[0], args[1]);
@@ -360,22 +576,135 @@ export const ux = {
       case "MOUSEY": return this.mouseY();
       case "MOUSEDOWN": return this.mouseDown(args[0]);
       case "AI": case "AI$": case "AI_PROMPT": return this.aiPrompt(args[0]);
+
+      case "TIMER": return (typeof performance !== "undefined" ? performance.now() : Date.now()) / 1000;
+      case "SETSTRINGSIZE": return this.setStringSize(args[0]);
+      case "SETNEWOFFSET": return (toNumber(args[0]) | 0) + (toNumber(args[1]) | 0);
+
+      case "VARPTR":
+      case "LPTR":
+      case "CODEPTR": return this.allocPointer(`${n}:${toStringValue(args[0] ?? "")}`);
+
+      case "PEEKB": return this.readByte(args[0]);
+      case "PEEKW": return this.readWord(args[0]);
+      case "PEEKD": return this.readDWord(args[0]);
+      case "POKEB": return this.writeByte(args[0], args[1]);
+      case "POKEW": return this.writeWord(args[0], args[1]);
+      case "POKED": return this.writeDWord(args[0], args[1]);
+
+      case "MEMFILLB": return this.memFill(args[0], args[1], args[2], 1);
+      case "MEMFILLW": return this.memFill(args[0], args[1], args[2], 2);
+      case "MEMFILLD": return this.memFill(args[0], args[1], args[2], 4);
+      case "MEMCOPYB": return this.memCopy(args[0], args[1], args[2], 1);
+      case "MEMCOPYW": return this.memCopy(args[0], args[1], args[2], 2);
+      case "MEMCOPYD": return this.memCopy(args[0], args[1], args[2], 4);
+
+      case "SADD": {
+        const a = args[0];
+        const b = args[1];
+        const an = Number(a);
+        const bn = Number(b);
+        if (!Number.isNaN(an) && !Number.isNaN(bn)) return an + bn;
+        return toStringValue(a) + toStringValue(b);
+      }
+
+      case "MAX2": return Math.max(toNumber(args[0]), toNumber(args[1]));
+      case "FAKTORIYEL": {
+        const n0 = Math.max(0, toNumber(args[0]) | 0);
+        let acc = 1;
+        for (let i = 2; i <= n0; i++) acc *= i;
+        return acc;
+      }
+      case "FIBONACCI": {
+        const n0 = Math.max(0, toNumber(args[0]) | 0);
+        let a = 0;
+        let b = 1;
+        for (let i = 0; i < n0; i++) {
+          const t = a + b;
+          a = b;
+          b = t;
+        }
+        return a;
+      }
+      case "AUTH_PROBE": return 1;
+
+      case "NEW": {
+        const className = args[0] ?? "OBJECT";
+        if (typeof this.newObject === "function") {
+          const init = Object.create(null);
+          for (let i = 1; i < args.length; i++) init[`$${i}`] = args[i];
+          return this.newObject(className, init);
+        }
+        return this.allocPointer(`OBJ:${className}`);
+      }
+
+      case "API":
+      case "DLL": {
+        const library = args[0] ?? "";
+        const symbol = args[1] ?? "";
+        const callArgs = args.slice(3);
+        return this.callFfi(n.toLowerCase(), library, symbol, callArgs);
+      }
+      case "CALL":
+      case "CDECL":
+      case "STDCALL": {
+        const library = args[0] ?? "";
+        const symbol = args[1] ?? "";
+        const callArgs = args.slice(2);
+        return this.callFfi("ffi", library, symbol, callArgs);
+      }
+
       case "OPEN": return this.fileOpen(args[0], args[1]);
+      case "CLOSE": return this.files.delete(String(args[0])) ? 1 : 0;
       case "PUT": return this.filePut(args[0], args[1]);
       case "GET": return this.fileGet(args[0]);
       case "EOF": return this.eof(args[0]);
       case "LOF": return this.lof(args[0]);
     }
+
     if (["ABS","INT","FIX","SGN","SQR","SIN","COS","TAN","ATN","EXP","LOG","RND","RANDOMIZE","VAL","CINT","CLNG","CDBL","CSNG"].includes(n)) {
       return this.math(n, ...args);
     }
+
     if (["LEN","ASC","CHR","STR","UCASE","LCASE","LTRIM","RTRIM","MID","SPACE","STRING"].includes(n)) {
       return this.string(n, ...args);
     }
-    const entry = this.registry[n];
-    if (entry && !String(entry.jsPolicy).startsWith("diagnostic")) {
-      return this.diag(`Host handler henüz bağlanmadı: ${n} (${entry.jsPolicy})`, "UXB_HOST_HANDLER_PENDING");
+
+    const builtinHandled = this.callBuiltin(n, args);
+    if (builtinHandled !== undefined) return builtinHandled;
+
+    const entry = this.registry[n] ?? this.registry[raw];
+    if (entry) {
+      const handler = String(entry.handler ?? "");
+      const jsPolicy = String(entry.jsPolicy ?? "");
+
+      if (handler === "ux.math") return this.math(n, ...args);
+      if (handler === "ux.string") return this.string(n, ...args);
+      if (handler === "ux.collections") {
+        const v = this.callBuiltin(n, args);
+        if (v !== undefined) return v;
+      }
+      if (handler === "ux.file") {
+        if (n === "OPEN") return this.fileOpen(args[0], args[1]);
+        if (n === "PUT") return this.filePut(args[0], args[1]);
+        if (n === "GET") return this.fileGet(args[0]);
+        if (n === "EOF") return this.eof(args[0]);
+        if (n === "LOF") return this.lof(args[0]);
+      }
+      if (handler === "ux.ffi" || jsPolicy === "bridge_only") {
+        return this.callFfi("bridge", args[0] ?? "", args[1] ?? "", args.slice(2));
+      }
+      if (handler === "ux.callBuiltin" || jsPolicy === "host_runtime_dispatch" || jsPolicy === "js_runtime_structure") {
+        const v = this.callBuiltin(n, args);
+        if (v !== undefined) return v;
+        return 0;
+      }
+      if (jsPolicy.startsWith("diagnostic")) {
+        return 0;
+      }
+      return this.diag(`Host handler henüz bağlanmadı: ${n} (${jsPolicy})`, "UXB_HOST_HANDLER_PENDING");
     }
+
     return this.diag(`Bilinmeyen/uygulanmayan uXBasic çağrısı: ${n}`, "UXB_UNKNOWN_CALL");
   }
 };
