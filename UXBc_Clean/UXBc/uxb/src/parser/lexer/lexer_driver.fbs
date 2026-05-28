@@ -1,0 +1,195 @@
+Private Sub LexSource(ByRef st As LexerState)
+    Dim ch As String
+    Do While Not AtEnd(st)
+        ch = PeekCh(st)
+
+        If ch = Chr(13) Then
+            If PeekChEx(st, 1) = Chr(10) Then
+                st.cursor += 1
+            Else
+                AdvanceCh st, ch
+            End If
+            Continue Do
+        End If
+
+        If ch = "_" Then
+            If TryConsumeLineContinuation(st) <> 0 Then
+                Continue Do
+            End If
+        End If
+
+        If ch = Chr(10) Then
+            PushTok st, "EOL", "", st.lineNo, st.colNo
+            AdvanceCh st, ch
+            Continue Do
+        End If
+
+        If ch = " " Or ch = Chr(9) Then
+            AdvanceCh st, ch
+            Continue Do
+        End If
+
+        If ch = "'" Then
+            SkipComment st
+            Continue Do
+        End If
+
+        If ch = Chr(34) Then
+            ReadStringLiteral st
+            Continue Do
+        End If
+
+        If IsDigit(ch) Then
+            ReadNumber st
+            Continue Do
+        End If
+
+        If IsIdentStart(ch) Then
+            ReadIdentifier st
+            Continue Do
+        End If
+
+        ReadOperatorOrPunct st
+    Loop
+
+    PushTok st, "EOF", "", st.lineNo, st.colNo
+End Sub
+
+Private Function LexerJsonEscape(ByRef s As String) As String
+    Dim outText As String
+    Dim i As Integer
+    For i = 1 To Len(s)
+        Dim ch As String
+        ch = Mid(s, i, 1)
+        Select Case ch
+        Case "\"
+            outText &= "\\"
+        Case Chr(34)
+            outText &= "\" & Chr(34)
+        Case Chr(10)
+            outText &= "\n"
+        Case Chr(13)
+            outText &= "\r"
+        Case Chr(9)
+            outText &= "\t"
+        Case Else
+            outText &= ch
+        End Select
+    Next i
+    Return outText
+End Function
+
+Function LexerTokensToJson(ByRef st As LexerState, ByRef jsonOut As String) As Integer
+    jsonOut = "{" & Chr(10)
+    jsonOut &= "  ""source_file"": """ & LexerJsonEscape(st.sourceFile) & """," & Chr(10)
+    jsonOut &= "  ""token_count"": " & LTrim(Str(st.tokens.count)) & "," & Chr(10)
+    jsonOut &= "  ""tokens"": [" & Chr(10)
+
+    Dim i As Integer
+    For i = 0 To st.tokens.count - 1
+        Dim tk As Token
+        tk = st.tokens.items(i)
+        jsonOut &= "    {"
+        jsonOut &= """kind"":""" & LexerJsonEscape(tk.kind) & """," 
+        jsonOut &= """kind_code"":" & LTrim(Str(tk.kindCode)) & ","
+        jsonOut &= """lexeme"":""" & LexerJsonEscape(tk.lexeme) & """," 
+        jsonOut &= """raw_lexeme"":""" & LexerJsonEscape(tk.rawLexeme) & """," 
+        jsonOut &= """canonical_lexeme"":""" & LexerJsonEscape(tk.canonicalLexeme) & """," 
+        jsonOut &= """source_file"":""" & LexerJsonEscape(tk.sourceFile) & """," 
+        jsonOut &= """line"":" & LTrim(Str(tk.lineNo)) & ","
+        jsonOut &= """column"":" & LTrim(Str(tk.colNo)) & ","
+        jsonOut &= """offset"":" & LTrim(Str(tk.offset)) & ","
+        jsonOut &= """length"":" & LTrim(Str(tk.length))
+        jsonOut &= "}"
+        If i < st.tokens.count - 1 Then jsonOut &= ","
+        jsonOut &= Chr(10)
+    Next i
+
+    jsonOut &= "  ]" & Chr(10)
+    jsonOut &= "}" & Chr(10)
+    Return 1
+End Function
+
+Function LexerDiagnosticsToJson(ByRef st As LexerState, ByRef jsonOut As String) As Integer
+    jsonOut = "{" & Chr(10)
+    jsonOut &= "  ""diagnostic_count"": " & LTrim(Str(st.diagnostics.count)) & "," & Chr(10)
+    jsonOut &= "  ""diagnostics"": [" & Chr(10)
+
+    Dim i As Integer
+    For i = 0 To st.diagnostics.count - 1
+        Dim d As LexerDiagnostic
+        d = st.diagnostics.items(i)
+        jsonOut &= "    {"
+        jsonOut &= """code"":""" & LexerJsonEscape(d.code) & """," 
+        jsonOut &= """message"":""" & LexerJsonEscape(d.message) & """," 
+        jsonOut &= """source_file"":""" & LexerJsonEscape(d.sourceFile) & """," 
+        jsonOut &= """line"":" & LTrim(Str(d.lineNo)) & ","
+        jsonOut &= """column"":" & LTrim(Str(d.colNo))
+        jsonOut &= "}"
+        If i < st.diagnostics.count - 1 Then jsonOut &= ","
+        jsonOut &= Chr(10)
+    Next i
+
+    jsonOut &= "  ]" & Chr(10)
+    jsonOut &= "}" & Chr(10)
+    Return 1
+End Function
+
+Function LexerWriteTokensJson(ByRef st As LexerState, ByRef outPath As String, ByRef errText As String) As Integer
+    Dim jsonText As String
+    If LexerTokensToJson(st, jsonText) = 0 Then
+        errText = "lexer: token json conversion failed"
+        Return 0
+    End If
+
+    Dim f As Integer
+    f = FreeFile
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errText = "lexer: token json write open failed " & outPath
+        Return 0
+    End If
+    Print #f, jsonText;
+    Close #f
+    Return 1
+End Function
+
+Function LexerWriteDiagnosticsJson(ByRef st As LexerState, ByRef outPath As String, ByRef errText As String) As Integer
+    Dim jsonText As String
+    If LexerDiagnosticsToJson(st, jsonText) = 0 Then
+        errText = "lexer: diagnostics json conversion failed"
+        Return 0
+    End If
+
+    Dim f As Integer
+    f = FreeFile
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errText = "lexer: diagnostics json write open failed " & outPath
+        Return 0
+    End If
+    Print #f, jsonText;
+    Close #f
+    Return 1
+End Function
+
+Sub LexerInit(ByRef st As LexerState, ByRef src As String, ByVal sourcePath As String = "")
+    st.sourceFile = sourcePath
+    st.sourceText = LexerPreprocessSource(src, sourcePath)
+    st.preprocessFailed = LexerPreprocessHasError()
+    st.preprocessError = LexerPreprocessGetError()
+    st.cursor = 1
+    st.lineNo = 1
+    st.colNo = 1
+    TokenListInit st.tokens
+    LexerDiagnosticListInit st.diagnostics
+    LexerDiagnosticListInit st.preprocessDiagnostics
+    LexerPreprocessDiagnosticsCopy st.preprocessDiagnostics
+    If st.preprocessDiagnostics.count > 0 Then
+        Dim i As Integer
+        For i = 0 To st.preprocessDiagnostics.count - 1
+            LexerDiagnosticListPush st.diagnostics, st.preprocessDiagnostics.items(i).code, st.preprocessDiagnostics.items(i).message, st.preprocessDiagnostics.items(i).lineNo, st.preprocessDiagnostics.items(i).colNo, st.preprocessDiagnostics.items(i).sourceFile
+        Next i
+    End If
+    LexSource st
+End Sub

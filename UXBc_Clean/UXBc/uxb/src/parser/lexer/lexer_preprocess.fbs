@@ -1,0 +1,1086 @@
+Private Type LexerMacro
+    nameText As String
+    valueText As String
+End Type
+
+Private Type LexerFuncMacro
+    nameText As String
+    paramsText As String
+    paramCount As Integer
+    bodyText As String
+End Type
+
+Declare Function LexerPreprocessSourceImpl(ByRef src As String, ByRef sourcePath As String, ByVal depth As Integer) As String
+
+Dim Shared gPreprocessStop As Integer
+Dim Shared gPreprocessFailed As Integer
+Dim Shared gPreprocessError As String
+Dim Shared gFuncMacros() As LexerFuncMacro
+Dim Shared gFuncMacroCount As Integer
+Dim Shared gPreprocessDiagnostics As LexerDiagnosticList
+Dim Shared gIncludeOncePaths() As String
+Dim Shared gIncludeOnceCount As Integer
+Dim Shared gIncludeStack() As String
+Dim Shared gIncludeStackCount As Integer
+
+Private Sub LexerPreprocessResetState()
+    gPreprocessStop = 0
+    gPreprocessFailed = 0
+    gPreprocessError = ""
+    gFuncMacroCount = 0
+    Erase gFuncMacros
+    gIncludeOnceCount = 0
+    gIncludeStackCount = 0
+    Erase gIncludeOncePaths
+    Erase gIncludeStack
+    LexerDiagnosticListInit gPreprocessDiagnostics
+End Sub
+
+Private Sub LexerPreprocessPushDiag(ByRef codeText As String, ByRef msgText As String, ByRef sourcePath As String, ByVal lineNo As Integer, ByVal colNo As Integer)
+    LexerDiagnosticListPush gPreprocessDiagnostics, codeText, msgText, lineNo, colNo, sourcePath
+End Sub
+
+Function LexerPreprocessDiagnosticsCopy(ByRef outList As LexerDiagnosticList) As Integer
+    LexerDiagnosticListInit outList
+    If gPreprocessDiagnostics.count <= 0 Then Return 1
+
+    Dim i As Integer
+    For i = 0 To gPreprocessDiagnostics.count - 1
+        LexerDiagnosticListPush outList, gPreprocessDiagnostics.items(i).code, gPreprocessDiagnostics.items(i).message, gPreprocessDiagnostics.items(i).lineNo, gPreprocessDiagnostics.items(i).colNo, gPreprocessDiagnostics.items(i).sourceFile
+    Next i
+    Return 1
+End Function
+
+Private Function LexerIsIdentStartChar(ByRef ch As String) As Integer
+    If ch = "" Then Return 0
+    Dim n As Integer
+    n = Asc(ch)
+    Return (n >= Asc("A") And n <= Asc("Z")) Or (n >= Asc("a") And n <= Asc("z")) Or n = Asc("_")
+End Function
+
+Private Function LexerIsIdentPartChar(ByRef ch As String) As Integer
+    If LexerIsIdentStartChar(ch) <> 0 Then Return 1
+    If ch = "" Then Return 0
+    Dim n As Integer
+    n = Asc(ch)
+    Return (n >= Asc("0") And n <= Asc("9"))
+End Function
+
+Private Function LexerParamsTextCount(ByRef paramsText As String) As Integer
+    Dim raw As String
+    raw = Trim(paramsText)
+    If raw = "" Then Return 0
+
+    Dim count As Integer
+    count = 1
+
+    Dim i As Integer
+    For i = 1 To Len(raw)
+        If Mid(raw, i, 1) = "," Then count += 1
+    Next i
+
+    Return count
+End Function
+
+Private Function LexerGetParamNameAt(ByRef paramsText As String, ByVal paramIndex As Integer) As String
+    Dim raw As String
+    raw = Trim(paramsText)
+    If raw = "" Then Return ""
+
+    Dim idx As Integer
+    Dim partStart As Integer
+    partStart = 1
+
+    Dim i As Integer
+    For i = 1 To Len(raw) + 1
+        If i > Len(raw) Or Mid(raw, i, 1) = "," Then
+            If idx = paramIndex Then
+                Return UCase(Trim(Mid(raw, partStart, i - partStart)))
+            End If
+            idx += 1
+            partStart = i + 1
+        End If
+    Next i
+
+    Return ""
+End Function
+
+Private Sub LexerSetFuncMacro(ByRef nameText As String, ByRef paramsText As String, ByVal paramCount As Integer, ByRef bodyText As String)
+    Dim key As String
+    key = UCase(Trim(nameText))
+    If key = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To gFuncMacroCount - 1
+        If UCase(gFuncMacros(i).nameText) = key Then
+            gFuncMacros(i).paramsText = UCase(Trim(paramsText))
+            gFuncMacros(i).paramCount = paramCount
+            gFuncMacros(i).bodyText = bodyText
+            Exit Sub
+        End If
+    Next i
+
+    If gFuncMacroCount = 0 Then
+        ReDim gFuncMacros(0)
+    Else
+        ReDim Preserve gFuncMacros(gFuncMacroCount)
+    End If
+
+    gFuncMacros(gFuncMacroCount).nameText = key
+    gFuncMacros(gFuncMacroCount).paramsText = UCase(Trim(paramsText))
+    gFuncMacros(gFuncMacroCount).paramCount = paramCount
+    gFuncMacros(gFuncMacroCount).bodyText = bodyText
+    gFuncMacroCount += 1
+End Sub
+
+Private Function LexerParseFuncMacroDirective(ByRef restText As String, ByRef nameText As String, ByRef paramsText As String, ByRef paramCount As Integer, ByRef bodyText As String) As Integer
+    Dim raw As String
+    raw = Trim(restText)
+    If raw = "" Then Return 0
+
+    Dim lp As Integer
+    lp = InStr(raw, "(")
+    If lp <= 1 Then Return 0
+
+    Dim rp As Integer
+    rp = InStr(lp + 1, raw, ")")
+    If rp <= lp Then Return 0
+
+    nameText = UCase(Trim(Left(raw, lp - 1)))
+    If nameText = "" Then Return 0
+
+    paramsText = Trim(Mid(raw, lp + 1, rp - lp - 1))
+    bodyText = Trim(Mid(raw, rp + 1))
+    If bodyText = "" Then Return 0
+
+    If paramsText = "" Then
+        paramCount = 0
+        Return 1
+    End If
+
+    Dim normalizedParams As String
+    normalizedParams = ""
+
+    Dim i As Integer
+    For i = 0 To LexerParamsTextCount(paramsText) - 1
+        Dim p As String
+        p = LexerGetParamNameAt(paramsText, i)
+        If p = "" Then Return 0
+
+        Dim j As Integer
+        For j = 1 To Len(p)
+            Dim c As String
+            c = Mid(p, j, 1)
+            If j = 1 Then
+                If LexerIsIdentStartChar(c) = 0 Then Return 0
+            Else
+                If LexerIsIdentPartChar(c) = 0 Then Return 0
+            End If
+        Next j
+
+        If normalizedParams <> "" Then normalizedParams &= ","
+        normalizedParams &= p
+    Next i
+
+    paramsText = normalizedParams
+    paramCount = LexerParamsTextCount(paramsText)
+    Return 1
+End Function
+
+Private Function LexerReplaceIdentToken(ByRef src As String, ByRef identName As String, ByRef replaceText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    i = 1
+
+    Dim key As String
+    key = UCase(Trim(identName))
+
+    Do While i <= Len(src)
+        Dim ch As String
+        ch = Mid(src, i, 1)
+
+        If LexerIsIdentStartChar(ch) <> 0 Then
+            Dim j As Integer
+            j = i + 1
+            Do While j <= Len(src)
+                If LexerIsIdentPartChar(Mid(src, j, 1)) = 0 Then Exit Do
+                j += 1
+            Loop
+
+            Dim tok As String
+            tok = Mid(src, i, j - i)
+
+            If UCase(tok) = key Then
+                outText &= replaceText
+            Else
+                outText &= tok
+            End If
+
+            i = j
+        Else
+            outText &= ch
+            i += 1
+        End If
+    Loop
+
+    Return outText
+End Function
+
+Private Function LexerMacroCollectCallArgs(ByRef callText As String, args() As String, ByRef argCount As Integer) As Integer
+    argCount = 0
+    If callText = "" Then Return 0
+
+    Dim depth As Integer
+    Dim buf As String
+    Dim i As Integer
+
+    For i = 1 To Len(callText)
+        Dim ch As String
+        ch = Mid(callText, i, 1)
+
+        If ch = "(" Then
+            depth += 1
+            If depth > 1 Then buf &= ch
+            Continue For
+        End If
+
+        If ch = ")" Then
+            depth -= 1
+            If depth < 0 Then Return 0
+
+            If depth = 0 Then
+                If Trim(buf) <> "" Or argCount > 0 Then
+                    If argCount = 0 Then
+                        ReDim args(0)
+                    Else
+                        ReDim Preserve args(argCount)
+                    End If
+                    args(argCount) = Trim(buf)
+                    argCount += 1
+                End If
+                Return 1
+            End If
+
+            buf &= ch
+            Continue For
+        End If
+
+        If ch = "," And depth = 1 Then
+            If argCount = 0 Then
+                ReDim args(0)
+            Else
+                ReDim Preserve args(argCount)
+            End If
+            args(argCount) = Trim(buf)
+            argCount += 1
+            buf = ""
+            Continue For
+        End If
+
+        buf &= ch
+    Next i
+
+    Return 0
+End Function
+
+Private Function LexerExpandOneFuncMacro(ByRef lineText As String, ByRef fm As LexerFuncMacro) As String
+    Dim outText As String
+    Dim i As Integer
+    i = 1
+
+    Do While i <= Len(lineText)
+        Dim ch As String
+        ch = Mid(lineText, i, 1)
+
+        If LexerIsIdentStartChar(ch) <> 0 Then
+            Dim j As Integer
+            j = i + 1
+            Do While j <= Len(lineText)
+                If LexerIsIdentPartChar(Mid(lineText, j, 1)) = 0 Then Exit Do
+                j += 1
+            Loop
+
+            Dim tok As String
+            tok = Mid(lineText, i, j - i)
+
+            If UCase(tok) = UCase(fm.nameText) Then
+                Dim k As Integer
+                k = j
+                Do While k <= Len(lineText)
+                    Dim ws As String
+                    ws = Mid(lineText, k, 1)
+                    If ws <> " " And ws <> Chr(9) Then Exit Do
+                    k += 1
+                Loop
+
+                If k <= Len(lineText) And Mid(lineText, k, 1) = "(" Then
+                    Dim depth As Integer
+                    Dim p As Integer
+                    depth = 0
+                    For p = k To Len(lineText)
+                        Dim c As String
+                        c = Mid(lineText, p, 1)
+                        If c = "(" Then
+                            depth += 1
+                        ElseIf c = ")" Then
+                            depth -= 1
+                            If depth = 0 Then Exit For
+                        End If
+                    Next p
+
+                    If depth = 0 And p <= Len(lineText) Then
+                        Dim callText As String
+                        callText = Mid(lineText, k, p - k + 1)
+
+                        Dim args() As String
+                        Dim argCount As Integer
+                        If LexerMacroCollectCallArgs(callText, args(), argCount) <> 0 Then
+                            If argCount = fm.paramCount Then
+                                Dim repl As String
+                                repl = fm.bodyText
+
+                                Dim pi As Integer
+                                For pi = 0 To fm.paramCount - 1
+                                    Dim pname As String
+                                    pname = LexerGetParamNameAt(fm.paramsText, pi)
+                                    repl = LexerReplaceIdentToken(repl, pname, args(pi))
+                                Next pi
+
+                                outText &= repl
+                                i = p + 1
+                                Continue Do
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+
+            outText &= tok
+            i = j
+        Else
+            outText &= ch
+            i += 1
+        End If
+    Loop
+
+    Return outText
+End Function
+
+Private Function LexerExpandFuncMacrosInCodeChunk(ByRef chunkText As String, ByRef sourcePath As String, ByVal lineNo As Integer) As String
+    Dim prevText As String
+    Dim expanded As String
+    expanded = chunkText
+
+    Dim passCount As Integer
+    For passCount = 1 To 16
+        prevText = expanded
+        Dim i As Integer
+        For i = 0 To gFuncMacroCount - 1
+            expanded = LexerExpandOneFuncMacro(expanded, gFuncMacros(i))
+        Next i
+        If expanded = prevText Then Return expanded
+    Next passCount
+
+    LexerPreprocessPushDiag "LEX_MACRO_RECURSION", "macro expansion recursion limit reached", sourcePath, lineNo, 1
+    Return expanded
+End Function
+
+Private Function LexerExpandFuncMacrosInLine(ByRef lineText As String, ByRef sourcePath As String, ByVal lineNo As Integer) As String
+    Dim outText As String
+    Dim codeChunk As String
+    Dim inString As Integer
+
+    Dim i As Integer
+    i = 1
+    Do While i <= Len(lineText)
+        Dim ch As String
+        ch = Mid(lineText, i, 1)
+
+        If inString = 0 Then
+            If ch = "'" Then
+                If codeChunk <> "" Then
+                    outText &= LexerExpandFuncMacrosInCodeChunk(codeChunk, sourcePath, lineNo)
+                    codeChunk = ""
+                End If
+                outText &= Mid(lineText, i)
+                Exit Do
+            ElseIf ch = Chr(34) Then
+                If codeChunk <> "" Then
+                    outText &= LexerExpandFuncMacrosInCodeChunk(codeChunk, sourcePath, lineNo)
+                    codeChunk = ""
+                End If
+                inString = 1
+                outText &= ch
+            Else
+                codeChunk &= ch
+            End If
+        Else
+            outText &= ch
+            If ch = Chr(34) Then
+                If i < Len(lineText) And Mid(lineText, i + 1, 1) = Chr(34) Then
+                    i += 1
+                    outText &= Chr(34)
+                Else
+                    inString = 0
+                End If
+            End If
+        End If
+
+        i += 1
+    Loop
+
+    If codeChunk <> "" Then
+        outText &= LexerExpandFuncMacrosInCodeChunk(codeChunk, sourcePath, lineNo)
+    End If
+
+    Return outText
+End Function
+
+Private Sub LexerPreprocessFail(ByRef sourcePath As String, ByVal lineNo As Integer, ByRef detail As String)
+    If gPreprocessFailed <> 0 Then Exit Sub
+
+    gPreprocessFailed = 1
+    gPreprocessStop = 1
+
+    Dim prefix As String
+    prefix = "preprocess fail"
+    If Trim(sourcePath) <> "" Then
+        prefix &= " [" & sourcePath & ":" & LTrim(Str(lineNo)) & "]"
+    End If
+
+    gPreprocessError = prefix & " " & detail
+    LexerPreprocessPushDiag "LEX_PREPROCESS_ERROR", detail, sourcePath, lineNo, 1
+End Sub
+
+Function LexerPreprocessHasError() As Integer
+    Return gPreprocessFailed
+End Function
+
+Function LexerPreprocessGetError() As String
+    Return gPreprocessError
+End Function
+
+Private Function LexerDirName(ByRef filePath As String) As String
+    Dim i As Integer
+    For i = Len(filePath) To 1 Step -1
+        Dim ch As String
+        ch = Mid(filePath, i, 1)
+        If ch = "\" Or ch = "/" Then
+            Return Left(filePath, i - 1)
+        End If
+    Next i
+    Return ""
+End Function
+
+Private Function LexerJoinPath(ByRef baseDir As String, ByRef relPath As String) As String
+    If baseDir = "" Then Return relPath
+
+    Dim lastCh As String
+    lastCh = Right(baseDir, 1)
+    If lastCh = "\" Or lastCh = "/" Then
+        Return baseDir & relPath
+    End If
+
+    Return baseDir & "\" & relPath
+End Function
+
+Private Function LexerNormalizePath(ByRef filePath As String) As String
+    Dim p As String
+    p = Replace(filePath, "/", "\")
+    Do While InStr(p, "\\") > 0
+        p = Replace(p, "\\", "\")
+    Loop
+    Return p
+End Function
+
+Private Function LexerIsAbsolutePath(ByRef filePath As String) As Integer
+    If Len(filePath) >= 2 Then
+        If Mid(filePath, 2, 1) = ":" Then Return 1
+    End If
+    If Left(filePath, 1) = "\" Or Left(filePath, 1) = "/" Then Return 1
+    Return 0
+End Function
+
+Private Function LexerPathContainsParentTraversal(ByRef pathText As String) As Integer
+    Dim norm As String
+    norm = Replace(pathText, "/", "\")
+    If InStr(norm, "..\") > 0 Then Return 1
+    If Right(norm, 2) = ".." Then Return 1
+    Return 0
+End Function
+
+Private Function LexerIncludeStackContains(ByRef resolvedPath As String) As Integer
+    Dim i As Integer
+    For i = 0 To gIncludeStackCount - 1
+        If UCase(gIncludeStack(i)) = UCase(resolvedPath) Then Return 1
+    Next i
+    Return 0
+End Function
+
+Private Sub LexerIncludeStackPush(ByRef resolvedPath As String)
+    If gIncludeStackCount = 0 Then
+        ReDim gIncludeStack(0)
+    Else
+        ReDim Preserve gIncludeStack(gIncludeStackCount)
+    End If
+    gIncludeStack(gIncludeStackCount) = resolvedPath
+    gIncludeStackCount += 1
+End Sub
+
+Private Sub LexerIncludeStackPop()
+    If gIncludeStackCount <= 0 Then Exit Sub
+    gIncludeStackCount -= 1
+    If gIncludeStackCount <= 0 Then
+        Erase gIncludeStack
+    Else
+        ReDim Preserve gIncludeStack(gIncludeStackCount - 1)
+    End If
+End Sub
+
+Private Function LexerIncludeOnceContains(ByRef resolvedPath As String) As Integer
+    Dim i As Integer
+    For i = 0 To gIncludeOnceCount - 1
+        If UCase(gIncludeOncePaths(i)) = UCase(resolvedPath) Then Return 1
+    Next i
+    Return 0
+End Function
+
+Private Sub LexerIncludeOnceAdd(ByRef resolvedPath As String)
+    If LexerIncludeOnceContains(resolvedPath) <> 0 Then Exit Sub
+
+    If gIncludeOnceCount = 0 Then
+        ReDim gIncludeOncePaths(0)
+    Else
+        ReDim Preserve gIncludeOncePaths(gIncludeOnceCount)
+    End If
+    gIncludeOncePaths(gIncludeOnceCount) = resolvedPath
+    gIncludeOnceCount += 1
+End Sub
+
+Private Function LexerReadTextFile(ByRef filePath As String, ByRef textOut As String) As Integer
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Input As #f
+    If Err <> 0 Then Return 0
+
+    textOut = ""
+    Do While Not Eof(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        textOut &= lineText & Chr(10)
+    Loop
+
+    Close #f
+    Return 1
+End Function
+
+Private Function LexerEvalDirectiveCond(ByRef condText As String, macros() As LexerMacro, ByVal macroCount As Integer) As Integer
+    Dim t As String
+    t = UCase(Trim(condText))
+
+    If t = "" Then Return 0
+    If t = "TRUE" Then Return 1
+    If t = "FALSE" Then Return 0
+
+    If (t = "0") Then Return 0
+    If (t = "1") Then Return 1
+
+    If (Left(t, 1) >= "0" And Left(t, 1) <= "9") Or Left(t, 1) = "-" Then
+        Return IIf(ValInt(t) <> 0, 1, 0)
+    End If
+
+    Dim i As Integer
+    For i = 0 To macroCount - 1
+        If UCase(macros(i).nameText) = t Then
+            Return IIf(ValInt(macros(i).valueText) <> 0, 1, 0)
+        End If
+    Next i
+
+    Return 0
+End Function
+
+Private Function LexerResolveMacroToken(ByRef tokenText As String, macros() As LexerMacro, ByVal macroCount As Integer) As String
+    Dim raw As String
+    raw = Trim(tokenText)
+    If raw = "" Then Return ""
+
+    Dim key As String
+    key = UCase(raw)
+
+    Dim i As Integer
+    For i = 0 To macroCount - 1
+        If UCase(macros(i).nameText) = key Then
+            Return Trim(macros(i).valueText)
+        End If
+    Next i
+
+    Return raw
+End Function
+
+Private Function LexerEvalDirectiveIfc(ByRef restText As String, macros() As LexerMacro, ByVal macroCount As Integer, ByRef errText As String) As Integer
+    Dim commaPos As Integer
+    commaPos = InStr(restText, ",")
+    If commaPos <= 0 Then
+        errText = "%%IFC syntax: expected '<lhs>, <rhs>'"
+        Return -1
+    End If
+
+    Dim lhsRaw As String
+    Dim rhsRaw As String
+    lhsRaw = Trim(Left(restText, commaPos - 1))
+    rhsRaw = Trim(Mid(restText, commaPos + 1))
+
+    If lhsRaw = "" Or rhsRaw = "" Then
+        errText = "%%IFC syntax: both operands are required"
+        Return -1
+    End If
+
+    If InStr(rhsRaw, ",") > 0 Then
+        errText = "%%IFC syntax: expected exactly one comma"
+        Return -1
+    End If
+
+    Dim lhsVal As String
+    Dim rhsVal As String
+    lhsVal = LexerResolveMacroToken(lhsRaw, macros(), macroCount)
+    rhsVal = LexerResolveMacroToken(rhsRaw, macros(), macroCount)
+
+    Return IIf(UCase(lhsVal) = UCase(rhsVal), 1, 0)
+End Function
+
+Private Function LexerHostPlatform() As String
+#Ifdef __FB_WIN32__
+    Return "WINDOWS"
+#ElseIf defined(__FB_WIN64__)
+    Return "WINDOWS"
+#ElseIf defined(__FB_LINUX__)
+    Return "LINUX"
+#ElseIf defined(__FB_DARWIN__)
+    Return "MACOS"
+#Else
+    Return "UNKNOWN"
+#EndIf
+End Function
+
+Private Function LexerParseOnOff(ByRef textValue As String, ByRef valueOut As String) As Integer
+    Dim t As String
+    t = UCase(Trim(textValue))
+
+    If t = "" Then
+        valueOut = "1"
+        Return 1
+    End If
+
+    If t = "1" Or t = "ON" Or t = "TRUE" Then
+        valueOut = "1"
+        Return 1
+    End If
+
+    If t = "0" Or t = "OFF" Or t = "FALSE" Then
+        valueOut = "0"
+        Return 1
+    End If
+
+    Return 0
+End Function
+
+Private Sub LexerSetMacro(ByRef nameText As String, ByRef valueText As String, macros() As LexerMacro, ByRef macroCount As Integer)
+    Dim key As String
+    key = UCase(Trim(nameText))
+    If key = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To macroCount - 1
+        If UCase(macros(i).nameText) = key Then
+            macros(i).valueText = Trim(valueText)
+            Exit Sub
+        End If
+    Next i
+
+    If macroCount = 0 Then
+        ReDim macros(0)
+    Else
+        ReDim Preserve macros(macroCount)
+    End If
+
+    macros(macroCount).nameText = key
+    macros(macroCount).valueText = Trim(valueText)
+    macroCount += 1
+End Sub
+
+Private Sub LexerUnsetMacro(ByRef nameText As String, macros() As LexerMacro, ByRef macroCount As Integer)
+    Dim key As String
+    key = UCase(Trim(nameText))
+    If key = "" Or macroCount <= 0 Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To macroCount - 1
+        If UCase(macros(i).nameText) = key Then
+            Dim j As Integer
+            For j = i To macroCount - 2
+                macros(j) = macros(j + 1)
+            Next j
+
+            macroCount -= 1
+            If macroCount <= 0 Then
+                Erase macros
+            Else
+                ReDim Preserve macros(macroCount - 1)
+            End If
+            Exit Sub
+        End If
+    Next i
+End Sub
+
+Private Sub LexerSplitDirective(ByRef directive As String, ByRef head As String, ByRef restText As String)
+    Dim sp As Integer
+    sp = InStr(directive, " ")
+    If sp <= 0 Then
+        head = UCase(directive)
+        restText = ""
+    Else
+        head = UCase(Left(directive, sp - 1))
+        restText = Trim(Mid(directive, sp + 1))
+    End If
+End Sub
+
+Private Sub LexerPushCondFrame(ByVal parentActive As Integer, ByVal condValue As Integer, stackParent() As Integer, stackCond() As Integer, stackElseSeen() As Integer, ByRef stackCount As Integer)
+    If stackCount = 0 Then
+        ReDim stackParent(0)
+        ReDim stackCond(0)
+        ReDim stackElseSeen(0)
+    Else
+        ReDim Preserve stackParent(stackCount)
+        ReDim Preserve stackCond(stackCount)
+        ReDim Preserve stackElseSeen(stackCount)
+    End If
+
+    stackParent(stackCount) = parentActive
+    stackCond(stackCount) = condValue
+    stackElseSeen(stackCount) = 0
+    stackCount += 1
+End Sub
+
+Private Sub LexerPopCondFrame(stackParent() As Integer, stackCond() As Integer, stackElseSeen() As Integer, ByRef stackCount As Integer, ByRef active As Integer)
+    If stackCount > 0 Then
+        Dim top As Integer
+        top = stackCount - 1
+        active = stackParent(top)
+
+        stackCount -= 1
+        If stackCount <= 0 Then
+            Erase stackParent
+            Erase stackCond
+            Erase stackElseSeen
+        Else
+            ReDim Preserve stackParent(stackCount - 1)
+            ReDim Preserve stackCond(stackCount - 1)
+            ReDim Preserve stackElseSeen(stackCount - 1)
+        End If
+    Else
+        active = 1
+    End If
+End Sub
+
+Private Sub LexerHandleDefine(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer)
+    Dim nameText As String
+    Dim valueText As String
+    Dim sp2 As Integer
+    sp2 = InStr(restText, " ")
+    If sp2 <= 0 Then
+        nameText = restText
+        valueText = "1"
+    Else
+        nameText = Left(restText, sp2 - 1)
+        valueText = Trim(Mid(restText, sp2 + 1))
+        If valueText = "" Then valueText = "1"
+    End If
+    LexerSetMacro nameText, valueText, macros(), macroCount
+End Sub
+
+Private Sub LexerHandleMacro(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer)
+    Dim nameText As String
+    Dim paramsText As String
+    Dim paramCount As Integer
+    Dim bodyText As String
+
+    If LexerParseFuncMacroDirective(restText, nameText, paramsText, paramCount, bodyText) <> 0 Then
+        LexerSetFuncMacro nameText, paramsText, paramCount, bodyText
+        Exit Sub
+    End If
+
+    ' Fallback: %%MACRO NAME VALUE behaves like %%DEFINE NAME VALUE.
+    LexerHandleDefine restText, macros(), macroCount
+End Sub
+
+Private Sub LexerHandleInclude(ByRef restText As String, ByRef sourcePath As String, ByVal depth As Integer, ByVal lineNo As Integer, ByRef outputText As String)
+    Dim incPath As String
+    incPath = ""
+
+    If Len(restText) >= 2 And Left(restText, 1) = Chr(34) And Right(restText, 1) = Chr(34) Then
+        incPath = Mid(restText, 2, Len(restText) - 2)
+    End If
+
+    If incPath = "" Then Exit Sub
+
+    If LexerIsAbsolutePath(incPath) <> 0 Then
+        LexerPreprocessPushDiag "LEX_INCLUDE_UNSAFE_PATH", "absolute include path rejected: " & incPath, sourcePath, lineNo, 1
+        LexerPreprocessFail sourcePath, lineNo, "include failed: unsafe absolute path"
+        Exit Sub
+    End If
+
+    If LexerPathContainsParentTraversal(incPath) <> 0 Then
+        LexerPreprocessPushDiag "LEX_INCLUDE_UNSAFE_PATH", "parent traversal include path rejected: " & incPath, sourcePath, lineNo, 1
+        LexerPreprocessFail sourcePath, lineNo, "include failed: unsafe parent traversal"
+        Exit Sub
+    End If
+
+    Dim resolvedPath As String
+    resolvedPath = LexerJoinPath(LexerDirName(sourcePath), incPath)
+    resolvedPath = LexerNormalizePath(resolvedPath)
+
+    If LexerIncludeOnceContains(resolvedPath) <> 0 Then Exit Sub
+
+    If LexerIncludeStackContains(resolvedPath) <> 0 Then
+        LexerPreprocessPushDiag "LEX_INCLUDE_CYCLE", "include cycle detected: " & resolvedPath, sourcePath, lineNo, 1
+        LexerPreprocessFail sourcePath, lineNo, "include failed: include cycle"
+        Exit Sub
+    End If
+
+    Dim includeText As String
+    If LexerReadTextFile(resolvedPath, includeText) <> 0 Then
+        outputText &= LexerPreprocessSourceImpl(includeText, resolvedPath, depth + 1)
+        LexerIncludeOnceAdd resolvedPath
+        If Right(outputText, 1) <> Chr(10) Then outputText &= Chr(10)
+    Else
+        LexerPreprocessPushDiag "LEX_INCLUDE_FAILED", "include read failed: " & incPath, sourcePath, lineNo, 1
+        LexerPreprocessFail sourcePath, lineNo, "include failed: read error"
+    End If
+End Sub
+
+Private Function LexerHandleHostDirective(ByRef head As String, ByRef restText As String, ByRef sourcePath As String, ByVal lineNo As Integer, ByRef hostPlatform As String, macros() As LexerMacro, ByRef macroCount As Integer) As Integer
+    Select Case head
+    Case "PLATFORM"
+        Dim requestedPlatform As String
+        requestedPlatform = UCase(Trim(restText))
+        If requestedPlatform <> "" And requestedPlatform <> hostPlatform Then
+            LexerPreprocessFail sourcePath, lineNo, "%%PLATFORM mismatch: host=" & hostPlatform & " requested=" & requestedPlatform
+            Return 0
+        End If
+        LexerSetMacro "PLATFORM", hostPlatform, macros(), macroCount
+
+    Case "DESTOS"
+        Dim targetOs As String
+        targetOs = UCase(Trim(restText))
+        If targetOs = "" Then targetOs = hostPlatform
+        LexerSetMacro "DESTOS", targetOs, macros(), macroCount
+
+    Case "NOZEROVARS"
+        Dim noZeroValue As String
+        If LexerParseOnOff(restText, noZeroValue) = 0 Then
+            LexerPreprocessFail sourcePath, lineNo, "%%NOZEROVARS expects ON/OFF/1/0"
+            Return 0
+        End If
+        LexerSetMacro "NOZEROVARS", noZeroValue, macros(), macroCount
+
+    Case "SECSTACK"
+        Dim secStackValue As String
+        If LexerParseOnOff(restText, secStackValue) = 0 Then
+            LexerPreprocessFail sourcePath, lineNo, "%%SECSTACK expects ON/OFF/1/0"
+            Return 0
+        End If
+        LexerSetMacro "SECSTACK", secStackValue, macros(), macroCount
+    End Select
+
+    Return 1
+End Function
+
+Private Function LexerProcessDirective(ByRef head As String, ByRef restText As String, ByRef sourcePath As String, ByVal depth As Integer, ByVal lineNo As Integer, ByRef hostPlatform As String, macros() As LexerMacro, ByRef macroCount As Integer, stackParent() As Integer, stackCond() As Integer, stackElseSeen() As Integer, ByRef stackCount As Integer, ByRef active As Integer, ByRef outputText As String) As Integer
+    Select Case head
+    Case "DEFINE"
+        If active <> 0 Then
+            LexerHandleDefine restText, macros(), macroCount
+        End If
+
+    Case "MACRO"
+        If active <> 0 Then
+            LexerHandleMacro restText, macros(), macroCount
+        End If
+
+    Case "UNDEF"
+        If active <> 0 Then
+            LexerUnsetMacro restText, macros(), macroCount
+        End If
+
+    Case "IF"
+        Dim parentActive As Integer
+        parentActive = active
+
+        Dim condValue As Integer
+        condValue = 0
+        If parentActive <> 0 Then
+            condValue = LexerEvalDirectiveCond(restText, macros(), macroCount)
+        End If
+
+        LexerPushCondFrame parentActive, condValue, stackParent(), stackCond(), stackElseSeen(), stackCount
+        active = IIf(parentActive <> 0 And condValue <> 0, 1, 0)
+
+    Case "IFC"
+        Dim parentActiveIfc As Integer
+        parentActiveIfc = active
+
+        Dim ifcErr As String
+        Dim ifcCond As Integer
+        ifcCond = 0
+        If parentActiveIfc <> 0 Then
+            ifcCond = LexerEvalDirectiveIfc(restText, macros(), macroCount, ifcErr)
+            If ifcCond < 0 Then
+                LexerPreprocessFail sourcePath, lineNo, ifcErr
+                Return 0
+            End If
+        End If
+
+        LexerPushCondFrame parentActiveIfc, ifcCond, stackParent(), stackCond(), stackElseSeen(), stackCount
+        active = IIf(parentActiveIfc <> 0 And ifcCond <> 0, 1, 0)
+
+    Case "ELSE"
+        If stackCount > 0 Then
+            Dim top As Integer
+            top = stackCount - 1
+
+            If stackElseSeen(top) = 0 Then
+                stackElseSeen(top) = 1
+                active = IIf(stackParent(top) <> 0 And stackCond(top) = 0, 1, 0)
+            Else
+                active = 0
+            End If
+        End If
+
+    Case "ENDIF"
+        LexerPopCondFrame stackParent(), stackCond(), stackElseSeen(), stackCount, active
+
+    Case "INCLUDE"
+        If active <> 0 Then
+            LexerHandleInclude restText, sourcePath, depth, lineNo, outputText
+        End If
+
+    Case "ENDCOMP"
+        If active <> 0 Then
+            gPreprocessStop = 1
+            Return 0
+        End If
+
+    Case "ERRORENDCOMP"
+        If active <> 0 Then
+            Dim msg As String
+            msg = Trim(restText)
+            If msg = "" Then
+                msg = "%%ERRORENDCOMP"
+            Else
+                msg = "%%ERRORENDCOMP " & msg
+            End If
+            LexerPreprocessFail sourcePath, lineNo, msg
+            Return 0
+        End If
+
+    Case "PLATFORM", "DESTOS", "NOZEROVARS", "SECSTACK"
+        If active <> 0 Then
+            If LexerHandleHostDirective(head, restText, sourcePath, lineNo, hostPlatform, macros(), macroCount) = 0 Then Return 0
+        End If
+    End Select
+
+    Return 1
+End Function
+
+Private Function LexerPreprocessSourceImpl(ByRef src As String, ByRef sourcePath As String, ByVal depth As Integer) As String
+    If depth > 8 Then Return src
+
+    If gPreprocessStop <> 0 Then Return ""
+
+    Dim resolvedSourcePath As String
+    resolvedSourcePath = LexerNormalizePath(sourcePath)
+    If resolvedSourcePath <> "" Then
+        If LexerIncludeStackContains(resolvedSourcePath) <> 0 Then
+            LexerPreprocessPushDiag "LEX_INCLUDE_CYCLE", "include cycle detected: " & resolvedSourcePath, sourcePath, 1, 1
+            LexerPreprocessFail sourcePath, 1, "include failed: include cycle"
+            Return ""
+        End If
+        LexerIncludeStackPush resolvedSourcePath
+    End If
+
+    Dim macros() As LexerMacro
+    Dim macroCount As Integer
+
+    Dim hostPlatform As String
+    hostPlatform = LexerHostPlatform()
+    LexerSetMacro "PLATFORM", hostPlatform, macros(), macroCount
+    LexerSetMacro "DESTOS", hostPlatform, macros(), macroCount
+    LexerSetMacro "NOZEROVARS", "0", macros(), macroCount
+    LexerSetMacro "SECSTACK", "0", macros(), macroCount
+
+    Dim stackParent() As Integer
+    Dim stackCond() As Integer
+    Dim stackElseSeen() As Integer
+    Dim stackCount As Integer
+
+    Dim outputText As String
+    Dim cursor As Integer
+    cursor = 1
+
+    Dim lineNo As Integer
+    lineNo = 1
+
+    Dim active As Integer
+    active = 1
+
+    Do While cursor <= Len(src)
+        If gPreprocessStop <> 0 Then Exit Do
+
+        Dim nextLf As Integer
+        nextLf = InStr(cursor, src, Chr(10))
+
+        Dim lineText As String
+        If nextLf = 0 Then
+            lineText = Mid(src, cursor)
+            cursor = Len(src) + 1
+        Else
+            lineText = Mid(src, cursor, nextLf - cursor)
+            cursor = nextLf + 1
+        End If
+
+        If Right(lineText, 1) = Chr(13) Then
+            lineText = Left(lineText, Len(lineText) - 1)
+        End If
+
+        Dim trimmed As String
+        trimmed = LTrim(lineText)
+
+        If Left(trimmed, 2) = "%%" Then
+            Dim directive As String
+            directive = Trim(Mid(trimmed, 3))
+
+            Dim head As String
+            Dim restText As String
+            LexerSplitDirective directive, head, restText
+
+            If LexerProcessDirective(head, restText, sourcePath, depth, lineNo, hostPlatform, macros(), macroCount, stackParent(), stackCond(), stackElseSeen(), stackCount, active, outputText) = 0 Then
+                Exit Do
+            End If
+        Else
+            If active <> 0 Then
+                outputText &= LexerExpandFuncMacrosInLine(lineText, sourcePath, lineNo) & Chr(10)
+            End If
+        End If
+
+        lineNo += 1
+    Loop
+
+    If resolvedSourcePath <> "" Then LexerIncludeStackPop
+    Return outputText
+End Function
+
+Private Function LexerPreprocessSource(ByRef src As String, ByRef sourcePath As String) As String
+    LexerPreprocessResetState
+    Return LexerPreprocessSourceImpl(src, sourcePath, 0)
+End Function
