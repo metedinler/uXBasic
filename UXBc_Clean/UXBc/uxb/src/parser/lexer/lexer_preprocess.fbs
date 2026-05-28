@@ -22,6 +22,7 @@ Dim Shared gIncludeOncePaths() As String
 Dim Shared gIncludeOnceCount As Integer
 Dim Shared gIncludeStack() As String
 Dim Shared gIncludeStackCount As Integer
+Dim Shared gMacroExpandLimit As Integer
 
 Private Sub LexerPreprocessResetState()
     gPreprocessStop = 0
@@ -33,7 +34,33 @@ Private Sub LexerPreprocessResetState()
     gIncludeStackCount = 0
     Erase gIncludeOncePaths
     Erase gIncludeStack
+    gMacroExpandLimit = 16
     LexerDiagnosticListInit gPreprocessDiagnostics
+End Sub
+
+Private Function LexerSplitHeadArg(ByRef restText As String, ByRef a As String, ByRef b As String) As Integer
+    Dim sp As Integer
+    sp = InStr(restText, " ")
+    If sp <= 0 Then
+        a = Trim(restText)
+        b = ""
+    Else
+        a = Trim(Left(restText, sp - 1))
+        b = Trim(Mid(restText, sp + 1))
+    End If
+    Return IIf(a <> "", 1, 0)
+End Function
+
+Private Sub LexerEmitArtifactLine(ByRef outText As String, ByRef kindText As String, ByRef payload As String)
+    outText &= "' %%" & kindText
+    If Trim(payload) <> "" Then outText &= " " & payload
+    outText &= Chr(10)
+End Sub
+
+Private Sub LexerEmitArtifactBlock(ByRef outText As String, ByRef kindText As String, ByRef argText As String, ByRef bodyText As String)
+    LexerEmitArtifactLine outText, kindText & "_BEGIN", argText
+    If bodyText <> "" Then outText &= bodyText
+    LexerEmitArtifactLine outText, kindText & "_END", ""
 End Sub
 
 Private Sub LexerPreprocessPushDiag(ByRef codeText As String, ByRef msgText As String, ByRef sourcePath As String, ByVal lineNo As Integer, ByVal colNo As Integer)
@@ -372,7 +399,7 @@ Private Function LexerExpandFuncMacrosInCodeChunk(ByRef chunkText As String, ByR
     expanded = chunkText
 
     Dim passCount As Integer
-    For passCount = 1 To 16
+    For passCount = 1 To gMacroExpandLimit
         prevText = expanded
         Dim i As Integer
         For i = 0 To gFuncMacroCount - 1
@@ -649,6 +676,20 @@ Private Function LexerEvalDirectiveIfc(ByRef restText As String, macros() As Lex
     Return IIf(UCase(lhsVal) = UCase(rhsVal), 1, 0)
 End Function
 
+Private Function LexerEvalSimpleInt(ByRef exprText As String, macros() As LexerMacro, ByVal macroCount As Integer, ByRef okOut As Integer) As Integer
+    Dim t As String
+    t = Trim(exprText)
+    If t = "" Then
+        okOut = 0
+        Return 0
+    End If
+
+    Dim resolved As String
+    resolved = LexerResolveMacroToken(t, macros(), macroCount)
+    okOut = 1
+    Return ValInt(resolved)
+End Function
+
 Private Function LexerHostPlatform() As String
 #Ifdef __FB_WIN32__
     Return "WINDOWS"
@@ -896,11 +937,62 @@ Private Function LexerHandleHostDirective(ByRef head As String, ByRef restText A
     Return 1
 End Function
 
-Private Function LexerProcessDirective(ByRef head As String, ByRef restText As String, ByRef sourcePath As String, ByVal depth As Integer, ByVal lineNo As Integer, ByRef hostPlatform As String, macros() As LexerMacro, ByRef macroCount As Integer, stackParent() As Integer, stackCond() As Integer, stackElseSeen() As Integer, ByRef stackCount As Integer, ByRef active As Integer, ByRef outputText As String) As Integer
+Private Function LexerBlockEndHead(ByRef beginHead As String) As String
+    Select Case beginHead
+    Case "JS_BEGIN": Return "JS_END"
+    Case "WAT_BEGIN": Return "WAT_END"
+    Case "WAT_FUNC_BEGIN": Return "WAT_FUNC_END"
+    Case "WASM_HOST_JS_BEGIN": Return "WASM_HOST_JS_END"
+    Case "HTML_BEGIN": Return "HTML_END"
+    Case "CSS_BEGIN": Return "CSS_END"
+    Case "JSON_BEGIN": Return "JSON_END"
+    Case "JSON_ARRAY_BEGIN": Return "JSON_ARRAY_END"
+    Case "MD_BEGIN": Return "MD_END"
+    Case "SECTION": Return "ENDSECTION"
+    Case Else: Return ""
+    End Select
+End Function
+
+Private Function LexerProcessDirective(ByRef head As String, ByRef restText As String, ByRef sourcePath As String, ByVal depth As Integer, ByVal lineNo As Integer, ByRef hostPlatform As String, macros() As LexerMacro, ByRef macroCount As Integer, stackParent() As Integer, stackCond() As Integer, stackElseSeen() As Integer, ByRef stackCount As Integer, ByRef active As Integer, ByRef outputText As String, ByRef blockActive As Integer, ByRef blockBeginHead As String, ByRef blockEndHead As String, ByRef blockArg As String, ByRef blockBody As String) As Integer
     Select Case head
     Case "DEFINE"
         If active <> 0 Then
             LexerHandleDefine restText, macros(), macroCount
+        End If
+
+    Case "SET"
+        If active <> 0 Then
+            LexerHandleDefine restText, macros(), macroCount
+        End If
+
+    Case "EVAL"
+        If active <> 0 Then
+            Dim evalName As String
+            Dim evalExpr As String
+            If LexerSplitHeadArg(restText, evalName, evalExpr) = 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "%%EVAL syntax: expected '<name> <expr>'"
+                Return 0
+            End If
+
+            Dim evalOk As Integer
+            Dim evalVal As Integer
+            evalVal = LexerEvalSimpleInt(evalExpr, macros(), macroCount, evalOk)
+            If evalOk = 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "%%EVAL invalid expression"
+                Return 0
+            End If
+            LexerSetMacro evalName, LTrim(Str(evalVal)), macros(), macroCount
+        End If
+
+    Case "EXPANDLIMIT"
+        If active <> 0 Then
+            Dim lim As Integer
+            lim = ValInt(Trim(restText))
+            If lim < 1 Or lim > 1024 Then
+                LexerPreprocessFail sourcePath, lineNo, "%%EXPANDLIMIT expects range 1..1024"
+                Return 0
+            End If
+            gMacroExpandLimit = lim
         End If
 
     Case "MACRO"
@@ -965,6 +1057,91 @@ Private Function LexerProcessDirective(ByRef head As String, ByRef restText As S
             LexerHandleInclude restText, sourcePath, depth, lineNo, outputText
         End If
 
+    Case "FOR", "ENDFOR", "FOREACH", "ENDFOREACH", "REPEAT", "ENDREPEAT", "BREAK", "CONTINUE"
+        If active <> 0 Then
+            LexerEmitArtifactLine outputText, head, restText
+        End If
+
+    Case "TARGET", "OUTDIR"
+        If active <> 0 Then
+            LexerSetMacro head, restText, macros(), macroCount
+            LexerEmitArtifactLine outputText, head, restText
+        End If
+
+    Case "SECTION", "JS_BEGIN", "WAT_BEGIN", "WAT_FUNC_BEGIN", "WASM_HOST_JS_BEGIN", "HTML_BEGIN", "CSS_BEGIN", "JSON_BEGIN", "JSON_ARRAY_BEGIN", "MD_BEGIN"
+        If active <> 0 Then
+            If blockActive <> 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "nested preprocessor block is not supported"
+                Return 0
+            End If
+            blockEndHead = LexerBlockEndHead(head)
+            If blockEndHead = "" Then
+                LexerPreprocessFail sourcePath, lineNo, "block directive has no end marker: " & head
+                Return 0
+            End If
+            blockActive = 1
+            blockBeginHead = head
+            blockArg = restText
+            blockBody = ""
+        End If
+
+    Case "ENDSECTION", "JS_END", "WAT_END", "WAT_FUNC_END", "WASM_HOST_JS_END", "HTML_END", "CSS_END", "JSON_END", "JSON_ARRAY_END", "MD_END"
+        If active <> 0 Then
+            LexerEmitArtifactLine outputText, head, restText
+        End If
+
+    Case "JS_LINE", "JS_FILE", "WAT_IMPORT", "WAT_EXPORT", "HTML_LINE", "HTML_SCRIPT", "HTML_STYLE", "HTML_IMAGE", "HTML_AUDIO", "CSS_LINE", "CSS_RULE", "CSS_IMPORT", "JSON_SET", "MANIFEST_SET", "MANIFEST_REQUIRE", "MD_FILE", "MD_SAFE", "MD_CSS", "ASSET_ROOT", "ASSET_COPY", "ASSET_FILE", "ASSET_IMAGE", "ASSET_AUDIO", "ASSET_REQUIRE", "REQUIRE_HOST_BINDING"
+        If active <> 0 Then
+            LexerEmitArtifactLine outputText, head, restText
+        End If
+
+    Case "ALLOW_RAW_JS", "ALLOW_RAW_WAT", "SAFE_PATHS"
+        If active <> 0 Then
+            Dim polVal As String
+            If LexerParseOnOff(restText, polVal) = 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "%%" & head & " expects ON/OFF/1/0"
+                Return 0
+            End If
+            LexerSetMacro head, polVal, macros(), macroCount
+            LexerEmitArtifactLine outputText, head, polVal
+        End If
+
+    Case "ASSERT_META"
+        If active <> 0 Then
+            If LexerEvalDirectiveCond(restText, macros(), macroCount) = 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "%%ASSERT_META failed: " & restText
+                Return 0
+            End If
+        End If
+
+    Case "WARN_META"
+        If active <> 0 Then
+            If LexerEvalDirectiveCond(restText, macros(), macroCount) = 0 Then
+                LexerPreprocessPushDiag "LEX_WARN_META", "%%WARN_META triggered: " & restText, sourcePath, lineNo, 1
+            End If
+        End If
+
+    Case "ALIAS"
+        If active <> 0 Then
+            Dim up As String
+            up = UCase(restText)
+            Dim asPos As Integer
+            asPos = InStr(up, " AS ")
+            If asPos <= 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "%%ALIAS syntax: expected '<old> AS <new>'"
+                Return 0
+            End If
+            Dim oldName As String
+            Dim newName As String
+            oldName = Trim(Left(restText, asPos - 1))
+            newName = Trim(Mid(restText, asPos + 4))
+            If oldName = "" Or newName = "" Then
+                LexerPreprocessFail sourcePath, lineNo, "%%ALIAS syntax: empty side"
+                Return 0
+            End If
+            LexerSetMacro oldName, newName, macros(), macroCount
+        End If
+
     Case "ENDCOMP"
         If active <> 0 Then
             gPreprocessStop = 1
@@ -987,6 +1164,12 @@ Private Function LexerProcessDirective(ByRef head As String, ByRef restText As S
     Case "PLATFORM", "DESTOS", "NOZEROVARS", "SECSTACK"
         If active <> 0 Then
             If LexerHandleHostDirective(head, restText, sourcePath, lineNo, hostPlatform, macros(), macroCount) = 0 Then Return 0
+        End If
+
+    Case Else
+        If active <> 0 Then
+            LexerPreprocessPushDiag "LEX_PREPROCESS_UNKNOWN_DIRECTIVE", "unknown preprocessor directive: %%" & head, sourcePath, lineNo, 1
+            LexerEmitArtifactLine outputText, head, restText
         End If
     End Select
 
@@ -1034,6 +1217,12 @@ Private Function LexerPreprocessSourceImpl(ByRef src As String, ByRef sourcePath
     Dim active As Integer
     active = 1
 
+    Dim blockActive As Integer
+    Dim blockBeginHead As String
+    Dim blockEndHeadLocal As String
+    Dim blockArg As String
+    Dim blockBody As String
+
     Do While cursor <= Len(src)
         If gPreprocessStop <> 0 Then Exit Do
 
@@ -1056,6 +1245,34 @@ Private Function LexerPreprocessSourceImpl(ByRef src As String, ByRef sourcePath
         Dim trimmed As String
         trimmed = LTrim(lineText)
 
+        If blockActive <> 0 Then
+            If Left(trimmed, 2) = "%%" Then
+                Dim blockDirective As String
+                blockDirective = Trim(Mid(trimmed, 3))
+
+                Dim blockHead As String
+                Dim blockRest As String
+                LexerSplitDirective blockDirective, blockHead, blockRest
+
+                If blockHead = blockEndHeadLocal Then
+                    If active <> 0 Then
+                        LexerEmitArtifactBlock outputText, blockBeginHead, blockArg, blockBody
+                    End If
+                    blockActive = 0
+                    blockBeginHead = ""
+                    blockEndHeadLocal = ""
+                    blockArg = ""
+                    blockBody = ""
+                    lineNo += 1
+                    Continue Do
+                End If
+            End If
+
+            blockBody &= lineText & Chr(10)
+            lineNo += 1
+            Continue Do
+        End If
+
         If Left(trimmed, 2) = "%%" Then
             Dim directive As String
             directive = Trim(Mid(trimmed, 3))
@@ -1064,7 +1281,7 @@ Private Function LexerPreprocessSourceImpl(ByRef src As String, ByRef sourcePath
             Dim restText As String
             LexerSplitDirective directive, head, restText
 
-            If LexerProcessDirective(head, restText, sourcePath, depth, lineNo, hostPlatform, macros(), macroCount, stackParent(), stackCond(), stackElseSeen(), stackCount, active, outputText) = 0 Then
+            If LexerProcessDirective(head, restText, sourcePath, depth, lineNo, hostPlatform, macros(), macroCount, stackParent(), stackCond(), stackElseSeen(), stackCount, active, outputText, blockActive, blockBeginHead, blockEndHeadLocal, blockArg, blockBody) = 0 Then
                 Exit Do
             End If
         Else
@@ -1075,6 +1292,10 @@ Private Function LexerPreprocessSourceImpl(ByRef src As String, ByRef sourcePath
 
         lineNo += 1
     Loop
+
+    If blockActive <> 0 Then
+        LexerPreprocessFail sourcePath, lineNo, "unterminated preprocessor block: %%" & blockBeginHead
+    End If
 
     If resolvedSourcePath <> "" Then LexerIncludeStackPop
     Return outputText
