@@ -1286,19 +1286,6 @@ Derleme işlemi sonucunda şu dosyalar oluşur:
 
 ---
 
-**Bölüm 3 Sonu.**
-
-**Değerlendirme:**
-Bu aşamada projenin "nasıl çalıştığını" ve "belleği nasıl kontrol ettiğini" sistematik hale getirdik. 
-* **İnsan için:** Pointer aritmetiğini ve INLINE kullanımını netleştirdik.
-* **Yapay Zeka için:** Modül yollarını ve kod üretimi (codegen) mantığını tanımladık.
-
-Sistematik refaktör sürecinin en can alıcı noktasına, yani **uXBasic'in Nesne Yönelimli Dünyasına (OOP)**, **Hata Yönetimi Stratejisine** ve **Derleyici Bileşenlerinin Derinlemesine Teknik Detaylarına** geçiyoruz.
-
-Bu bölüm, `pek.md` belgesinin "İleri Düzey Geliştirici" ve "Yapay Zeka Eğitim Verisi" katmanını oluşturur.
-
----
-
 # - Bölüm 4: Nesne Modeli, Koleksiyonlar ve Mimari Detaylar
 
 ## 17. Nesne Tabanlı Programlama (NesneYonelimli - OOP)
@@ -1387,8 +1374,6 @@ Bu bölüm, `uXbasic` derleyicisine katkı sunacak bir mühendisin bilmesi gerek
 4.  **Optimization:** AST üzerinden gereksiz kodlar ayıklanır.
 5.  **Emission:** Ara kod (ASM) veya doğrudan makine kodu (EXE) üretilir.
 
-
-
 ---
 
 ## 21. Artifact (Üretim Çıktıları) Yönetimi
@@ -1420,10 +1405,7 @@ Derleme sonunda oluşan dosyaların hiyerarşisi ve kullanım amaçları:
 3.  **Öğrenci İçin:** Temel BASIC mantığını modern x64 dünyasıyla birleştirdi.
 4.  **Katılımcı İçin:** Derleyicinin iç modüllerini ve build pipeline'ını haritalandırdı.
 
-Haklısın. "Kitap" vizyonu, sadece komutları listelemek değil; o komutun neden var olduğunu, işlemcinin kalbinde nasıl bir karşılık bulduğunu ve derleyicinin (compiler) bu metni nasıl "et ve kemiğe" (makine koduna) dönüştürdüğünü anlatmayı gerektirir. 
-
-Şu an broşür aşamasından çıkıp, **uXBasic Mühendislik El Kitabı** formatına geçiyoruz. Bu bölümü, projenin **"Motor Odası"** olarak görebilirsin. Sözdiziminden ziyade, derleyici mimarisinin bilgisayar bilimi temellerine odaklanacağız.
-
+ **uXBasic Mühendislik El Kitabı** formatına geçiyoruz. 
 ---
 
 # uXBasic Teknik Kitap (pek.md) - Genişletilmiş Versiyon
@@ -1461,8 +1443,6 @@ Lexer, derleyicinin "gözüdür". Kaynak dosyadaki karakter yığınını (`P`, 
 * **Dinamik Token Kapasitesi:** Bellek şişmesini önlemek için token havuzunu dinamik büyütür.
 * **Sayısal Dönüşüm:** "123.45" dizisini bellekte doğrudan `F64` karşılığına çevirir.
 
-
-
 ---
 
 ## 3. Parser ve AST: Mantığın İskeleti
@@ -1477,7 +1457,6 @@ uXBasic'te her satır bir `StatementNode` (İfade Düğümü), her hesaplama ise
 * **Sağ Çocuk (RHS):** `BinaryOpNode(+)`
     * **Sol:** `VariableNode(a)`
     * **Sağ:** `LiteralNode(5)`
-
 
 
 ### 3.2 Parser Teknikleri
@@ -1516,15 +1495,6 @@ Geliştirme aşamasında `--execmem` bayrağı ile AST düğümleri doğrudan be
 1.  **Dengeli Ağaçlar:** Binlerce satırlık bir programda AST'nin bellek yönetimi (ASTPool) verimli yapılmazsa derleyici çöker.
 2.  **Kapsam (Scope) Yönetimi:** Bir fonksiyonun içindeki `x` değişkeni ile dışındaki `x`'in adreslerinin karışmaması için her fonksiyonun kendi "Scope Frame" yapısı vardır.
 3.  **Hizalama (Alignment):** x64 işlemcilerde verinin 8 veya 16 baytın katı olmayan adreslerde olması performansı %50 düşürebilir. uXBasic `TypeWidthAbstraction` ile bunu otomatik çözer.
-
----
-
-**Bölüm 5 Hazırlık Sorusu:**
-Bu "Motor Odası" detayları, derleyicinin iç işleyişini anlamak için yeterli mi? Bir sonraki bölümde **"x64 ABI ve Register Allocation (Yazmaç Dağıtımı)"** gibi daha derin teknik konulara mı girelim, yoksa **"Kütüphane (Lib) Yazımı ve Windows API Entegrasyonu"** konusuna mı?
-
-Kesinlikle haklısın. Bir derleyici (compiler) projesinde "şurada şu fonksiyon var" demek yetmez; o fonksiyonun hangi veri tipini aldığını, bellekte hangi yapıyı değiştirdiğini ve hata durumunda ne fırlattığını bilmeden ne bir insan o kodu geliştirebilir ne de bir yapay zeka o mimariye katkı sunabilir. Bir "Mühendislik Spesifikasyonu" (Engineering Specification), projenin anayasasıdır.
-
-Sitemini ve vizyonunu anladım. Broşür seviyesini geride bırakıyoruz. **PEK.MD** belgesini, uXBasic derleyicisinin **"Teknik Radyografisi"** olacak şekilde, modül modül, değişken değişken ve algoritma seviyesinde aşağıda yeniden inşa etmeye başlıyorum.
 
 ---
 
@@ -1576,8 +1546,6 @@ Jetonlardan anlamlı bir ağaç yapısı kurar.
 * `ParseExpression(precedence AS I32) -> NodePtr`: İşlem önceliğine (PEMDAS) göre matematiksel ifadeleri ağaca dizer.
 * `ParseStatement() -> NodePtr`: `IF`, `FOR`, `PRINT` gibi komut bloklarını ayrıştırır.
 * `Expect(type AS TokenType)`: Beklenen bir jeton gelmezse `E100 (Syntax Error)` fırlatır.
-
-
 
 ---
 
@@ -1641,12 +1609,6 @@ Derleyici bir kara kutu değildir. Çıktıları şu sırayla oluşur:
 2. **Lexer Keyword Tablosu:** Her komutun `src/parser/lexer_keyword_table.fbs` içindeki tam listesi ve jeton ID'leri.
 3. **Değişkenlerin Yaşam Döngüsü:** Bir değişken tanımlandığında `TypeWidthAbstraction.fbs` üzerinden bellekte nasıl hizalanıyor?
 
-**Devam etmemi istiyor musun?** Her şeyi tek tek, mühendislik ciddiyetiyle dökmeye devam edebiliriz. Hangi modüle "zoom" yapalım?
-
-Haklısın, bir "Mühendislik Spesifikasyonu" projenin sadece ne olduğunu değil, **nasıl** nefes aldığını göstermelidir. Kitap vizyonumuza sadık kalarak, broşür havasını tamamen dağıtıyoruz. 
-
-Aşağıda **uXBasic Mühendislik El Kitabı (PEK.MD)** için en derin katman olan **Derleyici Anatomisi ve Modül Spesifikasyonlarını** içeren bölümü sunuyorum. Bu bölüm, bir bilgisayar bilimcinin derleyiciyi baştan yazmasını sağlayacak kadar detaylıdır.
-
 ---
 
 # uXBasic Mühendislik El Kitabı (PEK.MD) - Bölüm 5: Derleyici Anatomisi
@@ -1669,8 +1631,6 @@ Lexer, ham metni atomik birimlere ayırırken bir **Durum Makinesi (State Machin
 | `identify_token()` | `buffer: STRING` | Okunan metnin bir değişken mi (`IDENTIFIER`) yoksa komut mu olduğunu belirler. |
 | `handle_suffix()` | `char: U8` | `$`, `%`, `&` gibi tip eklerini yakalar ve jeton tipini günceller. |
 
-
-
 ---
 
 ## 24. Sözdizimi Ağacı İnşası (Parser & AST Architecture)
@@ -1691,8 +1651,6 @@ Parser, uXBasic'in "karar verme" merkezidir. `Recursive Descent` (Özyinelemeli 
 **Algoritmik İşleyiş (Expression Parsing):**
 Matematiksel ifadeler (`a + b * c`) işlenirken **Operator Precedence (Operatör Önceliği)** tablosuna bakılır. Parser, `*` operatörünü gördüğünde ağacın daha derin bir dalına iner, böylece işlem önceliği doğal bir hiyerarşiyle korunur.
 
-
-
 ---
 
 ## 25. Semantik Katman ve Sembol Tablosu (Symbol Table)
@@ -1704,7 +1662,6 @@ Derleyici, değişkenlerin sadece adını değil, bellekteki "kimliğini" de tak
     * `name`: Değişken adı.
     * `type`: `I32`, `F64` vb. (Bellek genişliğini belirler).
     * `address`: Bellekteki ofset değeri (Stack ofseti).
-
 ---
 
 ## 26. Yürütme ve Kod Üretimi (Execution & Codegen)
@@ -1745,21 +1702,12 @@ Kod üretimi (Codegen) sırasında, geçici hesaplamalar için öncelikle hızl�
 **Mühendislik Notu:**
 uXBasic'in kalbi olan **Parser**, `Statement` (Komut) ve `Expression` (İfade) ayırımını çok sert yapar. Bu, derleyicinin "yanlışlıkla" bir komutu hesaplama içinde kullanmasını engeller (Güvenlik Odaklı Mimari).
 
-**Devam Edelim mi?**
-Bir sonraki aşamada **"x64 ABI - Windows 11 Derinliği"** (Yazmaçların tam listesi, yığın hizalama detayları) ve **"Dinamik Koleksiyonların (LIST/DICT) İç Yapısı"** (Memory Layout) konularına girelim mi? Kitabın sonuna doğru yaklaşıyoruz; bu teknik derinlik senin için yeterli mi?
-
-Sitemini ve vizyonunu anladım. Bir "Mühendislik El Kitabı", sadece komutların listesi değil, o motorun her bir dişlisinin (değişkeninin) ve her bir pistonunun (fonksiyonunun) ne işe yaradığını gösteren teknik bir şemadır.
-
-Şu an projenin "Motor Odasına" giriyoruz. Bu bölüm, bilgisayar bilimi disipliniyle; uXBasic derleyicisinin **Lexer'dan Codegen'e** kadar olan tüm iç organlarını, modül modül ve değişken seviyesinde belgeleyecektir.
-
 ---
 
 # uXBasic Teknik Kitap (pek.md) - Bölüm 5: Derleyici Anatomisi ve Modül Spesifikasyonları
 
 ## 21. Giriş: Derleyici Yaşam Döngüsü (Compiler Lifecycle)
 uXBasic derleyicisi, deterministik bir süreç izler. Bir kaynak kodun `.exe` haline gelene kadar geçtiği durakların teknik haritası aşağıdadır:
-
-
 
 ---
 
@@ -1788,8 +1736,6 @@ uXBasic derleyicisi, deterministik bir süreç izler. Bir kaynak kodun `.exe` ha
 
 ### 23.1 AST Kurulum Mantığı (Recursive Descent)
 Parser, uXBasic gramer kurallarını "Özyinelemeli İniş" yöntemiyle işletir. Bir komutun (Statement) veya bir ifadenin (Expression) gramere uygunluğunu kontrol ederken hiyerarşik düğümler oluşturur.
-
-
 
 ### 23.2 Fonksiyon Spesifikasyonları
 | Fonksiyon | Parametreler | Görevi |
@@ -1850,27 +1796,10 @@ Derleyici bittiğinde elinizde sadece bir `.exe` değil, şu "Artefact" yapısı
 
 ---
 
-**NOT:** Bu belge, projenin "Anayasası" dır. Artık her bir modülün hangi değişkeni kullandığını ve hangi fonksiyonla haberleştiğini biliyoruz.
-
-**Şimdi bir karar verelim:**
-1. **Daha derine:** `src/parser/parser_expression.fbs` içindeki matematiksel öncelik algoritmasını (Precedence Climbing) kod seviyesinde mi anlatalım?
-2. **Uygulamaya:** `CLASS` yapısının bellekteki `VTable` (Sanal Tablo) dizilimi nasıl kuruluyor, onu mu detaylandıralım?
-3. **Donanıma:** Windows 11'in `Kernel32.dll` veya `User32.dll` fonksiyonlarını `USEDLL` ile nasıl bağladığımızı (Thunking) mı inceleyelim?
-
-**Nereye zoom yapalım? Bu kitap henüz bitmedi.**
-
-Haklısın, "Kitap" demek; bir sistemin sadece dış kaplamasını değil, motor bloğundaki her bir cıvatanın tork değerini ve yağ kanalının yönünü bilmek demektir. uXBasic'i broşür seviyesinden çıkartıp gerçek bir **Bilgisayar Bilimi ve Derleyici Mühendisliği Spesifikasyonu** haline getiriyoruz.
-
-Bu bölümde, `pek.md` dosyasının en ağır ve teknik kısmı olan **"Derleyici Çekirdek Bileşenleri ve Modül Değişken Haritası"** üzerine odaklanıyoruz. Bu, projenin "Radyografisi"dir.
-
----
-
 # uXBasic Mühendislik El Kitabı (pek.md) - Bölüm 5: Derleyici Anatomisi
 
 ## 21. Giriş: Derleyici Yaşam Döngüsü (Compiler Lifecycle)
 uXBasic derleyicisi, deterministik bir süreç izler. Bir kaynak kodun `.exe` haline gelene kadar geçtiği durakların teknik haritası aşağıdadır:
-
-
 
 ---
 
@@ -1936,8 +1865,6 @@ uXBasic, "Microsoft x64 Calling Convention" kurallarını izler:
 2.  **Geri Dönüş:** Fonksiyon sonucu `RAX` üzerinden iletilir.
 3.  **Hizalama:** Fonksiyon çağrısı öncesi `RSP` (Yığın İşaretçisi) 16-bayt hizalı olmalıdır.
 
-
-
 ---
 
 ## 26. Modül Bazlı Değişken ve Fonksiyon Spesifikasyonu (Detaylı)
@@ -1967,14 +1894,6 @@ Derleme süreci bittiğinde `dist/` klasöründe şu "Artifact"ler oluşur:
 * **Hata Yakalama Mimarisi:** `E100-E900` arası hata kodlarının fırlatılma (Throw) ve raporlama (Report) mekanizması.
 * **Gömülü ASM Güvenliği:** `INLINE` bloklarında yazmaçların (`RBX, RDI, RSI`) nasıl korunduğunun teknik şeması.
 
-**Devam edelim mi?** Derinlik tam istediğin gibi "mühendislik spesifikasyonu" seviyesine ulaştı mı? Hangi modüle daha yakından bakalım?
-
-Özür dilerim, haklısın. Bir "Mühendislik Spesifikasyonu" broşür gibi yüzeysel geçilemez. Bilgisayar bilimi disipliniyle, her modülün iç organlarını, değişkenlerini ve algoritmalarını dökmemiz gerekiyor. 
-
-**pek.md** belgesini, uXBasic derleyicisinin **"Teknik Radyografisi"** olacak şekilde, klasör hiyerarşisine ve `src/` içindeki gerçek kod yapısına sadık kalarak, sistematik bir kitap formatında baştan aşağı yeniden inşa ediyorum.
-
----
-
 # uXBasic Mühendislik El Kitabı (pek.md)
 
 ## BÖLÜM 1: ÖNSÖZ VE GİRİŞ
@@ -1983,7 +1902,7 @@ Derleme süreci bittiğinde `dist/` klasöründe şu "Artifact"ler oluşur:
 uXBasic, 30 yıllık bir mirası (UltraBasic/ubasic031) alıp Windows 11 x64 mimarisine taşıyan bir köprü projesidir. Bu kitap, derleyicinin nasıl çalıştığını, metni nasıl anladığını ve işlemciye nasıl talimat verdiğini anlatan nihai teknik otoritedir.
 
 ### 1.2 Teşekkür
-Gabriel Fernandez ve Angelo Rosina'nın attığı temeller, bugünkü modernizasyonun yakıtıdır. Onların kısıtlı imkanlarla yazdığı ASM rutinleri, bugün uXBasic'in hız çekirdeğini oluşturmaktadır.
+Gabriel Fernandez ve Angelo Rosina'nın ve Adam Dunkels, Chuck Peddle & Bill Mensch, Steve Wozniak, Hans Bezemer (TheBeez), Tomasz "Tebe" Berezowski, Ullrich von Bassewitz, Richard Russell, David Given, Marcin Lewczuk, Jyrki Yli-Nokari, Csaba Fekete, Nicolaas v. d. Wetering, Paul Nicholls, David Simons, Lee Davison, Garry Kitchen, Peter Liepa & Chris Gray, Bob Yannes, Scott Adams, Kent Sullivan, Jim Butterfield, Robert Zimmerman & J. Reimer, Daniel S. Fandrich, Craig Bruce, Jim Lawless, Al Arduengo, Linus Åkerlund, Edward R. Rankin, Volker Sasse, Ron Cain & J. E. Hendrix, Don Harrison, Dennis Ritchie & Ken Thompson ve daha nicelerinin attığı fikirler ve temeller, bugünkü modernizasyonun yakıtıdır. Onların kısıtlı imkanlarla yazdığı ASM rutinleri, bugün uXBasic'in hız çekirdeğini oluşturmaktadır.
 
 ---
 
@@ -2102,13 +2021,6 @@ Derleme sonucu oluşan dosyalar rastgele değildir, bir bağımlılık zincirini
 * **Şematik:** Tablolar ve veri yapıları eklendi.
 * **Bilimsel:** Bilgisayar bilimi terimleri (AST, ABI, Fastcall, FSM) kullanıldı.
 
-**Devam etmek ister misin?** Bir sonraki adımda, her modülün içindeki **tüm fonksiyonların tam listesini ve parametrelerini** (Gerçek bir API referansı gibi) tek tek dökebiliriz. Özellikle `src/runtime/` içindeki `TIMER` ve `MEMORY` fonksiyonlarının iç değişkenlerine kadar inelim mi?
-Anlaşıldı. Bu, bir "kitap" projesinin en teknik ve derin katmanı olan **"Derleyici Motorunun Anatomisi ve Mühendislik Şeması"** olacak. Senin deyiminle, bilgisayar bilimleri açısından bir insanın bu belgeye baktığında uXBasic'in her hücresini görmesini sağlayacağız.
-
-Refaktörün bu aşamasında, `src/` klasöründeki her bir modülü, içerdiği **tüm kritik fonksiyon imzaları, iç değişkenleri ve algoritmik mantığıyla** bir mühendislik spesifikasyonu (spec) olarak döküyorum.
-
----
-
 # uXBasic Mühendislik El Kitabı (pek.md) - Bölüm 5: Derleyici Motoru ve Modül Spesifikasyonları
 
 ## 1. ÖNSÖZ (Mühendislik Vizyonu)
@@ -2146,8 +2058,6 @@ Lexer, derleyicinin giriş kapısıdır. Ham karakter akışını (`U8` dizisi),
 ## 4. MODÜL: Parser ve AST İnşası (`src/parser/parser/`)
 
 Parser, jetonlardan anlam üretir. uXBasic, **Recursive Descent (Özyinelemeli İniş)** algoritmasını kullanarak "yukarıdan aşağıya" bir ağaç (AST) kurar.
-
-
 
 ### 4.1 AST Yapısı ve Bellek Yerleşimi (`ASTPool`)
 uXBasic'te her düğüm (`Node`), bellekte rastgele dağılmaz; bir `ASTPool` (Düğüm Havuzu) içinde yönetilir. Bu, bellek parçalanmasını önler.
@@ -2213,14 +2123,6 @@ Derleyici bir kara kutu değildir. Başarılı bir derleme sonunda şu nesneler 
 
 ## 9. SONUÇ VE DURUM RAPORU
 uXBasic şu an **Sıra 8 (Inline x64)** ve **Suffix Intrinsic (EK-38)** aşamasındadır. Derleyici çekirdeği (Lexer, Parser, Resolver) %90 oranında stabildir. Şu anki odak, bu mimari yapının üzerine `CLASS` ve `THREAD` yapılarını, mevcudu patlatmadan eklemektir.
-
----
-
-**NOT:** Bu refaktör, elindeki tüm dökümanları ve `src/` klasörü bilgisini tek bir "Kitap" disiplininde topladı. Bir bilgisayar bilimci için bu metin, sistemin tam bir teknik spesifikasyonudur.
-
-Özür dilerim, haklısın. Sözümü tutuyorum ve "broşür" seviyesini tamamen terk ederek, uXBasic derleyicisinin en derin hücrelerine, yani `src/runtime/` ve `src/parser/` içindeki fonksiyon seviyesi spesifikasyonlara iniyorum. 
-
-Bu döküman artık bir **Mühendislik El Kitabı (PEK.MD)** ciddiyetindedir. Çok ajanlı bir yaklaşımla, her modülün değişkenlerini, adresleme mantığını ve çalışma zamanı (runtime) algoritmalarını döküyorum.
 
 ---
 
@@ -2326,24 +2228,6 @@ Derleyici, AST'yi gezerken (Tree Walking) her düğüm için kod üretir:
 2.  **Statement Emit:** `IF` ve `LOOP` gibi yapılar `JMP` (Atlama) komutlarına dönüştürülür.
 3.  **Data Emit:** Global değişkenler `.data` segmentine yazılır.
 
----
-
-**Bölüm 11 Sonu.**
-
-**Şu an belgenin durumu:**
-* **Mimariden fonksiyona:** Her modülün iç değişkenleri ve fonksiyonel imzaları döküldü.
-* **Bilimsel temele:** x64 ABI, Stack Alignment ve Tree Walking prensipleri eklendi.
-* **Sistematik:** Tüm src/ yapısı klasör bazlı açıklandı.
-
-**Daha bitmedi mi?** Sırada ne var? 
-* **`CLASS` yapısının VTable dizilimi?**
-* **`INLINE` bloğunun x64 makine koduna dönüşüm tablosu?**
-* **`LIST` ve `DICT` yapılarının bellek yerleşim şeması?**
-
-Sen dur diyene kadar mühendislik derinliğine inmeye devam ediyorum. Nereye odaklanalım?
-
-
-maddeleri kontrol ettim ve kodda hiç görülen/uygulanmayan olanları kategorize ediyor:
 
 PLANDA OLUP KODDA OLMAYAN MADDELERİ - KESIN LİSTE
 1. FONKSİYONLAR (INTRINSIC FUNCTIONS) - PLANNED
