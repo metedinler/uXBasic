@@ -1,0 +1,101 @@
+#ifndef UXB_SYMBOL_TABLE_FBS
+#define UXB_SYMBOL_TABLE_FBS
+
+#include once "symbol_kind.fbs"
+#include once "symbol_record.fbs"
+#include once "symbol_key.fbs"
+#include once "scope_table.fbs"
+#include once "symbol_index.fbs"
+
+Dim Shared gUXBStep3Symbols(Any) As UXBSymbolRecord
+Dim Shared gUXBStep3SymbolCount As Integer
+Dim Shared gUXBStep3SymbolCap As Integer
+
+Private Sub UXBStep3SymbolEnsure(ByVal minCount As Integer)
+    If gUXBStep3SymbolCap >= minCount Then Exit Sub
+    If gUXBStep3SymbolCap < 1 Then gUXBStep3SymbolCap = 128
+    Do While gUXBStep3SymbolCap < minCount
+        gUXBStep3SymbolCap *= 2
+    Loop
+    ReDim Preserve gUXBStep3Symbols(gUXBStep3SymbolCap - 1)
+End Sub
+
+Sub UXBStep3SymbolReset()
+    gUXBStep3SymbolCount = 0
+    gUXBStep3SymbolCap = 0
+    ReDim gUXBStep3Symbols(0)
+    UXBSymHashReset
+End Sub
+
+Private Function UXBStep3SymbolFindExactLinear(ByVal nameText As String, ByVal kindText As String, ByVal scopeId As Integer) As Integer
+    Dim key As String = UXBSymNormalizeName(nameText)
+    Dim kindKey As String = UXBSymNormalizeKind(kindText)
+    Dim i As Integer
+    For i = 0 To gUXBStep3SymbolCount - 1
+        If UXBSymNormalizeName(gUXBStep3Symbols(i).name) = key Then
+            If kindKey = "" Or UXBSymNormalizeKind(gUXBStep3Symbols(i).kind) = kindKey Then
+                If gUXBStep3Symbols(i).scopeId = scopeId Then Return i
+            End If
+        End If
+    Next i
+    Return -1
+End Function
+
+' A symbol is only ever hash-inserted (see UXBStep3SymbolAdd) when it has a
+' non-empty kind, and UXBStep3SymbolFindExactLinear itself never matches a
+' non-empty query kind against a stored empty kind - so for a non-empty
+' kindText the hash is authoritative and a miss really does mean "not found".
+' This used to always fall through to the O(symbolCount) linear scan even on
+' a hash hit-miss, and callers that probe several candidate kinds per lookup
+' (e.g. UXBSymbolResolveAnyKindLexical trying 9 kinds, once per scope level)
+' turned that into an O(symbolCount) scan for nearly every miss - the dominant
+' cost of semantic analysis on any program with a non-trivial symbol table.
+Function UXBStep3SymbolFindExact(ByVal nameText As String, ByVal kindText As String, ByVal scopeId As Integer) As Integer
+    If Trim(kindText) <> "" Then
+        Return UXBSymHashLookupExact(scopeId, nameText, kindText)
+    End If
+    Return UXBStep3SymbolFindExactLinear(nameText, kindText, scopeId)
+End Function
+
+Function UXBStep3SymbolFind(ByVal nameText As String, ByVal kindText As String, ByVal scopeId As Integer) As Integer
+    Dim cur As Integer = scopeId
+    Do While cur >= 0
+        Dim idx As Integer = UXBStep3SymbolFindExact(nameText, kindText, cur)
+        If idx <> -1 Then Return idx
+        If cur <> 0 And UXBScopeIsValid(cur) = 0 Then
+            ' Semantic scopes use AST node index + 1 as a stable scope id.
+            ' Those ids are intentionally sparse and are not all pushed onto
+            ' the runtime scope stack. They still have the global scope as
+            ' their lexical parent.
+            cur = 0
+        Else
+            cur = UXBScopeParent(cur)
+        End If
+    Loop
+    Return -1
+End Function
+
+Function UXBStep3SymbolAdd(ByVal nameText As String, ByVal kindText As String, ByVal typeText As String, ByVal scopeId As Integer, ByVal astNode As Integer, ByRef errText As String) As Integer
+    Dim key As String = UXBSymNormalizeName(nameText)
+    Dim kindKey As String = UXBSymNormalizeKind(kindText)
+    If key = "" Then errText = "symbol: empty name": Return -1
+    If UXBStep3SymbolFindExact(key, kindKey, scopeId) <> -1 Then errText = "symbol: duplicate " & key: Return -1
+
+    UXBStep3SymbolEnsure(gUXBStep3SymbolCount + 1)
+    Dim idx As Integer = gUXBStep3SymbolCount
+    gUXBStep3SymbolCount += 1
+
+    gUXBStep3Symbols(idx).name = key
+    gUXBStep3Symbols(idx).kind = kindKey
+    gUXBStep3Symbols(idx).typeName = UCase(Trim(typeText))
+    gUXBStep3Symbols(idx).scopeId = scopeId
+    gUXBStep3Symbols(idx).astNode = astNode
+    gUXBStep3Symbols(idx).flags = 0
+
+    If kindKey <> "" Then UXBSymHashInsert scopeId, key, kindKey, idx
+
+    errText = ""
+    Return idx
+End Function
+
+#endif

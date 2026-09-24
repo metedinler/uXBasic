@@ -1,0 +1,375 @@
+#ifndef UXB_JS_EXPR_EMIT_FBS
+#define UXB_JS_EXPR_EMIT_FBS
+
+Private Function UXBJsStartsWith(ByRef s As String, ByRef prefixText As String) As Integer
+    If Len(s) < Len(prefixText) Then Return 0
+    If Left(s, Len(prefixText)) = prefixText Then Return 1
+    Return 0
+End Function
+
+Private Function UXBJsIsQuoted(ByRef s As String) As Integer
+    Dim t As String
+    t = Trim(s)
+    If Len(t) >= 2 Then
+        If Left(t, 1) = Chr(34) And Right(t, 1) = Chr(34) Then Return 1
+    End If
+    Return 0
+End Function
+
+Private Function UXBJsIsNumericLiteral(ByRef s As String) As Integer
+    Dim t As String
+    Dim i As Integer
+    Dim c As String
+    Dim dotCount As Integer
+    t = Trim(s)
+    If t = "" Then Return 0
+    If Left(t, 1) = "-" Or Left(t, 1) = "+" Then t = Mid(t, 2)
+    If t = "" Then Return 0
+    dotCount = 0
+    ' S-142b: a floating literal may carry a decimal exponent ("1.0E20", "1e-07", "2.5E+3"); it used to
+    ' fail this check and was emitted as a variable read (vars["1.0E20"] -> undefined).
+    Dim seenExponent As Integer
+    Dim exponentDigits As Integer
+    Dim mantissaDigits As Integer
+    seenExponent = 0
+    exponentDigits = 0
+    mantissaDigits = 0
+    For i = 1 To Len(t)
+        c = Mid(t, i, 1)
+        If seenExponent <> 0 Then
+            If (c = "+" Or c = "-") And i > 1 And exponentDigits = 0 And (Mid(t, i - 1, 1) = "e" Or Mid(t, i - 1, 1) = "E") Then
+                ' exponent sign
+            ElseIf c >= "0" And c <= "9" Then
+                exponentDigits += 1
+            Else
+                Return 0
+            End If
+        ElseIf c = "." Then
+            dotCount += 1
+            If dotCount > 1 Then Return 0
+        ElseIf (c = "e" Or c = "E") And mantissaDigits > 0 Then
+            seenExponent = 1
+        ElseIf c >= "0" And c <= "9" Then
+            mantissaDigits += 1
+        Else
+            Return 0
+        End If
+    Next i
+    If seenExponent <> 0 And exponentDigits = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function UXBJsUnquote(ByRef s As String) As String
+    Dim t As String
+    t = Trim(s)
+    If UXBJsIsQuoted(t) <> 0 Then Return Mid(t, 2, Len(t) - 2)
+    Return t
+End Function
+
+Public Function UXBJsEscape(ByVal rawText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    Dim c As String
+    outText = ""
+    For i = 1 To Len(rawText)
+        c = Mid(rawText, i, 1)
+        Select Case c
+        Case Chr(34): outText &= "\" & Chr(34)
+        Case "\": outText &= "\\"
+        Case Chr(10): outText &= "\n"
+        Case Chr(13): outText &= "\r"
+        Case Chr(9): outText &= "\t"
+        Case Else: outText &= c
+        End Select
+    Next i
+    Return outText
+End Function
+
+Public Function UXBJsQuote(ByVal rawText As String) As String
+    Return Chr(34) & UXBJsEscape(rawText) & Chr(34)
+End Function
+
+Public Function UXBJsSafeIdentifier(ByVal rawName As String) As String
+    Dim outText As String
+    Dim i As Integer
+    Dim c As String
+    outText = ""
+    For i = 1 To Len(rawName)
+        c = Mid(rawName, i, 1)
+        If (c >= "A" And c <= "Z") Or (c >= "a" And c <= "z") Or (c >= "0" And c <= "9") Or c = "_" Then
+            outText &= c
+        Else
+            outText &= "_"
+        End If
+    Next i
+    If outText = "" Then outText = "_"
+    If Mid(outText, 1, 1) >= "0" And Mid(outText, 1, 1) <= "9" Then outText = "_" & outText
+    Return outText
+End Function
+
+Public Function UXBJsCanonicalOpcode(ByVal opcodeText As String) As String
+    Dim op As String
+    op = UCase(Trim(opcodeText))
+    If Left(op, 4) = "MIR_" Then op = Mid(op, 5)
+    Select Case op
+    Case "NOP": Return "NOP"
+    Case "LOAD_CONST", "CONST": Return "LOAD_CONST"
+    Case "LOCAL_DECL", "GLOBAL_DECL", "PARAM_DECL", "DECLARE", "AS": Return "DECL"
+    Case "DIM": Return "DIM"
+    Case "REDIM": Return "REDIM"
+    Case "LOAD_LOCAL", "LOAD_GLOBAL", "LOAD_VAR", "LOAD": Return "LOAD_VAR"
+    Case "STORE_LOCAL", "STORE_GLOBAL", "STORE_VAR", "STORE": Return "STORE_VAR"
+    Case "+", "ADD", "FADD": Return "ADD"
+    Case "-", "SUB", "FSUB": Return "SUB"
+    Case "*", "MUL", "FMUL": Return "MUL"
+    Case "/", "DIV", "FDIV": Return "DIV"
+    Case "\", "IDIV": Return "IDIV"
+    Case "%", "MOD": Return "MOD"
+    Case "NEG", "FNEG": Return "NEG"
+    Case "++", "INC": Return "INC"
+    Case "--", "DEC": Return "DEC"
+    Case "+=": Return "ADD_ASSIGN"
+    Case "-=": Return "SUB_ASSIGN"
+    Case "*=": Return "MUL_ASSIGN"
+    Case "/=": Return "DIV_ASSIGN"
+    Case "\=": Return "IDIV_ASSIGN"
+    Case "%=": Return "MOD_ASSIGN"
+    Case "<<", "SHL": Return "SHL"
+    Case ">>", "SHR": Return "SHR"
+    Case "USHR": Return "USHR"
+    Case "ROL": Return "ROL"
+    Case "ROR": Return "ROR"
+    Case "**", "POW": Return "POW"
+    Case "^", "BXOR", "BITXOR": Return "XOR"
+    Case "=", "==", "EQ": Return "EQ"
+    Case "<>", "!=", "NE": Return "NE"
+    Case "<", "LT": Return "LT"
+    Case "<=", "LE": Return "LE"
+    Case ">", "GT": Return "GT"
+    Case ">=", "GE": Return "GE"
+    Case "&&", "ANDALSO": Return "ANDALSO"
+    Case "||", "ORELSE": Return "ORELSE"
+    Case "AND", "BAND": Return "AND"
+    Case "OR", "BOR": Return "OR"
+    Case "XOR", "BXOR": Return "XOR"
+    Case "NAND": Return "NAND"
+    Case "NOR": Return "NOR"
+    Case "XNOR", "NXOR", "EQV", "EQA", "IFF": Return "XNOR"
+    Case "IMP": Return "IMP"
+    Case "CIMP": Return "CIMP"
+    Case "NIMP": Return "NIMP"
+    Case "NCIMP": Return "NCIMP"
+    Case "IDA": Return "IDA"
+    Case "IDB": Return "IDB"
+    Case "NOTA": Return "NOTA"
+    Case "NOTB": Return "NOTB"
+    Case "NOT", "BNOT": Return "NOT"
+    Case "JMP_IF_FALSE", "JZ": Return "JZ"
+    Case "JMP_IF_TRUE", "JNZ": Return "JNZ"
+    Case "JMP", "GOTO": Return "JMP"
+    Case "GOSUB": Return "GOSUB"
+    Case "RETURN", "RET", "EXIT": Return "RET"
+    Case "CALL_BUILTIN": Return "CALL_BUILTIN"
+    Case "CALL_RUNTIME", "RUNTIME_CALL": Return "CALL_RUNTIME"
+    Case "CALL_EXTERNAL": Return "CALL_EXTERNAL"
+    Case "CALL_DLL": Return "CALL_DLL"
+    Case "CALL_API": Return "CALL_API"
+    Case "CALL": Return "CALL"
+    Case "PRINT": Return "PRINT"
+    Case "INPUT": Return "INPUT"
+    Case "CLS": Return "CLS"
+    Case "COLOR": Return "COLOR"
+    Case "LOCATE": Return "LOCATE"
+    Case "TIMER": Return "TIMER"
+    Case "RND": Return "RND"
+    Case "RANDOMIZE": Return "RANDOMIZE"
+    Case "STR_CONCAT": Return "ADD"
+    Case "STR_LEN": Return "LEN"
+    Case "STR_LEFT": Return "LEFT"
+    Case "STR_RIGHT": Return "RIGHT"
+    Case "STR_MID": Return "MID"
+    Case "STR_COMPARE": Return "STR_COMPARE"
+    Case "FILE_OPEN", "OPEN": Return "OPEN"
+    Case "FILE_CLOSE", "CLOSE": Return "CLOSE"
+    Case "FILE_READ", "GET": Return "GET"
+    Case "FILE_WRITE", "PUT": Return "PUT"
+    Case "FILE_SEEK", "SEEK": Return "SEEK"
+    Case "FILE_DELETE": Return "DELETE"
+    Case "FILE_EOF": Return "EOF"
+    Case "FILE_LOF": Return "LOF"
+    Case "MEMORY_COPY", "MEM_COPY", "MEMCOPY", "MEMCOPYB", "MEMCOPYW", "MEMCOPYD", "MEMCOPYQ", "MIR_MEMORY_COPY": Return "MEMORY_COPY"
+    Case "MEMORY_FILL", "MEM_FILL", "MEMFILL", "MEMFILLB", "MEMFILLW", "MEMFILLD", "MEMFILLQ", "MIR_MEMORY_FILL": Return "MEMORY_FILL"
+    Case "MEMORY_READ_SEQUENCE", "PEEKS", "MIR_MEMORY_READ_SEQUENCE": Return "MEMORY_READ_SEQUENCE"
+    Case "MEMORY_LOAD", "MEM_LOAD", "PEEK", "PEEKB", "PEEKW", "PEEKD", "PEEKQ", "MIR_MEMORY_LOAD": Return "MEMORY_LOAD"
+    Case "MEM_STORE", "POKE", "POKEB", "POKEW", "POKED", "POKEQ", "POKES": Return "POKE"
+    Case "MEMORY_REF": Return "MEMORY_REF"
+    Case "ARRAY_SIZEOF": Return "ARRAY_SIZEOF"
+    Case "ARRAY_LBOUND": Return "ARRAY_LBOUND"
+    Case "ARRAY_UBOUND": Return "ARRAY_UBOUND"
+    Case "ARRAY_NEW": Return "ARRAY_NEW"
+    Case "ARRAY_LOAD", "LOAD_INDEXED": Return "ARRAY_LOAD"
+    Case "ARRAY_STORE", "STORE_INDEXED": Return "ARRAY_STORE"
+    Case "OBJECT_NEW", "NEW": Return "OBJECT_NEW"
+    Case "FIELD_LOAD", "LOAD_FIELD": Return "FIELD_LOAD"
+    Case "FIELD_STORE", "STORE_FIELD": Return "FIELD_STORE"
+    Case "METHOD_CALL": Return "METHOD_CALL"
+    Case "VIRTUAL_CALL": Return "VIRTUAL_CALL"
+    Case "CAST", "COERCE", "TYPEOF", "SIZEOF", "OFFSETOF", "CODEPTR", "LPTR", "ADDR_OF": Return op
+    Case "HOST_CALL", "LIBRARY_CALL", "JS_CALL", "BROWSER_CALL", "EXTFP_CALL": Return op
+    Case "WASM_IMPORT", "WASM_EXPORT": Return op
+    End Select
+    Return op
+End Function
+
+Public Function UXBJsVarKey(ByVal nameText As String) As String
+    Dim n As String
+    n = UCase(Trim(nameText))
+    If n = "" Then n = "_"
+    Return UXBJsQuote(n)
+End Function
+
+Public Function UXBJsOperand(ByVal opText As String) As String
+    Dim t As String
+    t = Trim(opText)
+    If t = "" Then Return "undefined"
+    ' Receiver aliases have one physical object in every method frame.
+    ' SUPER affects member ownership during semantic lowering; at runtime it
+    ' still denotes the current receiver, just like THIS and ME.
+    If UCase(t) = "THIS" Or UCase(t) = "ME" Or UCase(t) = "SUPER" Then Return "vars[" & UXBJsQuote("THIS") & "]"
+    If UXBJsIsQuoted(t) <> 0 Then Return UXBJsQuote(UXBJsUnquote(t))
+    If UXBJsIsNumericLiteral(t) <> 0 Then Return t
+    Select Case LCase(t)
+    Case "true": Return "-1"
+    Case "false": Return "0"
+    Case "null": Return "null"
+    Case "nothing": Return "null"
+    End Select
+    Return "vars[" & UXBJsVarKey(t) & "]"
+End Function
+
+Public Function UXBJsAssignTarget(ByVal nameText As String) As String
+    Return "vars[" & UXBJsVarKey(nameText) & "]"
+End Function
+
+Public Function UXBJsBinaryOp(ByVal opcode As String) As String
+    Dim op As String
+    op = UXBJsCanonicalOpcode(opcode)
+    Select Case op
+    Case "ADD": Return "+"
+    Case "SUB": Return "-"
+    Case "MUL": Return "*"
+    Case "DIV": Return "/"
+    Case "IDIV": Return "/"
+    Case "MOD": Return "%"
+    Case "EQ": Return "==="
+    Case "NE": Return "!=="
+    Case "LT": Return "<"
+    Case "LE": Return "<="
+    Case "GT": Return ">"
+    Case "GE": Return ">="
+    Case "AND": Return "&"
+    Case "OR": Return "|"
+    Case "XOR": Return "^"
+    Case "ANDALSO": Return "&&"
+    Case "ORELSE": Return "||"
+    End Select
+    Return ""
+End Function
+
+Public Function UXBJsIsBinaryOpcode(ByVal opcode As String) As Integer
+    Dim op As String
+    op = UXBJsCanonicalOpcode(opcode)
+    Select Case op
+    Case "POW", "SHL", "SHR", "USHR", "UIDIV", "UMOD", "ULT", "ULE", "UGT", "UGE", "ROL", "ROR", "NAND", "NOR", "XNOR", "IMP", "CIMP", "NIMP", "NCIMP", "IDA", "IDB", "NOTA", "NOTB"
+        Return 1
+    End Select
+    If UXBJsBinaryOp(opcode) <> "" Then Return 1
+    Return 0
+End Function
+
+Public Function UXBJsCallName(ByVal rawName As String) As String
+    Dim n As String
+    n = UCase(Trim(rawName))
+    If Len(n) >= 2 Then
+        If Left(n, 1) = Chr(34) And Right(n, 1) = Chr(34) Then n = UCase(UXBJsUnquote(n))
+    End If
+    Return n
+End Function
+
+Public Function UXBJsSurfaceIsMetadata(ByVal opText As String) As Integer
+    Dim op As String
+    op = UXBJsCanonicalOpcode(opText)
+    Select Case op
+    Case "NOP", "DECL", "TYPE", "CLASS", "INTERFACE", "METHOD", "PROPERTY", "OPERATOR", "CONSTRUCTOR", "DESTRUCTOR", "IMPLEMENTS", "METADATA_ONLY"
+        Return 1
+    Case "ABSTRACT", "ALIAS", "BYREF", "BYVAL", "CDECL", "FINAL", "FRIEND", "IMMUTABLE", "IMPORT", "INCLUDE", "MODULE", "MUTABLE", "NAMESPACE", "PRIVATE", "PROTECTED", "PUBLIC", "READONLY", "RESTRICTED", "SEALED", "STATIC", "STDCALL", "USING", "MAIN"
+        Return 1
+    Case "BOOLEAN", "BYTE", "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "F32", "F64", "F80", "F128", "BALL", "BIGD", "BIGF", "BIGINT", "OBJECT", "PTR", "STRING", "STRPTR", "ANY", "VARIANT", "VOID", "LIST", "DICT", "SET"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Public Function UXBJsNativeOnly(ByVal opText As String) As Integer
+    Dim op As String
+    op = UXBJsCanonicalOpcode(opText)
+    Select Case op
+    Case "CALL_DLL", "CALL_API", "INLINE", "INLINE_ASM", "NATIVE_ONLY"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Function UXBJsTruthExpr(ByRef exprText As String) As String
+    Return "((" & exprText & ") ? true : false)"
+End Function
+
+Function UXBJsBinaryExpression(ByRef opRaw As String, ByRef lhs As String, ByRef rhs As String) As String
+    Dim op As String
+    op = UXBJsCanonicalOpcode(opRaw)
+    Select Case op
+    Case "POW": Return "Math.pow((" & lhs & "), (" & rhs & "))"
+    Case "EQ": Return "((" & lhs & ") === (" & rhs & ") ? -1 : 0)"
+    Case "NE": Return "((" & lhs & ") !== (" & rhs & ") ? -1 : 0)"
+    Case "LT": Return "((" & lhs & ") < (" & rhs & ") ? -1 : 0)"
+    Case "LE": Return "((" & lhs & ") <= (" & rhs & ") ? -1 : 0)"
+    Case "GT": Return "((" & lhs & ") > (" & rhs & ") ? -1 : 0)"
+    Case "GE": Return "((" & lhs & ") >= (" & rhs & ") ? -1 : 0)"
+    Case "AND": Return "Number(BigInt.asIntN(64, BigInt(" & lhs & ") & BigInt(" & rhs & ")))"
+    Case "OR": Return "Number(BigInt.asIntN(64, BigInt(" & lhs & ") | BigInt(" & rhs & ")))"
+    Case "XOR": Return "Number(BigInt.asIntN(64, BigInt(" & lhs & ") ^ BigInt(" & rhs & ")))"
+    Case "ANDALSO": Return "((" & lhs & ") !== 0 ? ((" & rhs & ") !== 0 ? -1 : 0) : 0)"
+    Case "ORELSE": Return "((" & lhs & ") !== 0 ? -1 : ((" & rhs & ") !== 0 ? -1 : 0))"
+    Case "SHL": Return "Number(BigInt.asIntN(64, BigInt(" & lhs & ") << BigInt(Number(" & rhs & ") & 63)))"
+    Case "SHR": Return "Number(BigInt.asIntN(64, BigInt.asIntN(64, BigInt(" & lhs & ")) >> BigInt(Number(" & rhs & ") & 63)))"
+    Case "USHR": Return "Number(BigInt.asUintN(64, BigInt(" & lhs & ")) >> BigInt(Number(" & rhs & ") & 63))"
+    ' S-077: unsigned 64-bit division/remainder/ordering. A JS Number holds at most
+    ' 53 exact bits, so operands are reinterpreted through BigInt.asUintN(64, ...)
+    ' (a negative Number stands for its two's-complement unsigned value). Values
+    ' above 2^53 still lose precision on the way back to Number -- recorded as the
+    ' JS 64-bit integer limitation, not hidden here.
+    Case "UIDIV": Return "Number(BigInt.asUintN(64, BigInt(" & lhs & ")) / BigInt.asUintN(64, BigInt(" & rhs & ")))"
+    Case "UMOD": Return "Number(BigInt.asUintN(64, BigInt(" & lhs & ")) % BigInt.asUintN(64, BigInt(" & rhs & ")))"
+    Case "ULT": Return "((BigInt.asUintN(64, BigInt(" & lhs & ")) < BigInt.asUintN(64, BigInt(" & rhs & "))) ? -1 : 0)"
+    Case "ULE": Return "((BigInt.asUintN(64, BigInt(" & lhs & ")) <= BigInt.asUintN(64, BigInt(" & rhs & "))) ? -1 : 0)"
+    Case "UGT": Return "((BigInt.asUintN(64, BigInt(" & lhs & ")) > BigInt.asUintN(64, BigInt(" & rhs & "))) ? -1 : 0)"
+    Case "UGE": Return "((BigInt.asUintN(64, BigInt(" & lhs & ")) >= BigInt.asUintN(64, BigInt(" & rhs & "))) ? -1 : 0)"
+    Case "ROL": Return "Number(BigInt.asIntN(64, (BigInt.asUintN(64, BigInt(" & lhs & ")) << BigInt(Number(" & rhs & ") & 63)) | (BigInt.asUintN(64, BigInt(" & lhs & ")) >> BigInt((64 - (Number(" & rhs & ") & 63)) & 63))))"
+    Case "ROR": Return "Number(BigInt.asIntN(64, (BigInt.asUintN(64, BigInt(" & lhs & ")) >> BigInt(Number(" & rhs & ") & 63)) | (BigInt.asUintN(64, BigInt(" & lhs & ")) << BigInt((64 - (Number(" & rhs & ") & 63)) & 63))))"
+    Case "NAND": Return "Number(BigInt.asIntN(64, ~(BigInt(" & lhs & ") & BigInt(" & rhs & "))))"
+    Case "NOR": Return "Number(BigInt.asIntN(64, ~(BigInt(" & lhs & ") | BigInt(" & rhs & "))))"
+    Case "XNOR": Return "Number(BigInt.asIntN(64, ~(BigInt(" & lhs & ") ^ BigInt(" & rhs & "))))"
+    Case "IMP": Return "Number(BigInt.asIntN(64, (~BigInt(" & lhs & ")) | BigInt(" & rhs & ")))"
+    Case "CIMP": Return "Number(BigInt.asIntN(64, BigInt(" & lhs & ") | (~BigInt(" & rhs & "))))"
+    Case "NIMP": Return "Number(BigInt.asIntN(64, BigInt(" & lhs & ") & (~BigInt(" & rhs & "))))"
+    Case "NCIMP": Return "Number(BigInt.asIntN(64, (~BigInt(" & lhs & ")) & BigInt(" & rhs & ")))"
+    Case "IDA": Return "Number(BigInt.asIntN(64, BigInt(" & lhs & ")))"
+    Case "IDB": Return "Number(BigInt.asIntN(64, BigInt(" & rhs & ")))"
+    Case "NOTA": Return "Number(BigInt.asIntN(64, ~BigInt(" & lhs & ")))"
+    Case "NOTB": Return "Number(BigInt.asIntN(64, ~BigInt(" & rhs & ")))"
+    Case Else
+        Return "(" & lhs & " " & UXBJsBinaryOp(op) & " " & rhs & ")"
+    End Select
+End Function
+
+#endif

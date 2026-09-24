@@ -1,0 +1,1198 @@
+' Extracted tail from mir.fbs
+
+Private Function MIRRoutineBodyStmtCount(ByRef ps As ParseState, ByVal routineNodeIdx As Integer) As Integer
+    If routineNodeIdx < 0 Or routineNodeIdx >= ps.ast.count Then Return 0
+
+    Dim total As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNodeIdx).firstChild
+    Do While ch <> -1
+        If MIRIsStmtKind(ps.ast.nodes(ch).kind) <> 0 Then total += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return total
+End Function
+
+Private Function MIRFindOwningClassName(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef classNameOut As String) As Integer
+    classNameOut = ""
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim p As Integer
+    p = ps.ast.nodes(nodeIdx).parent
+    Do While p >= 0 And p < ps.ast.count
+        If UCase(Trim(ps.ast.nodes(p).kind)) = "CLASS_STMT" Then
+            classNameOut = UCase(Trim(ps.ast.nodes(p).value))
+            Return IIf(classNameOut <> "", 1, 0)
+        End If
+        p = ps.ast.nodes(p).parent
+    Loop
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "CLASS_STMT" Then Continue For
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If ch = nodeIdx Then
+                classNameOut = UCase(Trim(ps.ast.nodes(i).value))
+                Return IIf(classNameOut <> "", 1, 0)
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
+    Return 0
+End Function
+
+Private Function MIRFindOwningRoutineContainerName(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef containerNameOut As String) As Integer
+    containerNameOut = ""
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim p As Integer
+    p = ps.ast.nodes(nodeIdx).parent
+    Do While p >= 0 And p < ps.ast.count
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(p).kind))
+        If k = "NAMESPACE_STMT" Or k = "MODULE_STMT" Then
+            containerNameOut = UCase(Trim(ps.ast.nodes(p).value))
+            Return IIf(containerNameOut <> "", 1, 0)
+        End If
+        p = ps.ast.nodes(p).parent
+    Loop
+    Return 0
+End Function
+
+Private Function MIRResolveRoutineEntryName(ByRef ps As ParseState, ByVal routineNodeIdx As Integer, ByRef routineNameOut As String) As Integer
+    routineNameOut = ""
+    If routineNodeIdx < 0 Or routineNodeIdx >= ps.ast.count Then Return 0
+
+    Dim k As String
+    k = UCase(Trim(ps.ast.nodes(routineNodeIdx).kind))
+
+    Select Case k
+    Case "SUB_STMT", "FUNCTION_STMT"
+        Dim localRoutineName As String
+        localRoutineName = UCase(Trim(ps.ast.nodes(routineNodeIdx).value))
+        Dim containerName As String
+        If MIRFindOwningRoutineContainerName(ps, routineNodeIdx, containerName) <> 0 Then
+            routineNameOut = containerName & "_" & localRoutineName
+        Else
+            routineNameOut = localRoutineName
+        End If
+        Return IIf(routineNameOut <> "", 1, 0)
+    Case "CLASS_METHOD_DECL"
+        Dim className As String
+        If MIRFindOwningClassName(ps, routineNodeIdx, className) = 0 Then Return 0
+        routineNameOut = className & "_" & UCase(Trim(ps.ast.nodes(routineNodeIdx).value))
+        Return IIf(routineNameOut <> "", 1, 0)
+    Case "CLASS_OPERATOR_DECL"
+        Dim classNameOp As String
+        If MIRFindOwningClassName(ps, routineNodeIdx, classNameOp) = 0 Then Return 0
+        Dim opSuffix As String
+        If MIROperatorTokenToRoutineSuffix(ps.ast.nodes(routineNodeIdx).value, opSuffix) = 0 Then Return 0
+        routineNameOut = classNameOp & "_" & UCase(Trim(opSuffix))
+        Return IIf(routineNameOut <> "", 1, 0)
+    Case "CLASS_CONSTRUCTOR_DECL"
+        Dim className2 As String
+        If MIRFindOwningClassName(ps, routineNodeIdx, className2) = 0 Then Return 0
+        routineNameOut = className2 & "_CTOR"
+        Return 1
+    Case "CLASS_DESTRUCTOR_DECL"
+        Dim className3 As String
+        If MIRFindOwningClassName(ps, routineNodeIdx, className3) = 0 Then Return 0
+        routineNameOut = className3 & "_DTOR"
+        Return 1
+    Case "CLASS_PROPERTY_GET_STMT", "CLASS_PROPERTY_SET_STMT"
+        Dim classNameProp As String
+        If MIRFindOwningClassName(ps, routineNodeIdx, classNameProp) = 0 Then Return 0
+        Dim propertyNode As Integer
+        propertyNode = ps.ast.nodes(routineNodeIdx).parent
+        If propertyNode < 0 Or propertyNode >= ps.ast.count Then Return 0
+        If UCase(Trim(ps.ast.nodes(propertyNode).kind)) <> "CLASS_PROPERTY_DECL" Then Return 0
+        Dim propertyName As String
+        propertyName = UCase(Trim(ps.ast.nodes(propertyNode).value))
+        If propertyName = "" Then Return 0
+        If k = "CLASS_PROPERTY_GET_STMT" Then
+            routineNameOut = classNameProp & "_PROPGET_" & propertyName
+        Else
+            routineNameOut = classNameProp & "_PROPSET_" & propertyName
+        End If
+        Return IIf(routineNameOut <> "", 1, 0)
+    End Select
+
+    Return 0
+End Function
+
+Private Function MIREnsureFunctionEntry(ByRef module As MIRModule, ByRef functionNameRaw As String, ByRef fnIdxOut As Integer) As Integer
+    Dim fnName As String
+    fnName = UCase(Trim(functionNameRaw))
+    If fnName = "" Then Return 0
+
+    fnIdxOut = MIRFindFunctionIndex(module, fnName)
+    If fnIdxOut <> -1 Then Return 1
+
+    fnIdxOut = module.functionCount
+    If module.functionCount = 0 Then
+        ReDim module.functions(0)
+    Else
+        ReDim Preserve module.functions(module.functionCount)
+    End If
+    module.functionCount += 1
+
+    Dim fn As MIRFunction Ptr
+    fn = @module.functions(fnIdxOut)
+
+    fn->name = fnName
+    fn->entryBlock = 0
+    fn->localVarCount = 0
+    fn->paramVarCount = 0
+    fn->returnType = "VOID"
+
+    ReDim fn->blocks(0)
+    fn->blockCount = 1
+    fn->blocks(0).id = 0
+    fn->blocks(0).instructionCount = 0
+    fn->blocks(0).isEntry = 1
+    fn->blocks(0).isExit = 1
+
+    Return 1
+End Function
+
+Sub MIRAppendFunctionParam(ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef paramNameRaw As String, ByRef paramTypeRaw As String, ByVal isByRef As Integer = 0)
+    Dim paramName As String
+    paramName = UCase(Trim(paramNameRaw))
+    If paramName = "" Then Exit Sub
+
+    Dim fn As MIRFunction Ptr
+    fn = @module.functions(fnIdx)
+
+    Dim i As Integer
+    For i = 0 To fn->paramVarCount - 1
+        If UCase(Trim(fn->paramVars(i))) = paramName Then Exit Sub
+    Next i
+
+    If fn->paramVarCount = 0 Then
+        ReDim fn->paramVars(0)
+        ReDim fn->paramVarTypes(0)
+        ReDim fn->paramByRef(0)
+    Else
+        ReDim Preserve fn->paramVars(fn->paramVarCount)
+        ReDim Preserve fn->paramVarTypes(fn->paramVarCount)
+        ReDim Preserve fn->paramByRef(fn->paramVarCount)
+    End If
+    fn->paramVars(fn->paramVarCount) = paramName
+    fn->paramVarTypes(fn->paramVarCount) = MIRCanonicalTypeName(paramTypeRaw)
+    If fn->paramVarTypes(fn->paramVarCount) = "" Then fn->paramVarTypes(fn->paramVarCount) = "I64"
+    fn->paramByRef(fn->paramVarCount) = isByRef
+    fn->paramVarCount += 1
+End Sub
+
+Sub MIRAppendFunctionLocal(ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef localNameRaw As String, ByRef localTypeRaw As String)
+    Dim localName As String
+    localName = UCase(Trim(localNameRaw))
+    If localName = "" Then Exit Sub
+    Dim fn As MIRFunction Ptr
+    fn = @module.functions(fnIdx)
+    Dim i As Integer
+    For i = 0 To fn->localVarCount - 1
+        If UCase(Trim(fn->localVars(i))) = localName Then
+            If Trim(fn->localVarTypes(i)) = "" Then fn->localVarTypes(i) = MIRCanonicalTypeName(localTypeRaw)
+            Exit Sub
+        End If
+    Next i
+    If fn->localVarCount = 0 Then
+        ReDim fn->localVars(0)
+        ReDim fn->localVarTypes(0)
+    Else
+        ReDim Preserve fn->localVars(fn->localVarCount)
+        ReDim Preserve fn->localVarTypes(fn->localVarCount)
+    End If
+    fn->localVars(fn->localVarCount) = localName
+    fn->localVarTypes(fn->localVarCount) = MIRCanonicalTypeName(localTypeRaw)
+    If fn->localVarTypes(fn->localVarCount) = "" Then fn->localVarTypes(fn->localVarCount) = "I64"
+    fn->localVarCount += 1
+End Sub
+
+Private Function MIRLowerRoutineNodeCore(ByRef ps As ParseState, ByVal routineNodeIdx As Integer, ByRef module As MIRModule, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    If routineNodeIdx < 0 Or routineNodeIdx >= ps.ast.count Then Return 1
+
+    Dim k As String
+    k = UCase(Trim(ps.ast.nodes(routineNodeIdx).kind))
+    Select Case k
+    Case "SUB_STMT", "FUNCTION_STMT", "CLASS_METHOD_DECL", "CLASS_OPERATOR_DECL", "CLASS_CONSTRUCTOR_DECL", "CLASS_DESTRUCTOR_DECL", "CLASS_PROPERTY_GET_STMT", "CLASS_PROPERTY_SET_STMT"
+        ' supported
+    Case Else
+        Return 1
+    End Select
+
+    If MIRRoutineBodyStmtCount(ps, routineNodeIdx) <= 0 Then
+        If k = "SUB_STMT" Or k = "FUNCTION_STMT" Then Return 1
+    End If
+
+    Dim routineName As String
+    If MIRResolveRoutineEntryName(ps, routineNodeIdx, routineName) = 0 Then
+        errText = "mir: routine name resolve failed"
+        Return 0
+    End If
+
+    Dim fnIdx As Integer
+    If MIREnsureFunctionEntry(module, routineName, fnIdx) = 0 Then
+        errText = "mir: function entry create failed " & routineName
+        Return 0
+    End If
+
+    Dim routineDefaultType As String
+    If k = "SUB_STMT" Or k = "CLASS_PROPERTY_SET_STMT" Or k = "CLASS_CONSTRUCTOR_DECL" Or k = "CLASS_DESTRUCTOR_DECL" Then
+        routineDefaultType = "VOID"
+    Else
+        routineDefaultType = "I64"
+    End If
+    module.functions(fnIdx).returnType = MIRDeclaredTypeForAstNode(ps, routineNodeIdx, routineDefaultType)
+
+    Dim memberHasReceiver As Integer
+    memberHasReceiver = 0
+    If k = "CLASS_METHOD_DECL" Or k = "CLASS_OPERATOR_DECL" Then
+        memberHasReceiver = IIf(MIRClassMethodHasFlag(ps, routineNodeIdx, "STATIC") = 0, 1, 0)
+    ElseIf k = "CLASS_CONSTRUCTOR_DECL" Or k = "CLASS_DESTRUCTOR_DECL" Then
+        memberHasReceiver = 1
+    ElseIf k = "CLASS_PROPERTY_GET_STMT" Or k = "CLASS_PROPERTY_SET_STMT" Then
+        Dim propertyOwnerNode As Integer
+        propertyOwnerNode = ps.ast.nodes(routineNodeIdx).parent
+        If propertyOwnerNode >= 0 And propertyOwnerNode < ps.ast.count Then
+            memberHasReceiver = IIf(MIRClassPropertyHasFlag(ps, propertyOwnerNode, "STATIC") = 0, 1, 0)
+        End If
+    End If
+    If memberHasReceiver <> 0 Then MIRAppendFunctionParam module, fnIdx, "THIS", "PTR"
+    If k = "CLASS_PROPERTY_SET_STMT" Then
+        MIRAppendFunctionParam module, fnIdx, "VALUE", "I64"
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNodeIdx).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "PARAM_DECL" Then
+            Dim paramDefaultType As String
+            paramDefaultType = "I64"
+            Dim paramType As String
+            paramType = MIRDeclaredTypeForAstNode(ps, ch, paramDefaultType)
+            Dim paramIsByRef As Integer
+            paramIsByRef = IIf(UCase(Trim(ps.ast.nodes(ch).op)) = "BYREF", 1, 0)
+            MIRAppendFunctionParam module, fnIdx, ps.ast.nodes(ch).value, paramType, paramIsByRef
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Dim bodyBlock As Integer
+    bodyBlock = 0
+
+    ch = ps.ast.nodes(routineNodeIdx).firstChild
+    Do While ch <> -1
+        If MIRIsStmtKind(ps.ast.nodes(ch).kind) <> 0 Then
+            If MIRLowerTopLevelStmt(ps, ch, module, fnIdx, bodyBlock, tempSeed, errText) = 0 Then Return 0
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Dim defaultRetName As String
+    defaultRetName = "__result__"
+    If k = "FUNCTION_STMT" Then
+        defaultRetName = UCase(Trim(ps.ast.nodes(routineNodeIdx).value))
+    End If
+
+    Dim needsDefaultReturn As Integer
+    needsDefaultReturn = 1
+    If bodyBlock >= 0 And bodyBlock < module.functions(fnIdx).blockCount Then
+        Dim bodyInstructionCount As Integer
+        bodyInstructionCount = module.functions(fnIdx).blocks(bodyBlock).instructionCount
+        If bodyInstructionCount > 0 Then
+            Dim lastBodyOpcode As String
+            lastBodyOpcode = UCase(Trim(module.functions(fnIdx).blocks(bodyBlock).instructions(bodyInstructionCount - 1).opcode))
+            If lastBodyOpcode = MIR_OP_RET Or lastBodyOpcode = "RETURN" Or lastBodyOpcode = "MIR_RETURN" Then
+                needsDefaultReturn = 0
+            End If
+        End If
+    End If
+    If needsDefaultReturn <> 0 Then
+        If UCase(Trim(module.functions(fnIdx).returnType)) = "VOID" Then
+            MIRAppendInstruction module, fnIdx, bodyBlock, MIR_OP_RET, "", 0
+        Else
+            MIRAppendInstruction module, fnIdx, bodyBlock, MIR_OP_RET, "", 1, defaultRetName
+        End If
+    End If
+    Return 1
+End Function
+
+' S-141: lowers one routine with gMirCurrentNamespace set to the namespace that directly contains
+' it (SUB/FUNCTION only), so unqualified calls to sibling routines resolve (see
+' MIRResolveEnclosingNamespaceRoutineCall in mir_lower_expr.fbs).
+Private Function MIRLowerRoutineNode(ByRef ps As ParseState, ByVal routineNodeIdx As Integer, ByRef module As MIRModule, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    Dim savedNamespace As String
+    savedNamespace = gMirCurrentNamespace
+    gMirCurrentNamespace = ""
+    If routineNodeIdx >= 0 And routineNodeIdx < ps.ast.count Then
+        Dim routineKind As String
+        routineKind = UCase(Trim(ps.ast.nodes(routineNodeIdx).kind))
+        If routineKind = "SUB_STMT" Or routineKind = "FUNCTION_STMT" Then
+            Dim ownerIdx As Integer
+            ownerIdx = ps.ast.nodes(routineNodeIdx).parent
+            If ownerIdx >= 0 And ownerIdx < ps.ast.count Then
+                Dim ownerKind As String
+                ownerKind = UCase(Trim(ps.ast.nodes(ownerIdx).kind))
+                If ownerKind = "NAMESPACE_STMT" Or ownerKind = "MODULE_STMT" Then gMirCurrentNamespace = UCase(Trim(ps.ast.nodes(ownerIdx).value))
+            End If
+        End If
+    End If
+    Dim rv As Integer
+    rv = MIRLowerRoutineNodeCore(ps, routineNodeIdx, module, tempSeed, errText)
+    gMirCurrentNamespace = savedNamespace
+    Return rv
+End Function
+Private Function MIRLowerAllRoutineNodes(ByRef ps As ParseState, ByRef module As MIRModule, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+        Select Case k
+        Case "SUB_STMT", "FUNCTION_STMT", "CLASS_METHOD_DECL", "CLASS_OPERATOR_DECL", "CLASS_CONSTRUCTOR_DECL", "CLASS_DESTRUCTOR_DECL", "CLASS_PROPERTY_GET_STMT", "CLASS_PROPERTY_SET_STMT"
+            If MIRLowerRoutineNode(ps, i, module, tempSeed, errText) = 0 Then Return 0
+        End Select
+    Next i
+    Return 1
+End Function
+
+Private Sub MIRCfgAddEdge(ByRef fn As MIRFunction, ByVal fromBlock As Integer, ByVal toBlock As Integer)
+    If fromBlock < 0 Or fromBlock >= fn.blockCount Then Exit Sub
+    If toBlock < 0 Or toBlock >= fn.blockCount Then Exit Sub
+
+    Dim fromBlk As MIRBasicBlock Ptr
+    Dim toBlk As MIRBasicBlock Ptr
+    fromBlk = @fn.blocks(fromBlock)
+    toBlk = @fn.blocks(toBlock)
+
+    Dim i As Integer
+    For i = 0 To fromBlk->successorCount - 1
+        If fromBlk->successors(i) = toBlock Then GoTo addPred
+    Next i
+
+    If fromBlk->successorCount = 0 Then
+        ReDim fromBlk->successors(0)
+    Else
+        ReDim Preserve fromBlk->successors(fromBlk->successorCount)
+    End If
+    fromBlk->successors(fromBlk->successorCount) = toBlock
+    fromBlk->successorCount += 1
+
+addPred:
+    For i = 0 To toBlk->predecessorCount - 1
+        If toBlk->predecessors(i) = fromBlock Then Exit Sub
+    Next i
+
+    If toBlk->predecessorCount = 0 Then
+        ReDim toBlk->predecessors(0)
+    Else
+        ReDim Preserve toBlk->predecessors(toBlk->predecessorCount)
+    End If
+    toBlk->predecessors(toBlk->predecessorCount) = fromBlock
+    toBlk->predecessorCount += 1
+End Sub
+
+Private Function MIRFinalizeCfgForFunction(ByRef fn As MIRFunction, ByRef errText As String) As Integer
+    errText = ""
+    If fn.blockCount <= 0 Then Return 1
+
+    Dim bi As Integer
+    For bi = 0 To fn.blockCount - 1
+        fn.blocks(bi).predecessorCount = 0
+        fn.blocks(bi).successorCount = 0
+        Erase fn.blocks(bi).predecessors
+        Erase fn.blocks(bi).successors
+    Next bi
+
+    For bi = 0 To fn.blockCount - 1
+        Dim blk As MIRBasicBlock
+        blk = fn.blocks(bi)
+
+        Dim hasTerminalTransfer As Integer
+        hasTerminalTransfer = 0
+
+        Dim ii As Integer
+        For ii = 0 To blk.instructionCount - 1
+            Dim inst As MIRIRInstruction
+            inst = blk.instructions(ii)
+
+            Dim op As String
+            op = UCase(Trim(inst.opcode))
+
+            Select Case op
+            Case MIR_OP_JMP
+                If inst.operandCount < 1 Then
+                    errText = "mir: CFG JMP target missing in fn " & fn.name & " block " & LTrim(Str(bi))
+                    Return 0
+                End If
+                Dim tgt As Integer
+                tgt = Val(inst.operands(0))
+                If tgt < 0 Or tgt >= fn.blockCount Then
+                    errText = "mir: CFG JMP target out of range in fn " & fn.name & " block " & LTrim(Str(bi))
+                    Return 0
+                End If
+                MIRCfgAddEdge fn, bi, tgt
+                If ii = blk.instructionCount - 1 Then hasTerminalTransfer = 1
+
+            Case MIR_OP_JZ, MIR_OP_JNZ
+                If inst.operandCount < 2 Then
+                    errText = "mir: CFG conditional target missing in fn " & fn.name & " block " & LTrim(Str(bi))
+                    Return 0
+                End If
+                Dim tgt2 As Integer
+                tgt2 = Val(inst.operands(1))
+                If tgt2 < 0 Or tgt2 >= fn.blockCount Then
+                    errText = "mir: CFG conditional target out of range in fn " & fn.name & " block " & LTrim(Str(bi))
+                    Return 0
+                End If
+                MIRCfgAddEdge fn, bi, tgt2
+                If ii = blk.instructionCount - 1 Then
+                    If bi + 1 < fn.blockCount Then MIRCfgAddEdge fn, bi, bi + 1
+                    hasTerminalTransfer = 1
+                End If
+
+            Case MIR_OP_RET
+                If ii = blk.instructionCount - 1 Then hasTerminalTransfer = 1
+            End Select
+        Next ii
+
+        If hasTerminalTransfer = 0 And bi + 1 < fn.blockCount Then
+            MIRCfgAddEdge fn, bi, bi + 1
+        End If
+    Next bi
+
+    For bi = 0 To fn.blockCount - 1
+        fn.blocks(bi).isExit = IIf(fn.blocks(bi).successorCount = 0, 1, 0)
+    Next bi
+
+    Return 1
+End Function
+
+Private Function MIRFinalizeCfg(ByRef module As MIRModule, ByRef errText As String) As Integer
+    Dim fi As Integer
+    For fi = 0 To module.functionCount - 1
+        If MIRFinalizeCfgForFunction(module.functions(fi), errText) = 0 Then Return 0
+    Next fi
+    Return 1
+End Function
+
+
+' ABI10_MIR_MAIN_BODY_RECURSIVE_FIX_20260711:
+' MAIN_STMT can be nested under parser/program containers while routine declarations
+' are lowered in a separate pass.  The MAIN executable body must be copied into the
+' synthetic MAIN MIR function explicitly.  Some AST shapes place executable statements
+' under BLOCK/BODY/STMT_LIST-like wrappers, so direct-child lowering is not enough.
+Private Function MIRIsRoutineDeclKindForProgramBody(ByRef kindText As String) As Integer
+    Dim k As String
+    k = UCase(Trim(kindText))
+    Select Case k
+    Case "SUB_STMT", "FUNCTION_STMT", "DECLARE_FUNCTION_STMT", "DECLARE_SUB_STMT", _
+         "CLASS_METHOD_DECL", "CLASS_OPERATOR_DECL", "CLASS_CONSTRUCTOR_DECL", _
+         "CLASS_DESTRUCTOR_DECL", "CLASS_PROPERTY_GET_STMT", "CLASS_PROPERTY_SET_STMT", _
+         "CLASS_STMT", "TYPE_STMT", "ENUM_STMT", "INTERFACE_STMT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function MIRIsCompileTimeOnlyProgramBodyKind(ByRef kindText As String) As Integer
+    Dim k As String
+    k = UCase(Trim(kindText))
+    Select Case k
+    Case "INCLUDE_STMT", "IMPORT_STMT", "USING_STMT", "USING_ITEM", "ALIAS_STMT", _
+         "ALIAS_TARGET", "DECLARE_FUNCTION_STMT", "DECLARE_SUB_STMT", "DEFTYPE_STMT", _
+         "SETSTRINGSIZE_STMT", "NAMESPACE_STMT", "MODULE_STMT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function MIRIsTransparentProgramBodyContainer(ByRef kindText As String) As Integer
+    Dim k As String
+    k = UCase(Trim(kindText))
+    Select Case k
+    Case "PROGRAM", "PROGRAM_STMT", "BLOCK", "BLOCK_STMT", "BODY", "BODY_STMT", _
+         "STMT_LIST", "STATEMENT_LIST", "STATEMENTS", "MAIN_BODY", "MAIN_BLOCK", _
+         "MAIN_STMT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function MIRFindFirstMainStmtNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    If UCase(Trim(ps.ast.nodes(nodeIdx).kind)) = "MAIN_STMT" Then Return nodeIdx
+
+    Dim child As Integer
+    child = ps.ast.nodes(nodeIdx).firstChild
+    Do While child <> -1
+        Dim found As Integer
+        found = MIRFindFirstMainStmtNode(ps, child)
+        If found <> -1 Then Return found
+        child = ps.ast.nodes(child).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function MIRFunctionInstructionCount(ByRef fn As MIRFunction) As Integer
+    Dim total As Integer
+    total = 0
+    Dim bi As Integer
+    For bi = 0 To fn.blockCount - 1
+        total += fn.blocks(bi).instructionCount
+    Next bi
+    Return total
+End Function
+
+Private Function MIRLowerProgramBodyRecursive( _
+    ByRef ps As ParseState, _
+    ByVal ownerNodeIdx As Integer, _
+    ByRef module As MIRModule, _
+    ByRef blkIdx As Integer, _
+    ByRef tempSeed As Integer, _
+    ByRef loweredOut As Integer, _
+    ByRef errText As String _
+) As Integer
+    If ownerNodeIdx < 0 Or ownerNodeIdx >= ps.ast.count Then Return 1
+
+    Dim child As Integer
+    child = ps.ast.nodes(ownerNodeIdx).firstChild
+    Do While child <> -1
+        Dim ck As String
+        ck = UCase(Trim(ps.ast.nodes(child).kind))
+
+        If MIRIsRoutineDeclKindForProgramBody(ck) <> 0 Then
+            ' Routines/classes are lowered by MIRLowerAllRoutineNodes or compile-time layers.
+        ElseIf MIRIsCompileTimeOnlyProgramBodyKind(ck) <> 0 Then
+            ' Compile-time declarations do not produce executable MAIN instructions.
+        ElseIf MIRIsTransparentProgramBodyContainer(ck) <> 0 Then
+            If MIRLowerProgramBodyRecursive(ps, child, module, blkIdx, tempSeed, loweredOut, errText) = 0 Then Return 0
+        ElseIf MIRIsStmtKind(ck) <> 0 Then
+            Dim beforeCount As Integer
+            beforeCount = MIRFunctionInstructionCount(module.functions(0))
+            If MIRLowerTopLevelStmt(ps, child, module, 0, blkIdx, tempSeed, errText) = 0 Then Return 0
+            If MIRFunctionInstructionCount(module.functions(0)) > beforeCount Then loweredOut += 1
+        ElseIf ps.ast.nodes(child).firstChild <> -1 Then
+            ' Defensive: tolerate parser wrapper nodes whose kind is not in the table yet.
+            If MIRLowerProgramBodyRecursive(ps, child, module, blkIdx, tempSeed, loweredOut, errText) = 0 Then Return 0
+        End If
+
+        child = ps.ast.nodes(child).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function MIRLowerExplicitMainStmtNode( _
+    ByRef ps As ParseState, _
+    ByVal mainNodeIdx As Integer, _
+    ByRef module As MIRModule, _
+    ByRef blkIdx As Integer, _
+    ByRef tempSeed As Integer, _
+    ByRef errText As String _
+) As Integer
+    If mainNodeIdx < 0 Or mainNodeIdx >= ps.ast.count Then Return 1
+
+    Dim loweredCount As Integer
+    loweredCount = 0
+    If MIRLowerProgramBodyRecursive(ps, mainNodeIdx, module, blkIdx, tempSeed, loweredCount, errText) = 0 Then Return 0
+
+    ' Do not fail here: an empty MAIN is legal.  ABI10 smoke will verify PASS_ABI10 output.
+    Return 1
+End Function
+
+Private Function MIRLowerFallbackProgramTopLevel( _
+    ByRef ps As ParseState, _
+    ByRef module As MIRModule, _
+    ByRef blkIdx As Integer, _
+    ByRef tempSeed As Integer, _
+    ByRef errText As String _
+) As Integer
+    Dim loweredCount As Integer
+    loweredCount = 0
+    Return MIRLowerProgramBodyRecursive(ps, ps.rootNode, module, blkIdx, tempSeed, loweredCount, errText)
+End Function
+
+Private Function MIRLowerProgramTaskPrelude(ByRef ps As ParseState, ByVal ownerNodeIdx As Integer, ByRef module As MIRModule, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    If ownerNodeIdx < 0 Or ownerNodeIdx >= ps.ast.count Then Return 1
+    Dim child As Integer = ps.ast.nodes(ownerNodeIdx).firstChild
+    Do While child <> -1
+        Dim childKind As String = UCase(Trim(ps.ast.nodes(child).kind))
+        Select Case childKind
+        Case "DIM_STMT", "REDIM_STMT", "CONST_STMT", _
+             "EVENT_STMT", "THREAD_STMT", "PARALEL_STMT", "PIPE_STMT", "SLOT_STMT", "SLOT_TABLE_STMT"
+            If MIRLowerTopLevelStmt(ps, child, module, 0, blkIdx, tempSeed, errText) = 0 Then Return 0
+        Case "PROGRAM", "PROGRAM_STMT", "BLOCK", "BLOCK_STMT", "BODY", "BODY_STMT", "STMT_LIST", "STATEMENT_LIST", "STATEMENTS", "NAMESPACE_STMT", "MODULE_STMT"
+            If MIRLowerProgramTaskPrelude(ps, child, module, blkIdx, tempSeed, errText) = 0 Then Return 0
+        End Select
+        child = ps.ast.nodes(child).nextSibling
+    Loop
+    Return 1
+End Function
+
+Private Function MIRModuleFunctionReturnType(ByRef module As MIRModule, ByRef functionName As String) As String
+    Dim target As String
+    target = UCase(Trim(functionName))
+    Dim i As Integer
+    For i = 0 To module.functionCount - 1
+        If UCase(Trim(module.functions(i).name)) = target Then Return UCase(Trim(module.functions(i).returnType))
+    Next i
+    Return ""
+End Function
+
+Private Function MIRKnownValueType(ByRef fn As MIRFunction, ByRef tokenText As String) As String
+    Dim t As String
+    t = Trim(tokenText)
+    If t = "" Then Return ""
+    If Len(t) >= 2 And Left(t, 1) = Chr(34) And Right(t, 1) = Chr(34) Then Return "STRING"
+    If UXBNumberLiteralIsFloat(t) <> 0 Then
+        Dim numericValue As Double
+        numericValue = Val(t)
+        If numericValue <> 0 Or Left(t, 1) = "0" Or Left(t, 2) = "+0" Or Left(t, 2) = "-0" Then Return "F64"
+    End If
+    Dim firstChar As String
+    firstChar = Left(t, 1)
+    If (firstChar >= "0" And firstChar <= "9") Or firstChar = "+" Or firstChar = "-" Then Return "I64"
+
+    Dim i As Integer
+    For i = 0 To fn.paramVarCount - 1
+        If UCase(Trim(fn.paramVars(i))) = UCase(t) Then Return UCase(Trim(fn.paramVarTypes(i)))
+    Next i
+    For i = 0 To fn.localVarCount - 1
+        If UCase(Trim(fn.localVars(i))) = UCase(t) Then Return UCase(Trim(fn.localVarTypes(i)))
+    Next i
+    Dim bi As Integer
+    For bi = 0 To fn.blockCount - 1
+        Dim ii As Integer
+        For ii = 0 To fn.blocks(bi).instructionCount - 1
+            If UCase(Trim(fn.blocks(bi).instructions(ii).result)) = UCase(t) Then
+                If Trim(fn.blocks(bi).instructions(ii).resultType) <> "" Then Return UCase(Trim(fn.blocks(bi).instructions(ii).resultType))
+            End If
+        Next ii
+    Next bi
+    Return ""
+End Function
+
+Private Sub MIRAnnotateModuleResultTypes(ByRef module As MIRModule)
+    Dim passNo As Integer
+    For passNo = 0 To 31
+        Dim changed As Integer
+        changed = 0
+        Dim fi As Integer
+        For fi = 0 To module.functionCount - 1
+            Dim fn As MIRFunction Ptr
+            fn = @module.functions(fi)
+            Dim bi As Integer
+            For bi = 0 To fn->blockCount - 1
+                Dim ii As Integer
+                For ii = 0 To fn->blocks(bi).instructionCount - 1
+                    Dim inst As MIRIRInstruction Ptr
+                    inst = @fn->blocks(bi).instructions(ii)
+                    If Trim(inst->result) = "" Or Trim(inst->resultType) <> "" Then Continue For
+                    Dim inferredType As String
+                    Dim op As String
+                    op = UCase(Trim(inst->opcode))
+                    Select Case op
+                    Case "LOAD_CONST"
+                        If inst->operandCount >= 1 Then inferredType = MIRKnownValueType(*fn, inst->operands(0))
+                    Case "LOAD_VAR", "STORE_VAR", "MOVE", "ASSIGN", "CAST", "COERCE", "CONV", "CONVERT"
+                        inferredType = MIRKnownValueType(*fn, inst->result)
+                        If inferredType = "" And inst->operandCount >= 1 Then inferredType = MIRKnownValueType(*fn, inst->operands(0))
+                    Case "FADD", "FSUB", "FMUL", "FDIV", "FNEG"
+                        inferredType = "F64"
+                    Case "EQ", "NE", "LT", "LE", "GT", "GE", "BOOLIZE"
+                        inferredType = "BOOLEAN"
+                    Case "ADD", "SUB", "MUL", "DIV", "IDIV", "MOD", "NEG", "AND", "OR", "XOR", "NOT", "SHL", "SHR", "USHR", "UIDIV", "UMOD", "ULT", "ULE", "UGT", "UGE", "ROL", "ROR"
+                        inferredType = "I64"
+                    Case "STR_CONCAT", "STR_CONCAT_ASSIGN"
+                        inferredType = "STRING"
+                    Case "CALL"
+                        If inst->operandCount >= 1 Then
+                            inferredType = MIRModuleFunctionReturnType(module, inst->operands(0))
+                            If inferredType = "" Then
+                                Select Case UCase(Trim(inst->operands(0)))
+                                Case "CHR", "CHR$", "STR", "STR$", "LEFT", "LEFT$", "RIGHT", "RIGHT$", "MID", "MID$", "LCASE", "LCASE$", "UCASE", "UCASE$", "LTRIM", "LTRIM$", "RTRIM", "RTRIM$", "TRIM", "TRIM$", "SPACE", "SPACE$", "HEX", "HEX$", "OCT", "OCT$", "BIN", "BIN$"
+                                    inferredType = "STRING"
+                                Case "ABS"
+                                    If inst->operandCount >= 2 Then inferredType = MIRKnownValueType(*fn, inst->operands(1))
+                                Case "SGN", "INT", "FIX", "CINT", "CLNG", "LEN", "ASC", "INSTR", "VAL", "TIMER", "RND", "INPUT", "INPUTF"
+                                    inferredType = "I64"
+                                Case "LIST_NEW", "DICT_NEW", "SET_NEW", "NEW"
+                                    inferredType = "PTR"
+                                End Select
+                            End If
+                        End If
+                    End Select
+                    If inferredType <> "" Then inst->resultType = inferredType: changed += 1
+                Next ii
+            Next bi
+        Next fi
+        If changed = 0 Then Exit For
+    Next passNo
+End Sub
+
+
+Private Function MIRRegisterStaticClassMembers(ByRef ps As ParseState, ByRef module As MIRModule, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "CLASS_STMT" Then Continue For
+        Dim className As String
+        className = UCase(Trim(ps.ast.nodes(i).value))
+        If className = "" Then Continue For
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            Dim memberKind As String
+            memberKind = UCase(Trim(ps.ast.nodes(ch).kind))
+            If memberKind = "CLASS_FIELD" Or memberKind = "CLASS_PROPERTY_DECL" Then
+                Dim isStatic As Integer
+                If memberKind = "CLASS_FIELD" Then
+                    isStatic = MIRClassFieldHasFlag(ps, ch, "STATIC")
+                Else
+                    isStatic = MIRClassPropertyHasFlag(ps, ch, "STATIC")
+                End If
+                If isStatic <> 0 Then
+                    Dim typeName As String
+                    typeName = "I64"
+                    Dim cc As Integer
+                    cc = ps.ast.nodes(ch).firstChild
+                    Do While cc <> -1
+                        If UCase(Trim(ps.ast.nodes(cc).kind)) = "TYPE_REF" Then
+                            typeName = UCase(Trim(ps.ast.nodes(cc).value))
+                            Exit Do
+                        End If
+                        cc = ps.ast.nodes(cc).nextSibling
+                    Loop
+                    Dim isArray As Integer
+                    If memberKind = "CLASS_FIELD" Then
+                        cc = ps.ast.nodes(ch).firstChild
+                        Do While cc <> -1
+                            If UCase(Trim(ps.ast.nodes(cc).kind)) = "DIM_BOUNDS" Then isArray = 1: Exit Do
+                            cc = ps.ast.nodes(cc).nextSibling
+                        Loop
+                    End If
+                    Dim globalName As String
+                    globalName = className & "." & UCase(Trim(ps.ast.nodes(ch).value))
+                    If MIRRegisterGlobal(module, globalName, typeName, isArray) = 0 Then
+                        errText = "mir: static class member global registration failed " & globalName
+                        Return 0
+                    End If
+                End If
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+    Return 1
+End Function
+
+' S-054: MIRLowerAllRoutineNodes (below) lowers every SUB/FUNCTION body
+' BEFORE the main/top-level program body is lowered, but an array-typed
+' global is only registered into module.globalVars as a side effect of
+' actually lowering ITS OWN DIM/REDIM statement (see MIRRegisterArrayGlobal
+' calls in mir_lower_stmt_core_split.fbs). A top-level array declared in the
+' main body was therefore invisible to MIRIsKnownArray while any routine body
+' was being lowered (regardless of which one came first textually -- the
+' routine pass as a whole always runs before the main-body pass), so
+' `arr(i) = v` inside a SUB/FUNCTION touching a module-level array fell
+' through to "assign lhs must be ident, field, or indexed array", and the
+' JS backend's arrayStore runtime helper could receive a target that was
+' never wired to the real array. This pre-pass walks the whole AST (a flat
+' node array, so a linear scan reaches every DIM/REDIM regardless of nesting)
+' and registers every array name BEFORE any body is lowered, so
+' MIRIsKnownArray no longer depends on lowering order.
+Private Function MIRPreRegisterArrayGlobals(ByRef ps As ParseState, ByRef module As MIRModule) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim nodeKind As String
+        nodeKind = UCase(Trim(ps.ast.nodes(i).kind))
+        If nodeKind = "DIM_STMT" Or nodeKind = "REDIM_STMT" Then
+            Dim declKind As String
+            declKind = IIf(nodeKind = "DIM_STMT", "DIM_DECL", "REDIM_DECL")
+            Dim ch As Integer
+            ch = ps.ast.nodes(i).firstChild
+            Do While ch <> -1
+                If UCase(Trim(ps.ast.nodes(ch).kind)) = declKind Then
+                    Dim boundsNode As Integer
+                    boundsNode = MIRFindChildByKind(ps, ch, "DIM_BOUNDS")
+                    If boundsNode <> -1 Then
+                        Dim varName As String
+                        varName = ps.ast.nodes(ch).value
+                        Dim typeNode As Integer
+                        typeNode = MIRFindChildByKind(ps, ch, "TYPE_REF")
+                        Dim typeName As String
+                        typeName = ""
+                        If typeNode <> -1 Then typeName = UCase(Trim(ps.ast.nodes(typeNode).value))
+                        MIRRegisterArrayGlobal module, varName, typeName
+                    End If
+                End If
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+        End If
+    Next i
+    Return 1
+End Function
+
+Function MIRBuildModuleFromAST(ByRef ps As ParseState, ByRef moduleOut As MIRModule, ByRef errText As String) As Integer
+    errText = ""
+    gMirLowerLoopDepth = 0
+    gMirLowerTryDepth = 0
+    moduleOut.functionCount = 0
+    moduleOut.globalVarCount = 0
+    moduleOut.sourceFileCount = 0
+    Erase moduleOut.functions
+    Erase moduleOut.globalVars
+    Erase moduleOut.globalVarTypes
+    Erase moduleOut.globalVarIsArray
+    Erase moduleOut.sourceFiles
+
+    ' UXB_MIR_FULL_JSON_V2_20260728: retain the root source file in MIRModule
+    ' so every backend/analysis consumer sees it through the same MIR object.
+    If Trim(ps.lx.sourceFile) <> "" Then
+        ReDim moduleOut.sourceFiles(0)
+        moduleOut.sourceFiles(0) = ps.lx.sourceFile
+        moduleOut.sourceFileCount = 1
+    End If
+
+    If ps.rootNode = -1 Then
+        errText = "mir: ast root missing"
+        Return 0
+    End If
+
+    MIREnsureMain moduleOut
+    moduleOut.functions(0).returnType = "I64"
+
+    If MIRRegisterStaticClassMembers(ps, moduleOut, errText) = 0 Then Return 0
+
+    MIRPreRegisterArrayGlobals ps, moduleOut
+
+    Dim tempSeed As Integer
+    tempSeed = 0
+
+    If MIRLowerAllRoutineNodes(ps, moduleOut, tempSeed, errText) = 0 Then Return 0
+
+    Dim curBlock As Integer
+    curBlock = 0
+
+    Dim explicitMainNode As Integer
+    explicitMainNode = MIRFindFirstMainStmtNode(ps, ps.rootNode)
+
+    If explicitMainNode >= 0 Then
+        If MIRLowerProgramTaskPrelude(ps, ps.rootNode, moduleOut, curBlock, tempSeed, errText) = 0 Then Return 0
+        If MIRLowerExplicitMainStmtNode(ps, explicitMainNode, moduleOut, curBlock, tempSeed, errText) = 0 Then Return 0
+    Else
+        If MIRLowerFallbackProgramTopLevel(ps, moduleOut, curBlock, tempSeed, errText) = 0 Then Return 0
+    End If
+
+    MIRAppendInstruction moduleOut, 0, curBlock, MIR_OP_RET, "", 1, "__result__"
+
+    MIRAnnotateModuleResultTypes moduleOut
+
+    If MIRFinalizeCfg(moduleOut, errText) = 0 Then Return 0
+
+    ' Build MIR-level vtable map from AST (uses CLASS_METHOD_SLOT metadata)
+    If MIRBuildVTableMap(ps, moduleOut, errText) = 0 Then Return 0
+
+    Return 1
+End Function
+
+Private Function MIRBuildVTableMap(ByRef ps As ParseState, ByRef module As MIRModule, ByRef errText As String) As Integer
+    errText = ""
+
+    module.vtableClassCount = 0
+    module.vtableEntryCount = 0
+    module.vtableInterfaceSlotBase = MIRGlobalVirtualSlotCount(ps)
+    module.vtableInterfaceSlotCount = 0
+    Erase module.vtableClassNames
+    Erase module.vtableClassSlotCounts
+    Erase module.vtableClassSlotStart
+    Erase module.vtableClassSizeBytes
+    Erase module.vtableClassBaseNames
+    Erase module.vtableClassCtorFunctionIndex
+    Erase module.vtableClassCtorParamCount
+    Erase module.vtableClassDtorFunctionIndex
+    Erase module.vtableInterfaceNames
+    Erase module.vtableInterfaceMethodNames
+    Erase module.vtableEntryKeys
+    Erase module.vtableEntrySlots
+    Erase module.vtableEntryClassIndex
+    Erase module.vtableEntryFunctionIndex
+
+    ' Build one deterministic interface-slot namespace.  Interface slots are
+    ' appended after the global virtual-method range so every implementing
+    ' class has the same physical slot number for the same interface method.
+    Dim st As Integer
+    For st = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(st).kind)) = "INTERFACE_STMT" Then
+            Dim interfaceName As String
+            interfaceName = UCase(Trim(ps.ast.nodes(st).value))
+            Dim m As Integer
+            m = ps.ast.nodes(st).firstChild
+            Do While m <> -1
+                If UCase(Trim(ps.ast.nodes(m).kind)) = "INTERFACE_METHOD_DECL" Then
+                    Dim methodName As String
+                    methodName = UCase(Trim(ps.ast.nodes(m).value))
+                    Dim already As Integer
+                    already = 0
+                    Dim ii As Integer
+                    For ii = 0 To module.vtableInterfaceSlotCount - 1
+                        If module.vtableInterfaceNames(ii) = interfaceName And module.vtableInterfaceMethodNames(ii) = methodName Then
+                            already = 1
+                            Exit For
+                        End If
+                    Next ii
+                    If already = 0 Then
+                        If module.vtableInterfaceSlotCount = 0 Then
+                            ReDim module.vtableInterfaceNames(0)
+                            ReDim module.vtableInterfaceMethodNames(0)
+                        Else
+                            ReDim Preserve module.vtableInterfaceNames(module.vtableInterfaceSlotCount)
+                            ReDim Preserve module.vtableInterfaceMethodNames(module.vtableInterfaceSlotCount)
+                        End If
+                        module.vtableInterfaceNames(module.vtableInterfaceSlotCount) = interfaceName
+                        module.vtableInterfaceMethodNames(module.vtableInterfaceSlotCount) = methodName
+                        module.vtableInterfaceSlotCount += 1
+                    End If
+                End If
+                m = ps.ast.nodes(m).nextSibling
+            Loop
+        End If
+    Next st
+
+    Dim globalVirtualSlots As Integer
+    globalVirtualSlots = module.vtableInterfaceSlotBase
+    Dim classIndex As Integer
+
+    For st = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(st).kind)) = "CLASS_STMT" Then
+            Dim className As String
+            className = UCase(Trim(ps.ast.nodes(st).value))
+            If className <> "" Then
+                classIndex = module.vtableClassCount
+                If module.vtableClassCount = 0 Then
+                    ReDim module.vtableClassNames(0)
+                    ReDim module.vtableClassSlotCounts(0)
+                    ReDim module.vtableClassSlotStart(0)
+                    ReDim module.vtableClassSizeBytes(0)
+                    ReDim module.vtableClassBaseNames(0)
+                    ReDim module.vtableClassCtorFunctionIndex(0)
+                    ReDim module.vtableClassCtorParamCount(0)
+                    ReDim module.vtableClassDtorFunctionIndex(0)
+                Else
+                    ReDim Preserve module.vtableClassNames(module.vtableClassCount)
+                    ReDim Preserve module.vtableClassSlotCounts(module.vtableClassCount)
+                    ReDim Preserve module.vtableClassSlotStart(module.vtableClassCount)
+                    ReDim Preserve module.vtableClassSizeBytes(module.vtableClassCount)
+                    ReDim Preserve module.vtableClassBaseNames(module.vtableClassCount)
+                    ReDim Preserve module.vtableClassCtorFunctionIndex(module.vtableClassCount)
+                    ReDim Preserve module.vtableClassCtorParamCount(module.vtableClassCount)
+                    ReDim Preserve module.vtableClassDtorFunctionIndex(module.vtableClassCount)
+                End If
+
+                module.vtableClassNames(classIndex) = className
+                module.vtableClassBaseNames(classIndex) = ""
+                Dim baseNode As Integer
+                baseNode = MIRFindChildByKind(ps, st, "CLASS_BASE_REF")
+                If baseNode <> -1 Then module.vtableClassBaseNames(classIndex) = UCase(Trim(ps.ast.nodes(baseNode).value))
+
+                Dim classSize As Integer
+                Dim classSizeErr As String
+                If TypeLayoutSizeOf(ps, className, classSize, classSizeErr) = 0 Then
+                    errText = "mir: class layout size resolve failed for " & className & " " & classSizeErr
+                    Return 0
+                End If
+                If classSize < 8 Then classSize = 8
+                module.vtableClassSizeBytes(classIndex) = classSize
+
+                Dim ctorIdx As Integer
+                Dim dtorIdx As Integer
+                ctorIdx = MIRFindFunctionIndex(module, className & "_CTOR")
+                dtorIdx = MIRFindFunctionIndex(module, className & "_DTOR")
+                module.vtableClassCtorFunctionIndex(classIndex) = ctorIdx
+                module.vtableClassCtorParamCount(classIndex) = 0
+                If ctorIdx >= 0 And ctorIdx < module.functionCount Then
+                    module.vtableClassCtorParamCount(classIndex) = module.functions(ctorIdx).paramVarCount - 1
+                    If module.vtableClassCtorParamCount(classIndex) < 0 Then module.vtableClassCtorParamCount(classIndex) = 0
+                End If
+                module.vtableClassDtorFunctionIndex(classIndex) = dtorIdx
+
+                Dim totalSlots As Integer
+                totalSlots = globalVirtualSlots + module.vtableInterfaceSlotCount
+                module.vtableClassSlotCounts(classIndex) = totalSlots
+                module.vtableClassSlotStart(classIndex) = module.vtableEntryCount
+                module.vtableClassCount += 1
+
+                If totalSlots > 0 Then
+                    Dim implOwner() As String
+                    Dim implMethod() As String
+                    ReDim implOwner(totalSlots - 1)
+                    ReDim implMethod(totalSlots - 1)
+
+                    ' Virtual/override slots are resolved base-first.  The
+                    ' global virtual range makes the physical vtable shape
+                    ' identical across classes.
+                    Dim typesList() As String
+                    Dim typeCount As Integer
+                    typeCount = 0
+                    Dim curType As String
+                    curType = className
+                    Do While curType <> ""
+                        If typeCount = 0 Then
+                            ReDim typesList(0)
+                        Else
+                            ReDim Preserve typesList(typeCount)
+                        End If
+                        typesList(typeCount) = curType
+                        typeCount += 1
+                        Dim cnode As Integer
+                        cnode = MIRFindClassDeclNode(ps, curType)
+                        If cnode = -1 Then Exit Do
+                        Dim cb As Integer
+                        cb = MIRFindChildByKind(ps, cnode, "CLASS_BASE_REF")
+                        If cb = -1 Then Exit Do
+                        curType = UCase(Trim(ps.ast.nodes(cb).value))
+                    Loop
+
+                    Dim ti As Integer
+                    For ti = typeCount - 1 To 0 Step -1
+                        Dim vnode As Integer
+                        vnode = MIRFindClassDeclNode(ps, typesList(ti))
+                        If vnode = -1 Then Continue For
+                        Dim ch As Integer
+                        ch = ps.ast.nodes(vnode).firstChild
+                        Do While ch <> -1
+                            If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_METHOD_DECL" Then
+                                Dim meta As Integer
+                                meta = MIRFindChildByKind(ps, ch, "CLASS_METHOD_SLOT")
+                                If meta <> -1 Then
+                                    Dim si As Integer
+                                    si = Val(ps.ast.nodes(meta).value)
+                                    If si >= 0 And si < globalVirtualSlots Then
+                                        implOwner(si) = typesList(ti)
+                                        implMethod(si) = UCase(Trim(ps.ast.nodes(ch).value))
+                                    End If
+                                End If
+                            End If
+                            ch = ps.ast.nodes(ch).nextSibling
+                        Loop
+                    Next ti
+
+                    ' Interface slots are fixed globally and are populated
+                    ' only for classes that actually implement that interface.
+                    Dim ifaceIndex As Integer
+                    For ifaceIndex = 0 To module.vtableInterfaceSlotCount - 1
+                        Dim ifaceName As String
+                        Dim ifaceMethod As String
+                        ifaceName = module.vtableInterfaceNames(ifaceIndex)
+                        ifaceMethod = module.vtableInterfaceMethodNames(ifaceIndex)
+                        If MIRClassImplementsInterface(ps, className, ifaceName) <> 0 Then
+                            Dim ifaceOwner As String
+                            Dim ifaceMethodNode As Integer
+                            If MIRFindClassInterfaceImplementation(ps, className, ifaceName, ifaceMethod, ifaceOwner, ifaceMethodNode) <> 0 Then
+                                implOwner(module.vtableInterfaceSlotBase + ifaceIndex) = ifaceOwner
+                                implMethod(module.vtableInterfaceSlotBase + ifaceIndex) = ifaceMethod
+                            End If
+                        End If
+                    Next ifaceIndex
+
+                    Dim siAll As Integer
+                    For siAll = 0 To totalSlots - 1
+                        Dim eidx As Integer
+                        eidx = module.vtableEntryCount
+                        If module.vtableEntryCount = 0 Then
+                            ReDim module.vtableEntryKeys(0)
+                            ReDim module.vtableEntrySlots(0)
+                            ReDim module.vtableEntryClassIndex(0)
+                            ReDim module.vtableEntryFunctionIndex(0)
+                        Else
+                            ReDim Preserve module.vtableEntryKeys(module.vtableEntryCount)
+                            ReDim Preserve module.vtableEntrySlots(module.vtableEntryCount)
+                            ReDim Preserve module.vtableEntryClassIndex(module.vtableEntryCount)
+                            ReDim Preserve module.vtableEntryFunctionIndex(module.vtableEntryCount)
+                        End If
+
+                        Dim entryKey As String
+                        If siAll < globalVirtualSlots Then
+                            entryKey = className & "_" & UCase(Trim(implMethod(siAll)))
+                        Else
+                            Dim localIface As Integer
+                            localIface = siAll - module.vtableInterfaceSlotBase
+                            If localIface >= 0 And localIface < module.vtableInterfaceSlotCount Then
+                                entryKey = className & "_IFACE_" & module.vtableInterfaceNames(localIface) & "_" & module.vtableInterfaceMethodNames(localIface)
+                            Else
+                                entryKey = className & "_SLOT_" & LTrim(Str(siAll))
+                            End If
+                        End If
+
+                        module.vtableEntryKeys(eidx) = UCase(Trim(entryKey))
+                        module.vtableEntrySlots(eidx) = siAll
+                        module.vtableEntryClassIndex(eidx) = classIndex
+                        module.vtableEntryFunctionIndex(eidx) = -1
+                        If implOwner(siAll) <> "" And implMethod(siAll) <> "" Then
+                            module.vtableEntryFunctionIndex(eidx) = MIRFindFunctionIndex(module, UCase(Trim(implOwner(siAll) & "_" & implMethod(siAll))))
+                        End If
+                        module.vtableEntryCount += 1
+                    Next siAll
+                End If
+            End If
+        End If
+    Next st
+
+    Return 1
+End Function
+
+Function MIROptimizeModule(ByRef module As MIRModule, ByRef errText As String) As Integer
+    errText = ""
+    If module.functionCount <= 0 Then Return 1
+
+    Dim fi As Integer
+    For fi = 0 To module.functionCount - 1
+        Dim bi As Integer
+        For bi = 0 To module.functions(fi).blockCount - 1
+            Dim knownNames(Any) As String
+            Dim knownVals(Any) As MIRValue
+            Dim knownCount As Integer
+            knownCount = 0
+
+            Dim ii As Integer
+            For ii = 0 To module.functions(fi).blocks(bi).instructionCount - 1
+                Dim inst As MIRIRInstruction
+                inst = module.functions(fi).blocks(bi).instructions(ii)
+
+                If inst.opcode = MIR_OP_LOAD_CONST And Trim(inst.result) <> "" And inst.operandCount >= 1 Then
+                    Dim cv As MIRValue
+                    If MIRValueFromString(inst.operands(0), cv) <> 0 Then
+                        Dim found As Integer
+                        found = -1
+                        Dim k As Integer
+                        For k = 0 To knownCount - 1
+                            If UCase(knownNames(k)) = UCase(inst.result) Then found = k
+                        Next k
+                        If found = -1 Then
+                            If knownCount = 0 Then
+                                ReDim knownNames(0)
+                                ReDim knownVals(0)
+                            Else
+                                ReDim Preserve knownNames(knownCount)
+                                ReDim Preserve knownVals(knownCount)
+                            End If
+                            knownNames(knownCount) = inst.result
+                            knownVals(knownCount) = cv
+                            knownCount += 1
+                        Else
+                            knownVals(found) = cv
+                        End If
+                    End If
+                End If
+            Next ii
+        Next bi
+    Next fi
+
+    Return 1
+End Function

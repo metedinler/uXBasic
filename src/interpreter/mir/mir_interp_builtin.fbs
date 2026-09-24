@@ -1,0 +1,242 @@
+#ifndef UXB_MIR_INTERP_BUILTIN_FBS
+#define UXB_MIR_INTERP_BUILTIN_FBS
+
+#include once "../../mir/mir_instruction.fbs"
+#include once "../common/interp_context.fbs"
+#include once "mir_interp_state.fbs"
+
+Private Function UXBMIRBuiltinAsDouble(ByRef v As UXBInterpValue) As Double
+    If v.kind = UXB_VAL_STRING Or v.kind = UXB_VAL_WSTRING Or v.kind = UXB_VAL_BIGF Or v.kind = UXB_VAL_BIGD Or v.kind = UXB_VAL_BALL Or v.kind = UXB_VAL_BIGINT Then Return Val(v.stringValue)
+    If v.kind = UXB_VAL_BOOL Then Return CDbl(v.boolValue)
+    If v.floatValue <> 0 Then Return v.floatValue
+    Return CDbl(v.intValue)
+End Function
+
+Private Function UXBMIRBuiltinAsInt(ByRef v As UXBInterpValue) As LongInt
+    If v.kind = UXB_VAL_STRING Or v.kind = UXB_VAL_WSTRING Or v.kind = UXB_VAL_BIGF Or v.kind = UXB_VAL_BIGD Or v.kind = UXB_VAL_BALL Or v.kind = UXB_VAL_BIGINT Then Return ValInt(v.stringValue)
+    ' S-046: must match UXBMIRInterpAsInt (mir_interp_arith.fbs) and the AST
+    ' interpreter's identical helper (ast_interp_expr.fbs) -- FreeBASIC's own
+    ' boolean TRUE is -1 (all bits set), not 1. Returning the raw boolValue (1)
+    ' here made CINT(DICTHAS(...))/CINT(SETHAS(...)) (and any other CINT/CLNG
+    ' of a BOOL) disagree with both the AST interpreter and native x64.
+    If v.kind = UXB_VAL_BOOL Then Return IIf(v.boolValue <> 0, -1, 0)
+    If v.intValue <> 0 Then Return v.intValue
+    Return CLngInt(v.floatValue)
+End Function
+
+Function UXBMIRInterpBuiltinNameFromCall(ByRef ins As UXBMIRInstructionRecord) As String
+    If ins.operandCount > 0 Then Return UCase(Trim(ins.operands(0)))
+    Return UCase(Trim(ins.resultName))
+End Function
+
+Function UXBMIRInterpBuiltinOpcodeFromCall(ByRef ins As UXBMIRInstructionRecord) As String
+    Dim nameText As String = UXBMIRInterpBuiltinNameFromCall(ins)
+    If Left(nameText, 4) = "MIR_" Then Return nameText
+    Select Case nameText
+    Case "ABS": Return "MIR_ABS"
+    Case "ASC": Return "MIR_ASC"
+    Case "ATN": Return "MIR_ATN"
+    Case "CDBL": Return "MIR_CDBL"
+    Case "CHR", "CHR$": Return "MIR_CHR"
+    Case "CINT": Return "MIR_CINT"
+    Case "CLNG": Return "MIR_CLNG"
+    Case "CSNG": Return "MIR_CSNG"
+    Case "COS": Return "MIR_COS"
+    Case "EXP": Return "MIR_EXP"
+    Case "FIX": Return "MIR_FIX"
+    Case "INT": Return "MIR_INT"
+    Case "LCASE", "LCASE$": Return "MIR_LCASE"
+    Case "LEN": Return "MIR_LEN"
+    Case "LOG": Return "MIR_LOG"
+    Case "LTRIM", "LTRIM$": Return "MIR_LTRIM"
+    Case "MID", "MID$": Return "MIR_STR_MID"
+    Case "LEFT", "LEFT$": Return "MIR_STR_LEFT"
+    Case "RIGHT", "RIGHT$": Return "MIR_STR_RIGHT"
+    Case "RND": Return "MIR_RND"
+    Case "RTRIM", "RTRIM$": Return "MIR_RTRIM"
+    Case "TRIM", "TRIM$": Return "MIR_TRIM"
+    Case "SGN": Return "MIR_SGN"
+    Case "SIN": Return "MIR_SIN"
+    Case "SPACE", "SPACE$": Return "MIR_SPACE"
+    Case "SQR", "SQRT": Return "MIR_SQRT"
+    Case "STR", "STR$": Return "MIR_STR"
+    Case "TAN": Return "MIR_TAN"
+    Case "UCASE", "UCASE$": Return "MIR_UCASE"
+    Case "VAL": Return "MIR_VAL"
+    Case "INSTR": Return "MIR_INSTR"
+    Case "HEX", "HEX$": Return "MIR_HEX"
+    Case "OCT", "OCT$": Return "MIR_OCT"
+    Case "BIN", "BIN$": Return "MIR_BIN"
+    Case "SADD": Return "MIR_SADD"
+    Case "CODEPTR": Return "MIR_CODEPTR"
+    Case "LPTR": Return "MIR_LPTR"
+    Case "OFFSETOF": Return "MIR_OFFSETOF"
+    Case "SIZEOF": Return "MIR_SIZEOF"
+    Case "TYPEOF": Return "MIR_TYPEOF"
+    Case "BIGINIT": Return "MIR_BIGINIT"
+    Case "CPLEN": Return "MIR_CPLEN"
+    End Select
+    Return ""
+End Function
+
+Private Function UXBMIRInterpArg(ByRef st As UXBMIRInterpState, ByRef ins As UXBMIRInstructionRecord, ByVal idx As Integer) As UXBInterpValue
+    If idx >= 0 And idx < ins.operandCount Then Return UXBMIRInterpGetOperand(st, ins.operands(idx))
+    Return UXBInterpValueVoid()
+End Function
+
+Function UXBMIRInterpExecBuiltin(ByRef ins As UXBMIRInstructionRecord, ByRef ctx As UXBInterpContext, ByRef st As UXBMIRInterpState) As UXBInterpValue
+    Dim op As String = UXBMIRStep4CanonicalOpcode(ins.opcode)
+    Dim argShift As Integer = 0
+    If op = "MIR_CALL_BUILTIN" Or op = "MIR_CALL" Then
+        op = UXBMIRInterpBuiltinOpcodeFromCall(ins)
+        argShift = 1
+    End If
+    If op = "" Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR builtin not bound: " & ins.opcode)
+
+    Dim a As UXBInterpValue = UXBMIRInterpArg(st, ins, argShift)
+    Dim b As UXBInterpValue = UXBMIRInterpArg(st, ins, argShift + 1)
+    Dim c As UXBInterpValue = UXBMIRInterpArg(st, ins, argShift + 2)
+
+    Select Case op
+    Case "MIR_ASC"
+        Dim s As String = UXBInterpValueToString(a)
+        If Len(s) = 0 Then Return UXBInterpValueInt(0)
+        Return UXBInterpValueInt(Asc(Left(s, 1)))
+    Case "MIR_CHR"
+        Return UXBInterpValueString(Chr(CInt(UXBMIRBuiltinAsInt(a) And 255)))
+    Case "MIR_VAL"
+        Return UXBInterpValueFloat(Val(UXBInterpValueToString(a)))
+    Case "MIR_STR"
+        Return UXBInterpValueString(UXBInterpValueToString(a))
+    Case "MIR_CINT", "MIR_CLNG"
+        Return UXBInterpValueInt(UXBMIRBuiltinAsInt(a))
+    Case "MIR_FIX"
+        ' FIX truncates toward zero.  UXBMIRBuiltinAsInt intentionally rounds
+        ' floating values for CINT/CLNG and therefore must not be shared here.
+        Return UXBInterpValueInt(CLngInt(Fix(UXBMIRBuiltinAsDouble(a))))
+    Case "MIR_INT"
+        Return UXBInterpValueInt(CLngInt(Int(UXBMIRBuiltinAsDouble(a))))
+    Case "MIR_CSNG", "MIR_CDBL"
+        Return UXBInterpValueFloat(UXBMIRBuiltinAsDouble(a))
+    Case "MIR_SGN"
+        Dim x As Double = UXBMIRBuiltinAsDouble(a)
+        If x < 0 Then Return UXBInterpValueInt(-1)
+        If x > 0 Then Return UXBInterpValueInt(1)
+        Return UXBInterpValueInt(0)
+    Case "MIR_ABS"
+        Dim x As Double = UXBMIRBuiltinAsDouble(a)
+        If x < 0 Then x = -x
+        If a.kind = UXB_VAL_I32 Or a.kind = UXB_VAL_I64 Or a.kind = UXB_VAL_U32 Or a.kind = UXB_VAL_U64 Then Return UXBInterpValueInt(CLngInt(x))
+        Return UXBInterpValueFloat(x)
+    Case "MIR_SQR", "MIR_SQRT"
+        Dim x As Double = UXBMIRBuiltinAsDouble(a)
+        If x < 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "sqrt argument must be non-negative")
+        Return UXBInterpValueFloat(Sqr(x))
+    Case "MIR_SIN": Return UXBInterpValueFloat(Sin(UXBMIRBuiltinAsDouble(a)))
+    Case "MIR_COS": Return UXBInterpValueFloat(Cos(UXBMIRBuiltinAsDouble(a)))
+    Case "MIR_TAN": Return UXBInterpValueFloat(Tan(UXBMIRBuiltinAsDouble(a)))
+    Case "MIR_ATN": Return UXBInterpValueFloat(Atn(UXBMIRBuiltinAsDouble(a)))
+    Case "MIR_LOG"
+        Dim x As Double = UXBMIRBuiltinAsDouble(a)
+        If x <= 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "log argument must be positive")
+        Return UXBInterpValueFloat(Log(x))
+    Case "MIR_EXP": Return UXBInterpValueFloat(Exp(UXBMIRBuiltinAsDouble(a)))
+    Case "MIR_RND": Return UXBInterpValueFloat(Rnd)
+    Case "MIR_LEN": Return UXBInterpValueInt(Len(UXBInterpValueToString(a)))
+    Case "MIR_CPLEN"
+        ' S-107: number of bytes of the UTF-8 code point that starts at the 0-based byte position b
+        ' (lead byte: 0xxxxxxx 1, 110xxxxx 2, 1110xxxx 3, 11110xxx 4; a stray continuation byte counts 1)
+        Dim cpText As String = UXBInterpValueToString(a)
+        Dim cpPos As Integer = CInt(UXBMIRBuiltinAsInt(b))
+        If cpPos < 0 Or cpPos >= Len(cpText) Then Return UXBInterpValueInt(1)
+        Dim cpLead As Integer = Asc(Mid(cpText, cpPos + 1, 1))
+        If cpLead < 192 Then Return UXBInterpValueInt(1)
+        If cpLead < 224 Then Return UXBInterpValueInt(2)
+        If cpLead < 240 Then Return UXBInterpValueInt(3)
+        Return UXBInterpValueInt(4)
+    Case "MIR_LCASE": Return UXBInterpValueString(LCase(UXBInterpValueToString(a)))
+    Case "MIR_UCASE": Return UXBInterpValueString(UCase(UXBInterpValueToString(a)))
+    Case "MIR_LTRIM": Return UXBInterpValueString(LTrim(UXBInterpValueToString(a)))
+    Case "MIR_RTRIM": Return UXBInterpValueString(RTrim(UXBInterpValueToString(a)))
+    Case "MIR_TRIM": Return UXBInterpValueString(Trim(UXBInterpValueToString(a)))
+    Case "MIR_SPACE"
+        Dim n As Integer = CInt(UXBMIRBuiltinAsInt(a))
+        If n < 0 Then n = 0
+        Return UXBInterpValueString(Space(n))
+    Case "MIR_INSTR"
+        Dim startPos As Integer = 1
+        Dim hay As String
+        Dim needle As String
+        If ins.operandCount - argShift >= 3 Then
+            startPos = CInt(UXBMIRBuiltinAsInt(a))
+            hay = UXBInterpValueToString(b)
+            needle = UXBInterpValueToString(c)
+        Else
+            hay = UXBInterpValueToString(a)
+            needle = UXBInterpValueToString(b)
+        End If
+        If startPos < 1 Then startPos = 1
+        Return UXBInterpValueInt(InStr(startPos, hay, needle))
+    Case "MIR_STR_LEFT"
+        Return UXBInterpValueString(Left(UXBInterpValueToString(a), CInt(UXBMIRBuiltinAsInt(b))))
+    Case "MIR_STR_RIGHT"
+        Return UXBInterpValueString(Right(UXBInterpValueToString(a), CInt(UXBMIRBuiltinAsInt(b))))
+    Case "MIR_STR_MID"
+        Dim startAt As Integer = CInt(UXBMIRBuiltinAsInt(b))
+        Dim sizeValue As Integer = CInt(UXBMIRBuiltinAsInt(c))
+        If sizeValue <= 0 Then Return UXBInterpValueString(Mid(UXBInterpValueToString(a), startAt))
+        Return UXBInterpValueString(Mid(UXBInterpValueToString(a), startAt, sizeValue))
+    Case "MIR_HEX": Return UXBInterpValueString(Hex(UXBMIRBuiltinAsInt(a)))
+    Case "MIR_OCT": Return UXBInterpValueString(Oct(UXBMIRBuiltinAsInt(a)))
+    Case "MIR_BIN"
+        Dim n As ULongInt = CULngInt(UXBMIRBuiltinAsInt(a))
+        Dim outText As String = ""
+        Dim i As Integer
+        For i = 63 To 0 Step -1
+            If outText <> "" Or ((n Shr i) And 1) <> 0 Then outText &= IIf(((n Shr i) And 1) <> 0, "1", "0")
+        Next i
+        If outText = "" Then outText = "0"
+        Return UXBInterpValueString(outText)
+    Case "MIR_SADD"
+        ' S-076: real address of the string's NUL-terminated data (pinned copy, see
+        ' common/string_pin.fbs) -- the same contract as the AST interpreter.
+        If ins.operandCount - argShift <> 1 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR SADD expects exactly one string argument")
+        If a.kind <> UXB_VAL_STRING Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR SADD requires a STRING argument")
+        Dim sadText As String = a.stringValue
+        Dim sadAddr As ULongInt
+        Dim sadErr As String
+        If UXBStrPinAddress(sadText, sadAddr, sadErr) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, sadErr)
+        Return UXBInterpValueUInt(sadAddr)
+    Case "MIR_CODEPTR", "MIR_LPTR", "MIR_ADDR_OF"
+        Return UXBInterpValueError(UXB_INTERP_ERR_NATIVE_ONLY, "MIR pointer builtin requires a real addressable memory/code object; handle 0 is forbidden")
+    Case "MIR_SIZEOF"
+        Select Case UXBInterpCanonicalType(UXBInterpValueToString(a))
+        Case UXB_VAL_I32, UXB_VAL_U32, UXB_VAL_F32: Return UXBInterpValueInt(4)
+        Case UXB_VAL_I64, UXB_VAL_U64, UXB_VAL_F64, UXB_VAL_PTR: Return UXBInterpValueInt(8)
+        Case UXB_VAL_BOOL, UXB_VAL_I32: Return UXBInterpValueInt(4)
+        Case UXB_VAL_STRING, UXB_VAL_WSTRING: Return UXBInterpValueInt(8)
+        End Select
+        Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR SIZEOF type is unknown: " & UXBInterpValueToString(a))
+    Case "MIR_OFFSETOF"
+        Return UXBInterpValueError(UXB_INTERP_ERR_NATIVE_ONLY, "MIR OFFSETOF requires bound type-layout metadata; zero placeholder is forbidden")
+    Case "MIR_TYPEOF"
+        Return UXBInterpValueString(a.typeName)
+    Case "MIR_BIGINIT"
+        Dim bigArgCount As Integer = ins.operandCount - argShift
+        If bigArgCount < 2 Or bigArgCount > 3 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR BIGINIT expects kind, value and optional precision")
+        Dim kindText As String = UXBInterpValueToString(a)
+        Dim rawKindText As String = UCase(Trim(ins.operands(argShift)))
+        Select Case rawKindText
+        Case "BIGI", "BIGINT", "BIGINTEGER", "BIGF", "BIGFLOAT", "BIGD", "BIGDECIMAL", "BALL"
+            kindText = rawKindText
+        End Select
+        Dim valueText As String = UXBInterpValueToString(b)
+        Dim precisionValue As Integer = 0
+        If bigArgCount = 3 Then precisionValue = CInt(UXBMIRBuiltinAsInt(c))
+        Dim bigErr As String
+        Return UXBInterpExtNumCreate(kindText, valueText, precisionValue, bigErr)
+    End Select
+    Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR builtin opcode not executable: " & op)
+End Function
+
+#endif

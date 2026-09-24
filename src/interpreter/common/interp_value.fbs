@@ -1,0 +1,537 @@
+#ifndef UXB_INTERP_VALUE_FBS
+#define UXB_INTERP_VALUE_FBS
+
+#include once "interp_error_codes.fbs"
+#include once "../../semantic/library_type_contract.fbs"
+#include once "library_payload.fbs"
+
+Const UXB_VAL_VOID As String = "VAL_VOID"
+Const UXB_VAL_BOOL As String = "VAL_BOOL"
+Const UXB_VAL_I32 As String = "VAL_I32"
+Const UXB_VAL_U32 As String = "VAL_U32"
+Const UXB_VAL_I64 As String = "VAL_I64"
+Const UXB_VAL_U64 As String = "VAL_U64"
+Const UXB_VAL_F32 As String = "VAL_F32"
+Const UXB_VAL_F64 As String = "VAL_F64"
+Const UXB_VAL_STRING As String = "VAL_STRING"
+Const UXB_VAL_WSTRING As String = "VAL_WSTRING"
+Const UXB_VAL_PTR As String = "VAL_PTR"
+Const UXB_VAL_ARRAY As String = "VAL_ARRAY"
+Const UXB_VAL_OBJECT As String = "VAL_OBJECT"
+Const UXB_VAL_FUNCTION As String = "VAL_FUNCTION"
+Const UXB_VAL_SUB As String = "VAL_SUB"
+Const UXB_VAL_FILE_HANDLE As String = "VAL_FILE_HANDLE"
+Const UXB_VAL_DLL_HANDLE As String = "VAL_DLL_HANDLE"
+Const UXB_VAL_RUNTIME_HANDLE As String = "VAL_RUNTIME_HANDLE"
+Const UXB_VAL_JS_HANDLE As String = "VAL_JS_HANDLE"
+Const UXB_VAL_WASM_HANDLE As String = "VAL_WASM_HANDLE"
+Const UXB_VAL_BIGF As String = "VAL_BIGF"
+Const UXB_VAL_BIGD As String = "VAL_BIGD"
+Const UXB_VAL_BALL As String = "VAL_BALL"
+Const UXB_VAL_BIGINT As String = "VAL_BIGINT"
+Const UXB_VAL_VARIANT As String = "VAL_VARIANT"
+Const UXB_VAL_ANY As String = "VAL_ANY"
+Const UXB_VAL_ERROR As String = "VAL_ERROR"
+
+Type UXBInterpValue
+    libraryPayload As UXBLibraryPayloadRef
+    kind As String
+    typeName As String
+    intValue As LongInt
+    uintValue As ULongInt
+    floatValue As Double
+    stringValue As String
+    boolValue As Integer
+    ptrValue As Any Ptr
+    externalPrecision As Integer
+    handleId As Integer
+    objectId As Integer
+    arrayId As Integer
+    errorCode As Integer
+    errorText As String
+End Type
+
+Function UXBInterpLibraryValueCopy(ByRef sourceValue As UXBInterpValue) As UXBInterpValue
+    Dim result As UXBInterpValue = sourceValue
+    If sourceValue.libraryPayload.node = 0 Then Return result
+    Dim idx As Integer = UXBLibraryTypeRegistryFind(sourceValue.typeName)
+    If idx < 0 Then Return result
+    Select Case LCase(Trim(gUXBLibraryTypes(idx).copyModel))
+    Case "clone"
+        result.libraryPayload = UXBLibraryPayloadClone(sourceValue.libraryPayload)
+        If result.libraryPayload.node = 0 Then
+            result.kind = UXB_VAL_ERROR
+            result.errorCode = UXB_INTERP_ERR_RUNTIME_SERVICE
+            result.errorText = "library type CLONE failed: " & sourceValue.typeName
+        End If
+    Case "retain"
+    Case Else
+        result.libraryPayload.Clear()
+        result.kind = UXB_VAL_ERROR
+        result.errorCode = UXB_INTERP_ERR_RUNTIME_SERVICE
+        result.errorText = "library type COPY unavailable: " & sourceValue.typeName
+    End Select
+    Return result
+End Function
+
+Declare Function UXBInterpValueRational(ByVal numerator As LongInt, ByVal denominator As LongInt) As UXBInterpValue
+
+Private Function UXBInterpU(ByVal textValue As String) As String
+    Return UCase(Trim(textValue))
+End Function
+
+Function UXBInterpCanonicalType(ByVal typeText As String) As String
+    Dim t As String = UXBInterpU(typeText)
+    Dim parameterPos As Integer = InStr(t, "(")
+    If parameterPos > 1 And Right(t, 1) = ")" Then t = Trim(Left(t, parameterPos - 1))
+    Select Case t
+    Case "", "VOID", "TYPE_VOID": Return UXB_VAL_VOID
+    Case "BOOL", "BOOLEAN", "TYPE_BOOL": Return UXB_VAL_BOOL
+    Case "I8", "I16", "I32", "INT", "INTEGER", "TYPE_I32": Return UXB_VAL_I32
+    Case "U8", "U16", "U32", "UINT", "TYPE_U32": Return UXB_VAL_U32
+    Case "I64", "LONGINT", "TYPE_I64": Return UXB_VAL_I64
+    Case "U64", "ULONGINT", "TYPE_U64": Return UXB_VAL_U64
+    Case "F32", "SINGLE", "TYPE_F32": Return UXB_VAL_F32
+    Case "F64", "DOUBLE", "TYPE_F64", "F80", "EXTENDED", "EXT", "TYPE_F80": Return UXB_VAL_F64
+    Case "STRING", "TYPE_STRING": Return UXB_VAL_STRING
+    Case "WSTRING", "TYPE_WSTRING": Return UXB_VAL_WSTRING
+    Case "PTR", "POINTER", "REF", "TYPE_PTR": Return UXB_VAL_PTR
+    Case "ARRAY", "LIST", "DICT", "SET", "TYPE_ARRAY": Return UXB_VAL_ARRAY
+    Case "OBJECT", "CLASS", "INTERFACE", "TYPE_OBJECT", "TYPE_CLASS", "TYPE_INTERFACE": Return UXB_VAL_OBJECT
+    Case "FUNCTION", "FUNCTION_PTR", "TYPE_FUNCTION_PTR": Return UXB_VAL_FUNCTION
+    Case "SUB": Return UXB_VAL_SUB
+    Case "FILE", "FILE_HANDLE", "TYPE_FILE_HANDLE": Return UXB_VAL_FILE_HANDLE
+    Case "DLL", "DLL_HANDLE", "TYPE_DLL_HANDLE": Return UXB_VAL_DLL_HANDLE
+    Case "JS_OBJECT", "TYPE_JS_OBJECT": Return UXB_VAL_JS_HANDLE
+    Case "WASM_EXTERNREF", "TYPE_WASM_EXTERNREF": Return UXB_VAL_WASM_HANDLE
+    Case "BIGF", "BIGFLOAT", "TYPE_BIGF", "TYPE_BIGFLOAT": Return UXB_VAL_BIGF
+    Case "BIGD", "BIGDECIMAL", "TYPE_BIGD": Return UXB_VAL_BIGD
+    Case "BALL", "TYPE_BALL": Return UXB_VAL_BALL
+    Case "BIGI", "BIGINT", "TYPE_BIGI", "TYPE_BIGINT": Return UXB_VAL_BIGINT
+    Case "VARIANT", "VAR", "TYPE_VARIANT": Return UXB_VAL_VARIANT
+    Case "ANY", "ANYREF", "TYPE_ANY": Return UXB_VAL_ANY
+    End Select
+    Return UXB_VAL_VARIANT
+End Function
+
+Function UXBInterpValueVoid() As UXBInterpValue
+    Dim v As UXBInterpValue
+    v.kind = UXB_VAL_VOID
+    v.typeName = "VOID"
+    Return v
+End Function
+
+Function UXBInterpValueError(ByVal codeValue As Integer, ByVal textValue As String) As UXBInterpValue
+    Dim v As UXBInterpValue
+    v.kind = UXB_VAL_ERROR
+    v.typeName = "ERROR"
+    v.errorCode = codeValue
+    v.errorText = textValue
+    Return v
+End Function
+
+Function UXBInterpValueBool(ByVal b As Integer) As UXBInterpValue
+    Dim v As UXBInterpValue
+    v.kind = UXB_VAL_BOOL
+    v.typeName = "BOOLEAN"
+    v.boolValue = IIf(b <> 0, 1, 0)
+    v.intValue = IIf(v.boolValue <> 0, -1, 0)
+    v.uintValue = CULngInt(v.boolValue)
+    v.floatValue = CDbl(v.boolValue)
+    Return v
+End Function
+
+Function UXBInterpValueInt(ByVal n As LongInt) As UXBInterpValue
+    Dim v As UXBInterpValue
+    v.kind = UXB_VAL_I64
+    v.typeName = "I64"
+    v.intValue = n
+    v.uintValue = CULngInt(n)
+    v.floatValue = CDbl(n)
+    Return v
+End Function
+
+Function UXBInterpValueUInt(ByVal n As ULongInt) As UXBInterpValue
+    Dim v As UXBInterpValue
+    v.kind = UXB_VAL_U64
+    v.typeName = "U64"
+    v.uintValue = n
+    v.intValue = CLngInt(n)
+    v.floatValue = CDbl(n)
+    Return v
+End Function
+
+Function UXBInterpValueFloat(ByVal n As Double) As UXBInterpValue
+    Dim v As UXBInterpValue
+    v.kind = UXB_VAL_F64
+    v.typeName = "F64"
+    v.floatValue = n
+    v.intValue = CLngInt(n)
+    v.uintValue = CULngInt(v.intValue)
+    Return v
+End Function
+
+Function UXBInterpApplyDeclaredType(ByVal sourceValue As UXBInterpValue, ByVal declaredTypeRaw As String) As UXBInterpValue
+    Dim v As UXBInterpValue = sourceValue
+    Dim declaredType As String = UXBInterpU(declaredTypeRaw)
+    If declaredType = "" Then Return v
+    If Left(declaredType, 5) = "TYPE_" Then declaredType = Mid(declaredType, 6)
+
+    If UXBLibraryTypeRegistryFind(declaredType) >= 0 And UXBInterpU(v.typeName) = declaredType Then Return v
+
+    If declaredType = "RATIONAL" Then
+        If UCase(Trim(v.typeName)) = "RATIONAL" Then Return v
+        If v.kind = UXB_VAL_STRING Or v.kind = UXB_VAL_WSTRING Or v.kind = UXB_VAL_VARIANT Or v.kind = UXB_VAL_ANY Then
+            Return UXBInterpValueRational(ValLng(Trim(v.stringValue)), 1)
+        End If
+        Return UXBInterpValueRational(v.intValue, 1)
+    End If
+
+    ' S-037: a variable's declared type is "the type of the first value stored into it", and
+    ' the lowering initializes a class-typed DIM with the constant 0 -- so an OBJECT/ARRAY
+    ' handle stored later met declared type I32 and was coerced into an integer (its kind
+    ' became I32, only objectId survived). A method call on it then no longer looked like
+    ' an object: `a.Speak()` with `a AS Animal = NEW Dog()` ran Animal's method instead of
+    ' Dog's (no dynamic dispatch). A handle is never a number; keep it as it is.
+    If v.kind = UXB_VAL_OBJECT Or v.kind = UXB_VAL_ARRAY Then Return v
+
+    If v.kind = UXB_VAL_STRING Or v.kind = UXB_VAL_WSTRING Then
+        Select Case declaredType
+        Case "F32", "SINGLE", "F64", "DOUBLE"
+            v = UXBInterpValueFloat(Val(Trim(v.stringValue)))
+        Case "BOOL", "BOOLEAN", _
+             "U8", "UBYTE", "U16", "USHORT", "U32", "UINTEGER", "UINT", "ULONG", "U64", "ULONGINT", _
+             "I8", "BYTE", "SBYTE", "I16", "SHORT", "I32", "INTEGER", "INT", "LONG", "I64", "LONGINT"
+            v = UXBInterpValueInt(ValInt(Trim(v.stringValue)))
+        End Select
+    End If
+
+    Dim rawBits As ULongInt
+    rawBits = IIf(v.kind = UXB_VAL_U32 Or v.kind = UXB_VAL_U64, v.uintValue, CULngInt(v.intValue))
+    Select Case declaredType
+    Case "U8", "UBYTE"
+        v.kind = UXB_VAL_U32: v.uintValue = rawBits And &hFFULL: v.intValue = CLngInt(v.uintValue)
+    Case "U16", "USHORT"
+        v.kind = UXB_VAL_U32: v.uintValue = rawBits And &hFFFFULL: v.intValue = CLngInt(v.uintValue)
+    Case "U32", "UINTEGER", "UINT", "ULONG"
+        v.kind = UXB_VAL_U32: v.uintValue = rawBits And &hFFFFFFFFULL: v.intValue = CLngInt(v.uintValue)
+    Case "U64", "ULONGINT"
+        v.kind = UXB_VAL_U64: v.uintValue = rawBits: v.intValue = CLngInt(rawBits)
+    Case "I8", "BYTE", "SBYTE"
+        v.kind = UXB_VAL_I32: v.intValue = CLngInt(rawBits And &hFFULL)
+        If (rawBits And &h80ULL) <> 0 Then v.intValue Or= Not &hFFLL
+        v.uintValue = CULngInt(v.intValue)
+    Case "I16", "SHORT"
+        v.kind = UXB_VAL_I32: v.intValue = CLngInt(rawBits And &hFFFFULL)
+        If (rawBits And &h8000ULL) <> 0 Then v.intValue Or= Not &hFFFFLL
+        v.uintValue = CULngInt(v.intValue)
+    Case "I32", "INTEGER", "INT", "LONG"
+        v.kind = UXB_VAL_I32: v.intValue = CLngInt(rawBits And &hFFFFFFFFULL)
+        If (rawBits And &h80000000ULL) <> 0 Then v.intValue Or= Not &hFFFFFFFFLL
+        v.uintValue = CULngInt(v.intValue)
+    Case "I64", "LONGINT"
+        v.kind = UXB_VAL_I64: v.intValue = CLngInt(rawBits): v.uintValue = rawBits
+    Case "F32", "SINGLE"
+        If v.kind = UXB_VAL_U32 Or v.kind = UXB_VAL_U64 Then
+            v.floatValue = CDbl(v.uintValue)
+        ElseIf v.kind <> UXB_VAL_F32 And v.kind <> UXB_VAL_F64 Then
+            v.floatValue = CDbl(v.intValue)
+        End If
+        v.kind = UXB_VAL_F32
+    Case "F64", "DOUBLE", "F80", "EXTENDED", "EXT"
+        ' S-077: an unsigned source converts by its unsigned magnitude (2^64-1 is
+        ' 1.8446744073709552e19, not -1.0).
+        If v.kind = UXB_VAL_U32 Or v.kind = UXB_VAL_U64 Then
+            v.floatValue = CDbl(v.uintValue)
+        ElseIf v.kind <> UXB_VAL_F32 And v.kind <> UXB_VAL_F64 Then
+            v.floatValue = CDbl(v.intValue)
+        End If
+        v.kind = UXB_VAL_F64
+    Case "BOOL", "BOOLEAN"
+        v = UXBInterpValueBool(IIf(v.intValue <> 0 Or v.floatValue <> 0, 1, 0))
+    Case Else
+        v.kind = UXBInterpCanonicalType(declaredType)
+    End Select
+    ' S-077: floatValue mirrors the integer payload (UXBMIRInterpAsDouble reads
+    ' it first). Applying an integer type used to leave the source value's
+    ' mirror behind, so an unsigned 2^64-1 converted to double as -1.0.
+    Select Case v.kind
+    Case UXB_VAL_U32, UXB_VAL_U64
+        v.floatValue = CDbl(v.uintValue)
+    Case UXB_VAL_I32, UXB_VAL_I64
+        If declaredType <> "F32" And declaredType <> "SINGLE" And declaredType <> "F64" And declaredType <> "DOUBLE" Then v.floatValue = CDbl(v.intValue)
+    End Select
+    v.typeName = declaredType
+    Return v
+End Function
+
+Function UXBInterpValueString(ByVal s As String) As UXBInterpValue
+    Dim v As UXBInterpValue
+    v.kind = UXB_VAL_STRING
+    v.typeName = "STRING"
+    v.stringValue = s
+    Return v
+End Function
+
+Function UXBInterpValueHandle(ByVal kindText As String, ByVal idValue As Integer) As UXBInterpValue
+    Dim v As UXBInterpValue
+    v.kind = UXBInterpCanonicalType(kindText)
+    v.typeName = UCase(Trim(kindText))
+    v.handleId = idValue
+    v.objectId = idValue
+    v.arrayId = idValue
+    v.intValue = idValue
+    Return v
+End Function
+
+Function UXBInterpValueExternal(ByVal typeText As String, ByVal handleValue As Integer, ByVal payloadText As String = "") As UXBInterpValue
+    Dim v As UXBInterpValue
+    v.kind = UXBInterpCanonicalType(typeText)
+    v.typeName = UCase(Trim(typeText))
+    v.handleId = handleValue
+    v.objectId = handleValue
+    v.arrayId = handleValue
+    v.stringValue = payloadText
+    v.intValue = handleValue
+    Return v
+End Function
+
+Private Function UXBInterpAbsI64(ByVal n As LongInt) As ULongInt
+    If n < 0 Then Return CULngInt(0ULL - CULngInt(n))
+    Return CULngInt(n)
+End Function
+
+Private Function UXBInterpGcdI64(ByVal a As LongInt, ByVal b As LongInt) As ULongInt
+    Dim x As ULongInt
+    Dim y As ULongInt
+    x = UXBInterpAbsI64(a)
+    y = UXBInterpAbsI64(b)
+    While y <> 0
+        Dim t As ULongInt
+        t = x Mod y
+        x = y
+        y = t
+    Wend
+    If x = 0 Then Return 1
+    Return x
+End Function
+
+Function UXBInterpRationalPayload(ByVal numerator As LongInt, ByVal denominator As LongInt) As String
+    If denominator = 0 Then Return "NaN/0"
+    If denominator < 0 Then
+        numerator = -numerator
+        denominator = -denominator
+    End If
+    Dim g As ULongInt
+    g = UXBInterpGcdI64(numerator, denominator)
+    If g > 1 Then
+        numerator = numerator \ CLngInt(g)
+        denominator = denominator \ CLngInt(g)
+    End If
+    Return LTrim(Str(numerator)) & "/" & LTrim(Str(denominator))
+End Function
+
+Function UXBInterpValueRational(ByVal numerator As LongInt, ByVal denominator As LongInt) As UXBInterpValue
+    Return UXBInterpValueExternal("RATIONAL", 0, UXBInterpRationalPayload(numerator, denominator))
+End Function
+
+Function UXBInterpValueVariant(ByRef innerValue As UXBInterpValue) As UXBInterpValue
+    Dim v As UXBInterpValue = innerValue
+    v.kind = UXB_VAL_VARIANT
+    If v.typeName = "" Then v.typeName = "VARIANT"
+    Return v
+End Function
+
+Function UXBInterpValueAny(ByRef innerValue As UXBInterpValue) As UXBInterpValue
+    Dim v As UXBInterpValue = innerValue
+    v.kind = UXB_VAL_ANY
+    If v.typeName = "" Then v.typeName = "ANY"
+    Return v
+End Function
+
+Function UXBInterpValueDefaultForType(ByVal typeText As String) As UXBInterpValue
+    If UXBInterpU(typeText) = "RATIONAL" Then Return UXBInterpValueRational(0, 1)
+    If UXBLibraryTypeRegistryFind(typeText) >= 0 Then Return UXBInterpValueExternal(UXBInterpU(typeText), 0, "")
+    Dim k As String = UXBInterpCanonicalType(typeText)
+    Select Case k
+    Case UXB_VAL_VOID: Return UXBInterpValueVoid()
+    Case UXB_VAL_BOOL: Return UXBInterpValueBool(0)
+    Case UXB_VAL_I32, UXB_VAL_I64, UXB_VAL_BIGINT: Return UXBInterpApplyDeclaredType(UXBInterpValueInt(0), typeText)
+    Case UXB_VAL_U32, UXB_VAL_U64: Return UXBInterpApplyDeclaredType(UXBInterpValueUInt(0), typeText)
+    Case UXB_VAL_F32, UXB_VAL_F64: Return UXBInterpValueFloat(0)
+    Case UXB_VAL_STRING, UXB_VAL_WSTRING, UXB_VAL_BIGF, UXB_VAL_BIGD, UXB_VAL_BALL: Return UXBInterpValueString("")
+    Case UXB_VAL_ARRAY: Return UXBInterpValueHandle("ARRAY", -1)
+    Case UXB_VAL_OBJECT, UXB_VAL_VARIANT, UXB_VAL_ANY: Return UXBInterpValueExternal(k, 0, "")
+    End Select
+    Return UXBInterpValueExternal(k, 0, "")
+End Function
+
+Function UXBInterpIsError(ByRef v As UXBInterpValue) As Integer
+    Return IIf(v.kind = UXB_VAL_ERROR, 1, 0)
+End Function
+
+Function UXBInterpIsContainer(ByRef v As UXBInterpValue) As Integer
+    Select Case v.kind
+    Case UXB_VAL_ARRAY, UXB_VAL_OBJECT, UXB_VAL_VARIANT, UXB_VAL_ANY, UXB_VAL_JS_HANDLE, UXB_VAL_WASM_HANDLE
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Function UXBInterpIsNumeric(ByRef v As UXBInterpValue) As Integer
+    Select Case v.kind
+    Case UXB_VAL_BOOL, UXB_VAL_I32, UXB_VAL_U32, UXB_VAL_I64, UXB_VAL_U64, UXB_VAL_F32, UXB_VAL_F64, UXB_VAL_BIGF, UXB_VAL_BIGD, UXB_VAL_BALL, UXB_VAL_BIGINT
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function UXBInterpIsMachineNumeric(ByRef v As UXBInterpValue) As Integer
+    Select Case v.kind
+    Case UXB_VAL_BOOL, UXB_VAL_I32, UXB_VAL_U32, UXB_VAL_I64, UXB_VAL_U64, UXB_VAL_F32, UXB_VAL_F64
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Declare Function UXBInterpValueToString(ByRef v As UXBInterpValue) As String
+
+Function UXBInterpValuesEqual(ByRef leftValue As UXBInterpValue, ByRef rightValue As UXBInterpValue) As Integer
+    If UXBInterpIsMachineNumeric(leftValue) <> 0 And UXBInterpIsMachineNumeric(rightValue) <> 0 Then
+        If leftValue.kind = UXB_VAL_F32 Or leftValue.kind = UXB_VAL_F64 Or _
+           rightValue.kind = UXB_VAL_F32 Or rightValue.kind = UXB_VAL_F64 Then
+            Return IIf(leftValue.floatValue = rightValue.floatValue, 1, 0)
+        End If
+
+        Dim leftUnsigned As Integer
+        Dim rightUnsigned As Integer
+        leftUnsigned = IIf(leftValue.kind = UXB_VAL_U32 Or leftValue.kind = UXB_VAL_U64, 1, 0)
+        rightUnsigned = IIf(rightValue.kind = UXB_VAL_U32 Or rightValue.kind = UXB_VAL_U64, 1, 0)
+
+        If leftUnsigned <> 0 And rightUnsigned <> 0 Then
+            Return IIf(leftValue.uintValue = rightValue.uintValue, 1, 0)
+        End If
+        ' S-077: a signed operand meeting a U64 operand converts to U64 (the
+        ' language's promotion rule, and what every compiled engine does with a
+        ' plain 64-bit compare): I64(-1) = U64(2^64-1) is TRUE. A U32 is zero-extended,
+        ' so a negative signed value can never equal it.
+        If leftUnsigned <> 0 Then
+            If rightValue.intValue < 0 Then
+                If leftValue.kind = UXB_VAL_U64 Then Return IIf(leftValue.uintValue = CULngInt(rightValue.intValue), 1, 0)
+                Return 0
+            End If
+            Return IIf(leftValue.uintValue = CULngInt(rightValue.intValue), 1, 0)
+        End If
+        If rightUnsigned <> 0 Then
+            If leftValue.intValue < 0 Then
+                If rightValue.kind = UXB_VAL_U64 Then Return IIf(CULngInt(leftValue.intValue) = rightValue.uintValue, 1, 0)
+                Return 0
+            End If
+            Return IIf(CULngInt(leftValue.intValue) = rightValue.uintValue, 1, 0)
+        End If
+        Return IIf(leftValue.intValue = rightValue.intValue, 1, 0)
+    End If
+
+    Return IIf(UXBInterpValueToString(leftValue) = UXBInterpValueToString(rightValue), 1, 0)
+End Function
+
+Function UXBInterpTruth(ByRef v As UXBInterpValue) As Integer
+    If v.kind = UXB_VAL_BOOL Then Return IIf(v.boolValue <> 0, 1, 0)
+    If UXBInterpIsNumeric(v) <> 0 Then Return IIf(v.floatValue <> 0 Or v.intValue <> 0 Or Len(v.stringValue) > 0, 1, 0)
+    If v.kind = UXB_VAL_STRING Or v.kind = UXB_VAL_WSTRING Then Return IIf(Len(v.stringValue) > 0, 1, 0)
+    If v.kind = UXB_VAL_VOID Or v.kind = UXB_VAL_ERROR Then Return 0
+    Return 1
+End Function
+
+Function UXBInterpValueToString(ByRef v As UXBInterpValue) As String
+    If v.libraryPayload.node <> 0 Then
+        If v.libraryPayload.node->textFn <> 0 Then Return v.libraryPayload.node->textFn(v.libraryPayload.node->dataPtr)
+    End If
+    Select Case v.kind
+    Case UXB_VAL_VOID: Return ""
+    ' S-152: a truth value prints as its number, -1 / 0, exactly as the AST engine, native x64, legacy x64 and JS do
+    ' (`PRINT a > b`, `PRINT flag`, `"x=" + STR(flag)`); only this interpreter used to spell it TRUE / FALSE.
+    Case UXB_VAL_BOOL: Return IIf(v.boolValue <> 0, "-1", "0")
+    Case UXB_VAL_F32: Return UXBFloatToText(v.floatValue, 1)
+    Case UXB_VAL_F64: Return UXBFloatToText(v.floatValue, 0)
+    Case UXB_VAL_STRING, UXB_VAL_WSTRING: Return v.stringValue
+    Case UXB_VAL_BIGF, UXB_VAL_BIGD, UXB_VAL_BALL, UXB_VAL_BIGINT: Return v.stringValue
+    Case UXB_VAL_ARRAY: Return "ARRAY#" & LTrim(Str(v.arrayId))
+    Case UXB_VAL_OBJECT: Return "OBJECT#" & LTrim(Str(v.objectId))
+    Case UXB_VAL_VARIANT, UXB_VAL_ANY: Return v.stringValue
+    Case UXB_VAL_ERROR: Return "ERROR " & LTrim(Str(v.errorCode)) & ": " & v.errorText
+    ' S-077: unsigned kinds print their unsigned magnitude (2^64-1, not -1).
+    Case UXB_VAL_U32, UXB_VAL_U64: Return LTrim(Str(v.uintValue))
+    End Select
+    Return LTrim(Str(v.intValue))
+End Function
+
+Function UXBInterpCoerceToString(ByRef v As UXBInterpValue) As UXBInterpValue
+    Return UXBInterpValueString(UXBInterpValueToString(v))
+End Function
+
+Function UXBInterpValueFromLiteral(ByVal textValue As String, ByVal preferredType As String = "") As UXBInterpValue
+    Dim s As String = Trim(textValue)
+    Dim t As String = UXBInterpU(preferredType)
+    If t <> "RATIONAL" And UXBLibraryTypeRegistryFind(t) >= 0 And s = "0" Then Return UXBInterpValueDefaultForType(t)
+    ' S-077: canonical MIR names types "TYPE_I8"/"TYPE_U16"/...; the literal
+    ' typing below only listed a few TYPE_-prefixed spellings, so a DIM's zero
+    ' initializer for I8/U8/I16/U16 stayed a plain I64 and the variable then
+    ' never wrapped on later stores (c = 127 : c++ gave 128, not -128).
+    If Left(t, 5) = "TYPE_" And t <> "TYPE_VOID" Then t = Mid(t, 6)
+
+    ' UXB_FIX_A5_MIR_LITERAL: Canonical MIR bazen MIR_LOAD_CONST result type'ini
+    ' TYPE_VOID olarak tasiyor, fakat operand_type TYPE_STRING oluyor. Bu durumda
+    ' tirnakli sabitler ValInt() yoluyla 0'a dusmemeli. Tirnakli literal her zaman
+    ' STRING kabul edilir.
+    If Left(s, 1) = Chr(34) And Right(s, 1) = Chr(34) And Len(s) >= 2 Then
+        Return UXBInterpValueString(Mid(s, 2, Len(s) - 2))
+    End If
+
+    If t = "STRING" Or t = "TYPE_STRING" Then Return UXBInterpValueString(s)
+    If t = "RATIONAL" Then Return UXBInterpValueRational(ValLng(s), 1)
+    If t = "BIGF" Or t = "BIGD" Or t = "BALL" Or t = "BIGFLOAT" Then Return UXBInterpValueExternal(t, 0, s)
+    If t = "VARIANT" Then Return UXBInterpValueExternal("VARIANT", 0, s)
+    If t = "ANY" Then Return UXBInterpValueExternal("ANY", 0, s)
+    If UCase(s) = "TRUE" Then Return UXBInterpValueBool(1)
+    If UCase(s) = "FALSE" Then Return UXBInterpValueBool(0)
+    If s = "" Then Return UXBInterpValueVoid()
+
+    Dim parsedValue As UXBInterpValue
+    If UXBNumberLiteralIsFloat(s) <> 0 Then
+        parsedValue = UXBInterpValueFloat(Val(s))
+    Else
+        ' ValInt is host-Integer width here and corrupts a valid I64 literal
+        ' before a later I32/U32 cast can retain its low bits.  Val() would
+        ' route the text through a Double (53-bit mantissa) and overflow at
+        ' 2^63, so parse the literal exactly: a non-negative literal above
+        ' I64 max is an unsigned 64-bit quantity (S-077/S-078).
+        If Left(s, 1) = "-" Then
+            parsedValue = UXBInterpValueInt(ValLng(s))
+        Else
+            Dim literalBits As ULongInt = ValULng(s)
+            If literalBits > 9223372036854775807ULL Then
+                parsedValue = UXBInterpValueUInt(literalBits)
+            Else
+                parsedValue = UXBInterpValueInt(CLngInt(literalBits))
+            End If
+        End If
+    End If
+
+    Select Case t
+    Case "BOOL", "BOOLEAN", "TYPE_BOOL", _
+         "I8", "I16", "I32", "I64", "TYPE_I32", "TYPE_I64", _
+         "U8", "U16", "U32", "U64", "TYPE_U32", "TYPE_U64", _
+         "F32", "F64", "F80", "EXTENDED", "EXT", "TYPE_F32", "TYPE_F64"
+        Return UXBInterpApplyDeclaredType(parsedValue, t)
+    End Select
+    Return parsedValue
+End Function
+
+Function UXBInterpCloneValue(ByRef v As UXBInterpValue) As UXBInterpValue
+    Dim r As UXBInterpValue
+    r = v
+    Return r
+End Function
+
+#endif

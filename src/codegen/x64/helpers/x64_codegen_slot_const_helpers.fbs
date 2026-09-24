@@ -1,0 +1,306 @@
+' Extracted from code_generator.fbs for wave-14 modular split
+
+Private Function X64Upper(ByRef s As String) As String
+    Return UCase(Trim(s))
+End Function
+
+Private Function X64SlotLaneKindFromNodeKind(ByRef nodeKindRaw As String, ByRef laneKindOut As String) As Integer
+    laneKindOut = ""
+    Select Case X64Upper(nodeKindRaw)
+    Case "EVENT_STMT"
+        laneKindOut = "EVENT"
+        Return 1
+    Case "THREAD_STMT"
+        laneKindOut = "THREAD"
+        Return 1
+    Case "PARALEL_STMT"
+        laneKindOut = "PARALEL"
+        Return 1
+    Case "PIPE_STMT"
+        laneKindOut = "PIPE"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function X64SlotNodeKindFromLaneKind(ByRef laneKindRaw As String, ByRef nodeKindOut As String) As Integer
+    nodeKindOut = ""
+    Select Case X64Upper(laneKindRaw)
+    Case "EVENT"
+        nodeKindOut = "EVENT_STMT"
+        Return 1
+    Case "THREAD"
+        nodeKindOut = "THREAD_STMT"
+        Return 1
+    Case "PARALEL"
+        nodeKindOut = "PARALEL_STMT"
+        Return 1
+    Case "PIPE"
+        nodeKindOut = "PIPE_STMT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function X64SlotRoutineLabelForNode(ByVal nodeIdx As Integer) As String
+    Return "__uxb_slot_lane_" & LTrim(Str(nodeIdx))
+End Function
+
+Private Function X64SlotActiveSymbolName(ByVal nodeIdx As Integer) As String
+    Return "__UXB_SLOT_ACTIVE_" & LTrim(Str(nodeIdx))
+End Function
+
+Private Function X64SlotCapSymbolName(ByRef laneKind As String) As String
+    Return "__UXB_SLOT_CAP_" & X64Upper(laneKind)
+End Function
+
+Private Function X64SlotCountSymbolName(ByRef laneKind As String) As String
+    Return "__UXB_SLOT_COUNT_" & X64Upper(laneKind)
+End Function
+
+Private Function X64TryConstIntExpr(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef valueOut As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+    Dim k As String
+    k = X64Upper(n.kind)
+
+    If k = "NUMBER" Then
+        valueOut = CInt(Val(Trim(n.value)))
+        Return 1
+    End If
+
+    If k = "UNARY" Then
+        Dim childIdx As Integer
+        childIdx = n.left
+        If childIdx = -1 Then childIdx = n.right
+        If childIdx = -1 Then childIdx = n.firstChild
+        If childIdx = -1 Then Return 0
+
+        Dim childValue As Integer
+        If X64TryConstIntExpr(ps, childIdx, childValue) = 0 Then Return 0
+
+        Dim opText As String
+        opText = X64Upper(Trim(n.op))
+        If opText = "-" Then
+            valueOut = -childValue
+            Return 1
+        ElseIf opText = "+" Then
+            valueOut = childValue
+            Return 1
+        End If
+    End If
+
+    Return 0
+End Function
+
+Private Function X64TryFindTopLevelConstDecl(ByRef ps As ParseState, ByRef constNameRaw As String, ByRef declNodeOut As Integer) As Integer
+    declNodeOut = -1
+
+    Dim targetName As String
+    targetName = X64Upper(Trim(constNameRaw))
+    If targetName = "" Then Return 0
+    If ps.rootNode < 0 Or ps.rootNode >= ps.ast.count Then Return 0
+
+    Dim stmt As Integer
+    stmt = ps.ast.nodes(ps.rootNode).firstChild
+    Do While stmt <> -1
+        If X64Upper(ps.ast.nodes(stmt).kind) = "CONST_STMT" Then
+            Dim decl As Integer
+            decl = ps.ast.nodes(stmt).firstChild
+            Do While decl <> -1
+                If X64Upper(ps.ast.nodes(decl).kind) = "CONST_DECL" Then
+                    If X64Upper(Trim(ps.ast.nodes(decl).value)) = targetName Then
+                        declNodeOut = decl
+                        Return 1
+                    End If
+                End If
+                decl = ps.ast.nodes(decl).nextSibling
+            Loop
+        End If
+        stmt = ps.ast.nodes(stmt).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function X64TryResolveConstIntExpr(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef valueOut As LongInt, ByVal depth As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    If depth > 64 Then Return 0
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    Dim k As String
+    k = X64Upper(n.kind)
+
+    If k = "NUMBER" Or k = "INTEGER" Or k = "INT" Or k = "INT_LITERAL" Then
+        valueOut = CLngInt(Val(Trim(n.value)))
+        Return 1
+    End If
+
+    If k = "IDENT" Or k = "IDENTIFIER" Or k = "VAR" Or k = "VAR_REF" Or k = "KEYWORD_REF" Then
+        Dim identName As String
+        identName = X64Upper(Trim(n.value))
+        If identName = "TRUE" Then
+            valueOut = 1
+            Return 1
+        End If
+        If identName = "FALSE" Then
+            valueOut = 0
+            Return 1
+        End If
+
+        Dim constDeclNode As Integer
+        If X64TryFindTopLevelConstDecl(ps, identName, constDeclNode) = 0 Then Return 0
+
+        Dim constExprNode As Integer
+        constExprNode = ps.ast.nodes(constDeclNode).left
+        If constExprNode = -1 Then constExprNode = X64ChildAt(ps, constDeclNode, 0)
+        If constExprNode = -1 Then Return 0
+
+        Return X64TryResolveConstIntExpr(ps, constExprNode, valueOut, depth + 1)
+    End If
+
+    If k = "UNARY" Then
+        Dim unaryChild As Integer
+        unaryChild = n.left
+        If unaryChild = -1 Then unaryChild = n.right
+        If unaryChild = -1 Then unaryChild = n.firstChild
+        If unaryChild = -1 Then Return 0
+
+        Dim childValue As LongInt
+        If X64TryResolveConstIntExpr(ps, unaryChild, childValue, depth + 1) = 0 Then Return 0
+
+        Dim unaryOp As String
+        unaryOp = X64Upper(Trim(n.op))
+        Select Case unaryOp
+        Case "+"
+            valueOut = childValue
+            Return 1
+        Case "-"
+            valueOut = -childValue
+            Return 1
+        End Select
+
+        Return 0
+    End If
+
+    If k = "BINARY" Then
+        Dim lhsNode As Integer
+        Dim rhsNode As Integer
+        lhsNode = n.left
+        rhsNode = n.right
+        If lhsNode = -1 Then lhsNode = X64ChildAt(ps, nodeIdx, 0)
+        If rhsNode = -1 Then rhsNode = X64ChildAt(ps, nodeIdx, 1)
+        If lhsNode = -1 Or rhsNode = -1 Then Return 0
+
+        Dim lhsValue As LongInt
+        Dim rhsValue As LongInt
+        If X64TryResolveConstIntExpr(ps, lhsNode, lhsValue, depth + 1) = 0 Then Return 0
+        If X64TryResolveConstIntExpr(ps, rhsNode, rhsValue, depth + 1) = 0 Then Return 0
+
+        Dim binaryOp As String
+        binaryOp = X64Upper(Trim(n.op))
+
+        Select Case binaryOp
+        Case "+"
+            valueOut = lhsValue + rhsValue
+            Return 1
+        Case "-"
+            valueOut = lhsValue - rhsValue
+            Return 1
+        Case "*"
+            valueOut = lhsValue * rhsValue
+            Return 1
+        Case "/", "\"
+            If rhsValue = 0 Then Return 0
+            valueOut = lhsValue \ rhsValue
+            Return 1
+        Case "MOD"
+            If rhsValue = 0 Then Return 0
+            valueOut = lhsValue Mod rhsValue
+            Return 1
+        Case "AND"
+            valueOut = lhsValue And rhsValue
+            Return 1
+        Case "OR"
+            valueOut = lhsValue Or rhsValue
+            Return 1
+        Case "XOR"
+            valueOut = lhsValue Xor rhsValue
+            Return 1
+        Case "SHL", "<<"
+            valueOut = lhsValue Shl CInt(rhsValue)
+            Return 1
+        Case "SHR", ">>"
+            valueOut = lhsValue Shr CInt(rhsValue)
+            Return 1
+        Case "="
+            valueOut = IIf(lhsValue = rhsValue, 1, 0)
+            Return 1
+        Case "<>"
+            valueOut = IIf(lhsValue <> rhsValue, 1, 0)
+            Return 1
+        Case "<"
+            valueOut = IIf(lhsValue < rhsValue, 1, 0)
+            Return 1
+        Case "<="
+            valueOut = IIf(lhsValue <= rhsValue, 1, 0)
+            Return 1
+        Case ">"
+            valueOut = IIf(lhsValue > rhsValue, 1, 0)
+            Return 1
+        Case ">="
+            valueOut = IIf(lhsValue >= rhsValue, 1, 0)
+            Return 1
+        End Select
+
+        Return 0
+    End If
+
+    Return 0
+End Function
+
+Private Function X64TryResolveConstInt(ByRef ps As ParseState, ByRef constNameRaw As String, ByRef valueOut As LongInt) As Integer
+    Dim declNode As Integer
+    If X64TryFindTopLevelConstDecl(ps, constNameRaw, declNode) = 0 Then Return 0
+
+    Dim constExprNode As Integer
+    constExprNode = ps.ast.nodes(declNode).left
+    If constExprNode = -1 Then constExprNode = X64ChildAt(ps, declNode, 0)
+    If constExprNode = -1 Then Return 0
+
+    Return X64TryResolveConstIntExpr(ps, constExprNode, valueOut, 0)
+End Function
+
+Private Function X64SlotTryConstHeaderId(ByRef ps As ParseState, ByVal slotNodeIdx As Integer, ByRef idOut As Integer) As Integer
+    idOut = -1
+    If slotNodeIdx < 0 Or slotNodeIdx >= ps.ast.count Then Return 0
+
+    Dim headerNode As Integer
+    headerNode = X64ChildAt(ps, slotNodeIdx, 0)
+    If headerNode = -1 Then Return 0
+    If X64Upper(ps.ast.nodes(headerNode).kind) <> "SLOT_HEADER_ARGS" Then Return 0
+
+    Dim idExpr As Integer
+    idExpr = X64ChildAt(ps, headerNode, 0)
+    If idExpr = -1 Then Return 0
+
+    Dim parsedId As Integer
+    If X64TryConstIntExpr(ps, idExpr, parsedId) = 0 Then Return 0
+    idOut = parsedId
+    Return 1
+End Function
+
+' Find first child of node with matching kind (case-insensitive)
+Private Function X64FindChildByKind(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef kindText As String) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) = X64Upper(kindText) Then Return ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return -1
+End Function

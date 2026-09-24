@@ -1,0 +1,214 @@
+#ifndef UXB_FFI_SIGNATURE_BINDING_FBS
+#define UXB_FFI_SIGNATURE_BINDING_FBS
+
+' Adim15: FFI signature DSL parser.
+' Supported tokens: I32/U32/I64/U64/F32/F64/PTR/STRPTR/WSTRPTR/VOID.
+' Accepted forms:
+'   "I32,I32->I32"
+'   "(I32, F64) -> VOID"
+'   "VOID"
+
+' UXB_FFI_CONTRACT_FIX_20260728: executable CALL(DLL/API) ABI is ABI10.
+Const UXB_FFI_MAX_ARGS As Integer = 10
+
+Type UXBFFITypeSpec
+    name As String
+    sizeBytes As Integer
+    abiClass As String  ' INT, FLOAT, PTR, VOID
+End Type
+
+Type UXBFFISignature
+    rawText As String
+    returnType As UXBFFITypeSpec
+    args(0 To UXB_FFI_MAX_ARGS - 1) As UXBFFITypeSpec
+    argCount As Integer
+    ok As Integer
+    errorText As String
+End Type
+
+Function UXBFFITrimUpper(ByRef s As String) As String
+    Return UCase(Trim(s))
+End Function
+
+Function UXBFFITypeFromName(ByRef typeName As String, ByRef outType As UXBFFITypeSpec, ByRef errText As String) As Integer
+    Dim t As String
+    t = UXBFFITrimUpper(typeName)
+    errText = ""
+
+    Select Case t
+    Case "I32", "U32", "F32"
+        outType.name = t
+        outType.sizeBytes = 4
+    Case "I64", "U64", "F64", "PTR", "STRPTR", "WSTRPTR"
+        outType.name = t
+        outType.sizeBytes = 8
+    Case "VOID"
+        outType.name = t
+        outType.sizeBytes = 0
+    Case Else
+        errText = "FFI_SIGNATURE_ERROR: unknown type '" & typeName & "'"
+        Return 0
+    End Select
+
+    Select Case t
+    Case "F32", "F64"
+        outType.abiClass = "FLOAT"
+    Case "PTR", "STRPTR", "WSTRPTR"
+        outType.abiClass = "PTR"
+    Case "VOID"
+        outType.abiClass = "VOID"
+    Case Else
+        outType.abiClass = "INT"
+    End Select
+
+    Return 1
+End Function
+
+Private Function UXBFFIStripParens(ByRef s As String) As String
+    Dim t As String
+    t = Trim(s)
+    If Len(t) >= 2 Then
+        If Left(t, 1) = "(" And Right(t, 1) = ")" Then
+            Return Trim(Mid(t, 2, Len(t) - 2))
+        End If
+    End If
+    Return t
+End Function
+
+Private Function UXBFFIArgTokenAt(ByRef argText As String, ByVal wantedIndex As Integer) As String
+    Dim i As Integer
+    Dim startPos As Integer
+    Dim idx As Integer
+    startPos = 1
+    idx = 0
+
+    For i = 1 To Len(argText) + 1
+        If i > Len(argText) Or Mid(argText, i, 1) = "," Then
+            If idx = wantedIndex Then Return Trim(Mid(argText, startPos, i - startPos))
+            idx += 1
+            startPos = i + 1
+        End If
+    Next i
+    Return ""
+End Function
+
+Private Function UXBFFICountArgs(ByRef argText As String) As Integer
+    Dim t As String
+    t = Trim(argText)
+    If t = "" Or UCase(t) = "VOID" Then Return 0
+    Dim n As Integer
+    Dim i As Integer
+    n = 1
+    For i = 1 To Len(t)
+        If Mid(t, i, 1) = "," Then n += 1
+    Next i
+    Return n
+End Function
+
+Sub UXBFFISignatureInit(ByRef sig As UXBFFISignature)
+    sig.rawText = ""
+    sig.argCount = 0
+    sig.ok = 0
+    sig.errorText = ""
+    sig.returnType.name = "VOID"
+    sig.returnType.sizeBytes = 0
+    sig.returnType.abiClass = "VOID"
+End Sub
+
+Function UXBFFIParseSignature(ByRef signatureText As String, ByRef sig As UXBFFISignature) As Integer
+    UXBFFISignatureInit sig
+    sig.rawText = Trim(signatureText)
+
+    If sig.rawText = "" Then
+        sig.errorText = "FFI_SIGNATURE_ERROR: empty signature"
+        Return 0
+    End If
+
+    Dim leftPart As String
+    Dim rightPart As String
+    Dim arrowPos As Integer
+    arrowPos = InStr(sig.rawText, "->")
+
+    If arrowPos <= 0 Then
+        leftPart = ""
+        rightPart = sig.rawText
+    Else
+        leftPart = Trim(Left(sig.rawText, arrowPos - 1))
+        rightPart = Trim(Mid(sig.rawText, arrowPos + 2))
+    End If
+
+    Dim errText As String
+    If UXBFFITypeFromName(rightPart, sig.returnType, errText) = 0 Then
+        sig.errorText = errText
+        Return 0
+    End If
+
+    leftPart = UXBFFIStripParens(leftPart)
+    Dim argc As Integer
+    argc = UXBFFICountArgs(leftPart)
+    If argc > UXB_FFI_MAX_ARGS Then
+        sig.errorText = "FFI_SIGNATURE_ERROR: too many arguments, max=" & LTrim(Str(UXB_FFI_MAX_ARGS))
+        Return 0
+    End If
+
+    Dim i As Integer
+    For i = 0 To argc - 1
+        Dim tok As String
+        tok = UXBFFIArgTokenAt(leftPart, i)
+        If tok = "" Then
+            sig.errorText = "FFI_SIGNATURE_ERROR: empty argument type at index " & LTrim(Str(i))
+            Return 0
+        End If
+        If UXBFFITypeFromName(tok, sig.args(i), errText) = 0 Then
+            sig.errorText = errText
+            Return 0
+        End If
+        If sig.args(i).abiClass = "VOID" Then
+            sig.errorText = "FFI_SIGNATURE_ERROR: VOID cannot be used as argument type"
+            Return 0
+        End If
+    Next i
+
+    sig.argCount = argc
+    sig.ok = 1
+    Return 1
+End Function
+
+Function UXBFFICallingConventionValid(ByRef convText As String, ByRef targetText As String, ByRef errText As String) As Integer
+    Dim c As String
+    Dim t As String
+    c = UXBFFITrimUpper(convText)
+    t = UXBFFITrimUpper(targetText)
+    If c = "" Then c = "CDECL"
+
+    Select Case c
+    Case "CDECL", "STDCALL", "WIN64", "SYSTEM", "API"
+        ' accepted names
+    Case Else
+        errText = "FFI_CALL_CONV_ERROR: unsupported convention '" & convText & "'"
+        Return 0
+    End Select
+
+    If t = "X64" Or t = "NATIVE" Then
+        If c = "STDCALL" Then
+            ' On Win64 convention is unified. Keep as accepted but reportable.
+            Return 1
+        End If
+    End If
+
+    Return 1
+End Function
+
+Function UXBFFISignatureToText(ByRef sig As UXBFFISignature) As String
+    Dim s As String
+    Dim i As Integer
+    s = "("
+    For i = 0 To sig.argCount - 1
+        If i > 0 Then s &= ","
+        s &= sig.args(i).name
+    Next i
+    s &= ")->" & sig.returnType.name
+    Return s
+End Function
+
+#endif

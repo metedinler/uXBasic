@@ -1,0 +1,28 @@
+'' Task context variable names are shared by the runtime, semantic, MIR and x64
+'' layers, so they are declared before every bundle that produces or reads them.
+#include once "common/task_context_names.fbs"
+#include once "common/number_literal.fbs"
+#include once "common/float_text.fbs"
+#include once "common/type_abi.fbs"
+#include once "common/memory_ref.fbs"
+#include once "common/string_pin.fbs"
+'' Integration: optional native uxb_runtime.dll bridge must be declared before runtime/exec bundles
+#include once "runtime/native/uxb_runtime_integration.fbs"
+#include once "build/main_runtime_include_bundle.fbs"
+#include once "build/main_runtime_service_include_bundle.fbs"
+#include once "build/main_cli_include_bundle.fbs"
+#include once "build/main_preprocess_include_bundle.fbs"
+#include once "build/main_frontend_include_bundle.fbs"
+#include once "build/main_semantic_include_bundle.fbs"
+#include once "build/main_type_binding_include_bundle.fbs"
+#include once "build/main_layout_include_bundle.fbs"
+#include once "build/main_canonical_mir_include_bundle.fbs"
+#include once "build/main_interpreter_include_bundle.fbs"
+#include once "build/main_backend_include_bundle.fbs"
+#include once "build/main_x64_ast_include_bundle.fbs"
+#include once "build/main_x64_mir_include_bundle.fbs"
+#include once "build/main_web_backend_include_bundle.fbs"
+#include once "build/main_artifact_include_bundle.fbs"
+#include once "build/main_cli_runtime_helpers.fbs"
+#include once "main_program_entry.fbs"
+

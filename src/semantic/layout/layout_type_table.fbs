@@ -1,0 +1,677 @@
+#include once "layout_shared_core.fbs"
+
+#include once "../library_type_contract.fbs"
+
+Private Function EvalConstIntExpr(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef valueOut As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    Select Case UCase(n.kind)
+    Case "NUMBER"
+        valueOut = ValInt(n.value)
+        Return 1
+    Case "UNARY"
+        Dim rv As Integer
+        Dim unaryNode As Integer
+        unaryNode = n.left
+        If unaryNode = -1 Then unaryNode = n.right
+        If EvalConstIntExpr(ps, unaryNode, rv) = 0 Then Return 0
+        If n.op = "-" Then
+            valueOut = -rv
+            Return 1
+        ElseIf n.op = "+" Then
+            valueOut = rv
+            Return 1
+        End If
+        Return 0
+    Case "BINARY"
+        Dim lv As Integer
+        Dim rv As Integer
+        If EvalConstIntExpr(ps, n.left, lv) = 0 Then Return 0
+        If EvalConstIntExpr(ps, n.right, rv) = 0 Then Return 0
+
+        Select Case n.op
+        Case "+"
+            valueOut = lv + rv
+            Return 1
+        Case "-"
+            valueOut = lv - rv
+            Return 1
+        Case "*"
+            valueOut = lv * rv
+            Return 1
+        Case "\"
+            If rv = 0 Then Return 0
+            valueOut = lv \ rv
+            Return 1
+        Case "/"
+            If rv = 0 Then Return 0
+            valueOut = lv \ rv
+            Return 1
+        Case "%"
+            If rv = 0 Then Return 0
+            valueOut = lv Mod rv
+            Return 1
+        End Select
+    End Select
+
+    Return 0
+End Function
+
+Private Function ExtractBoundRange(ByRef ps As ParseState, ByVal boundNode As Integer, ByRef lowerOut As Integer, ByRef upperOut As Integer) As Integer
+    If boundNode < 0 Or boundNode >= ps.ast.count Then Return 0
+
+    Dim b As ASTNode
+    b = ps.ast.nodes(boundNode)
+
+    If UCase(b.kind) = "RANGE_EXPR" Then
+        If EvalConstIntExpr(ps, b.left, lowerOut) = 0 Then Return 0
+        If EvalConstIntExpr(ps, b.right, upperOut) = 0 Then Return 0
+        Return 1
+    End If
+
+    lowerOut = 0
+    If EvalConstIntExpr(ps, boundNode, upperOut) = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function BuildArrayFieldLayout(ByRef ps As ParseState, ByVal boundsNode As Integer, ByVal elemSize As Integer, ByVal elemAlign As Integer, ByRef isArrayFieldOut As Integer, ByRef firstDimOut As Integer, ByRef dimCountOut As Integer, ByRef elemStrideOut As Integer, ByRef fieldSizeOut As Integer, ByRef errOut As String) As Integer
+    Dim arrayElemCount As Integer
+
+    isArrayFieldOut = 0
+    firstDimOut = -1
+    dimCountOut = 0
+    elemStrideOut = LayoutAlignUp(elemSize, elemAlign)
+    arrayElemCount = 1
+
+    If boundsNode <> -1 Then
+        If UCase(ps.ast.nodes(boundsNode).kind) = "DIM_BOUNDS" Then
+            isArrayFieldOut = 1
+            firstDimOut = gTypeLayoutDimCount
+
+            Dim bNode As Integer
+            bNode = ps.ast.nodes(boundsNode).firstChild
+            Do While bNode <> -1
+                Dim lowerBound As Integer
+                Dim upperBound As Integer
+                If ExtractBoundRange(ps, bNode, lowerBound, upperBound) = 0 Then
+                    errOut = "layout: array bounds must be constant integers"
+                    Return 0
+                End If
+
+                Dim extent As Integer
+                extent = upperBound - lowerBound + 1
+                If extent <= 0 Then
+                    errOut = "layout: invalid array bounds"
+                    Return 0
+                End If
+
+                AddLayoutDim lowerBound, upperBound, extent
+                dimCountOut = dimCountOut + 1
+
+                If arrayElemCount > 2147483647 \ extent Then
+                    errOut = "layout: array extent overflow"
+                    Return 0
+                End If
+                arrayElemCount = arrayElemCount * extent
+
+                bNode = ps.ast.nodes(bNode).nextSibling
+            Loop
+
+            If dimCountOut = 0 Then
+                errOut = "layout: empty array bounds"
+                Return 0
+            End If
+        End If
+    End If
+
+    If isArrayFieldOut <> 0 Then
+        If elemStrideOut > 0 And arrayElemCount > 2147483647 \ elemStrideOut Then
+            errOut = "layout: array size overflow"
+            Return 0
+        End If
+        fieldSizeOut = elemStrideOut * arrayElemCount
+    Else
+        fieldSizeOut = elemSize
+    End If
+
+    Return 1
+End Function
+
+
+Private Function LayoutContractValue(ByRef contractText As String, ByRef keyText As String) As String
+    Dim contractUpper As String
+    Dim keyUpper As String
+    Dim startPos As Integer
+    Dim endPos As Integer
+    contractUpper = UCase(Trim(contractText))
+    keyUpper = UCase(Trim(keyText)) & "="
+    startPos = InStr(contractUpper, keyUpper)
+    If startPos = 0 Then Return ""
+    startPos += Len(keyUpper)
+    endPos = InStr(startPos, contractUpper, ";")
+    If endPos = 0 Then endPos = Len(contractUpper) + 1
+    Return Trim(Mid(contractUpper, startPos, endPos - startPos))
+End Function
+
+Private Function ConfigureTypeLayoutRecord(ByRef ps As ParseState, ByVal typeIdx As Integer, ByRef errOut As String) As Integer
+    If typeIdx < 0 Or typeIdx >= gTypeLayoutCount Then Return 0
+    Dim declNode As Integer
+    declNode = gTypeLayouts(typeIdx).declNode
+    If declNode < 0 Or declNode >= ps.ast.count Then Return 0
+
+    Dim nodeKind As String
+    Dim contractText As String
+    Dim recordKind As String
+    Dim abiKind As String
+    Dim packText As String
+    Dim alignText As String
+    nodeKind = UCase(Trim(ps.ast.nodes(declNode).kind))
+    contractText = UCase(Trim(ps.ast.nodes(declNode).op))
+
+    If nodeKind = "CLASS_STMT" Then
+        recordKind = "CLASS"
+        abiKind = "UX"
+    Else
+        recordKind = contractText
+        If InStr(recordKind, ";") > 0 Then recordKind = Left(recordKind, InStr(recordKind, ";") - 1)
+        If recordKind = "" Then recordKind = "TYPE"
+        If recordKind <> "TYPE" And recordKind <> "STRUCT" And recordKind <> "UNION" Then recordKind = "TYPE"
+        abiKind = LayoutContractValue(contractText, "ABI")
+        If abiKind = "" Then abiKind = IIf(recordKind = "TYPE", "UX", "C")
+    End If
+
+    packText = LayoutContractValue(contractText, "PACK")
+    alignText = LayoutContractValue(contractText, "ALIGN")
+
+    gTypeLayouts(typeIdx).recordKind = recordKind
+    gTypeLayouts(typeIdx).abiKind = abiKind
+    gTypeLayouts(typeIdx).baseTypeName = ""
+    If nodeKind = "CLASS_STMT" Then
+        Dim baseRefNode As Integer
+        baseRefNode = LayoutChildAt(ps, declNode, 0)
+        Dim baseScan As Integer
+        baseScan = ps.ast.nodes(declNode).firstChild
+        Do While baseScan <> -1
+            If UCase(Trim(ps.ast.nodes(baseScan).kind)) = "CLASS_BASE_REF" Then
+                gTypeLayouts(typeIdx).baseTypeName = UCase(Trim(ps.ast.nodes(baseScan).value))
+                Exit Do
+            End If
+            baseScan = ps.ast.nodes(baseScan).nextSibling
+        Loop
+    End If
+    gTypeLayouts(typeIdx).packBytes = IIf(packText = "", 0, ValInt(packText))
+    gTypeLayouts(typeIdx).explicitAlign = IIf(alignText = "", 0, ValInt(alignText))
+    gTypeLayouts(typeIdx).ffiByValue = IIf(recordKind = "STRUCT" And abiKind = "C", 1, 0)
+    gTypeLayouts(typeIdx).ffiByValueReason = ""
+    If recordKind = "UNION" Then gTypeLayouts(typeIdx).ffiByValueReason = "UNION by-value requires a generated C adapter"
+    If recordKind = "TYPE" Or recordKind = "CLASS" Then gTypeLayouts(typeIdx).ffiByValueReason = "uXBasic managed layout"
+    If gTypeLayouts(typeIdx).packBytes > 0 Then
+        gTypeLayouts(typeIdx).ffiByValue = 0
+        gTypeLayouts(typeIdx).ffiByValueReason = "PACK layout requires pointer passing or a generated C adapter"
+    End If
+    If gTypeLayouts(typeIdx).explicitAlign > 0 Then
+        gTypeLayouts(typeIdx).ffiByValue = 0
+        gTypeLayouts(typeIdx).ffiByValueReason = "explicit ALIGN requires libffi layout verification or a generated C adapter"
+    End If
+
+    If gTypeLayouts(typeIdx).packBytes < 0 Or gTypeLayouts(typeIdx).explicitAlign < 0 Then
+        errOut = "layout: PACK/ALIGN cannot be negative for " & gTypeLayouts(typeIdx).typeName
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function ValidateCAbiFieldType(ByRef rawTypeName As String, ByRef reasonOut As String) As Integer
+    Dim t As String
+    t = UCase(Trim(rawTypeName))
+    reasonOut = ""
+    Select Case t
+    Case "STRING", "WSTRING", "ARRAY", "LIST", "DICT", "SET", "REF", "OBJECT"
+        reasonOut = "use PTR or STRPTR for managed/reference fields"
+        Return 0
+    Case "F80", "EXTENDED", "EXT", "F128", "FLOAT128", "QUAD", "BIGF", "BIGFLOAT", "BIGD", "BIGDECIMAL", "BALL", "BIGI", "BIGINT", "BIGINTEGER"
+        reasonOut = "toolchain-dependent scalar requires a generated C adapter"
+        Return 0
+    End Select
+    Return 1
+End Function
+
+Private Function ResolveTypeLayout(ByRef ps As ParseState, ByRef rawTypeName As String, ByRef sizeOut As Integer, ByRef alignOut As Integer, ByRef errOut As String) As Integer
+    Dim builtinSize As Integer
+    Dim builtinAlign As Integer
+    Dim typeIdx As Integer
+    Dim normalizedTypeName As String
+    normalizedTypeName = UCase(Trim(rawTypeName))
+    If normalizedTypeName = "PTR" Then normalizedTypeName = "POINTER"
+    If normalizedTypeName = "BIGI" Then normalizedTypeName = "BIGINT"
+
+    If IsBuiltinLayoutType(normalizedTypeName, builtinSize, builtinAlign) Then
+        sizeOut = builtinSize
+        alignOut = builtinAlign
+        Return 1
+    End If
+
+    If UXBLibraryTypeLayoutInfo(normalizedTypeName, sizeOut, alignOut) <> 0 Then
+        Return 1
+    End If
+
+    ' Interfaces are runtime object references. They intentionally have no
+    ' by-value record layout, but DIM/assignment still needs the pointer-sized
+    ' slot so MIR and native backends can carry an interface-typed variable.
+    Dim interfaceNode As Integer
+    interfaceNode = -1
+    Dim astI As Integer
+    For astI = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(astI).kind)) = "INTERFACE" Or UCase(Trim(ps.ast.nodes(astI).kind)) = "INTERFACE_STMT" Then
+            If UCase(Trim(ps.ast.nodes(astI).value)) = normalizedTypeName Then
+                interfaceNode = astI
+                Exit For
+            End If
+        End If
+    Next astI
+    If interfaceNode <> -1 Then
+        sizeOut = 8
+        alignOut = 8
+        Return 1
+    End If
+
+    typeIdx = FindTypeLayoutIndex(normalizedTypeName)
+    If typeIdx = -1 Then
+        errOut = "unknown type: " & UCase(Trim(rawTypeName))
+        Return 0
+    End If
+
+    If gTypeLayouts(typeIdx).computed Then
+        sizeOut = gTypeLayouts(typeIdx).sizeBytes
+        alignOut = gTypeLayouts(typeIdx).alignBytes
+        Return 1
+    End If
+
+    If gTypeLayouts(typeIdx).visiting Then
+        errOut = "recursive by-value type: " & gTypeLayouts(typeIdx).typeName
+        Return 0
+    End If
+
+    gTypeLayouts(typeIdx).visiting = 1
+
+    Dim declNode As Integer
+    declNode = gTypeLayouts(typeIdx).declNode
+    If declNode < 0 Or declNode >= ps.ast.count Then
+        gTypeLayouts(typeIdx).visiting = 0
+        errOut = "layout: missing declaration node for type " & gTypeLayouts(typeIdx).typeName
+        Return 0
+    End If
+
+    Dim curOffset As Integer
+    Dim maxAlign As Integer
+    Dim firstField As Integer
+    Dim fieldCount As Integer
+    Dim fieldNode As Integer
+
+    curOffset = 0
+    maxAlign = 1
+    firstField = -1
+    fieldCount = 0
+
+    ' CLASS objects use a single vtable pointer at offset 0.  Derived classes
+    ' reuse the complete base object layout instead of allocating a second vptr
+    ' or restarting their fields at offset 8.
+    If UCase(Trim(ps.ast.nodes(declNode).kind)) = "CLASS_STMT" Then
+        If Trim(gTypeLayouts(typeIdx).baseTypeName) <> "" Then
+            Dim baseSize As Integer
+            Dim baseAlign As Integer
+            Dim baseErr As String
+            If ResolveTypeLayout(ps, gTypeLayouts(typeIdx).baseTypeName, baseSize, baseAlign, baseErr) = 0 Then
+                gTypeLayouts(typeIdx).visiting = 0
+                errOut = "layout: CLASS base layout resolve failed for " & gTypeLayouts(typeIdx).typeName & ": " & baseErr
+                Return 0
+            End If
+            curOffset = baseSize
+            maxAlign = baseAlign
+            If curOffset < 8 Then curOffset = 8
+            If maxAlign < 8 Then maxAlign = 8
+        Else
+            Dim vptrIdx As Integer
+            vptrIdx = AddLayoutField("__vptr", "POINTER", 0, 8, 8, 0, "POINTER", 8, 8, 8, -1, 0, "VPTR", "", "")
+            If firstField = -1 Then firstField = vptrIdx
+            fieldCount = fieldCount + 1
+            curOffset = 8
+            If maxAlign < 8 Then maxAlign = 8
+        End If
+    End If
+
+    fieldNode = ps.ast.nodes(declNode).firstChild
+    Do While fieldNode <> -1
+        Dim fieldKind As String
+        fieldKind = UCase(ps.ast.nodes(fieldNode).kind)
+
+        If fieldKind = "TYPE_FIELD" Or fieldKind = "CLASS_FIELD" Or fieldKind = "CLASS_PROPERTY_DECL" Then
+            If UCase(Trim(ps.ast.nodes(declNode).kind)) = "CLASS_STMT" Then
+                Dim staticMember As Integer
+                staticMember = 0
+                Dim flagScan As Integer
+                flagScan = ps.ast.nodes(fieldNode).firstChild
+                Do While flagScan <> -1
+                    Dim fk As String
+                    fk = UCase(Trim(ps.ast.nodes(flagScan).kind))
+                    If (fieldKind = "CLASS_FIELD" And fk = "CLASS_FIELD_FLAG" And UCase(Trim(ps.ast.nodes(flagScan).value)) = "STATIC") Or (fieldKind = "CLASS_PROPERTY_DECL" And fk = "CLASS_PROPERTY_FLAG" And UCase(Trim(ps.ast.nodes(flagScan).value)) = "STATIC") Then
+                        staticMember = 1
+                        Exit Do
+                    End If
+                    flagScan = ps.ast.nodes(flagScan).nextSibling
+                Loop
+                If staticMember <> 0 Then
+                    fieldNode = ps.ast.nodes(fieldNode).nextSibling
+                    Continue Do
+                End If
+            End If
+            Dim fieldTypeNode As Integer
+            Dim fieldTypeName As String
+            Dim elemSize As Integer
+            Dim elemAlign As Integer
+            Dim fieldOffset As Integer
+            Dim fieldSize As Integer
+            Dim boundsNode As Integer
+            Dim isArrayField As Integer
+            Dim firstDim As Integer
+            Dim dimCount As Integer
+            Dim elemStride As Integer
+
+            fieldTypeNode = LayoutChildAt(ps, fieldNode, 0)
+            If fieldTypeNode = -1 Then
+                gTypeLayouts(typeIdx).visiting = 0
+                errOut = "layout: missing field type in " & gTypeLayouts(typeIdx).typeName
+                Return 0
+            End If
+
+            fieldTypeName = ps.ast.nodes(fieldTypeNode).value
+            If gTypeLayouts(typeIdx).abiKind = "C" Then
+                Dim cAbiReason As String
+                If ValidateCAbiFieldType(fieldTypeName, cAbiReason) = 0 Then
+                    gTypeLayouts(typeIdx).visiting = 0
+                    errOut = "layout: C ABI field " & gTypeLayouts(typeIdx).typeName & "." & ps.ast.nodes(fieldNode).value & " " & cAbiReason
+                    Return 0
+                End If
+            End If
+
+            Dim fieldTypeIdx As Integer
+            fieldTypeIdx = FindTypeLayoutIndex(fieldTypeName)
+            If fieldTypeIdx <> -1 AndAlso gTypeLayouts(fieldTypeIdx).declNode >= 0 Then
+                If gTypeLayouts(typeIdx).abiKind = "C" Then
+                    If gTypeLayouts(fieldTypeIdx).abiKind <> "C" Or gTypeLayouts(fieldTypeIdx).recordKind = "CLASS" Or gTypeLayouts(fieldTypeIdx).recordKind = "TYPE" Then
+                        gTypeLayouts(typeIdx).visiting = 0
+                        errOut = "layout: C ABI record cannot contain managed type " & gTypeLayouts(fieldTypeIdx).typeName & " by value; use PTR"
+                        Return 0
+                    End If
+                    If gTypeLayouts(fieldTypeIdx).recordKind = "UNION" Or gTypeLayouts(fieldTypeIdx).ffiByValue = 0 Then
+                        gTypeLayouts(typeIdx).ffiByValue = 0
+                        If gTypeLayouts(typeIdx).ffiByValueReason = "" Then gTypeLayouts(typeIdx).ffiByValueReason = "nested field requires a generated C adapter"
+                    End If
+                End If
+                Dim fieldTypeDeclNode As Integer
+                fieldTypeDeclNode = gTypeLayouts(fieldTypeIdx).declNode
+                If UCase(Trim(ps.ast.nodes(fieldTypeDeclNode).kind)) = "CLASS_STMT" Then
+                    ' CLASS values are object references, including recursive links.
+                    elemSize = 8
+                    elemAlign = 8
+                ElseIf ResolveTypeLayout(ps, fieldTypeName, elemSize, elemAlign, errOut) = 0 Then
+                    gTypeLayouts(typeIdx).visiting = 0
+                    Return 0
+                End If
+            ElseIf ResolveTypeLayout(ps, fieldTypeName, elemSize, elemAlign, errOut) = 0 Then
+                gTypeLayouts(typeIdx).visiting = 0
+                Return 0
+            End If
+
+            If gTypeLayouts(typeIdx).abiKind = "C" And fieldTypeIdx <> -1 Then
+                If gTypeLayouts(fieldTypeIdx).ffiByValue = 0 Then
+                    gTypeLayouts(typeIdx).ffiByValue = 0
+                    If gTypeLayouts(typeIdx).ffiByValueReason = "" Then gTypeLayouts(typeIdx).ffiByValueReason = "nested record requires a generated C adapter"
+                End If
+            End If
+
+            boundsNode = LayoutChildAt(ps, fieldNode, 1)
+            If BuildArrayFieldLayout(ps, boundsNode, elemSize, elemAlign, isArrayField, firstDim, dimCount, elemStride, fieldSize, errOut) = 0 Then
+                gTypeLayouts(typeIdx).visiting = 0
+                Return 0
+            End If
+
+            Dim effectiveAlign As Integer
+            effectiveAlign = elemAlign
+            If gTypeLayouts(typeIdx).packBytes > 0 And effectiveAlign > gTypeLayouts(typeIdx).packBytes Then effectiveAlign = gTypeLayouts(typeIdx).packBytes
+
+            If gTypeLayouts(typeIdx).recordKind = "UNION" Then
+                fieldOffset = 0
+            Else
+                fieldOffset = LayoutAlignUp(curOffset, effectiveAlign)
+            End If
+            If firstField = -1 Then firstField = gTypeLayoutFieldCount
+            Dim accessorGetName As String
+            Dim accessorSetName As String
+            accessorGetName = ""
+            accessorSetName = ""
+            If fieldKind = "CLASS_PROPERTY_DECL" Then
+                accessorGetName = gTypeLayouts(typeIdx).typeName & "_PROPGET_" & UCase(Trim(ps.ast.nodes(fieldNode).value))
+                accessorSetName = gTypeLayouts(typeIdx).typeName & "_PROPSET_" & UCase(Trim(ps.ast.nodes(fieldNode).value))
+            End If
+            AddLayoutField ps.ast.nodes(fieldNode).value, fieldTypeName, fieldOffset, fieldSize, effectiveAlign, isArrayField, fieldTypeName, elemSize, elemAlign, elemStride, firstDim, dimCount, fieldKind, accessorGetName, accessorSetName
+            fieldCount = fieldCount + 1
+            If gTypeLayouts(typeIdx).recordKind = "UNION" Then
+                If fieldSize > curOffset Then curOffset = fieldSize
+            Else
+                curOffset = fieldOffset + fieldSize
+            End If
+            If effectiveAlign > maxAlign Then maxAlign = effectiveAlign
+        End If
+
+        fieldNode = ps.ast.nodes(fieldNode).nextSibling
+    Loop
+
+    If gTypeLayouts(typeIdx).abiKind = "C" And fieldCount = 0 Then
+        gTypeLayouts(typeIdx).visiting = 0
+        errOut = "layout: empty C ABI " & gTypeLayouts(typeIdx).recordKind & " is not supported"
+        Return 0
+    End If
+
+    If maxAlign > 8 Then maxAlign = 8
+    If gTypeLayouts(typeIdx).explicitAlign > maxAlign Then maxAlign = gTypeLayouts(typeIdx).explicitAlign
+    If maxAlign < 1 Then maxAlign = 1
+    gTypeLayouts(typeIdx).firstField = firstField
+    gTypeLayouts(typeIdx).fieldCount = fieldCount
+    gTypeLayouts(typeIdx).alignBytes = maxAlign
+    gTypeLayouts(typeIdx).sizeBytes = LayoutAlignUp(curOffset, maxAlign)
+    gTypeLayouts(typeIdx).computed = 1
+    gTypeLayouts(typeIdx).visiting = 0
+
+    sizeOut = gTypeLayouts(typeIdx).sizeBytes
+    alignOut = gTypeLayouts(typeIdx).alignBytes
+    Return 1
+End Function
+
+Private Function CollectTypeDeclarations(ByRef ps As ParseState, ByRef errOut As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim nodeKind As String
+        nodeKind = UCase(ps.ast.nodes(i).kind)
+
+        If nodeKind = "TYPE_STMT" Or nodeKind = "CLASS_STMT" Then
+            If AddTypeLayoutDecl(ps.ast.nodes(i).value, i, errOut) = 0 Then Return 0
+            Dim addedIdx As Integer
+            addedIdx = FindTypeLayoutIndex(ps.ast.nodes(i).value)
+            If ConfigureTypeLayoutRecord(ps, addedIdx, errOut) = 0 Then Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Function BuildTypeLayoutTable(ByRef ps As ParseState) As Integer
+    Dim errText As String
+    Dim i As Integer
+    Dim ignoreSize As Integer
+    Dim ignoreAlign As Integer
+
+    LayoutResetState
+
+    If CollectTypeDeclarations(ps, errText) = 0 Then
+        ps.lastError = errText
+        Return 0
+    End If
+
+    For i = 0 To gTypeLayoutCount - 1
+        If ResolveTypeLayout(ps, gTypeLayouts(i).typeName, ignoreSize, ignoreAlign, errText) = 0 Then
+            ps.lastError = errText
+            Return 0
+        End If
+    Next i
+
+    gTypeLayoutBuilt = 1
+    Return 1
+End Function
+
+Function TypeLayoutSizeOf(ByRef ps As ParseState, ByRef rawTypeName As String, ByRef sizeOut As Integer, ByRef errOut As String) As Integer
+    Dim alignOut As Integer
+
+    If gTypeLayoutBuilt = 0 Then
+        If BuildTypeLayoutTable(ps) = 0 Then
+            errOut = ps.lastError
+            Return 0
+        End If
+    End If
+
+    If ResolveTypeLayout(ps, rawTypeName, sizeOut, alignOut, errOut) = 0 Then Return 0
+    Return 1
+End Function
+
+' S-079: the storage cell of one array element of `rawTypeName` -- the payload
+' rounded up to the alignment (F80: payload 10 -> 16-byte cell; a struct's size is
+' already a multiple of its alignment). Builtin scalars answer from the shared
+' UXBTypeAbi table so every layer agrees on the same numbers.
+Function TypeLayoutStrideOf(ByRef ps As ParseState, ByRef rawTypeName As String, ByRef strideOut As Integer, ByRef errOut As String) As Integer
+    Dim payloadBytes As Integer
+    Dim alignBytes As Integer
+    Dim abiStride As Integer
+    If UXBTypeAbi(rawTypeName, payloadBytes, alignBytes, abiStride) <> 0 Then
+        strideOut = abiStride
+        Return 1
+    End If
+
+    If gTypeLayoutBuilt = 0 Then
+        If BuildTypeLayoutTable(ps) = 0 Then
+            errOut = ps.lastError
+            Return 0
+        End If
+    End If
+    If ResolveTypeLayout(ps, rawTypeName, payloadBytes, alignBytes, errOut) = 0 Then Return 0
+    If alignBytes < 1 Then alignBytes = 1
+    strideOut = ((payloadBytes + alignBytes - 1) \ alignBytes) * alignBytes
+    Return 1
+End Function
+
+Function TypeLayoutDescribeGlobal(ByRef rawTypeName As String, ByRef sizeOut As Integer, ByRef alignOut As Integer, ByRef recordKindOut As String, ByRef abiKindOut As String, ByRef packOut As Integer, ByRef explicitAlignOut As Integer) As Integer
+    If UXBLibraryTypeLayoutInfo(rawTypeName, sizeOut, alignOut) <> 0 Then
+        recordKindOut = "LIBTYPE"
+        abiKindOut = "C_ABI"
+        packOut = 0
+        explicitAlignOut = alignOut
+        Return 1
+    End If
+
+    Dim idx As Integer
+    idx = FindTypeLayoutIndex(rawTypeName)
+    If idx < 0 Or idx >= gTypeLayoutCount Then Return 0
+    If gTypeLayouts(idx).computed = 0 Then Return 0
+    sizeOut = gTypeLayouts(idx).sizeBytes
+    alignOut = gTypeLayouts(idx).alignBytes
+    recordKindOut = gTypeLayouts(idx).recordKind
+    abiKindOut = gTypeLayouts(idx).abiKind
+    packOut = gTypeLayouts(idx).packBytes
+    explicitAlignOut = gTypeLayouts(idx).explicitAlign
+    Return 1
+End Function
+
+
+Private Function TypeLayoutJsonEscape(ByRef rawText As String) As String
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        Select Case ch
+        Case Chr(34)
+            outText &= "\" & Chr(34)
+        Case "\"
+            outText &= "\\"
+        Case Chr(10)
+            outText &= "\n"
+        Case Chr(13)
+            outText &= "\r"
+        Case Else
+            outText &= ch
+        End Select
+    Next i
+    Return outText
+End Function
+
+Function TypeLayoutTableToJson(ByRef ps As ParseState, ByVal statusText As String) As String
+    Dim errText As String
+    If gTypeLayoutBuilt = 0 Then
+        If BuildTypeLayoutTable(ps) = 0 Then
+            errText = ps.lastError
+        End If
+    End If
+
+    Dim q As String
+    q = Chr(34)
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  " & q & "schema" & q & ": " & q & "uxb.semantic.layouts.v2" & q & "," & Chr(10)
+    j &= "  " & q & "status" & q & ": " & q & TypeLayoutJsonEscape(statusText) & q & "," & Chr(10)
+    j &= "  " & q & "type_count" & q & ": " & LTrim(Str(gTypeLayoutCount)) & "," & Chr(10)
+    j &= "  " & q & "field_count" & q & ": " & LTrim(Str(gTypeLayoutFieldCount)) & "," & Chr(10)
+    j &= "  " & q & "error" & q & ": " & q & TypeLayoutJsonEscape(errText) & q & "," & Chr(10)
+    j &= "  " & q & "records" & q & ": [" & Chr(10)
+    Dim ti As Integer
+    For ti = 0 To gTypeLayoutCount - 1
+        j &= "    {" & q & "typeName" & q & ":" & q & TypeLayoutJsonEscape(gTypeLayouts(ti).typeName) & q
+        j &= "," & q & "declNode" & q & ":" & LTrim(Str(gTypeLayouts(ti).declNode))
+        j &= "," & q & "recordKind" & q & ":" & q & TypeLayoutJsonEscape(gTypeLayouts(ti).recordKind) & q
+        j &= "," & q & "abiKind" & q & ":" & q & TypeLayoutJsonEscape(gTypeLayouts(ti).abiKind) & q
+        j &= "," & q & "packBytes" & q & ":" & LTrim(Str(gTypeLayouts(ti).packBytes))
+        j &= "," & q & "explicitAlign" & q & ":" & LTrim(Str(gTypeLayouts(ti).explicitAlign))
+        j &= "," & q & "ffiByValue" & q & ":" & IIf(gTypeLayouts(ti).ffiByValue <> 0, "true", "false")
+        j &= "," & q & "ffiByValueReason" & q & ":" & q & TypeLayoutJsonEscape(gTypeLayouts(ti).ffiByValueReason) & q
+        j &= "," & q & "sizeBytes" & q & ":" & LTrim(Str(gTypeLayouts(ti).sizeBytes))
+        j &= "," & q & "alignBytes" & q & ":" & LTrim(Str(gTypeLayouts(ti).alignBytes))
+        j &= "," & q & "fieldCount" & q & ":" & LTrim(Str(gTypeLayouts(ti).fieldCount))
+        j &= "," & q & "fields" & q & ":["
+        Dim fi As Integer
+        For fi = 0 To gTypeLayouts(ti).fieldCount - 1
+            Dim fieldIdx As Integer
+            fieldIdx = gTypeLayouts(ti).firstField + fi
+            If fi > 0 Then j &= ","
+            j &= "{" & q & "fieldName" & q & ":" & q & TypeLayoutJsonEscape(gTypeLayoutFields(fieldIdx).fieldName) & q
+            j &= "," & q & "fieldKind" & q & ":" & q & TypeLayoutJsonEscape(gTypeLayoutFields(fieldIdx).fieldKind) & q
+            j &= "," & q & "typeName" & q & ":" & q & TypeLayoutJsonEscape(gTypeLayoutFields(fieldIdx).fieldTypeName) & q
+            j &= "," & q & "offsetBytes" & q & ":" & LTrim(Str(gTypeLayoutFields(fieldIdx).offsetBytes))
+            j &= "," & q & "sizeBytes" & q & ":" & LTrim(Str(gTypeLayoutFields(fieldIdx).sizeBytes))
+            j &= "," & q & "alignBytes" & q & ":" & LTrim(Str(gTypeLayoutFields(fieldIdx).alignBytes))
+            j &= "," & q & "isArray" & q & ":" & IIf(gTypeLayoutFields(fieldIdx).isArray <> 0, "true", "false")
+            j &= "," & q & "elemTypeName" & q & ":" & q & TypeLayoutJsonEscape(gTypeLayoutFields(fieldIdx).elemTypeName) & q
+            j &= "," & q & "elemStrideBytes" & q & ":" & LTrim(Str(gTypeLayoutFields(fieldIdx).elemStrideBytes))
+            j &= "," & q & "accessorGetName" & q & ":" & q & TypeLayoutJsonEscape(gTypeLayoutFields(fieldIdx).accessorGetName) & q
+            j &= "," & q & "accessorSetName" & q & ":" & q & TypeLayoutJsonEscape(gTypeLayoutFields(fieldIdx).accessorSetName) & q & "}"
+        Next fi
+        j &= "]}"
+        If ti < gTypeLayoutCount - 1 Then j &= ","
+        j &= Chr(10)
+    Next ti
+    j &= "  ]" & Chr(10)
+    j &= "}" & Chr(10)
+    Return j
+End Function

@@ -1,0 +1,205 @@
+#ifndef UXB_ARRAY_MEMORY_REF_FBS
+#define UXB_ARRAY_MEMORY_REF_FBS
+#include once "../type_binding/type_rules.fbs"
+
+' PATCH4: canonical array -> MemoryRef discovery contract.
+' This file intentionally contains no backend code. It only resolves a source-level
+' array declaration into immutable layout facts which semantic, interpreter and
+' backend layers can consume consistently.
+
+Type UXBArrayMemoryInfo
+    found As Integer
+    dynamicBounds As Integer
+    nameText As String
+    elementType As String
+    elementBytes As LongInt
+    lowerBound As LongInt
+    upperBound As LongInt
+    elementCount As LongInt
+    byteLength As LongInt
+    declNode As Integer
+End Type
+
+Sub UXBArrayMemoryInfoReset(ByRef info As UXBArrayMemoryInfo)
+    info.found = 0
+    info.dynamicBounds = 0
+    info.nameText = ""
+    info.elementType = ""
+    info.elementBytes = 0
+    info.lowerBound = 0
+    info.upperBound = 0
+    info.elementCount = 0
+    info.byteLength = 0
+    info.declNode = -1
+End Sub
+
+Private Function UXBArrayMemoryChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal posIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+    Dim ch As Integer = ps.ast.nodes(nodeIdx).firstChild
+    Dim i As Integer
+    For i = 0 To posIdx - 1
+        If ch = -1 Then Return -1
+        ch = ps.ast.nodes(ch).nextSibling
+    Next i
+    Return ch
+End Function
+
+Private Function UXBArrayMemoryIsIntegerLiteral(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef valueOut As LongInt) As Integer
+    valueOut = 0
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    Dim k As String = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    If k <> "NUMBER" And k <> "INT" And k <> "INTEGER" And k <> "INT_LITERAL" Then Return 0
+    Dim t As String = Trim(ps.ast.nodes(nodeIdx).value)
+    If t = "" Then Return 0
+    valueOut = ValInt(t)
+    Return 1
+End Function
+
+Private Function UXBArrayMemoryTypeBytes(ByRef typeNameRaw As String, ByRef bytesOut As LongInt) As Integer
+    Dim t As String = UCase(Trim(typeNameRaw))
+    If t = "" Then Return 0
+    ' S-079: the array element cell comes from the shared ABI table.
+    Dim abiPayload As Integer
+    Dim abiAlign As Integer
+    Dim abiStride As Integer
+    If UXBTypeAbi(t, abiPayload, abiAlign, abiStride) <> 0 Then
+        bytesOut = abiStride
+    Else
+        bytesOut = UXBStep3TypeSizeBytes(t)
+    End If
+    If bytesOut < 1 Then Return 0
+    Return 1
+End Function
+
+Private Function UXBArrayMemoryReadBounds(ByRef ps As ParseState, ByVal boundsNode As Integer, ByRef lowerOut As LongInt, ByRef upperOut As LongInt, ByRef dynamicOut As Integer, ByRef errText As String) As Integer
+    lowerOut = 0
+    upperOut = 0
+    dynamicOut = 0
+    errText = ""
+    If boundsNode < 0 Or boundsNode >= ps.ast.count Then errText = "array bounds node missing": Return 0
+
+    Dim boundCount As Integer
+    boundCount = 0
+    Dim ch As Integer = ps.ast.nodes(boundsNode).firstChild
+    Dim onlyBound As Integer = -1
+    Do While ch <> -1
+        boundCount += 1
+        onlyBound = ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    If boundCount <> 1 Then
+        errText = "memory-ref currently requires a one-dimensional array"
+        Return 0
+    End If
+
+    If UCase(Trim(ps.ast.nodes(onlyBound).kind)) = "RANGE_EXPR" Then
+        Dim loNode As Integer = ps.ast.nodes(onlyBound).left
+        Dim hiNode As Integer = ps.ast.nodes(onlyBound).right
+        If UXBArrayMemoryIsIntegerLiteral(ps, loNode, lowerOut) = 0 Or UXBArrayMemoryIsIntegerLiteral(ps, hiNode, upperOut) = 0 Then
+            dynamicOut = 1
+            Return 1
+        End If
+    Else
+        lowerOut = 0
+        If UXBArrayMemoryIsIntegerLiteral(ps, onlyBound, upperOut) = 0 Then
+            dynamicOut = 1
+            Return 1
+        End If
+    End If
+
+    If upperOut < lowerOut Then
+        errText = "array upper bound is smaller than lower bound"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Function UXBFindArrayMemoryInfo(ByRef ps As ParseState, ByRef nameRaw As String, ByRef info As UXBArrayMemoryInfo, ByRef errText As String) As Integer
+    UXBArrayMemoryInfoReset info
+    errText = ""
+    Dim target As String = UCase(Trim(nameRaw))
+    If target = "" Then errText = "array name is empty": Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = UCase(Trim(ps.ast.nodes(i).kind))
+        If k <> "DIM_DECL" And k <> "REDIM_DECL" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> target Then Continue For
+
+        ' A DIM_DECL/REDIM_DECL with no DIM_BOUNDS child is not an array declaration
+        ' at all (scalar, LIST/DICT/SET, CLASS instance, STRING, ...). Every caller of
+        ' this function already treats info.found = 0 as "not an array, handle it your
+        ' own way" - so skip past it here instead of misreporting it as a boundless
+        ' array (S-038: this used to make `DIM l AS LIST` fail FOR EACH lowering with
+        ' "array declaration has no bounds: l" instead of falling through to the real
+        ' collection-iterator / generic-type path).
+        Dim boundsNode As Integer = -1
+        Dim child As Integer = ps.ast.nodes(i).firstChild
+        Do While child <> -1
+            If UCase(Trim(ps.ast.nodes(child).kind)) = "DIM_BOUNDS" Then boundsNode = child: Exit Do
+            child = ps.ast.nodes(child).nextSibling
+        Loop
+        If boundsNode = -1 Then Continue For
+
+        info.found = 1
+        info.nameText = ps.ast.nodes(i).value
+        info.declNode = i
+
+        Dim typeNode As Integer = UXBArrayMemoryChildAt(ps, i, 1)
+        If typeNode = -1 OrElse UCase(Trim(ps.ast.nodes(typeNode).kind)) <> "TYPE_REF" Then
+            typeNode = -1
+            Dim ch As Integer = ps.ast.nodes(i).firstChild
+            Do While ch <> -1
+                If UCase(Trim(ps.ast.nodes(ch).kind)) = "TYPE_REF" Then typeNode = ch: Exit Do
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+        End If
+        If typeNode = -1 Then errText = "array element type is missing: " & info.nameText: Return 0
+        info.elementType = UCase(Trim(ps.ast.nodes(typeNode).value))
+        If UXBArrayMemoryTypeBytes(info.elementType, info.elementBytes) = 0 Then
+            errText = "array element type has no supported memory size: " & info.elementType
+            Return 0
+        End If
+
+        If UXBArrayMemoryReadBounds(ps, boundsNode, info.lowerBound, info.upperBound, info.dynamicBounds, errText) = 0 Then Return 0
+        If info.dynamicBounds <> 0 Then Return 1
+
+        info.elementCount = info.upperBound - info.lowerBound + 1
+        If info.elementCount < 1 Then errText = "array element count is invalid": Return 0
+        info.byteLength = info.elementBytes * info.elementCount
+        If info.byteLength < 1 Then errText = "array byte length is invalid": Return 0
+        Return 1
+    Next i
+
+    info.found = 0
+    Return 1
+End Function
+
+Function UXBFindDeclaredTypeForMemoryOperand(ByRef ps As ParseState, ByRef nameRaw As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+    Dim target As String = UCase(Trim(nameRaw))
+    If target = "" Then Return 0
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = UCase(Trim(ps.ast.nodes(i).kind))
+        If k <> "DIM_DECL" And k <> "REDIM_DECL" And k <> "PARAM_DECL" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> target Then Continue For
+        Dim ch As Integer = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(Trim(ps.ast.nodes(ch).kind)) = "TYPE_REF" Then
+                typeOut = UCase(Trim(ps.ast.nodes(ch).value))
+                Return 1
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+    Return 0
+End Function
+
+Function UXBArrayMemoryRefText(ByRef info As UXBArrayMemoryInfo) As String
+    If info.found = 0 Or info.dynamicBounds <> 0 Then Return ""
+    Return "ARRAY_REF|" & info.nameText & "|" & LTrim(Str(info.elementBytes)) & "|" & LTrim(Str(info.byteLength)) & "|" & LTrim(Str(info.lowerBound)) & "|" & LTrim(Str(info.elementCount))
+End Function
+
+#endif

@@ -1,0 +1,116 @@
+#ifndef UXB_MIR_X64_SURFACE_HOOKS_FBS
+#define UXB_MIR_X64_SURFACE_HOOKS_FBS
+
+Private Function MIRX64SurfaceNoEmit(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef op As String) As Integer
+    MIRX64AddWarning cg, "MIR x64 no-emit surface accepted: " & op
+    Return 1
+End Function
+
+Private Function MIRX64EmitAssertOpcode(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 1 Then
+        errText = "MIR x64 emitter: ASSERT requires condition operand"
+        Return 0
+    End If
+    If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_assert_i64", "rax"
+    Return 1
+End Function
+
+Private Function MIRX64EmitThrowOpcode(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    Return MIRX64EmitRuntimeHostCallInstruction(cg, "THROW", ins, 0, "", errText)
+End Function
+
+Private Function MIRX64EmitOnOffOpcode(ByRef ins As MIRIRInstruction, ByRef op As String, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If Trim(ins.result) <> "" Then
+        If op = "ON" Then Return MIRX64StoreImmediateToVar(cg, ins.result, "1", errText)
+        Return MIRX64StoreImmediateToVar(cg, ins.result, "0", errText)
+    End If
+    Return MIRX64EmitRuntimeHostCallInstruction(cg, op, ins, 0, "", errText)
+End Function
+
+Private Function MIRX64EmitExitOpcode(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount >= 1 And Trim(ins.operands(0)) <> "" Then
+        MIRX64Emit cg, "    jmp .Lmir_user_" & MIRX64NormalizeVarName(ins.operands(0))
+        Return 1
+    End If
+    MIRX64Emit cg, "    jmp " & MIRX64CurrentEpilogueLabel(cg)
+    Return 1
+End Function
+
+Private Function MIRX64TryEmitCompileTimeSurface(ByRef ins As MIRIRInstruction, ByRef op As String, ByRef cg As MIRX64Context, ByRef handledOut As Integer) As Integer
+    Select Case op
+    Case "METADATA_ONLY", "ABSTRACT", "ALIAS", "BYREF", "BYVAL", "CDECL", "FINAL", "FRIEND", "IMMUTABLE", "IMPORT", "INCLUDE", "MODULE", "MUTABLE", "NAMESPACE", "PRIVATE", "PROTECTED", "PUBLIC", "READONLY", "RESTRICTED", "SEALED", "STATIC", "STDCALL", "USING", "MAIN", "DECLARE", "AS", "CASE", "ELSE", "ELSEIF", "END", "FOR", "DO", "LOOP", "NEXT", "SELECT", "THEN", "TO", "STEP", "WHILE", "IN", "IS", "[", "]", "(", ")", ",", ":", ".", "DEFBYT", "DEFDBL", "DEFEXT", "DEFINT", "DEFLNG", "DEFSNG", "DEFSTR", ".AST.JSON", ".BAS", ".BI", ".H", ".HX", ".JS", ".JSON", ".MIR.JSON", ".UXB", ".UXBASIC", ".UXM", ".UXMH", ".WASM", ".WAT"
+        handledOut = 1
+        Return MIRX64SurfaceNoEmit(ins, cg, op)
+    End Select
+    Return 1
+End Function
+
+Private Function MIRX64TryEmitTypeSurface(ByRef ins As MIRIRInstruction, ByRef op As String, ByRef cg As MIRX64Context, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    Select Case op
+    Case "TYPE_DECL", "CLASS_DECL", "INTERFACE_DECL", "METHOD_DECL", "PROPERTY_DECL", "OPERATOR_DECL", "CONSTRUCTOR_DECL", "DESTRUCTOR_DECL", "IMPLEMENTS_DECL", "CLASS", "TYPE", "INTERFACE", "METHOD", "PROPERTY", "OPERATOR", "CONSTRUCTOR", "DESTRUCTOR", "IMPLEMENTS", "BOOLEAN", "BYTE", "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "F32", "F64", "F80", "F128", "BALL", "BIGD", "BIGF", "BIGINT", "OBJECT", "PTR", "STRING", "STRPTR", "ANY", "VARIANT", "VOID", "LIST", "DICT", "SET"
+        handledOut = 1
+        Return MIRX64SurfaceNoEmit(ins, cg, op)
+    End Select
+    Return 1
+End Function
+
+Private Function MIRX64TryEmitHostSurface(ByRef ins As MIRIRInstruction, ByRef op As String, ByRef cg As MIRX64Context, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    Select Case op
+    Case "JSON", "REGEX", "HTTP", "OS", "STRINGX", "LLAMA", "LUA", "PROLOG", "SQLITE", "CURL", "CRYPTO", "ARCHIVE", "IMAGE", "AUDIO", "MATH", "GRAPHICS", "SERVER", "ONNX", "WEBGPU", "BROWSER", "CANVAS", "LIBRARY_CALL", "HOST_CALL", "EXTFP_CALL"
+        handledOut = 1
+        If ins.operandCount >= 1 And (op = "LIBRARY_CALL" Or op = "HOST_CALL" Or op = "EXTFP_CALL") Then
+            Return MIRX64EmitRuntimeHostCallInstruction(cg, ins.operands(0), ins, 1, ins.result, errText)
+        End If
+        Return MIRX64EmitRuntimeSurfaceCall(cg, op, ins, errText)
+    Case "EVENT", "THREAD", "PIPE", "SLOT", "TRIGGER", "PARALEL", "PARALEL", "THREAD"
+        handledOut = 1
+        Return MIRX64EmitRuntimeSurfaceCall(cg, op, ins, errText)
+    Case "PRINT_FILE", "INPUT_FILE", "LINE_INPUT_FILE"
+        handledOut = 1
+        Return MIRX64EmitRuntimeSurfaceCall(cg, op, ins, errText)
+    End Select
+    Return 1
+End Function
+
+Private Function MIRX64TryEmitGuardSurface(ByRef ins As MIRIRInstruction, ByRef op As String, ByRef cg As MIRX64Context, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    Select Case op
+    Case "TRY", "CATCH", "FINALLY"
+        handledOut = 1
+        Return MIRX64SurfaceNoEmit(ins, cg, op)
+    Case "THROW"
+        handledOut = 1
+        Return MIRX64EmitThrowOpcode(ins, cg, errText)
+    Case "ASSERT"
+        handledOut = 1
+        Return MIRX64EmitAssertOpcode(ins, cg, errText)
+    Case "ON", "OFF"
+        handledOut = 1
+        Return MIRX64EmitOnOffOpcode(ins, op, cg, errText)
+    Case "EXIT"
+        handledOut = 1
+        Return MIRX64EmitExitOpcode(ins, cg, errText)
+    End Select
+    Return 1
+End Function
+
+Private Function MIRX64TryEmitExtendedSurfaceHook(ByRef ins As MIRIRInstruction, ByRef op As String, ByRef cg As MIRX64Context, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    handledOut = 0
+
+    If MIRX64TryEmitCompileTimeSurface(ins, op, cg, handledOut) = 0 Then Return 0
+    If handledOut <> 0 Then Return 1
+
+    If MIRX64TryEmitTypeSurface(ins, op, cg, handledOut, errText) = 0 Then Return 0
+    If handledOut <> 0 Then Return 1
+
+    If MIRX64TryEmitGuardSurface(ins, op, cg, handledOut, errText) = 0 Then Return 0
+    If handledOut <> 0 Then Return 1
+
+    If MIRX64TryEmitHostSurface(ins, op, cg, handledOut, errText) = 0 Then Return 0
+    If handledOut <> 0 Then Return 1
+
+    Return 1
+End Function
+
+#endif
+

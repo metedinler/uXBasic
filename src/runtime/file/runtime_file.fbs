@@ -1,0 +1,118 @@
+#ifndef UXB_RUNTIME_FILE_FBS
+#define UXB_RUNTIME_FILE_FBS
+
+#include once "../runtime_context.fbs"
+#include once "../services/runtime_service_ids.fbs"
+
+Private Function UXBRuntimeFileMode(ByVal modeText As String) As String
+    Dim m As String = UCase(Trim(modeText))
+    Select Case m
+    Case "OUTPUT", "WRITE", "W": Return "OUTPUT"
+    Case "APPEND", "A": Return "APPEND"
+    Case "BINARY", "BIN": Return "BINARY"
+    End Select
+    Return "INPUT"
+End Function
+
+' FreeBASIC, VB tarzındaki "On Error Resume Next" soz dizimini kabul etmez.
+' Bu nedenle IO islemleri kucuk guvenli yardimci fonksiyonlara alindi.
+Private Function UXBRuntimeTryOpenFile(ByVal pathText As String, ByVal modeText As String, ByRef fileNoOut As Integer, ByRef errText As String) As Integer
+    errText = ""
+    fileNoOut = FreeFile
+
+    On Error GoTo _uxb_runtime_file_open_error
+    Select Case UCase(Trim(modeText))
+    Case "OUTPUT"
+        Open pathText For Output As #fileNoOut
+    Case "APPEND"
+        Open pathText For Append As #fileNoOut
+    Case "BINARY"
+        Open pathText For Binary As #fileNoOut
+    Case Else
+        Open pathText For Input As #fileNoOut
+    End Select
+    On Error GoTo 0
+    Return 1
+
+_uxb_runtime_file_open_error:
+    errText = "file open failed: " & pathText & " err=" & LTrim(Str(Err))
+    On Error GoTo 0
+    Return 0
+End Function
+
+Private Function UXBRuntimeTryDeleteFile(ByVal pathText As String, ByRef errText As String) As Integer
+    errText = ""
+    On Error GoTo _uxb_runtime_file_delete_error
+    Kill pathText
+    On Error GoTo 0
+    Return 1
+
+_uxb_runtime_file_delete_error:
+    errText = "file delete failed: " & pathText & " err=" & LTrim(Str(Err))
+    On Error GoTo 0
+    Return 0
+End Function
+
+Function UXBRuntimeFileDispatch(ByRef rt As UXBRuntimeContext, ByVal serviceId As String, ByRef args As UXBRuntimeArgList) As UXBInterpValue
+    Select Case UCase(Trim(serviceId))
+    Case RT_FILE_OPEN
+        Dim pathText As String = UXBRuntimeArgText(args, 0)
+        Dim modeText As String = UXBRuntimeFileMode(UXBRuntimeArgText(args, 1))
+        Dim f As Integer
+        Dim errText As String
+        If UXBRuntimeTryOpenFile(pathText, modeText, f, errText) = 0 Then
+            Return UXBRuntimeSetError(rt, UXB_RT_ERR_IO, errText)
+        End If
+        Dim hid As Integer = UXBRuntimeAllocHandle(rt, "FILE", pathText, f)
+        Return UXBInterpValueHandle("FILE_HANDLE", hid)
+    Case RT_FILE_CLOSE
+        Dim hp As UXBRuntimeHandle Ptr = UXBRuntimeFindHandle(rt, CInt(UXBRuntimeArgInt(args, 0)))
+        If hp = 0 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_IO, "file handle not found")
+        Dim fnClose As Integer = hp->fileNo
+        Close #fnClose
+        hp->active = 0
+        Return UXBInterpValueVoid()
+    Case RT_FILE_READ
+        Dim hp As UXBRuntimeHandle Ptr = UXBRuntimeFindHandle(rt, CInt(UXBRuntimeArgInt(args, 0)))
+        If hp = 0 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_IO, "file handle not found")
+        Dim lineText As String = ""
+        Dim fnRead As Integer = hp->fileNo
+        If EOF(fnRead) = 0 Then Line Input #fnRead, lineText
+        Return UXBInterpValueString(lineText)
+    Case RT_FILE_WRITE
+        Dim hp As UXBRuntimeHandle Ptr = UXBRuntimeFindHandle(rt, CInt(UXBRuntimeArgInt(args, 0)))
+        If hp = 0 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_IO, "file handle not found")
+        Dim fnWrite As Integer = hp->fileNo
+        If UCase(Trim(UXBRuntimeArgText(args, 2))) = "RAW" Then
+            Print #fnWrite, UXBRuntimeArgText(args, 1);
+        Else
+            Print #fnWrite, UXBRuntimeArgText(args, 1)
+        End If
+        Return UXBInterpValueVoid()
+    Case RT_FILE_SEEK
+        Dim hp As UXBRuntimeHandle Ptr = UXBRuntimeFindHandle(rt, CInt(UXBRuntimeArgInt(args, 0)))
+        If hp = 0 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_IO, "file handle not found")
+        Dim fnSeek As Integer = hp->fileNo
+        Seek #fnSeek, CLng(UXBRuntimeArgInt(args, 1))
+        Return UXBInterpValueVoid()
+    Case RT_FILE_EOF
+        Dim hp As UXBRuntimeHandle Ptr = UXBRuntimeFindHandle(rt, CInt(UXBRuntimeArgInt(args, 0)))
+        If hp = 0 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_IO, "file handle not found")
+        Dim fnEof As Integer = hp->fileNo
+        Return UXBInterpValueInt(IIf(EOF(fnEof) <> 0, -1, 0))
+    Case RT_FILE_LOF
+        Dim hp As UXBRuntimeHandle Ptr = UXBRuntimeFindHandle(rt, CInt(UXBRuntimeArgInt(args, 0)))
+        If hp = 0 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_IO, "file handle not found")
+        Dim fnLof As Integer = hp->fileNo
+        Return UXBInterpValueInt(LOF(fnLof))
+    Case RT_FILE_DELETE
+        Dim deleteErrText As String
+        If UXBRuntimeTryDeleteFile(UXBRuntimeArgText(args, 0), deleteErrText) = 0 Then
+            Return UXBRuntimeSetError(rt, UXB_RT_ERR_IO, deleteErrText)
+        End If
+        Return UXBInterpValueVoid()
+    End Select
+    Return UXBRuntimeSetError(rt, UXB_RT_ERR_SERVICE_NOT_FOUND, "file service not found: " & serviceId)
+End Function
+
+#endif

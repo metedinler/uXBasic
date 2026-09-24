@@ -1,0 +1,536 @@
+Private Function ParseClassMethodHasFlag(ByRef ps As ParseState, ByVal methodNode As Integer, ByRef flagRaw As String) As Integer
+    Dim target As String
+    target = UCase(Trim(flagRaw))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_FLAG" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = target Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function ParseMagicCustomNameIsValid(ByRef rawName As String) As Integer
+    Dim n As String
+    n = UCase(Trim(rawName))
+    If n = "" Then Return 0
+
+    Dim i As Integer
+    For i = 1 To Len(n)
+        Dim ch As String
+        ch = Mid(n, i, 1)
+        If (ch >= "A" And ch <= "Z") Or (ch >= "0" And ch <= "9") Or ch = "_" Then
+            Continue For
+        End If
+        Return 0
+    Next i
+
+    Return 1
+End Function
+
+Private Function ParseMagicMethodCanonicalName(ByRef rawName As String, ByRef canonicalOut As String) As Integer
+    Dim nameUpper As String
+    nameUpper = UCase(Trim(rawName))
+    canonicalOut = ""
+
+    Select Case nameUpper
+    Case "GET", "MAGIC_GET", "__GET"
+        canonicalOut = "MAGIC_GET"
+    Case "SET", "MAGIC_SET", "__SET"
+        canonicalOut = "MAGIC_SET"
+    Case "CALL", "MAGIC_CALL", "__CALL"
+        canonicalOut = "MAGIC_CALL"
+    Case "TOSTRING", "STR", "MAGIC_TOSTRING", "__TOSTRING"
+        canonicalOut = "MAGIC_TOSTRING"
+    Case "ADD", "MAGIC_ADD", "__ADD"
+        canonicalOut = "MAGIC_ADD"
+    Case "SUB", "MAGIC_SUB", "__SUB"
+        canonicalOut = "MAGIC_SUB"
+    Case "MUL", "MAGIC_MUL", "__MUL"
+        canonicalOut = "MAGIC_MUL"
+    Case "DIV", "MAGIC_DIV", "__DIV"
+        canonicalOut = "MAGIC_DIV"
+    Case "IDIV", "MAGIC_IDIV", "__IDIV"
+        canonicalOut = "MAGIC_IDIV"
+    Case "MOD", "MAGIC_MOD", "__MOD"
+        canonicalOut = "MAGIC_MOD"
+    Case "AND", "BAND", "BITAND", "MAGIC_AND", "MAGIC_BAND", "__AND", "__BAND"
+        canonicalOut = "MAGIC_AND"
+    Case "OR", "BOR", "BITOR", "MAGIC_OR", "MAGIC_BOR", "__OR", "__BOR"
+        canonicalOut = "MAGIC_OR"
+    Case "XOR", "MAGIC_XOR", "__XOR"
+        canonicalOut = "MAGIC_XOR"
+    Case "SHL", "MAGIC_SHL", "__SHL"
+        canonicalOut = "MAGIC_SHL"
+    Case "SHR", "MAGIC_SHR", "__SHR"
+        canonicalOut = "MAGIC_SHR"
+    Case "ROL", "MAGIC_ROL", "__ROL"
+        canonicalOut = "MAGIC_ROL"
+    Case "ROR", "MAGIC_ROR", "__ROR"
+        canonicalOut = "MAGIC_ROR"
+    Case "EQ", "MAGIC_EQ", "__EQ"
+        canonicalOut = "MAGIC_EQ"
+    Case "NE", "MAGIC_NE", "__NE"
+        canonicalOut = "MAGIC_NE"
+    Case "LT", "MAGIC_LT", "__LT"
+        canonicalOut = "MAGIC_LT"
+    Case "LE", "MAGIC_LE", "__LE"
+        canonicalOut = "MAGIC_LE"
+    Case "GT", "MAGIC_GT", "__GT"
+        canonicalOut = "MAGIC_GT"
+    Case "GE", "MAGIC_GE", "__GE"
+        canonicalOut = "MAGIC_GE"
+    Case Else
+        ' Kullanici yuzeyi: MAGIC <metotadi> ... END MAGIC.
+        ' Bilinen hook adlari yukarida kanonik hale gelir. Bilinmeyen adlar da
+        ' MAGIC_<AD> biciminde AST/semantic'e tasinir; otomatik runtime tetikleme
+        ' yalniz execution contract'i olan bilinen hooklarda vardir.
+        If Left(nameUpper, 2) = "__" Then
+            nameUpper = Mid(nameUpper, 3)
+        ElseIf Left(nameUpper, 6) = "MAGIC_" Then
+            nameUpper = Mid(nameUpper, 7)
+        End If
+        If ParseMagicCustomNameIsValid(nameUpper) = 0 Then Return 0
+        canonicalOut = "MAGIC_" & nameUpper
+    End Select
+
+    Return 1
+End Function
+
+Private Function ParseMagicMethodIsKnownHook(ByRef canonicalNameRaw As String) As Integer
+    Dim m As String
+    m = UCase(Trim(canonicalNameRaw))
+
+    Select Case m
+    Case "MAGIC_GET", "MAGIC_SET", "MAGIC_CALL", "MAGIC_TOSTRING", _
+         "MAGIC_ADD", "MAGIC_SUB", "MAGIC_MUL", "MAGIC_DIV", "MAGIC_IDIV", "MAGIC_MOD", _
+         "MAGIC_AND", "MAGIC_OR", "MAGIC_XOR", "MAGIC_SHL", "MAGIC_SHR", "MAGIC_ROL", "MAGIC_ROR", _
+         "MAGIC_EQ", "MAGIC_NE", "MAGIC_LT", "MAGIC_LE", "MAGIC_GT", "MAGIC_GE"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function ParseMagicMethodHookKind(ByRef canonicalNameRaw As String, ByRef hookKindOut As String) As Integer
+    Dim m As String
+    m = UCase(Trim(canonicalNameRaw))
+    hookKindOut = "CUSTOM"
+
+    Select Case m
+    Case "MAGIC_GET", "MAGIC_SET"
+        hookKindOut = "PROPERTY"
+    Case "MAGIC_CALL"
+        hookKindOut = "CALLABLE"
+    Case "MAGIC_TOSTRING"
+        hookKindOut = "STRINGIFY"
+    Case "MAGIC_ADD", "MAGIC_SUB", "MAGIC_MUL", "MAGIC_DIV", "MAGIC_IDIV", "MAGIC_MOD", _
+         "MAGIC_AND", "MAGIC_OR", "MAGIC_XOR", "MAGIC_SHL", "MAGIC_SHR", "MAGIC_ROL", "MAGIC_ROR", _
+         "MAGIC_EQ", "MAGIC_NE", "MAGIC_LT", "MAGIC_LE", "MAGIC_GT", "MAGIC_GE"
+        hookKindOut = "OPERATOR"
+    Case Else
+        hookKindOut = "CUSTOM"
+    End Select
+
+    Return 1
+End Function
+
+Private Function ParseClassMethodSignature(ByRef ps As ParseState, ByVal methodNode As Integer) As String
+    Dim sig As String
+    sig = ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        Dim kindText As String
+        kindText = UCase(ps.ast.nodes(ch).kind)
+
+        If kindText = "PARAM_DECL" Then
+            Dim paramType As String
+            paramType = ""
+
+            Dim pch As Integer
+            pch = ps.ast.nodes(ch).firstChild
+            Do While pch <> -1
+                If UCase(ps.ast.nodes(pch).kind) = "TYPE_REF" Then
+                    paramType = UCase(Trim(ps.ast.nodes(pch).value))
+                    Exit Do
+                End If
+                pch = ps.ast.nodes(pch).nextSibling
+            Loop
+
+            sig &= "P:" & paramType & ";"
+        ElseIf kindText = "RETURN_TYPE" Then
+            sig &= "R:" & UCase(Trim(ps.ast.nodes(ch).value)) & ";"
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return sig
+End Function
+
+Private Function ParseGetClassBaseName(ByRef ps As ParseState, ByVal classNode As Integer, ByRef baseOut As String) As Integer
+    baseOut = ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_BASE_REF" Then
+            baseOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(baseOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function ParseFindClassNode(ByRef ps As ParseState, ByRef classNameRaw As String) As Integer
+    Dim className As String
+    className = UCase(Trim(classNameRaw))
+    If className = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = className Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function ParseFindClassMethodNode(ByRef ps As ParseState, ByVal classNode As Integer, ByRef methodNameRaw As String) As Integer
+    Dim methodName As String
+    methodName = UCase(Trim(methodNameRaw))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = methodName Then Return ch
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function ParseFindMethodInBaseHierarchy(ByRef ps As ParseState, ByRef baseNameRaw As String, ByRef methodNameRaw As String, ByRef methodNodeOut As Integer) As Integer
+    methodNodeOut = -1
+
+    Dim curClass As String
+    curClass = UCase(Trim(baseNameRaw))
+
+    Dim hop As Integer
+    Do While curClass <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+
+        Dim classNode As Integer
+        classNode = ParseFindClassNode(ps, curClass)
+        If classNode = -1 Then Exit Do
+
+        methodNodeOut = ParseFindClassMethodNode(ps, classNode, methodNameRaw)
+        If methodNodeOut <> -1 Then Return 1
+
+        Dim nextBase As String
+        If ParseGetClassBaseName(ps, classNode, nextBase) = 0 Then Exit Do
+        curClass = nextBase
+    Loop
+
+    methodNodeOut = -1
+    Return 0
+End Function
+
+Private Function ParseValidateOverrideContract(ByRef ps As ParseState, ByVal classNode As Integer, ByVal methodNode As Integer, ByRef methodNameRaw As String, ByRef errText As String) As Integer
+    Dim baseName As String
+    If ParseGetClassBaseName(ps, classNode, baseName) = 0 Then
+        errText = "METHOD: OVERRIDE requires base class"
+        Return 0
+    End If
+
+    Dim baseMethodNode As Integer
+    If ParseFindMethodInBaseHierarchy(ps, baseName, methodNameRaw, baseMethodNode) = 0 Then
+        errText = "METHOD: OVERRIDE base method missing"
+        Return 0
+    End If
+
+    If ParseClassMethodHasFlag(ps, baseMethodNode, "VIRTUAL") = 0 And ParseClassMethodHasFlag(ps, baseMethodNode, "OVERRIDE") = 0 Then
+        errText = "METHOD: base method is not VIRTUAL"
+        Return 0
+    End If
+
+    If ParseClassMethodSignature(ps, methodNode) <> ParseClassMethodSignature(ps, baseMethodNode) Then
+        errText = "METHOD: OVERRIDE signature mismatch"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function IsClassMemberHeaderStart(ByRef ps As ParseState) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+    Dim k As String
+    k = UCase(Trim(tk.lexeme))
+
+    If IsEndClassStart(ps) Then Return 1
+    If tk.kind = "EOF" Then Return 1
+    If IsEndMethodStart(ps) Then Return 1
+    If IsKw(ps, "END") And UCase(LookToken(ps, 1).lexeme) = "MAGIC" Then Return 1
+    If IsKw(ps, "END") And UCase(LookToken(ps, 1).lexeme) = "FUNCTION" Then Return 1
+    If IsKw(ps, "END") And UCase(LookToken(ps, 1).lexeme) = "SUB" Then Return 1
+
+    If tk.kind = "KEYWORD" Or tk.kind = "IDENT" Then
+        Select Case k
+        Case "PUBLIC", "PRIVATE", "PROTECTED", "RESTRICTED", "FRIEND", "METHOD", "FUNCTION", "SUB", "MAGIC", "MAGIC", "OPERATOR", "CONSTRUCTOR", "DESTRUCTOR", "VIRTUAL", "OVERRIDE", "STATIC", "READONLY", "MUTABLE", "IMMUTABLE", "PROPERTY", "MIXIN", "DECORATOR"
+            Return 1
+        End Select
+    End If
+
+    If tk.kind = "IDENT" Then
+        Dim n1 As Token
+        n1 = LookToken(ps, 1)
+        If UCase(Trim(n1.lexeme)) = "AS" Then Return 1
+    End If
+
+    Return 0
+End Function
+
+Private Function ParseClassMethodDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    If UCase(CurToken(ps).lexeme) = "STATIC" Then
+        Dim la1 As Token
+        la1 = LookToken(ps, 1)
+        Dim la1Upper As String
+        la1Upper = UCase(la1.lexeme)
+        If la1Upper <> "METHOD" And la1Upper <> "FUNCTION" And la1Upper <> "SUB" And la1Upper <> "MAGIC" And la1Upper <> "MAGIC" And la1Upper <> "VIRTUAL" And la1Upper <> "OVERRIDE" And la1Upper <> "STATIC" Then
+            Return 0
+        End If
+    End If
+
+    Dim hasVirtualFlag As Integer
+    Dim hasOverrideFlag As Integer
+    Dim hasStaticFlag As Integer
+    Dim isMagicDecl As Integer
+    Dim modifierTok As Token
+    modifierTok = CurToken(ps)
+    Do
+        Dim curUpper As String
+        curUpper = UCase(CurToken(ps).lexeme)
+        If curUpper = "VIRTUAL" Then
+            If hasVirtualFlag <> 0 Then
+                ps.lastError = "METHOD: duplicate VIRTUAL modifier"
+                Return -1
+            End If
+            hasVirtualFlag = 1
+            AdvanceTok ps
+            Continue Do
+        End If
+        If curUpper = "OVERRIDE" Then
+            If hasOverrideFlag <> 0 Then
+                ps.lastError = "METHOD: duplicate OVERRIDE modifier"
+                Return -1
+            End If
+            hasOverrideFlag = 1
+            AdvanceTok ps
+            Continue Do
+        End If
+        If curUpper = "STATIC" Then
+            If hasStaticFlag <> 0 Then
+                ps.lastError = "METHOD: duplicate STATIC modifier"
+                Return -1
+            End If
+            hasStaticFlag = 1
+            AdvanceTok ps
+            Continue Do
+        End If
+        Exit Do
+    Loop
+    If hasVirtualFlag <> 0 And hasOverrideFlag <> 0 Then
+        ps.lastError = "METHOD: VIRTUAL and OVERRIDE cannot be combined"
+        Return -1
+    End If
+    If hasStaticFlag <> 0 And (hasVirtualFlag <> 0 Or hasOverrideFlag <> 0) Then
+        ps.lastError = "METHOD: STATIC cannot be combined with VIRTUAL/OVERRIDE"
+        Return -1
+    End If
+    Dim methodHeaderUpper As String
+    methodHeaderUpper = UCase(CurToken(ps).lexeme)
+
+    If methodHeaderUpper <> "METHOD" And methodHeaderUpper <> "FUNCTION" And methodHeaderUpper <> "SUB" And methodHeaderUpper <> "MAGIC" And methodHeaderUpper <> "MAGIC" Then
+        If hasVirtualFlag <> 0 Or hasOverrideFlag <> 0 Or hasStaticFlag <> 0 Then
+            ps.lastError = "METHOD: METHOD keyword expected after modifier"
+            Return -1
+        End If
+        Return 0
+    End If
+
+    Dim methodTok As Token
+    methodTok = CurToken(ps)
+
+    If methodHeaderUpper = "MAGIC" Or methodHeaderUpper = "MAGIC" Then
+        isMagicDecl = 1
+    End If
+
+    AdvanceTok ps
+    If isMagicDecl <> 0 Then
+        If UCase(CurToken(ps).lexeme) = "METHOD" Then AdvanceTok ps
+    End If
+
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" And (isMagicDecl = 0 Or (nameTok.kind <> "KEYWORD" And nameTok.kind <> "IDENT")) Then
+        ps.lastError = "METHOD: name expected"
+        Return -1
+    End If
+
+    Dim methodName As String
+    Dim magicOriginalName As String
+    methodName = nameTok.lexeme
+    magicOriginalName = methodName
+    If isMagicDecl <> 0 Then
+        If ParseMagicMethodCanonicalName(methodName, methodName) = 0 Then
+            ps.lastError = "MAGIC: invalid method name " & UCase(Trim(nameTok.lexeme))
+            Return -1
+        End If
+    End If
+
+    If HasClassNamedMember(ps, classNode, methodName) Then
+        ps.lastError = "CLASS: duplicate member name: " & UCase(Trim(methodName))
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim methodNode As Integer
+    methodNode = MakeNodeFromToken(ps, "CLASS_METHOD_DECL", methodName, currentAccess, methodTok)
+
+    Dim methodLabel As String
+    methodLabel = IIf(isMagicDecl <> 0, "MAGIC", "METHOD")
+    If ParseClassMemberParamList(ps, methodNode, methodLabel) = 0 Then Return -1
+
+    If MatchKeyword(ps, "AS") Then
+        Dim retTok As Token
+        retTok = CurToken(ps)
+        If ValidateTypeToken(ps, retTok) = 0 Then
+            ps.lastError = "METHOD: return type expected after AS"
+            Return -1
+        End If
+        AdvanceTok ps
+        Dim retNode As Integer
+        Dim canonicalMethodRet As String
+        canonicalMethodRet = CanonicalTypeNameForParser(retTok.lexeme)
+        retNode = MakeNodeFromToken(ps, "RETURN_TYPE", canonicalMethodRet, "", retTok)
+        ASTAddChild ps.ast, methodNode, retNode
+    ElseIf methodHeaderUpper = "FUNCTION" Then
+        ps.lastError = "METHOD: FUNCTION requires AS return type"
+        Return -1
+    End If
+
+    If hasVirtualFlag <> 0 Then
+        Dim virtualFlagNode As Integer
+        virtualFlagNode = MakeNodeFromToken(ps, "CLASS_METHOD_FLAG", "VIRTUAL", "", modifierTok)
+        ASTAddChild ps.ast, methodNode, virtualFlagNode
+    End If
+
+    If hasOverrideFlag <> 0 Then
+        Dim overrideFlagNode As Integer
+        overrideFlagNode = MakeNodeFromToken(ps, "CLASS_METHOD_FLAG", "OVERRIDE", "", modifierTok)
+        ASTAddChild ps.ast, methodNode, overrideFlagNode
+    End If
+
+    If hasStaticFlag <> 0 Then
+        Dim staticFlagNode As Integer
+        staticFlagNode = MakeNodeFromToken(ps, "CLASS_METHOD_FLAG", "STATIC", "", modifierTok)
+        ASTAddChild ps.ast, methodNode, staticFlagNode
+    End If
+
+    If isMagicDecl <> 0 Then
+        Dim magicFlagNode As Integer
+        magicFlagNode = MakeNodeFromToken(ps, "CLASS_METHOD_FLAG", "MAGIC", "", methodTok)
+        ASTAddChild ps.ast, methodNode, magicFlagNode
+
+        Dim magicNameNode As Integer
+        magicNameNode = MakeNodeFromToken(ps, "CLASS_MAGIC_NAME", methodName, "", methodTok)
+        ASTAddChild ps.ast, methodNode, magicNameNode
+
+        Dim magicOriginalNode As Integer
+        magicOriginalNode = MakeNodeFromToken(ps, "CLASS_MAGIC_ORIGINAL", UCase(Trim(magicOriginalName)), "", methodTok)
+        ASTAddChild ps.ast, methodNode, magicOriginalNode
+
+        Dim magicKind As String
+        Dim magicKindOk As Integer
+        magicKindOk = ParseMagicMethodHookKind(methodName, magicKind)
+        Dim magicKindNode As Integer
+        magicKindNode = MakeNodeFromToken(ps, "CLASS_MAGIC_KIND", magicKind, "", methodTok)
+        ASTAddChild ps.ast, methodNode, magicKindNode
+
+        Dim magicAutoNode As Integer
+        magicAutoNode = MakeNodeFromToken(ps, "CLASS_MAGIC_AUTOHOOK", IIf(ParseMagicMethodIsKnownHook(methodName) <> 0, "1", "0"), "", methodTok)
+        ASTAddChild ps.ast, methodNode, magicAutoNode
+    End If
+
+    If hasOverrideFlag <> 0 Then
+        Dim overrideErr As String
+        If ParseValidateOverrideContract(ps, classNode, methodNode, methodName, overrideErr) = 0 Then
+            ps.lastError = overrideErr
+            Return -1
+        End If
+    End If
+
+    Dim accessNode As Integer
+    accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", methodTok)
+    ASTAddChild ps.ast, methodNode, accessNode
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "METHOD: unexpected trailing tokens"
+        Return -1
+    End If
+
+    SkipSeparators ps
+
+    ' Declaration-only form remains valid.
+    ' Body form requires the matching END keyword.
+    ' MAGIC <ad>(...) blocks are closed only with END MAGIC.
+    Dim endMethodKeyword As String
+    endMethodKeyword = "METHOD"
+    If methodHeaderUpper = "FUNCTION" Then endMethodKeyword = "FUNCTION"
+    If methodHeaderUpper = "SUB" Then endMethodKeyword = "SUB"
+    If isMagicDecl <> 0 Then endMethodKeyword = "MAGIC"
+
+    If IsKw(ps, "END") And UCase(LookToken(ps, 1).lexeme) = endMethodKeyword Then
+        AdvanceTok ps
+        AdvanceTok ps
+    ElseIf IsClassMemberHeaderStart(ps) = 0 Then
+        Do While CurToken(ps).kind <> "EOF"
+            If IsKw(ps, "END") And UCase(LookToken(ps, 1).lexeme) = endMethodKeyword Then Exit Do
+            If IsEndClassStart(ps) Then
+                ps.lastError = methodLabel & ": missing END " & endMethodKeyword
+                Return -1
+            End If
+
+            Dim st As Integer
+            st = ParseSimpleStatement(ps)
+            If st = -1 Then Return -1
+            ASTAddChild ps.ast, methodNode, st
+            SkipSeparators ps
+        Loop
+
+        If (IsKw(ps, "END") And UCase(LookToken(ps, 1).lexeme) = endMethodKeyword) = 0 Then
+            ps.lastError = methodLabel & ": missing END " & endMethodKeyword
+            Return -1
+        End If
+        AdvanceTok ps
+        AdvanceTok ps
+    End If
+
+    ASTAddChild ps.ast, classNode, methodNode
+    SkipSeparators ps
+    Return 1
+End Function
+

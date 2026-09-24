@@ -1,0 +1,73 @@
+#ifndef UXB_AST_INTERP_FBS
+#define UXB_AST_INTERP_FBS
+
+#include once "../../parser/ast.fbs"
+#include once "../../parser/ast_contract_validate.fbs"
+#include once "../common/interp_context.fbs"
+#include once "ast_interp_surface_quality.fbs"
+#include once "ast_interp_stmt.fbs"
+#include once "ast_interp_json_report.fbs"
+
+Private Sub UXBAstInterpRegisterRoutinesWalk(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext, ByVal containerPrefix As String = "")
+    If nodeIdx < 0 Or nodeIdx >= ast.count Then Exit Sub
+    Dim k As String = UCase(Trim(ast.nodes(nodeIdx).kind))
+    Dim childPrefix As String
+    childPrefix = UCase(Trim(containerPrefix))
+    If k = ASTK_NAMESPACE_STMT Or k = ASTK_MODULE_STMT Then
+        Dim containerName As String
+        containerName = UCase(Trim(ast.nodes(nodeIdx).value))
+        If containerName <> "" Then
+            If childPrefix = "" Then childPrefix = containerName Else childPrefix &= "." & containerName
+        End If
+    End If
+    Select Case k
+    Case ASTK_SUB_STMT, ASTK_FUNCTION_STMT, ASTK_EVENT_STMT, ASTK_PIPE_STMT, ASTK_THREAD_STMT, ASTK_PARALEL_STMT, ASTK_CLASS_METHOD_DECL, ASTK_INTERFACE_METHOD_DECL, ASTK_DECLARE_SUB_STMT, ASTK_DECLARE_FUNCTION_STMT
+        If Trim(ast.nodes(nodeIdx).value) <> "" Then
+            UXBInterpContextRegisterRoutine ctx, ast.nodes(nodeIdx).value, ast.nodes(nodeIdx).kind, nodeIdx
+            If childPrefix <> "" Then
+                UXBInterpContextRegisterRoutine ctx, childPrefix & "." & ast.nodes(nodeIdx).value, ast.nodes(nodeIdx).kind, nodeIdx
+            End If
+        End If
+    End Select
+    Dim ch As Integer = ast.nodes(nodeIdx).firstChild
+    Do While ch <> AST_NULL
+        UXBAstInterpRegisterRoutinesWalk ast, ch, ctx, childPrefix
+        ch = ast.nodes(ch).nextSibling
+    Loop
+End Sub
+
+Function UXBAstInterpRun(ByRef ast As ASTPool, ByVal rootNode As Integer, ByRef ctx As UXBInterpContext, ByRef errText As String) As UXBInterpResult
+    UXBInterpResultInit ctx.result
+    If rootNode < 0 Or rootNode >= ast.count Then
+        UXBInterpResultFail ctx.result, UXB_INTERP_ERR_AST_CONTRACT, "AST root out of range"
+        errText = ctx.result.errorText
+        Return ctx.result
+    End If
+    Dim contractErr As String = ""
+    If AstContract_ValidateTree(ast, rootNode, contractErr) = 0 Then
+        UXBInterpResultFail ctx.result, UXB_INTERP_ERR_AST_CONTRACT, contractErr
+        errText = contractErr
+        Return ctx.result
+    End If
+    If UXBAstInterpValidateTreeSurface(ast, rootNode, contractErr) = 0 Then
+        UXBInterpResultFail ctx.result, UXB_INTERP_ERR_AST_CONTRACT, contractErr
+        errText = contractErr
+        Return ctx.result
+    End If
+    UXBAstInterpRegisterRoutinesWalk ast, rootNode, ctx
+    Dim r As UXBInterpValue = UXBAstInterpExecStmt(ast, rootNode, ctx)
+    If UXBInterpIsError(r) <> 0 Then
+        UXBInterpResultFail ctx.result, r.errorCode, r.errorText
+        errText = r.errorText
+    Else
+        If ctx.result.statusText = "RETURN" Or ctx.result.statusText = "END" Or ctx.result.statusText = "" Then ctx.result.statusText = "PASS"
+        ctx.result.returnValue = r
+        ctx.result.stdoutText = ctx.runtime.stdoutText
+        ctx.result.stderrText = ctx.runtime.stderrText
+        ctx.result.runtimeServiceCalls = ctx.runtime.serviceCallCount
+        errText = ""
+    End If
+    Return ctx.result
+End Function
+
+#endif

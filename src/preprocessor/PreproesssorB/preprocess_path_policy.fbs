@@ -1,0 +1,106 @@
+#ifndef UXB_PREPROCESS_PATH_POLICY_FBS
+#define UXB_PREPROCESS_PATH_POLICY_FBS
+
+' uXBasic preprocessor path policy.
+' This file is intentionally independent from BASIC lexer/parser.
+' Purpose:
+'   - Every path-like preprocessor argument passes through this file.
+'   - SAFE_PATHS ON blocks path escape attempts.
+'   - SAFE_PATHS OFF records programmer responsibility in manifest/diagnostics.
+
+Private Function UXBPreStripQuotes(ByRef s As String) As String
+    Dim t As String
+    t = Trim(s)
+    If Len(t) >= 2 Then
+        If Left(t, 1) = Chr(34) And Right(t, 1) = Chr(34) Then
+            Return Mid(t, 2, Len(t) - 2)
+        End If
+    End If
+    Return t
+End Function
+
+Private Function UXBPreOnOff(ByRef s As String, ByVal defaultValue As Integer) As Integer
+    Dim t As String
+    t = UCase(Trim(UXBPreStripQuotes(s)))
+    If t = "" Then Return defaultValue
+    If t = "1" Or t = "ON" Or t = "TRUE" Or t = "YES" Or t = "ALLOW" Then Return 1
+    If t = "0" Or t = "OFF" Or t = "FALSE" Or t = "NO" Or t = "DENY" Then Return 0
+    Return defaultValue
+End Function
+
+Private Function UXBPreDefaultBlockOutFile(ByRef targetText As String) As String
+    Select Case UCase(Trim(targetText))
+    Case "HTML": Return "index.html"
+    Case "CSS": Return "style.css"
+    Case "JS": Return "program.user.js"
+    Case "WAT": Return "program.wat"
+    Case "WAT_FUNC": Return "program.wat"
+    Case "WASM_HOST_JS": Return "ux_wasm_host.js"
+    Case "JSON", "JSON_ARRAY": Return "data.json"
+    Case "MD": Return "README.md"
+    Case "TEMPLATE": Return "template.txt"
+    Case "SECTION": Return "section.txt"
+    Case "GEN": Return "generated.txt"
+    Case Else: Return "artifact.out"
+    End Select
+End Function
+
+Private Function UXBPrePathHasDrive(ByRef pathText As String) As Integer
+    Dim t As String
+    t = Trim(pathText)
+    If Len(t) >= 2 Then
+        Dim a As Integer
+        a = Asc(UCase(Left(t, 1)))
+        If a >= Asc("A") And a <= Asc("Z") And Mid(t, 2, 1) = ":" Then Return 1
+    End If
+    Return 0
+End Function
+
+Private Function UXBPrePathIsUnsafe(ByRef pathText As String) As Integer
+    Dim t As String
+    t = Trim(UXBPreStripQuotes(pathText))
+    Dim u As String
+    u = UCase(t)
+    If t = "" Then Return 1
+    If InStr(u, "../") > 0 Then Return 1
+    If InStr(u, "..\") > 0 Then Return 1
+    If Left(u, 3) = "../" Or Left(u, 3) = "..\" Then Return 1
+    If InStr(u, "..") > 0 Then Return 1
+    If UXBPrePathHasDrive(t) <> 0 Then Return 1
+    If Left(t, 1) = "/" Or Left(t, 1) = "\" Then Return 1
+    If Left(t, 2) = "\\" Then Return 1
+    If InStr(t, ";") > 0 Then Return 1
+    If InStr(t, "|") > 0 Then Return 1
+    If InStr(t, "&") > 0 Then Return 1
+    If InStr(t, "<") > 0 Then Return 1
+    If InStr(t, ">") > 0 Then Return 1
+    Return 0
+End Function
+
+Function UXBPreNormalizePath(ByRef rawPath As String, ByRef purposeText As String, ByRef sourcePath As String, ByVal lineNo As Integer, ByRef r As PreprocessResult, ByRef outPath As String) As Integer
+    outPath = Trim(UXBPreStripQuotes(rawPath))
+    If outPath = "" Then
+        PreprocessResultAddDiagnostic r, "PREPROCESS_PATH_EMPTY: " & purposeText & " at " & sourcePath & ":" & LTrim(Str(lineNo))
+        Return 0
+    End If
+    If r.safePaths <> 0 Then
+        If UXBPrePathIsUnsafe(outPath) <> 0 Then
+            PreprocessResultAddDiagnostic r, "SAFE_PATH_BLOCKED: " & purposeText & "=" & outPath & " at " & sourcePath & ":" & LTrim(Str(lineNo))
+            Return 0
+        End If
+    Else
+        PreprocessResultAddManifest r, "security.safePaths", "false"
+        PreprocessResultAddManifest r, "security.programmerResponsible", "true"
+        PreprocessResultAddDiagnostic r, "SAFE_PATHS_OFF_PROGRAMMER_RESPONSIBLE: " & purposeText & "=" & outPath
+    End If
+    Return 1
+End Function
+
+Function UXBPreNormalizeBlockOutFile(ByRef targetText As String, ByRef rawPath As String, ByRef sourcePath As String, ByVal lineNo As Integer, ByRef r As PreprocessResult, ByRef outFile As String) As Integer
+    Dim p As String
+    p = Trim(UXBPreStripQuotes(rawPath))
+    If p = "" Then p = UXBPreDefaultBlockOutFile(targetText)
+    Return UXBPreNormalizePath(p, "block." & UCase(Trim(targetText)) & ".outFile", sourcePath, lineNo, r, outFile)
+End Function
+
+#endif

@@ -1,0 +1,213 @@
+#ifndef UXB_INTERPRETER_EXECUTION_ARTIFACTS_FBS
+#define UXB_INTERPRETER_EXECUTION_ARTIFACTS_FBS
+
+#include once "../common/report_writer.fbs"
+#include once "common/library_payload.fbs"
+
+Private Function UXBInterpreterArtifactJsonEscape(ByVal rawText As String) As String
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        Select Case ch
+        Case Chr(34)
+            outText &= "\" & Chr(34)
+        Case "\"
+            outText &= "\\"
+        Case Chr(13)
+            outText &= "\r"
+        Case Chr(10)
+            outText &= "\n"
+        Case Chr(9)
+            outText &= "\t"
+        Case Else
+            outText &= ch
+        End Select
+    Next i
+    Return outText
+End Function
+
+Function UXBInterpreterExecResultJson( _
+    ByVal layerName As String, _
+    ByVal sourceFile As String, _
+    ByVal statusText As String, _
+    ByVal stdoutText As String, _
+    ByVal stderrText As String, _
+    ByVal programOutputText As String, _
+    ByVal resultTypeText As String, _
+    ByVal returnText As String, _
+    ByVal runtimeCallCount As Integer, _
+    ByVal errorText As String _
+) As String
+    Dim q As String
+    q = Chr(34)
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  " & q & "schema_version" & q & ":" & q & "uxb-interpreter-exec-result-2" & q & "," & Chr(10)
+    j &= "  " & q & "layer_name" & q & ":" & q & UXBInterpreterArtifactJsonEscape(layerName) & q & "," & Chr(10)
+    j &= "  " & q & "status" & q & ":" & q & UXBInterpreterArtifactJsonEscape(statusText) & q & "," & Chr(10)
+    j &= "  " & q & "source_file" & q & ":" & q & UXBInterpreterArtifactJsonEscape(sourceFile) & q & "," & Chr(10)
+    j &= "  " & q & "stdout" & q & ":" & q & UXBInterpreterArtifactJsonEscape(stdoutText) & q & "," & Chr(10)
+    j &= "  " & q & "stderr" & q & ":" & q & UXBInterpreterArtifactJsonEscape(stderrText) & q & "," & Chr(10)
+    j &= "  " & q & "program_output" & q & ":" & q & UXBInterpreterArtifactJsonEscape(programOutputText) & q & "," & Chr(10)
+    j &= "  " & q & "result_type" & q & ":" & q & UXBInterpreterArtifactJsonEscape(resultTypeText) & q & "," & Chr(10)
+    j &= "  " & q & "return_value" & q & ":" & q & UXBInterpreterArtifactJsonEscape(returnText) & q & "," & Chr(10)
+    j &= "  " & q & "runtime_service_calls" & q & ":" & LTrim(Str(runtimeCallCount)) & "," & Chr(10)
+    If layerName = "MIR_INTERPRETER" Then j &= "  " & q & "library_type_lifecycle" & q & ":" & UXBLibraryPayloadStatsJson() & "," & Chr(10)
+    j &= "  " & q & "error_text" & q & ":" & q & UXBInterpreterArtifactJsonEscape(errorText) & q & Chr(10)
+    j &= "}" & Chr(10)
+    Return j
+End Function
+
+' S-020: AST and MIR interpreter stdout can differ only by line-ending style
+' (AST's console buffer accumulates CRLF, MIR's LF) with byte-identical content
+' otherwise. Comparing the raw strings treats that as a real divergence; this
+' normalizes both to LF before the equality check so only an actual observable
+' output difference fails the gate.
+Private Function UXBInterpreterNormalizeLineEndings(ByVal rawText As String) As String
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    Dim n As Integer
+    n = Len(rawText)
+    i = 1
+    Do While i <= n
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        If ch = Chr(13) Then
+            outText &= Chr(10)
+            If i < n And Mid(rawText, i + 1, 1) = Chr(10) Then i += 1
+        Else
+            outText &= ch
+        End If
+        i += 1
+    Loop
+    Return outText
+End Function
+
+Function UXBInterpreterCompareJson( _
+    ByVal sourceFile As String, _
+    ByVal astStatus As String, _
+    ByVal mirStatus As String, _
+    ByVal astOutput As String, _
+    ByVal mirOutput As String, _
+    ByVal astResultType As String, _
+    ByVal mirResultType As String, _
+    ByVal astReturnText As String, _
+    ByVal mirReturnText As String _
+) As String
+    Dim q As String
+    q = Chr(34)
+    Dim outputMatch As Integer
+    Dim resultTypeMatch As Integer
+    Dim returnMatch As Integer
+    outputMatch = IIf(UXBInterpreterNormalizeLineEndings(astOutput) = UXBInterpreterNormalizeLineEndings(mirOutput), 1, 0)
+    resultTypeMatch = IIf(astResultType = mirResultType, 1, 0)
+    returnMatch = IIf(astReturnText = mirReturnText, 1, 0)
+    ' S-020: result_type/return_value are wrapper metadata, not the program's
+    ' observable semantic result — astResultType/astReturnText are hardcoded to
+    ' the engine name ("AST_RUNTIME") and the pass/fail status string
+    ' (main_program_entry_part2.fbs), never the AST interpreter's own computed
+    ' value/type the way mirResultType/mirReturnText derive from
+    ' mirInterpResult.returnValue. Comparing them was guaranteed to mismatch
+    ' regardless of whether AST and MIR actually agree; they stay in the report
+    ' for visibility but no longer gate PASS/FAIL. Program output (normalized
+    ' for line-ending style) is the real observable-behavior contract here.
+    Dim finalStatus As String
+    If astStatus = "PASS" And mirStatus = "PASS" And outputMatch <> 0 Then
+        finalStatus = "PASS"
+    Else
+        finalStatus = "FAIL"
+    End If
+
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  " & q & "schema_version" & q & ":" & q & "uxb-interpreter-compare-1" & q & "," & Chr(10)
+    j &= "  " & q & "source_file" & q & ":" & q & UXBInterpreterArtifactJsonEscape(sourceFile) & q & "," & Chr(10)
+    j &= "  " & q & "status" & q & ":" & q & finalStatus & q & "," & Chr(10)
+    j &= "  " & q & "ast_status" & q & ":" & q & UXBInterpreterArtifactJsonEscape(astStatus) & q & "," & Chr(10)
+    j &= "  " & q & "mir_status" & q & ":" & q & UXBInterpreterArtifactJsonEscape(mirStatus) & q & "," & Chr(10)
+    j &= "  " & q & "stdout_match" & q & ":" & IIf(outputMatch <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "program_output_match" & q & ":" & IIf(outputMatch <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "result_type_match" & q & ":" & IIf(resultTypeMatch <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "return_value_match" & q & ":" & IIf(returnMatch <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "ast_result_type" & q & ":" & q & UXBInterpreterArtifactJsonEscape(astResultType) & q & "," & Chr(10)
+    j &= "  " & q & "mir_result_type" & q & ":" & q & UXBInterpreterArtifactJsonEscape(mirResultType) & q & "," & Chr(10)
+    j &= "  " & q & "message" & q & ":" & q & IIf(finalStatus = "PASS", "AST ve MIR interpreter sonuclari eslesti", "AST ve MIR interpreter sonuclari farkli veya biri basarisiz") & q & Chr(10)
+    j &= "}" & Chr(10)
+    Return j
+End Function
+
+Function UXBInterpreterRuntimeTraceJson( _
+    ByVal sourceFile As String, _
+    ByVal requestedBackend As String, _
+    ByVal astRan As Integer, _
+    ByVal mirRan As Integer, _
+    ByVal astStatus As String, _
+    ByVal mirStatus As String _
+) As String
+    Dim q As String
+    q = Chr(34)
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  " & q & "schema_version" & q & ":" & q & "uxb-runtime-trace-1" & q & "," & Chr(10)
+    j &= "  " & q & "source_file" & q & ":" & q & UXBInterpreterArtifactJsonEscape(sourceFile) & q & "," & Chr(10)
+    j &= "  " & q & "requested_backend" & q & ":" & q & UXBInterpreterArtifactJsonEscape(requestedBackend) & q & "," & Chr(10)
+    j &= "  " & q & "ast_ran" & q & ":" & IIf(astRan <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "mir_ran" & q & ":" & IIf(mirRan <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "ast_status" & q & ":" & q & UXBInterpreterArtifactJsonEscape(astStatus) & q & "," & Chr(10)
+    j &= "  " & q & "mir_status" & q & ":" & q & UXBInterpreterArtifactJsonEscape(mirStatus) & q & Chr(10)
+    j &= "}" & Chr(10)
+    Return j
+End Function
+
+Function UXBInterpreterLiveJson( _
+    ByVal layerName As String, _
+    ByVal sourceFile As String, _
+    ByVal phaseText As String, _
+    ByVal statusText As String, _
+    ByVal stdoutText As String, _
+    ByVal stderrText As String, _
+    ByVal programOutputText As String, _
+    ByVal resultTypeText As String, _
+    ByVal returnText As String, _
+    ByVal runtimeCallCount As Integer, _
+    ByVal stepValue As LongInt, _
+    ByVal doneFlag As Integer, _
+    ByVal errorText As String _
+) As String
+    Dim q As String
+    q = Chr(34)
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  " & q & "schema_version" & q & ":" & q & "uxb-interpreter-live-1" & q & "," & Chr(10)
+    j &= "  " & q & "layer_name" & q & ":" & q & UXBInterpreterArtifactJsonEscape(layerName) & q & "," & Chr(10)
+    j &= "  " & q & "source_file" & q & ":" & q & UXBInterpreterArtifactJsonEscape(sourceFile) & q & "," & Chr(10)
+    j &= "  " & q & "phase" & q & ":" & q & UXBInterpreterArtifactJsonEscape(phaseText) & q & "," & Chr(10)
+    j &= "  " & q & "status" & q & ":" & q & UXBInterpreterArtifactJsonEscape(statusText) & q & "," & Chr(10)
+    j &= "  " & q & "stdout" & q & ":" & q & UXBInterpreterArtifactJsonEscape(stdoutText) & q & "," & Chr(10)
+    j &= "  " & q & "stderr" & q & ":" & q & UXBInterpreterArtifactJsonEscape(stderrText) & q & "," & Chr(10)
+    j &= "  " & q & "program_output" & q & ":" & q & UXBInterpreterArtifactJsonEscape(programOutputText) & q & "," & Chr(10)
+    j &= "  " & q & "result_type" & q & ":" & q & UXBInterpreterArtifactJsonEscape(resultTypeText) & q & "," & Chr(10)
+    j &= "  " & q & "return_value" & q & ":" & q & UXBInterpreterArtifactJsonEscape(returnText) & q & "," & Chr(10)
+    j &= "  " & q & "runtime_service_calls" & q & ":" & LTrim(Str(runtimeCallCount)) & "," & Chr(10)
+    j &= "  " & q & "step" & q & ":" & LTrim(Str(stepValue)) & "," & Chr(10)
+    j &= "  " & q & "done" & q & ":" & IIf(doneFlag <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "error_text" & q & ":" & q & UXBInterpreterArtifactJsonEscape(errorText) & q & Chr(10)
+    j &= "}" & Chr(10)
+    Return j
+End Function
+
+Function UXBInterpreterWriteTextArtifact(ByRef outPath As String, ByRef textValue As String, ByRef errText As String) As Integer
+    If Trim(outPath) = "" Then Return 1
+    Return UXBReportWriteText(outPath, textValue, errText)
+End Function
+
+Function UXBInterpreterWriteArtifact(ByRef outPath As String, ByRef textValue As String, ByRef errText As String) As Integer
+    If Trim(outPath) = "" Then Return 1
+    Return UXBReportWriteText(outPath, textValue, errText)
+End Function
+
+#endif

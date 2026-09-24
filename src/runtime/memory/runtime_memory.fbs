@@ -1,0 +1,361 @@
+#ifndef UXB_RUNTIME_MEMORY_FBS
+#define UXB_RUNTIME_MEMORY_FBS
+
+#include once "../runtime_context.fbs"
+#include once "../services/runtime_service_ids.fbs"
+#include once "../memory_vm.fbs"
+
+Type UXBRuntimeMemoryCell
+    addressValue As ULongInt
+    value As UByte
+End Type
+
+Dim Shared gUXBRuntimeMemoryCells(Any) As UXBRuntimeMemoryCell
+Dim Shared gUXBRuntimeMemoryCellCount As Integer
+Dim Shared gUXBRuntimeVirtualMemory(0 To 1048575) As UByte
+Const UXB_RUNTIME_VMEM_SIZE As ULongInt = 1048576
+
+Private Function UXBRuntimeMemoryMode(ByVal modeText As String) As Integer
+    Select Case UCase(Trim(modeText))
+    Case "VIRTUAL": Return 1
+    Case "NATIVE": Return 2
+    Case Else: Return 0
+    End Select
+End Function
+
+Private Function UXBRuntimeVirtualLoad(ByVal addr As ULongInt, ByVal widthBytes As Integer, ByRef valueOut As LongInt) As Integer
+    If addr > &hFFFFFFFFULL Then Return 0
+    Select Case widthBytes
+    Case 1
+        Dim b As Integer = VMemPeekB(CUInt(addr))
+        If b < 0 Then Return 0
+        valueOut = b
+    Case 2
+        Dim w As Integer = VMemPeekW(CUInt(addr))
+        If w < 0 Then Return 0
+        valueOut = w
+    Case 4
+        Dim d As Integer = VMemPeekD(CUInt(addr))
+        If d < 0 And CUInt(addr) < &hFFFFFFFC Then Return 0
+        valueOut = d
+    Case 8
+        If VMemInRange(CUInt(addr), 8) = 0 Then Return 0
+        valueOut = VMemPeekQ(CUInt(addr))
+    Case Else
+        Return 0
+    End Select
+    Return 1
+End Function
+
+Private Function UXBRuntimeVirtualRangeOK(ByVal addr As ULongInt, ByVal countBytes As ULongInt) As Integer
+    If countBytes = 0 Then Return 1
+    If addr >= UXB_RUNTIME_VMEM_SIZE Then Return 0
+    If countBytes > UXB_RUNTIME_VMEM_SIZE - addr Then Return 0
+    Return 1
+End Function
+
+' S-049: NATIVE mode (modeId=2) used to be a hard, blanket rejection here --
+' the exact same "not implemented at all" gap the AST interpreter had before
+' its own NATIVE fix (see exec_state_value_utils.fbs's ExecNative* family,
+' which this mirrors). Now that VARPTR is lowered for canonical-MIR too
+' (mir_interp_memory.fbs), NATIVE addresses are real process addresses, so
+' every access here is range-checked with Win32 IsBadReadPtr/IsBadWritePtr
+' first and fails closed (Return 0, same as an out-of-range VIRTUAL access)
+' instead of ever risking a raw dereference of a bad address.
+' Also used by the AST interpreter's own NATIVE-memory validation
+' (src/runtime/exec/exec_state_value_utils.fbs) -- this is one combined
+' translation unit, so that file's identical Declare was removed and both
+' sides now share this one (FreeBASIC's duplicate-Declare check apparently
+' scans the whole compiled text, not just what's textually already visible,
+' so only one copy may exist anywhere in the build regardless of order).
+Declare Function IsBadReadPtr Lib "kernel32.dll" Alias "IsBadReadPtr" (ByVal lp As Any Ptr, ByVal ucb As UInteger) As Long
+Declare Function IsBadWritePtr Lib "kernel32.dll" Alias "IsBadWritePtr" (ByVal lp As Any Ptr, ByVal ucb As UInteger) As Long
+
+Private Function UXBRuntimeNativeAddrReadable(ByVal addr As ULongInt, ByVal byteCount As ULongInt) As Integer
+    If addr = 0 Or byteCount = 0 Then Return 0
+    ' S-056: uXBasic-owned buffers are bounds/lifetime checked first (MemoryRef).
+    If UXBMemRefCheck(addr, byteCount) = 0 Then Return 0
+    Return IIf(IsBadReadPtr(CPtr(Any Ptr, addr), CUInt(byteCount)) = 0, 1, 0)
+End Function
+
+Private Function UXBRuntimeNativeAddrWritable(ByVal addr As ULongInt, ByVal byteCount As ULongInt) As Integer
+    If addr = 0 Or byteCount = 0 Then Return 0
+    If UXBMemRefCheck(addr, byteCount) = 0 Then Return 0
+    Return IIf(IsBadWritePtr(CPtr(Any Ptr, addr), CUInt(byteCount)) = 0, 1, 0)
+End Function
+
+Function UXBRuntimeMemoryLoadWidth(ByVal modeText As String, ByVal addr As ULongInt, ByVal widthBytes As Integer, ByRef okOut As Integer) As LongInt
+    okOut = 0
+    Dim modeId As Integer = UXBRuntimeMemoryMode(modeText)
+    If widthBytes <> 1 And widthBytes <> 2 And widthBytes <> 4 And widthBytes <> 8 Then Return 0
+    If modeId = 2 Then
+        If UXBRuntimeNativeAddrReadable(addr, CULngInt(widthBytes)) = 0 Then Return 0
+        Dim np As UByte Ptr = CPtr(UByte Ptr, addr)
+        Dim nv As ULongInt = 0
+        Dim ni As Integer
+        For ni = 0 To widthBytes - 1
+            nv Or= (CULngInt(np[ni]) Shl (ni * 8))
+        Next ni
+        okOut = 1
+        Return CLngInt(nv)
+    End If
+    Dim virtualValue As LongInt
+    If UXBRuntimeVirtualLoad(addr, widthBytes, virtualValue) = 0 Then Return 0
+    okOut = 1
+    Return virtualValue
+End Function
+
+Function UXBRuntimeMemoryStoreWidth(ByVal modeText As String, ByVal addr As ULongInt, ByVal value As LongInt, ByVal widthBytes As Integer) As Integer
+    Dim modeId As Integer = UXBRuntimeMemoryMode(modeText)
+    If widthBytes <> 1 And widthBytes <> 2 And widthBytes <> 4 And widthBytes <> 8 Then Return 0
+    If modeId = 2 Then
+        If UXBRuntimeNativeAddrWritable(addr, CULngInt(widthBytes)) = 0 Then Return 0
+        Dim np As UByte Ptr = CPtr(UByte Ptr, addr)
+        Dim nv As ULongInt = CULngInt(value)
+        Dim ni As Integer
+        For ni = 0 To widthBytes - 1
+            np[ni] = CUByte((nv Shr (ni * 8)) And &hFF)
+        Next ni
+        Return 1
+    End If
+    If addr > &hFFFFFFFFULL Then Return 0
+    Select Case widthBytes
+    Case 1: Return VMemPokeB(CUInt(addr), CInt(value))
+    Case 2: Return VMemPokeW(CUInt(addr), CInt(value))
+    Case 4: Return VMemPokeD(CUInt(addr), CInt(value))
+    Case 8: Return VMemPokeQ(CUInt(addr), value)
+    End Select
+    Return 0
+End Function
+
+Function UXBRuntimeMemoryCopyMode(ByVal modeText As String, ByVal srcAddr As ULongInt, ByVal dstAddr As ULongInt, ByVal byteCount As ULongInt) As Integer
+    If byteCount = 0 Then Return 1
+    If UXBRuntimeMemoryMode(modeText) = 2 Then
+        If UXBRuntimeNativeAddrReadable(srcAddr, byteCount) = 0 Then Return 0
+        If UXBRuntimeNativeAddrWritable(dstAddr, byteCount) = 0 Then Return 0
+        Dim ns As UByte Ptr = CPtr(UByte Ptr, srcAddr)
+        Dim nd As UByte Ptr = CPtr(UByte Ptr, dstAddr)
+        If nd = ns Then Return 1
+        Dim ni As ULongInt
+        If nd < ns Then
+            For ni = 0 To byteCount - 1
+                nd[ni] = ns[ni]
+            Next ni
+        Else
+            ni = byteCount
+            Do While ni > 0
+                ni -= 1
+                nd[ni] = ns[ni]
+            Loop
+        End If
+        Return 1
+    End If
+    If srcAddr > &hFFFFFFFFULL Or dstAddr > &hFFFFFFFFULL Or byteCount > &hFFFFFFFFULL Then Return 0
+    Return VMemCopyB(CUInt(srcAddr), CUInt(dstAddr), CUInt(byteCount))
+End Function
+
+Function UXBRuntimeMemoryFillMode(ByVal modeText As String, ByVal dstAddr As ULongInt, ByVal value As LongInt, ByVal countValue As ULongInt, ByVal widthBytes As Integer) As Integer
+    If widthBytes <> 1 And widthBytes <> 2 And widthBytes <> 4 And widthBytes <> 8 Then Return 0
+    Dim totalBytes As ULongInt = countValue * CULngInt(widthBytes)
+    If countValue <> 0 And totalBytes \ CULngInt(widthBytes) <> countValue Then Return 0
+    If UXBRuntimeMemoryMode(modeText) = 2 Then
+        If countValue = 0 Then Return 1
+        If UXBRuntimeNativeAddrWritable(dstAddr, totalBytes) = 0 Then Return 0
+        ' S-069 follow-up: this NATIVE branch used to validate the address and
+        ' then fall through to the trailing "Return 0" WITHOUT filling
+        ' anything, so canonical-MIR's NATIVE MEMFILL* failed even for a
+        ' perfectly valid address ("memory fill failed" & UXBMemRefReason()). Real fill loop,
+        ' mirroring UXBRuntimeMemoryCopyMode's real-native-pointer pattern.
+        Dim nfi As ULongInt
+        Select Case widthBytes
+        Case 1
+            Dim nf1 As UByte Ptr = CPtr(UByte Ptr, dstAddr)
+            For nfi = 0 To countValue - 1
+                nf1[nfi] = CUByte(value And &hFF)
+            Next nfi
+        Case 2
+            Dim nf2 As UShort Ptr = CPtr(UShort Ptr, dstAddr)
+            For nfi = 0 To countValue - 1
+                nf2[nfi] = CUShort(value And &hFFFF)
+            Next nfi
+        Case 4
+            Dim nf4 As ULong Ptr = CPtr(ULong Ptr, dstAddr)
+            For nfi = 0 To countValue - 1
+                nf4[nfi] = CULng(value And &hFFFFFFFF)
+            Next nfi
+        Case 8
+            Dim nf8 As ULongInt Ptr = CPtr(ULongInt Ptr, dstAddr)
+            For nfi = 0 To countValue - 1
+                nf8[nfi] = CULngInt(value)
+            Next nfi
+        End Select
+        Return 1
+    Else
+        If dstAddr > &hFFFFFFFFULL Or totalBytes > &hFFFFFFFFULL Then Return 0
+        Select Case widthBytes
+        Case 1: Return VMemFillB(CUInt(dstAddr), CInt(value), CUInt(countValue))
+        Case 2: Return VMemFillW(CUInt(dstAddr), CInt(value), CUInt(countValue))
+        Case 4: Return VMemFillD(CUInt(dstAddr), CInt(value), CUInt(countValue))
+        Case 8
+            Dim qi As ULongInt
+            For qi = 0 To countValue - 1
+                If VMemPokeQ(CUInt(dstAddr + qi * 8), value) = 0 Then Return 0
+            Next qi
+            Return 1
+        End Select
+    End If
+    Return 0
+End Function
+
+' S-059: PEEKS/POKES's NATIVE mode used to be silently unreachable here --
+' this function returned failure unconditionally for NATIVE (modeId 2)
+' regardless of whether the address was actually valid, while sibling
+' width/copy/fill functions in this same file (UXBRuntimeMemoryLoadWidth,
+' StoreWidth, CopyMode, FillMode, just above) already got a real NATIVE
+' branch. Native x64's own MIR_MEMORY_READ_SEQUENCE/WRITE_SEQUENCE emitter
+' (mir_x64_runtime_emit_helpers.fbs) never had this restriction and already
+' resolves NATIVE addresses for real -- so NATIVE PEEKS/POKES silently
+' worked in native x64 but failed (AST: clean rejection; canonical-MIR:
+' confusing "memory sequence write/read failed") in the other two engines.
+' Mirrors UXBRuntimeMemoryCopyMode's real-native-pointer-loop pattern.
+Function UXBRuntimeMemoryReadSequence(ByVal modeText As String, ByVal addr As ULongInt, ByVal lengthValue As ULongInt, ByRef okOut As Integer) As String
+    okOut = 0
+    If UXBRuntimeMemoryMode(modeText) = 2 Then
+        If lengthValue > 0 And UXBRuntimeNativeAddrReadable(addr, lengthValue) = 0 Then Return ""
+        Dim nativeOut As String = String(CLng(lengthValue), Chr(0))
+        Dim np As UByte Ptr = CPtr(UByte Ptr, addr)
+        Dim ni As ULongInt
+        For ni = 0 To lengthValue - 1
+            Mid(nativeOut, CLng(ni) + 1, 1) = Chr(np[ni])
+        Next ni
+        okOut = 1
+        Return nativeOut
+    End If
+    If addr > &hFFFFFFFFULL Or lengthValue > &hFFFFFFFFULL Then Return ""
+    If VMemInRange(CUInt(addr), CUInt(lengthValue)) = 0 And lengthValue <> 0 Then Return ""
+    Dim outText As String = String(CLng(lengthValue), Chr(0))
+    Dim i As UInteger
+    For i = 0 To CUInt(lengthValue) - 1
+        Mid(outText, CLng(i) + 1, 1) = Chr(VMemPeekB(CUInt(addr) + i))
+    Next i
+    okOut = 1
+    Return outText
+End Function
+
+Function UXBRuntimeMemoryWriteSequence(ByVal modeText As String, ByVal addr As ULongInt, ByVal sourceText As String, ByVal lengthValue As ULongInt) As Integer
+    If lengthValue > CULngInt(Len(sourceText)) Then Return 0
+    If UXBRuntimeMemoryMode(modeText) = 2 Then
+        If lengthValue > 0 And UXBRuntimeNativeAddrWritable(addr, lengthValue) = 0 Then Return 0
+        Dim np As UByte Ptr = CPtr(UByte Ptr, addr)
+        Dim ni As ULongInt
+        For ni = 0 To lengthValue - 1
+            np[ni] = CUByte(Asc(Mid(sourceText, CLng(ni) + 1, 1)))
+        Next ni
+        Return 1
+    End If
+    If addr > &hFFFFFFFFULL Or lengthValue > &hFFFFFFFFULL Then Return 0
+    Return VMemPokeSLength(CUInt(addr), sourceText, CUInt(lengthValue))
+End Function
+
+Private Function UXBRuntimeMemoryFind(ByVal addr As ULongInt) As Integer
+    Dim i As Integer
+    For i = 0 To gUXBRuntimeMemoryCellCount - 1
+        If gUXBRuntimeMemoryCells(i).addressValue = addr Then Return i
+    Next i
+    Return -1
+End Function
+
+Sub UXBRuntimeMemoryStoreByte(ByVal addr As ULongInt, ByVal valueByte As UByte)
+    Dim idx As Integer = UXBRuntimeMemoryFind(addr)
+    If idx < 0 Then
+        If gUXBRuntimeMemoryCellCount = 0 Then
+            ReDim gUXBRuntimeMemoryCells(0)
+        Else
+            ReDim Preserve gUXBRuntimeMemoryCells(gUXBRuntimeMemoryCellCount)
+        End If
+        idx = gUXBRuntimeMemoryCellCount
+        gUXBRuntimeMemoryCellCount += 1
+        gUXBRuntimeMemoryCells(idx).addressValue = addr
+    End If
+    gUXBRuntimeMemoryCells(idx).value = valueByte
+End Sub
+
+Function UXBRuntimeMemoryLoadByte(ByVal addr As ULongInt) As UByte
+    Dim idx As Integer = UXBRuntimeMemoryFind(addr)
+    If idx < 0 Then Return 0
+    Return gUXBRuntimeMemoryCells(idx).value
+End Function
+
+Function UXBRuntimeMemoryDispatch(ByRef rt As UXBRuntimeContext, ByVal serviceId As String, ByRef args As UXBRuntimeArgList) As UXBInterpValue
+    Dim s As String = UCase(Trim(serviceId))
+    Select Case s
+    Case RT_PEEK, RT_MEM_LOAD
+        If args.count >= 3 Then
+            Dim loadMode As String = UXBRuntimeArgText(args, 0)
+            Dim loadAddr As ULongInt = CULngInt(UXBRuntimeArgInt(args, 1))
+            Dim loadWidth As Integer = CInt(UXBRuntimeArgInt(args, 2))
+            Dim loadOK As Integer
+            Dim loadValue As LongInt = UXBRuntimeMemoryLoadWidth(loadMode, loadAddr, loadWidth, loadOK)
+            If loadOK = 0 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "memory load failed")
+            Return UXBInterpValueInt(loadValue)
+        End If
+        Return UXBInterpValueInt(CLngInt(UXBRuntimeMemoryLoadByte(CULngInt(UXBRuntimeArgInt(args, 0)))))
+    Case RT_POKE, RT_MEM_STORE
+        If args.count >= 4 Then
+            Dim storeMode As String = UXBRuntimeArgText(args, 0)
+            If UXBRuntimeMemoryStoreWidth(storeMode, CULngInt(UXBRuntimeArgInt(args, 1)), UXBRuntimeArgInt(args, 2), CInt(UXBRuntimeArgInt(args, 3))) = 0 Then
+                Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "memory store failed")
+            End If
+            Return UXBInterpValueVoid()
+        End If
+        UXBRuntimeMemoryStoreByte CULngInt(UXBRuntimeArgInt(args, 0)), CUByte(UXBRuntimeArgInt(args, 1) And &hFF)
+        Return UXBInterpValueVoid()
+    Case RT_MEM_FILL
+        If args.count >= 5 Then
+            If UXBRuntimeMemoryFillMode(UXBRuntimeArgText(args, 0), CULngInt(UXBRuntimeArgInt(args, 1)), UXBRuntimeArgInt(args, 2), CULngInt(UXBRuntimeArgInt(args, 3)), CInt(UXBRuntimeArgInt(args, 4))) = 0 Then
+                Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "memory fill failed" & UXBMemRefReason())
+            End If
+            Return UXBInterpValueVoid()
+        End If
+        Dim addr As ULongInt = CULngInt(UXBRuntimeArgInt(args, 0))
+        Dim sizeValue As LongInt = UXBRuntimeArgInt(args, 1)
+        Dim fillByte As UByte = CUByte(UXBRuntimeArgInt(args, 2) And &hFF)
+        If sizeValue < 0 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "negative memory fill length")
+        Dim i As LongInt
+        For i = 0 To sizeValue - 1
+            UXBRuntimeMemoryStoreByte addr + CULngInt(i), fillByte
+        Next i
+        Return UXBInterpValueVoid()
+    Case RT_MEM_READ_SEQUENCE
+        If args.count < 3 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "memory sequence read arguments missing")
+        Dim seqOK As Integer
+        Dim seqOut As String = UXBRuntimeMemoryReadSequence(UXBRuntimeArgText(args, 0), CULngInt(UXBRuntimeArgInt(args, 1)), CULngInt(UXBRuntimeArgInt(args, 2)), seqOK)
+        If seqOK = 0 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "memory sequence read failed")
+        Return UXBInterpValueString(seqOut)
+    Case RT_MEM_WRITE_SEQUENCE
+        If args.count < 4 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "memory sequence write arguments missing")
+        If UXBRuntimeMemoryWriteSequence(UXBRuntimeArgText(args, 0), CULngInt(UXBRuntimeArgInt(args, 1)), UXBRuntimeArgText(args, 2), CULngInt(UXBRuntimeArgInt(args, 3))) = 0 Then
+            Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "memory sequence write failed")
+        End If
+        Return UXBInterpValueVoid()
+    Case RT_MEM_COPY
+        If args.count >= 5 Then
+            If UXBRuntimeMemoryCopyMode(UXBRuntimeArgText(args, 0), CULngInt(UXBRuntimeArgInt(args, 1)), CULngInt(UXBRuntimeArgInt(args, 2)), CULngInt(UXBRuntimeArgInt(args, 3))) = 0 Then
+                Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "memory copy failed" & UXBMemRefReason())
+            End If
+            Return UXBInterpValueVoid()
+        End If
+        Dim srcAddr As ULongInt = CULngInt(UXBRuntimeArgInt(args, 0))
+        Dim dstAddr As ULongInt = CULngInt(UXBRuntimeArgInt(args, 1))
+        Dim copySize As LongInt = UXBRuntimeArgInt(args, 2)
+        If copySize < 0 Then Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "negative memory copy length")
+        Dim j As LongInt
+        For j = 0 To copySize - 1
+            UXBRuntimeMemoryStoreByte dstAddr + CULngInt(j), UXBRuntimeMemoryLoadByte(srcAddr + CULngInt(j))
+        Next j
+        Return UXBInterpValueVoid()
+    End Select
+    Return UXBRuntimeSetError(rt, UXB_RT_ERR_SERVICE_NOT_FOUND, "memory service not found: " & serviceId)
+End Function
+
+#endif

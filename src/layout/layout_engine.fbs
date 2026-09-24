@@ -1,0 +1,62 @@
+#ifndef UXB_LAYOUT_ENGINE_FBS
+#define UXB_LAYOUT_ENGINE_FBS
+#include once "layout_registry.fbs"
+#include once "layout_array.fbs"
+#include once "layout_string.fbs"
+#include once "../type_binding/type_rules.fbs"
+#include once "../semantic/layout.fbs"
+
+Function UXBStep3LayoutBuild(ByRef ps As ParseState, ByRef errText As String) As Integer
+    UXBStep3LayoutReset
+    If BuildTypeLayoutTable(ps) = 0 Then errText = "layout: build failed: " & ps.lastError: Return 0
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = UCase(Trim(ps.ast.nodes(i).kind))
+        Select Case k
+        Case "TYPE_STMT", "CLASS_STMT", "INTERFACE_STMT"
+            Dim sz As Integer, e As String
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                If TypeLayoutSizeOf(ps, ps.ast.nodes(i).value, sz, e) <> 0 Then
+                    ' Gercek hizalamayi (STRUCT/UNION/PACK/ALIGN'a gore dogru hesaplanan)
+                    ' TypeLayoutDescribeGlobal'dan al; sabit TYPE_PTR varsayimi yanlisti
+                    ' (bu kayit defteri su an baska hicbir yerde okunmuyor, ama dogru
+                    ' deger tutmasi ileride buna bagimli bir kod eklenirse guvenlik saglar).
+                    Dim realAlign As Integer, ignoreSize As Integer
+                    Dim rk As String, ak As String
+                    Dim pb As Integer, ea As Integer
+                    realAlign = UXBStep3TypeAlignBytes("TYPE_PTR")
+                    If TypeLayoutDescribeGlobal(ps.ast.nodes(i).value, ignoreSize, realAlign, rk, ak, pb, ea) = 0 Then
+                        realAlign = UXBStep3TypeAlignBytes("TYPE_PTR")
+                    End If
+                    UXBStep3LayoutRecordAdd ps.ast.nodes(i).value, k, sz, realAlign, "USER"
+                End If
+            End If
+        Case "DIM_STMT", "DIM_DECL", "REDIM_STMT", "REDIM_DECL", "PARAM_DECL"
+            Dim typ As String = UXBStep3TypeCanonical(ps.ast.nodes(i).typeName)
+            If typ = TYPE_OBJECT And Trim(ps.ast.nodes(i).typeName) = "" Then typ = TYPE_OBJECT
+            UXBStep3LayoutRecordAdd ps.ast.nodes(i).value, "VAR", UXBStep3TypeSizeBytes(typ), UXBStep3TypeAlignBytes(typ), "LOCAL_OR_GLOBAL"
+        End Select
+    Next i
+    errText = ""
+    Return 1
+End Function
+
+Function UXBStep3LayoutCheckNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then errText = "layout: bad node": Return 0
+    Dim k As String = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    Select Case k
+    Case "TYPE_STMT", "CLASS_STMT"
+        Dim sz As Integer
+        If Trim(ps.ast.nodes(nodeIdx).value) = "" Then errText = "layout: empty user type name": Return 0
+        If TypeLayoutSizeOf(ps, ps.ast.nodes(nodeIdx).value, sz, errText) = 0 Then Return 0
+    Case "TYPE_FIELD", "CLASS_FIELD", "DIM_STMT", "DIM_DECL", "REDIM_STMT", "REDIM_DECL", "PARAM_DECL"
+        Dim typ As String = UXBStep3TypeCanonical(ps.ast.nodes(nodeIdx).typeName)
+        If UXBStep3TypeIsBlocked(typ) <> 0 Then errText = "layout: blocked field or variable type": Return 0
+        If UXBStep3TypeSizeBytes(typ) < 0 Then errText = "layout: invalid size": Return 0
+    Case "INDEX_EXPR"
+        errText = "": Return 1
+    End Select
+    errText = ""
+    Return 1
+End Function
+#endif

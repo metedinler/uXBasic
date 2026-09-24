@@ -1,0 +1,261 @@
+Private Sub ReadStringLiteral(ByRef st As LexerState)
+    Dim ln As Integer, cn As Integer
+    ln = st.lineNo
+    cn = st.colNo
+
+    Dim ch As String, s As String
+    AdvanceCh st, ch
+
+    Do While Not AtEnd(st)
+        ch = PeekCh(st)
+        If ch = Chr(10) Then
+            LexerAddDiagnostic st, "LEX_UNTERMINATED_STRING", "unterminated string literal", ln, cn
+            PushTok st, "UNKNOWN", s, ln, cn
+            Exit Sub
+        End If
+
+        If ch = Chr(34) Then
+            If PeekChEx(st, 1) = Chr(34) Then
+                AdvanceCh st, ch
+                AdvanceCh st, ch
+                s &= Chr(34)
+            Else
+                AdvanceCh st, ch
+                PushTok st, "STRING", s, ln, cn
+                Exit Sub
+            End If
+        Else
+            AdvanceCh st, ch
+            s &= ch
+        End If
+    Loop
+
+    LexerAddDiagnostic st, "LEX_UNTERMINATED_STRING", "unterminated string literal", ln, cn
+    PushTok st, "UNKNOWN", s, ln, cn
+End Sub
+
+Private Sub ReadNumber(ByRef st As LexerState)
+    Dim ln As Integer, cn As Integer
+    ln = st.lineNo
+    cn = st.colNo
+
+    Dim s As String, ch As String
+    Dim seenDot As Integer
+    Dim seenExp As Integer
+    Dim baseText As String
+    Dim suffixText As String
+    baseText = "DEC"
+
+    If PeekCh(st) = "&" And (UCase(PeekChEx(st, 1)) = "H" Or UCase(PeekChEx(st, 1)) = "O") Then
+        baseText = IIf(UCase(PeekChEx(st, 1)) = "H", "HEX", "OCT")
+        AdvanceCh st, ch: s &= ch
+        AdvanceCh st, ch: s &= ch
+        Do While Not AtEnd(st)
+            ch = PeekCh(st)
+            If (baseText = "HEX" And IsHexDigit(ch) <> 0) Or (baseText = "OCT" And IsOctDigit(ch) <> 0) Then
+                AdvanceCh st, ch
+                s &= ch
+            Else
+                Exit Do
+            End If
+        Loop
+        If Len(s) <= 2 Then LexerAddDiagnostic st, "LEX_INVALID_NUMBER", "numeric literal requires digits", ln, cn
+        Do While IsAlpha(PeekCh(st)) <> 0 Or IsDigit(PeekCh(st)) <> 0 Or PeekCh(st) = "_"
+            AdvanceCh st, ch
+            suffixText &= ch
+            s &= ch
+        Loop
+        PushNumberTokRaw st, s, s, ln, cn, st.cursor - Len(s), baseText, suffixText
+        Exit Sub
+    End If
+
+    If PeekCh(st) = "%" And UCase(PeekChEx(st, 1)) = "B" Then
+        baseText = "BIN"
+        AdvanceCh st, ch: s &= ch
+        AdvanceCh st, ch: s &= ch
+        Do While Not AtEnd(st)
+            ch = PeekCh(st)
+            If IsBinDigit(ch) <> 0 Then
+                AdvanceCh st, ch
+                s &= ch
+            Else
+                Exit Do
+            End If
+        Loop
+        If Len(s) <= 2 Then LexerAddDiagnostic st, "LEX_INVALID_NUMBER", "binary literal requires digits", ln, cn
+        Do While IsAlpha(PeekCh(st)) <> 0 Or IsDigit(PeekCh(st)) <> 0 Or PeekCh(st) = "_"
+            AdvanceCh st, ch
+            suffixText &= ch
+            s &= ch
+        Loop
+        PushNumberTokRaw st, s, s, ln, cn, st.cursor - Len(s), baseText, suffixText
+        Exit Sub
+    End If
+
+    If PeekCh(st) = "0" And (UCase(PeekChEx(st, 1)) = "X" Or UCase(PeekChEx(st, 1)) = "B" Or UCase(PeekChEx(st, 1)) = "O") Then
+        Select Case UCase(PeekChEx(st, 1))
+        Case "X": baseText = "HEX"
+        Case "B": baseText = "BIN"
+        Case "O": baseText = "OCT"
+        End Select
+        AdvanceCh st, ch: s &= ch
+        AdvanceCh st, ch: s &= ch
+        Do While Not AtEnd(st)
+            ch = PeekCh(st)
+            If (baseText = "HEX" And IsHexDigit(ch) <> 0) Or (baseText = "BIN" And IsBinDigit(ch) <> 0) Or (baseText = "OCT" And IsOctDigit(ch) <> 0) Then
+                AdvanceCh st, ch
+                s &= ch
+            Else
+                Exit Do
+            End If
+        Loop
+        If Len(s) <= 2 Then LexerAddDiagnostic st, "LEX_INVALID_NUMBER", "numeric literal requires digits", ln, cn
+        Do While IsAlpha(PeekCh(st)) <> 0 Or IsDigit(PeekCh(st)) <> 0 Or PeekCh(st) = "_"
+            AdvanceCh st, ch
+            suffixText &= ch
+            s &= ch
+        Loop
+        PushNumberTokRaw st, s, s, ln, cn, st.cursor - Len(s), baseText, suffixText
+        Exit Sub
+    End If
+
+    Do While Not AtEnd(st)
+        ch = PeekCh(st)
+        If IsDigit(ch) Then
+            AdvanceCh st, ch
+            s &= ch
+        ElseIf ch = "." And seenDot = 0 And IsDigit(PeekChEx(st, 1)) Then
+            seenDot = 1
+            AdvanceCh st, ch
+            s &= ch
+        ElseIf (ch = "e" Or ch = "E") And seenExp = 0 And Len(s) > 0 Then
+            Dim e1 As String
+            Dim e2 As String
+            e1 = PeekChEx(st, 1)
+            e2 = PeekChEx(st, 2)
+
+            If IsDigit(e1) = 0 And ((e1 <> "+" And e1 <> "-") Or IsDigit(e2) = 0) Then
+                Exit Do
+            End If
+
+            seenExp = 1
+            AdvanceCh st, ch
+            s &= ch
+
+            If PeekCh(st) = "+" Or PeekCh(st) = "-" Then
+                AdvanceCh st, ch
+                s &= ch
+            End If
+        Else
+            Exit Do
+        End If
+    Loop
+
+    Do While IsAlpha(PeekCh(st)) <> 0 Or IsDigit(PeekCh(st)) <> 0 Or PeekCh(st) = "_"
+        AdvanceCh st, ch
+        suffixText &= ch
+        s &= ch
+    Loop
+
+    PushNumberTokRaw st, s, s, ln, cn, st.cursor - Len(s), baseText, suffixText
+End Sub
+
+Private Sub ReadIdentifier(ByRef st As LexerState)
+    Dim ln As Integer, cn As Integer
+    ln = st.lineNo
+    cn = st.colNo
+
+    Dim s As String, ch As String
+    Do While Not AtEnd(st)
+        ch = PeekCh(st)
+        If IsIdentPart(ch) Then
+            AdvanceCh st, ch
+            s &= ch
+        Else
+            Exit Do
+        End If
+    Loop
+
+    Dim identCanonical As String
+    identCanonical = CanonicalIdentifier(s)
+
+    If (identCanonical = "rol" Or identCanonical = "ror") And PeekCh(st) = "=" Then
+        AdvanceCh st, ch
+        PushTokRaw st, "OP", s & "=", UCase(identCanonical) & "=", ln, cn, st.cursor - Len(s) - 1
+        Exit Sub
+    End If
+
+    Dim retiredThreadAlias As String
+    Dim retiredParalelAlias As String
+    Dim retiredMagicAlias As String
+    retiredThreadAlias = "th" & "reat"
+    retiredParalelAlias = "par" & "allel"
+    retiredMagicAlias = "sihirli" & "metot"
+    If identCanonical = retiredThreadAlias Or identCanonical = retiredParalelAlias Or identCanonical = retiredMagicAlias Then
+        LexerAddDiagnostic st, "LEX_FORBIDDEN_KEYWORD", "forbidden keyword form: " & s, ln, cn
+        PushTokRaw st, "UNKNOWN", s, identCanonical, ln, cn, st.cursor - Len(s)
+        Exit Sub
+    End If
+
+    If ShouldTreatAsKeyword(st, identCanonical) Then
+        PushTokRaw st, "KEYWORD", s, CanonicalKeyword(identCanonical), ln, cn, st.cursor - Len(s)
+    Else
+        PushTokRaw st, "IDENT", s, identCanonical, ln, cn, st.cursor - Len(s)
+    End If
+End Sub
+
+Private Sub SkipComment(ByRef st As LexerState)
+    Dim ch As String
+    Do While Not AtEnd(st)
+        ch = PeekCh(st)
+        If ch = Chr(10) Then Exit Do
+        AdvanceCh st, ch
+    Loop
+End Sub
+
+Private Sub ReadOperatorOrPunct(ByRef st As LexerState)
+    Dim ln As Integer, cn As Integer
+    ln = st.lineNo
+    cn = st.colNo
+
+    Dim ch As String, n1 As String, n2 As String, two As String, three As String
+    ch = PeekCh(st)
+    n1 = PeekChEx(st, 1)
+    n2 = PeekChEx(st, 2)
+    two = ch & n1
+    three = ch & n1 & n2
+
+    If ch = "\" And n1 = "=" Then
+        AdvanceCh st, ch
+        AdvanceCh st, n1
+        PushTok st, "OP", "\=", ln, cn
+        Exit Sub
+    End If
+
+    Select Case three
+    Case "<<=", ">>=", "**="
+        AdvanceCh st, ch
+        AdvanceCh st, n1
+        AdvanceCh st, n2
+        PushTok st, "OP", three, ln, cn
+        Exit Sub
+    End Select
+
+    Select Case two
+    Case "==", "++", "--", "+=", "-=", "*=", "/=", "\=", "%=", "&=", "|=", "^=", "=+", "=-", "**", "<<", ">>", "<=", ">=", "<>", "!=", "&&", "||", "|>"
+        AdvanceCh st, ch
+        AdvanceCh st, n1
+        PushTok st, "OP", two, ln, cn
+        Exit Sub
+    End Select
+
+    Select Case ch
+    Case "+", "-", "*", "/", "\", "%", "=", "<", ">", "@", "#", "(", ")", "[", "]", ",", ":", ";", ".", "|", "&", "^", "!", "~", "?"
+        AdvanceCh st, ch
+        PushTok st, "OP", ch, ln, cn
+    Case Else
+        AdvanceCh st, n1
+        LexerAddDiagnostic st, "LEX_UNKNOWN_CHAR", "unknown character: " & ch, ln, cn
+        PushTok st, "UNKNOWN", ch, ln, cn
+    End Select
+End Sub

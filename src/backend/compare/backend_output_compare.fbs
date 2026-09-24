@@ -1,0 +1,213 @@
+#ifndef UXB_BACKEND_OUTPUT_COMPARE_FBS
+#define UXB_BACKEND_OUTPUT_COMPARE_FBS
+
+Type UXBBackendCompareResult
+    status As String
+    expectedText As String
+    actualText As String
+    errorText As String
+End Type
+
+Function UXBBackendNormalizeOutput(ByVal textValue As String) As String
+    Dim t As String
+    t = ""
+    Dim i As Integer
+    i = 1
+    Do While i <= Len(textValue)
+        If Mid(textValue, i, 1) = Chr(13) Then
+            t &= Chr(10)
+            If i < Len(textValue) And Mid(textValue, i + 1, 1) = Chr(10) Then i += 1
+        Else
+            t &= Mid(textValue, i, 1)
+        End If
+        i += 1
+    Loop
+    Do While Len(t) > 0 And (Right(t, 1) = Chr(10) Or Right(t, 1) = " " Or Right(t, 1) = Chr(9))
+        t = Left(t, Len(t) - 1)
+    Loop
+    Return t
+End Function
+
+Function UXBBackendCompareOutput(ByVal expectedText As String, ByVal actualText As String) As UXBBackendCompareResult
+    Dim r As UXBBackendCompareResult
+    r.expectedText = expectedText
+    r.actualText = actualText
+    If UXBBackendNormalizeOutput(expectedText) = UXBBackendNormalizeOutput(actualText) Then
+        r.status = "PASS"
+        r.errorText = ""
+    Else
+        r.status = "FAIL"
+        r.errorText = "backend output differs from reference"
+    End If
+    Return r
+End Function
+
+Private Function UXBBackendCompareJsonEscape(ByRef rawText As String) As String
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim c As Integer
+        c = Asc(Mid(rawText, i, 1))
+        Select Case c
+        Case 34
+            outText &= Chr(92) & Chr(34)
+        Case 92
+            outText &= Chr(92) & Chr(92)
+        Case 13
+            outText &= Chr(92) & "r"
+        Case 10
+            outText &= Chr(92) & "n"
+        Case 9
+            outText &= Chr(92) & "t"
+        Case Else
+            If c < 32 Then
+                outText &= " "
+            Else
+                outText &= Chr(c)
+            End If
+        End Select
+    Next i
+    Return outText
+End Function
+
+Private Function UXBBackendCompareLoadText(ByRef filePath As String, ByRef outText As String, ByRef errText As String) As Integer
+    outText = ""
+    errText = ""
+    If Trim(filePath) = "" Then
+        errText = "compare input path is empty"
+        Return 0
+    End If
+    If Dir(filePath) = "" Then
+        errText = "compare input file not found: " & filePath
+        Return 0
+    End If
+
+    Dim f As Integer
+    f = FreeFile
+    Open filePath For Input As #f
+    If Err <> 0 Then
+        errText = "compare input file cannot be opened: " & filePath
+        Return 0
+    End If
+
+    Do Until EOF(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        outText &= lineText & Chr(10)
+    Loop
+    Close #f
+    Return 1
+End Function
+
+Private Function UXBBackendCompareDirName(ByRef filePath As String) As String
+    Dim i As Integer
+    For i = Len(filePath) To 1 Step -1
+        Dim ch As String
+        ch = Mid(filePath, i, 1)
+        If ch = "\" Or ch = "/" Then Return Left(filePath, i - 1)
+    Next i
+    Return ""
+End Function
+
+Private Sub UXBBackendCompareEnsureDir(ByRef filePath As String)
+    Dim d As String
+    d = UXBBackendCompareDirName(filePath)
+    If Trim(d) = "" Then Exit Sub
+    If Dir(d) <> "" Then Exit Sub
+    Shell "cmd /c mkdir " & Chr(34) & d & Chr(34) & " 2>nul"
+End Sub
+
+Private Function UXBBackendCompareWriteText(ByRef filePath As String, ByRef fileText As String, ByRef errText As String) As Integer
+    errText = ""
+    If Trim(filePath) = "" Then
+        errText = "compare report path is empty"
+        Return 0
+    End If
+    UXBBackendCompareEnsureDir filePath
+    Dim f As Integer
+    f = FreeFile
+    Open filePath For Output As #f
+    If Err <> 0 Then
+        errText = "compare report cannot be opened: " & filePath
+        Return 0
+    End If
+    Print #f, fileText;
+    Close #f
+    Return 1
+End Function
+
+Function UXBX64WriteAsmRouteReport( _
+    ByRef reportPath As String, _
+    ByVal routeName As String, _
+    ByRef asmPath As String, _
+    ByVal statusText As String, _
+    ByVal diagnosticText As String, _
+    ByRef errText As String _
+) As Integer
+    errText = ""
+    Dim q As String
+    q = Chr(34)
+    Dim jsonText As String
+    jsonText = "{" & Chr(10)
+    jsonText &= "  " & q & "schema_version" & q & ": " & q & "uxb.x64_asm_route_report.v1" & q & "," & Chr(10)
+    jsonText &= "  " & q & "layer_name" & q & ": " & q & "X64_BACKEND" & q & "," & Chr(10)
+    jsonText &= "  " & q & "route" & q & ": " & q & UXBBackendCompareJsonEscape(routeName) & q & "," & Chr(10)
+    jsonText &= "  " & q & "asm_path" & q & ": " & q & UXBBackendCompareJsonEscape(asmPath) & q & "," & Chr(10)
+    jsonText &= "  " & q & "status" & q & ": " & q & UXBBackendCompareJsonEscape(statusText) & q & "," & Chr(10)
+    jsonText &= "  " & q & "diagnostic" & q & ": " & q & UXBBackendCompareJsonEscape(diagnosticText) & q & Chr(10)
+    jsonText &= "}" & Chr(10)
+    Return UXBBackendCompareWriteText(reportPath, jsonText, errText)
+End Function
+
+Function UXBX64CompareAsmFiles( _
+    ByRef astAsmPath As String, _
+    ByRef mirAsmPath As String, _
+    ByRef reportPath As String, _
+    ByRef compareStatusOut As String, _
+    ByRef errText As String _
+) As Integer
+    compareStatusOut = "UNKNOWN"
+    errText = ""
+
+    Dim astText As String
+    Dim mirText As String
+    If UXBBackendCompareLoadText(astAsmPath, astText, errText) = 0 Then
+        compareStatusOut = "ERROR"
+        Return 0
+    End If
+    If UXBBackendCompareLoadText(mirAsmPath, mirText, errText) = 0 Then
+        compareStatusOut = "ERROR"
+        Return 0
+    End If
+
+    Dim cmp As UXBBackendCompareResult
+    cmp = UXBBackendCompareOutput(astText, mirText)
+    compareStatusOut = cmp.status
+    If cmp.status <> "PASS" Then errText = cmp.errorText
+
+    Dim q As String
+    q = Chr(34)
+    Dim jsonText As String
+    jsonText = "{" & Chr(10)
+    jsonText &= "  " & q & "schema_version" & q & ": " & q & "uxb.x64_ast_mir_compare.v1" & q & "," & Chr(10)
+    jsonText &= "  " & q & "kind" & q & ": " & q & "x64_ast_vs_x64_mir_compare" & q & "," & Chr(10)
+    jsonText &= "  " & q & "status" & q & ": " & q & UXBBackendCompareJsonEscape(compareStatusOut) & q & "," & Chr(10)
+    jsonText &= "  " & q & "ast_asm_path" & q & ": " & q & UXBBackendCompareJsonEscape(astAsmPath) & q & "," & Chr(10)
+    jsonText &= "  " & q & "mir_asm_path" & q & ": " & q & UXBBackendCompareJsonEscape(mirAsmPath) & q & "," & Chr(10)
+    jsonText &= "  " & q & "normalized_ast_length" & q & ": " & LTrim(Str(Len(UXBBackendNormalizeOutput(astText)))) & "," & Chr(10)
+    jsonText &= "  " & q & "normalized_mir_length" & q & ": " & LTrim(Str(Len(UXBBackendNormalizeOutput(mirText)))) & "," & Chr(10)
+    jsonText &= "  " & q & "diagnostic" & q & ": " & q & UXBBackendCompareJsonEscape(errText) & q & Chr(10)
+    jsonText &= "}" & Chr(10)
+
+    Dim writeErr As String
+    If UXBBackendCompareWriteText(reportPath, jsonText, writeErr) = 0 Then
+        errText = writeErr
+        compareStatusOut = "ERROR"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+#endif

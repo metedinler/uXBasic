@@ -1,0 +1,711 @@
+Private Function ExecChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    Dim i As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function ExecChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim total As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        total += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return total
+End Function
+
+Private Function ExecFindChildByKind(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal kindText As String) As Integer
+    Dim targetKind As String
+    targetKind = UCase(kindText)
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = targetKind Then Return ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Declare Function ExecBuildVTableMap(ByRef ps As ParseState, ByRef es As ExecState, ByRef errText As String) As Integer
+
+Private Function ExecFindClassNode(ByRef ps As ParseState, ByRef classNameRaw As String) As Integer
+    Dim cname As String
+    cname = UCase(Trim(classNameRaw))
+    If cname = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = cname Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function ExecClassBaseName(ByRef ps As ParseState, ByVal classNode As Integer, ByRef baseNameOut As String) As Integer
+    baseNameOut = ""
+    If classNode < 0 Or classNode >= ps.ast.count Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_EXTENDS" Then
+            baseNameOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(baseNameOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+
+Private Function ExecTypeElemSizeBytes(ByVal typeNameRaw As String) As Integer
+    Dim typeName As String
+    typeName = UCase(Trim(typeNameRaw))
+
+    Select Case typeName
+    Case "I8", "U8"
+        Return 1
+    Case "I16", "U16", "SHORT"
+        Return 2
+    Case "I32", "U32", "INTEGER", "LONG"
+        Return 4
+    Case "I64", "U64"
+        Return 8
+    Case "F32", "SINGLE"
+        Return 4
+    Case "F64", "DOUBLE", "F80", "EXTENDED"
+        Return 8
+    End Select
+
+    Return 0
+End Function
+
+Private Function ExecNormalizeTypeName(ByVal typeNameRaw As String) As String
+    Dim t As String
+    t = UCase(Trim(typeNameRaw))
+
+    Select Case t
+    Case "INTEGER", "LONG"
+        Return "I32"
+    Case "SHORT"
+        Return "I16"
+    Case "BYTE"
+        Return "I8"
+    Case "SINGLE"
+        Return "F32"
+    Case "DOUBLE", "EXTENDED"
+        Return "F64"
+    End Select
+
+    Return t
+End Function
+
+Private Function ExecParseBoundRange(ByRef ps As ParseState, ByRef es As ExecState, ByVal boundNode As Integer, ByRef lowerOut As Integer, ByRef upperOut As Integer, ByRef errText As String) As Integer
+    If boundNode = -1 Then
+        errText = "exec: DIM/REDIM bound node missing"
+        Return 0
+    End If
+
+    Dim b As ASTNode
+    b = ps.ast.nodes(boundNode)
+
+    If UCase(b.kind) = "RANGE_EXPR" Then
+        lowerOut = ExecEvalNode(ps, es, b.left, errText)
+        If errText <> "" Then Return 0
+
+        upperOut = ExecEvalNode(ps, es, b.right, errText)
+        If errText <> "" Then Return 0
+    Else
+        lowerOut = 0
+        upperOut = ExecEvalNode(ps, es, boundNode, errText)
+        If errText <> "" Then Return 0
+    End If
+
+    If upperOut < lowerOut Then
+        errText = "exec: DIM/REDIM invalid array bounds (lower > upper)"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecBuildVTableMap(ByRef ps As ParseState, ByRef es As ExecState, ByRef errText As String) As Integer
+    errText = ""
+    es.runtime.vtableClassCount = 0
+    es.runtime.vtableEntryCount = 0
+    Erase es.runtime.vtableClassNames
+    Erase es.runtime.vtableClassHandles
+    es.runtime.vtableNextHandle = &h1000
+    Erase es.runtime.vtableClassSlotCounts
+    Erase es.runtime.vtableClassSlotStart
+    Erase es.runtime.vtableEntryKeys
+    Erase es.runtime.vtableEntrySlots
+    Erase es.runtime.vtableEntryClassIndex
+    Erase es.runtime.vtableEntryRoutineIdx
+
+    Dim st As Integer
+    st = ps.ast.nodes(ps.rootNode).firstChild
+    Do While st <> -1
+        If UCase(ps.ast.nodes(st).kind) = "CLASS_STMT" Then
+            Dim className As String
+            className = UCase(Trim(ps.ast.nodes(st).value))
+            If className <> "" Then
+                ' Build base-chain list (derived-first) then iterate reverse for base-first processing
+                Dim typesList() As String
+                Dim typeCount As Integer
+                typeCount = 0
+
+                Dim curType As String
+                curType = className
+                Do While curType <> ""
+                    If typeCount = 0 Then
+                        ReDim typesList(0)
+                    Else
+                        ReDim Preserve typesList(typeCount)
+                    End If
+                    typesList(typeCount) = UCase(Trim(curType))
+                    typeCount += 1
+
+                    Dim cnode As Integer
+                    cnode = ExecFindClassNode(ps, curType)
+                    If cnode = -1 Then Exit Do
+
+                    Dim nextBase As String
+                    If ExecClassBaseName(ps, cnode, nextBase) = 0 Then Exit Do
+                    curType = nextBase
+                Loop
+
+                ' Find max slot index in chain
+                Dim maxSlot As Integer
+                maxSlot = -1
+                Dim ti As Integer
+                For ti = typeCount - 1 To 0 Step -1
+                    Dim cnode2 As Integer
+                    cnode2 = ExecFindClassNode(ps, typesList(ti))
+                    If cnode2 = -1 Then Continue For
+                    Dim ch As Integer
+                    ch = ps.ast.nodes(cnode2).firstChild
+                    Do While ch <> -1
+                        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+                            Dim meta As Integer
+                            meta = -1
+                            Dim mch As Integer
+                            mch = ps.ast.nodes(ch).firstChild
+                            Do While mch <> -1
+                                If UCase(ps.ast.nodes(mch).kind) = "CLASS_METHOD_SLOT" Then
+                                    meta = mch
+                                    Exit Do
+                                End If
+                                mch = ps.ast.nodes(mch).nextSibling
+                            Loop
+                            If meta <> -1 Then
+                                Dim si As Integer
+                                si = Val(ps.ast.nodes(meta).value)
+                                If si > maxSlot Then maxSlot = si
+                            End If
+                        End If
+                        ch = ps.ast.nodes(ch).nextSibling
+                    Loop
+                Next ti
+
+                Dim slotCount As Integer
+                If maxSlot < 0 Then
+                    slotCount = 0
+                Else
+                    slotCount = maxSlot + 1
+                End If
+
+                ' register class mapping
+                Dim classIdx As Integer
+                classIdx = es.runtime.vtableClassCount
+                If es.runtime.vtableClassCount = 0 Then
+                    ReDim es.runtime.vtableClassNames(0)
+                    ReDim es.runtime.vtableClassSlotCounts(0)
+                    ReDim es.runtime.vtableClassSlotStart(0)
+                    ReDim es.runtime.vtableClassHandles(0)
+                Else
+                    ReDim Preserve es.runtime.vtableClassNames(es.runtime.vtableClassCount)
+                    ReDim Preserve es.runtime.vtableClassSlotCounts(es.runtime.vtableClassCount)
+                    ReDim Preserve es.runtime.vtableClassSlotStart(es.runtime.vtableClassCount)
+                    ReDim Preserve es.runtime.vtableClassHandles(es.runtime.vtableClassCount)
+                End If
+                es.runtime.vtableClassNames(classIdx) = className
+                es.runtime.vtableClassSlotCounts(classIdx) = slotCount
+                es.runtime.vtableClassSlotStart(classIdx) = es.runtime.vtableEntryCount
+                ' assign runtime handle for class (unique per runtime)
+                es.runtime.vtableClassHandles(classIdx) = es.runtime.vtableNextHandle
+                es.runtime.vtableNextHandle += 8
+                es.runtime.vtableClassCount += 1
+
+                ' prepare implementer arrays (base-first so later overrides replace earlier)
+                If slotCount > 0 Then
+                    Dim implOwner() As String
+                    Dim implMethod() As String
+                    ReDim implOwner(slotCount - 1)
+                    ReDim implMethod(slotCount - 1)
+
+                    For ti = typeCount - 1 To 0 Step -1
+                        Dim cnode3 As Integer
+                        cnode3 = ExecFindClassNode(ps, typesList(ti))
+                        If cnode3 = -1 Then Continue For
+                        Dim ch2 As Integer
+                        ch2 = ps.ast.nodes(cnode3).firstChild
+                        Do While ch2 <> -1
+                            If UCase(ps.ast.nodes(ch2).kind) = "CLASS_METHOD_DECL" Then
+                                Dim mname As String
+                                mname = UCase(Trim(ps.ast.nodes(ch2).value))
+                                Dim mch2 As Integer
+                                mch2 = ps.ast.nodes(ch2).firstChild
+                                Do While mch2 <> -1
+                                    If UCase(ps.ast.nodes(mch2).kind) = "CLASS_METHOD_SLOT" Then
+                                        Dim si2 As Integer
+                                        si2 = Val(ps.ast.nodes(mch2).value)
+                                        If si2 >= 0 And si2 < slotCount Then
+                                            implOwner(si2) = typesList(ti)
+                                            implMethod(si2) = mname
+                                        End If
+                                    End If
+                                    mch2 = ps.ast.nodes(mch2).nextSibling
+                                Loop
+                            End If
+                            ch2 = ps.ast.nodes(ch2).nextSibling
+                        Loop
+                    Next ti
+
+                    ' add entries
+                    Dim i As Integer
+                    For i = 0 To slotCount - 1
+                        Dim key As String
+                        key = className & "_" & UCase(Trim(implMethod(i)))
+
+                        Dim eidx As Integer
+                        eidx = es.runtime.vtableEntryCount
+                        If es.runtime.vtableEntryCount = 0 Then
+                            ReDim es.runtime.vtableEntryKeys(0)
+                            ReDim es.runtime.vtableEntrySlots(0)
+                            ReDim es.runtime.vtableEntryClassIndex(0)
+                            ReDim es.runtime.vtableEntryRoutineIdx(0)
+                        Else
+                            ReDim Preserve es.runtime.vtableEntryKeys(es.runtime.vtableEntryCount)
+                            ReDim Preserve es.runtime.vtableEntrySlots(es.runtime.vtableEntryCount)
+                            ReDim Preserve es.runtime.vtableEntryClassIndex(es.runtime.vtableEntryCount)
+                            ReDim Preserve es.runtime.vtableEntryRoutineIdx(es.runtime.vtableEntryCount)
+                        End If
+
+                        es.runtime.vtableEntryKeys(eidx) = UCase(Trim(key))
+                        es.runtime.vtableEntrySlots(eidx) = i
+                        es.runtime.vtableEntryClassIndex(eidx) = classIdx
+
+                        Dim implRoutineName As String
+                        implRoutineName = ""
+                        If implOwner(i) <> "" And implMethod(i) <> "" Then
+                            implRoutineName = UCase(Trim(implOwner(i) & "_" & implMethod(i)))
+                            es.runtime.vtableEntryRoutineIdx(eidx) = ExecRoutineIndexOf(es, implRoutineName)
+                        Else
+                            es.runtime.vtableEntryRoutineIdx(eidx) = -1
+                        End If
+
+                        es.runtime.vtableEntryCount += 1
+                    Next i
+                End If
+            End If
+        End If
+
+        st = ps.ast.nodes(st).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Sub ExecSetVarDeclMeta(ByRef es As ExecState, ByRef nameText As String, ByRef declType As String, ByVal isArray As Integer, ByVal arrayDims As Integer, ByVal arrayLower As Integer, ByVal arrayUpper As Integer, ByVal arrayBytes As LongInt)
+    Dim idx As Integer
+    idx = ExecEnsureVar(es, nameText)
+    If idx = -1 Then Exit Sub
+
+    es.vars(idx).declType = ExecNormalizeTypeName(declType)
+    es.vars(idx).isArray = isArray
+    es.vars(idx).arrayDims = arrayDims
+    es.vars(idx).arrayLower = arrayLower
+    es.vars(idx).arrayUpper = arrayUpper
+    es.vars(idx).arrayBytes = arrayBytes
+End Sub
+
+Private Function ExecLabelIndexOf(labelNames() As String, ByVal labelCount As Integer, ByRef needle As String) As Integer
+    Dim i As Integer
+    For i = 0 To labelCount - 1
+        If labelNames(i) = needle Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function ExecBuildTopLevelLabelMap(ByRef ps As ParseState, ByVal rootNode As Integer, labelNames() As String, labelNodes() As Integer, ByRef labelCount As Integer, ByRef errText As String) As Integer
+    labelCount = 0
+
+    Dim st As Integer
+    st = ps.ast.nodes(rootNode).firstChild
+    Do While st <> -1
+        If UCase(ps.ast.nodes(st).kind) = "LABEL_STMT" Then
+            Dim labelName As String
+            labelName = UCase(Trim(ps.ast.nodes(st).value))
+            If labelName = "" Then
+                errText = "exec: LABEL name missing"
+                Return 0
+            End If
+
+            If ExecLabelIndexOf(labelNames(), labelCount, labelName) <> -1 Then
+                errText = "exec: duplicate LABEL " & labelName
+                Return 0
+            End If
+
+            If labelCount = 0 Then
+                ReDim labelNames(0)
+                ReDim labelNodes(0)
+            Else
+                ReDim Preserve labelNames(labelCount)
+                ReDim Preserve labelNodes(labelCount)
+            End If
+
+            labelNames(labelCount) = labelName
+            labelNodes(labelCount) = st
+            labelCount += 1
+        End If
+
+        st = ps.ast.nodes(st).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ExecEvalStringLiteral(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef textOut As String, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then
+        errText = "exec: invalid string node"
+        Return 0
+    End If
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+    If UCase(n.kind) <> "STRING" Then
+        errText = "exec: string literal expected"
+        Return 0
+    End If
+
+    textOut = n.value
+    Return 1
+End Function
+
+Private Function ExecFormatFileError(ByRef io As UxbFileRuntime) As String
+    Dim errorCode As Integer
+    errorCode = UxbFileGetLastError(io)
+    Return UxbFormatError(errorCode, UxbFileErrorText(errorCode))
+End Function
+
+Private Function ExecHashText(ByRef textValue As String) As UInteger
+    Dim h As UInteger
+    h = CUInt(&h811C9DC5)
+
+    Dim i As Integer
+    For i = 1 To Len(textValue)
+        h = h Xor CUInt(Asc(Mid(textValue, i, 1)) And &hFF)
+        h *= CUInt(&h01000193)
+    Next i
+
+    Return h
+End Function
+
+Private Function ExecRol32(ByVal v As UInteger, ByVal s As Integer) As UInteger
+    Dim shiftBits As Integer
+    shiftBits = s And 31
+    If shiftBits = 0 Then Return v
+    Return (v Shl shiftBits) Or (v Shr (32 - shiftBits))
+End Function
+
+' Runtime vtable handle helpers (8A-3)
+Private Function ExecFindRuntimeVTableClassIndex(ByRef es As ExecState, ByRef classTypeName As String) As Integer
+    Dim classUpper As String
+    classUpper = UCase(Trim(classTypeName))
+    If classUpper = "" Then Return -1
+
+    Dim ci As Integer
+    For ci = 0 To es.runtime.vtableClassCount - 1
+        If es.runtime.vtableClassNames(ci) = classUpper Then Return ci
+    Next ci
+
+    Return -1
+End Function
+
+Private Function ExecFindRuntimeVTableHandle(ByRef es As ExecState, ByRef classTypeName As String, ByRef handleOut As UInteger) As Integer
+    handleOut = 0
+    Dim ci As Integer
+    ci = ExecFindRuntimeVTableClassIndex(es, classTypeName)
+    If ci < 0 Then Return 0
+    handleOut = es.runtime.vtableClassHandles(ci)
+    If handleOut = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function ExecFindRuntimeVTableClassByHandle(ByRef es As ExecState, ByVal handleValue As UInteger, ByRef classNameOut As String) As Integer
+    classNameOut = ""
+    Dim ci As Integer
+    For ci = 0 To es.runtime.vtableClassCount - 1
+        If es.runtime.vtableClassHandles(ci) = handleValue Then
+            classNameOut = es.runtime.vtableClassNames(ci)
+            Return 1
+        End If
+    Next ci
+    Return 0
+End Function
+
+' Resolve runtime class name by object address (reads object header handle/classIdx)
+Private Function ExecResolveRuntimeClassByObjectAddr(ByVal objAddr As ULongInt, ByRef classNameOut As String) As Integer
+    classNameOut = ""
+    If objAddr = 0UL Then Return 0
+    If gActiveRuntimeCtx = 0 Then Return 0
+
+    Dim hval As UInteger
+    hval = CUInt(VMemPeekD(CUInt(objAddr)))
+    If hval = 0 Then Return 0
+
+    ' Quick path: if header value looks like a direct classIdx
+    If hval < gActiveRuntimeCtx->vtableClassCount Then
+        classNameOut = gActiveRuntimeCtx->vtableClassNames(hval)
+        If classNameOut <> "" Then Return 1
+    End If
+
+    ' Otherwise try to match as runtime handle
+    Dim ci As Integer
+    For ci = 0 To gActiveRuntimeCtx->vtableClassCount - 1
+        If gActiveRuntimeCtx->vtableClassHandles(ci) = hval Then
+            classNameOut = gActiveRuntimeCtx->vtableClassNames(ci)
+            Return 1
+        End If
+    Next ci
+
+    Return 0
+End Function
+
+Private Function ExecRor32(ByVal v As UInteger, ByVal s As Integer) As UInteger
+    Dim shiftBits As Integer
+    shiftBits = s And 31
+    If shiftBits = 0 Then Return v
+    Return (v Shr shiftBits) Or (v Shl (32 - shiftBits))
+End Function
+
+Private Function ExecDebugInputQueuePop(ByRef lineOut As String) As Integer
+    If gDebugInputQueueReadPos >= gDebugInputQueueCount Then Return 0
+    lineOut = gDebugInputQueue(gDebugInputQueueReadPos)
+    gDebugInputQueueReadPos += 1
+    Return 1
+End Function
+
+Private Function ExecDebugKeyQueuePop(ByRef keyOut As Integer) As Integer
+    If gDebugKeyQueueReadPos >= gDebugKeyQueueCount Then Return 0
+    keyOut = gDebugKeyQueue(gDebugKeyQueueReadPos)
+    gDebugKeyQueueReadPos += 1
+    Return 1
+End Function
+
+Private Function ExecRoutineIndexOf(ByRef es As ExecState, ByRef needle As String) As Integer
+    Dim i As Integer
+    For i = 0 To es.runtime.routineDefCount - 1
+        If es.runtime.routineDefs(i).nameText = needle Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function ExecRegisterRoutineDef(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef routineNameRaw As String, ByRef routineKindRaw As String, ByRef errText As String) As Integer
+    Dim routineName As String
+    Dim routineKind As String
+    routineName = UCase(Trim(routineNameRaw))
+    routineKind = UCase(Trim(routineKindRaw))
+    If routineName = "" Then
+        errText = "exec: routine name missing"
+        Return 0
+    End If
+
+    Dim existingIdx As Integer
+    existingIdx = ExecRoutineIndexOf(es, routineName)
+    If existingIdx <> -1 Then
+        Dim existingKind As String
+        Dim existingIsImpl As Integer
+        Dim newIsImpl As Integer
+
+        existingKind = UCase(Trim(es.runtime.routineDefs(existingIdx).routineKind))
+        existingIsImpl = IIf(existingKind = "SUB_STMT" Or existingKind = "FUNCTION_STMT", 1, 0)
+        newIsImpl = IIf(routineKind = "SUB_STMT" Or routineKind = "FUNCTION_STMT", 1, 0)
+
+        ' CLASS METHOD declaration and top-level implementation can legally share
+        ' the same canonical symbol (e.g. BOX_SETBYTHIS). Prefer implementation.
+        If (existingKind = "CLASS_METHOD_DECL" Or existingKind = "CLASS_OPERATOR_DECL") And newIsImpl <> 0 Then
+            es.runtime.routineDefs(existingIdx).nodeIdx = nodeIdx
+            es.runtime.routineDefs(existingIdx).routineKind = routineKind
+            Return 1
+        End If
+
+        If existingIsImpl <> 0 And (routineKind = "CLASS_METHOD_DECL" Or routineKind = "CLASS_OPERATOR_DECL") Then
+            Return 1
+        End If
+
+        errText = "exec: duplicate routine " & routineName
+        Return 0
+    End If
+
+    If es.runtime.routineDefCount = 0 Then
+        ReDim es.runtime.routineDefs(0)
+    Else
+        ReDim Preserve es.runtime.routineDefs(es.runtime.routineDefCount)
+    End If
+
+    es.runtime.routineDefs(es.runtime.routineDefCount).nameText = routineName
+    es.runtime.routineDefs(es.runtime.routineDefCount).nodeIdx = nodeIdx
+    es.runtime.routineDefs(es.runtime.routineDefCount).routineKind = routineKind
+    es.runtime.routineDefCount += 1
+    Return 1
+End Function
+
+Private Function ExecOperatorTokenToRoutineSuffix(ByRef opRaw As String, ByRef suffixOut As String) As Integer
+    Dim opText As String
+    opText = UCase(Trim(opRaw))
+    suffixOut = ""
+
+    Select Case opText
+    Case "+", "ADD", "OP_ADD"
+        suffixOut = "OP_ADD"
+    Case "-", "SUB", "OP_SUB"
+        suffixOut = "OP_SUB"
+    Case "*", "MUL", "OP_MUL"
+        suffixOut = "OP_MUL"
+    Case "/", "DIV", "OP_DIV"
+        suffixOut = "OP_DIV"
+    Case "\", "IDIV", "OP_IDIV"
+        suffixOut = "OP_IDIV"
+    Case "%", "MOD", "OP_MOD"
+        suffixOut = "OP_MOD"
+    Case "&", "BAND", "OP_BAND"
+        suffixOut = "OP_BAND"
+    Case "|", "BOR", "OP_BOR"
+        suffixOut = "OP_BOR"
+    Case "AND", "OP_AND"
+        suffixOut = "OP_AND"
+    Case "OR", "OP_OR"
+        suffixOut = "OP_OR"
+    Case "XOR", "OP_XOR", "^"
+        suffixOut = "OP_XOR"
+    Case "<<", "SHL", "OP_SHL"
+        suffixOut = "OP_SHL"
+    Case ">>", "SHR", "OP_SHR"
+        suffixOut = "OP_SHR"
+    Case "ROL", "OP_ROL"
+        suffixOut = "OP_ROL"
+    Case "ROR", "OP_ROR"
+        suffixOut = "OP_ROR"
+    Case "=", "==", "OP_EQ"
+        suffixOut = "OP_EQ"
+    Case "<>", "!=", "OP_NE"
+        suffixOut = "OP_NE"
+    Case "<", "OP_LT"
+        suffixOut = "OP_LT"
+    Case "<=", "OP_LE"
+        suffixOut = "OP_LE"
+    Case ">", "OP_GT"
+        suffixOut = "OP_GT"
+    Case ">=", "OP_GE"
+        suffixOut = "OP_GE"
+    End Select
+
+    If suffixOut = "" Then
+        Dim cleaned As String
+        cleaned = ""
+        Dim i As Integer
+        For i = 1 To Len(opText)
+            Dim ch As String
+            ch = Mid(opText, i, 1)
+            If (ch >= "A" And ch <= "Z") Or (ch >= "0" And ch <= "9") Then cleaned &= ch
+        Next i
+        If cleaned <> "" Then suffixOut = "OP_" & cleaned
+    End If
+
+    Return IIf(suffixOut <> "", 1, 0)
+End Function
+
+Private Function ExecBuildRoutineMapFromClass(ByRef ps As ParseState, ByRef es As ExecState, ByVal classNodeIdx As Integer, ByRef errText As String) As Integer
+    Dim className As String
+    className = UCase(Trim(ps.ast.nodes(classNodeIdx).value))
+    If className = "" Then
+        errText = "exec: class name missing"
+        Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNodeIdx).firstChild
+    Do While ch <> -1
+        Dim ck As String
+        ck = UCase(Trim(ps.ast.nodes(ch).kind))
+
+        If ck = "CLASS_METHOD_DECL" Then
+            Dim methodName As String
+            methodName = UCase(Trim(ps.ast.nodes(ch).value))
+            If methodName = "" Then
+                errText = "exec: class method name missing in " & className
+                Return 0
+            End If
+            If ExecRegisterRoutineDef(ps, es, ch, className & "_" & methodName, "CLASS_METHOD_DECL", errText) = 0 Then Return 0
+        ElseIf ck = "CLASS_OPERATOR_DECL" Then
+            Dim operatorSuffix As String
+            If ExecOperatorTokenToRoutineSuffix(ps.ast.nodes(ch).value, operatorSuffix) = 0 Then
+                errText = "exec: class operator token unsupported in " & className
+                Return 0
+            End If
+            If ExecRegisterRoutineDef(ps, es, ch, className & "_" & operatorSuffix, "CLASS_OPERATOR_DECL", errText) = 0 Then Return 0
+        ElseIf ck = "CLASS_CONSTRUCTOR_DECL" Then
+            If ExecRegisterRoutineDef(ps, es, ch, className & "_CTOR", "CLASS_CONSTRUCTOR_DECL", errText) = 0 Then Return 0
+        ElseIf ck = "CLASS_DESTRUCTOR_DECL" Then
+            If ExecRegisterRoutineDef(ps, es, ch, className & "_DTOR", "CLASS_DESTRUCTOR_DECL", errText) = 0 Then Return 0
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ExecBuildTopLevelRoutineMap(ByRef ps As ParseState, ByRef es As ExecState, ByVal rootNode As Integer, ByRef errText As String) As Integer
+    es.runtime.routineDefCount = 0
+    Erase es.runtime.routineDefs
+
+    Dim st As Integer
+    st = ps.ast.nodes(rootNode).firstChild
+    Do While st <> -1
+        Dim stKind As String
+        stKind = UCase(ps.ast.nodes(st).kind)
+
+        If stKind = "SUB_STMT" Or stKind = "FUNCTION_STMT" Then
+            If ExecRegisterRoutineDef(ps, es, st, ps.ast.nodes(st).value, stKind, errText) = 0 Then Return 0
+        ElseIf stKind = "CLASS_STMT" Then
+            If ExecBuildRoutineMapFromClass(ps, es, st, errText) = 0 Then Return 0
+        End If
+
+        st = ps.ast.nodes(st).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+' FFI policy/resolver/invoke flow is split out so this file stays focused on
+' shared eval helpers and routine/label support.
+#include once "exec_ffi_runtime.fbs"

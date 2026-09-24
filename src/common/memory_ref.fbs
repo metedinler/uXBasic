@@ -1,0 +1,138 @@
+#ifndef UXB_MEMORY_REF_FBS
+#define UXB_MEMORY_REF_FBS
+
+' MemoryRef region registry -- the ONE place that knows which NATIVE address
+' ranges are uXBasic-owned (S-056).
+'
+' A NATIVE address is a plain integer in the language (`p = VARPTR(a)`,
+' `PEEKD(p + 8)`), so provenance cannot travel with the value. The runtime keeps
+' the provenance instead: every uXBasic-owned buffer (an array's backing store)
+' registers itself here as a REGION {base, length, kind, owner, generation};
+' every NATIVE access is resolved against the registry before it touches memory:
+'
+'   * inside a LIVE region -> the whole access must fit in it. The end address
+'     itself belongs to the region (`p + 4*(N+1)` is one past the array), so the
+'     classic off-by-one is caught instead of silently reading a neighbour.
+'   * inside a RELEASED region (the array was REDIMed / erased / freed) -> stale
+'     pointer: the access is refused. A later allocation that reuses the address
+'     retires the old tombstone (the address is legitimately live again).
+'   * outside every region -> EXTERNAL origin (an OS handle's buffer, a DLL's
+'     pointer, `PTR(n)`): not ours to bound; the caller's own validity probe
+'     (IsBadReadPtr) still applies.
+'
+' VIRTUAL memory is a separate memory class with its own bounds (VMem*); it never
+' consults this registry.
+Const UXB_MEMREF_KIND_ARRAY As Integer = 1
+Const UXB_MEMREF_MAX As Integer = 4096
+
+Type UXBMemRegion
+    baseAddr As ULongInt
+    byteLength As ULongInt
+    kind As Integer
+    ownerName As String
+    generation As Integer
+    state As Integer   ' 0 free slot, 1 live, 2 released (tombstone)
+End Type
+
+Dim Shared gUxbMemRegions(0 To UXB_MEMREF_MAX - 1) As UXBMemRegion
+Dim Shared gUxbMemRegionCount As Integer
+Dim Shared gUxbMemRefGeneration As Integer
+' Why the last refused access was refused (empty when the last check passed).
+Dim Shared gUxbMemRefLastError As String
+
+Private Sub UXBMemRefReset()
+    Dim i As Integer
+    For i = 0 To gUxbMemRegionCount - 1
+        gUxbMemRegions(i).state = 0
+        gUxbMemRegions(i).ownerName = ""
+    Next i
+    gUxbMemRegionCount = 0
+    gUxbMemRefGeneration = 0
+    gUxbMemRefLastError = ""
+End Sub
+
+' Registers [baseAddr, baseAddr + byteLength) as a live region. Any released
+' region overlapping it is retired (the allocator handed the address out again).
+Private Function UXBMemRefRegister(ByVal kindId As Integer, ByVal baseAddr As ULongInt, ByVal byteLength As ULongInt, ByRef ownerText As String) As Integer
+    If baseAddr = 0 Or byteLength = 0 Then Return -1
+
+    Dim i As Integer
+    Dim slot As Integer
+    Dim regionEnd As ULongInt
+    slot = -1
+    regionEnd = baseAddr + byteLength
+    For i = 0 To gUxbMemRegionCount - 1
+        If gUxbMemRegions(i).state = 2 Then
+            If baseAddr < gUxbMemRegions(i).baseAddr + gUxbMemRegions(i).byteLength And regionEnd > gUxbMemRegions(i).baseAddr Then
+                gUxbMemRegions(i).state = 0
+            End If
+        End If
+        If slot = -1 And gUxbMemRegions(i).state = 0 Then slot = i
+    Next i
+    If slot = -1 Then
+        If gUxbMemRegionCount >= UXB_MEMREF_MAX Then Return -1
+        slot = gUxbMemRegionCount
+        gUxbMemRegionCount += 1
+    End If
+
+    gUxbMemRefGeneration += 1
+    gUxbMemRegions(slot).baseAddr = baseAddr
+    gUxbMemRegions(slot).byteLength = byteLength
+    gUxbMemRegions(slot).kind = kindId
+    gUxbMemRegions(slot).ownerName = ownerText
+    gUxbMemRegions(slot).generation = gUxbMemRefGeneration
+    gUxbMemRegions(slot).state = 1
+    Return slot
+End Function
+
+' The buffer that started at `baseAddr` is gone (REDIM, ERASE, scope exit): keep
+' its range as a tombstone so a stale pointer into it is refused.
+Private Sub UXBMemRefRelease(ByVal baseAddr As ULongInt)
+    If baseAddr = 0 Then Exit Sub
+    Dim i As Integer
+    For i = 0 To gUxbMemRegionCount - 1
+        If gUxbMemRegions(i).state = 1 And gUxbMemRegions(i).baseAddr = baseAddr Then
+            gUxbMemRegions(i).state = 2
+            Exit Sub
+        End If
+    Next i
+End Sub
+
+' 1 = the access may proceed (inside a live region, or external); 0 = refused,
+' with the reason in gUxbMemRefLastError.
+Private Function UXBMemRefCheck(ByVal addr As ULongInt, ByVal accessBytes As ULongInt) As Integer
+    gUxbMemRefLastError = ""
+    If accessBytes = 0 Then accessBytes = 1
+
+    Dim i As Integer
+    Dim staleIdx As Integer
+    staleIdx = -1
+    For i = 0 To gUxbMemRegionCount - 1
+        Select Case gUxbMemRegions(i).state
+        Case 1
+            If addr >= gUxbMemRegions(i).baseAddr And addr <= gUxbMemRegions(i).baseAddr + gUxbMemRegions(i).byteLength Then
+                If addr + accessBytes > gUxbMemRegions(i).baseAddr + gUxbMemRegions(i).byteLength Then
+                    gUxbMemRefLastError = "MemoryRef: " & LTrim(Str(accessBytes)) & "-byte access at offset " & LTrim(Str(addr - gUxbMemRegions(i).baseAddr)) & " runs past the end of " & gUxbMemRegions(i).ownerName & " (" & LTrim(Str(gUxbMemRegions(i).byteLength)) & " bytes)"
+                    Return 0
+                End If
+                Return 1
+            End If
+        Case 2
+            If addr >= gUxbMemRegions(i).baseAddr And addr < gUxbMemRegions(i).baseAddr + gUxbMemRegions(i).byteLength Then staleIdx = i
+        End Select
+    Next i
+
+    If staleIdx >= 0 Then
+        gUxbMemRefLastError = "MemoryRef: stale pointer -- " & gUxbMemRegions(staleIdx).ownerName & " was released (REDIM/ERASE) after this address was taken"
+        Return 0
+    End If
+    Return 1
+End Function
+
+' ": <reason>" for error messages, or "" when the last check gave none.
+Private Function UXBMemRefReason() As String
+    If gUxbMemRefLastError = "" Then Return ""
+    Return ": " & gUxbMemRefLastError
+End Function
+
+#endif

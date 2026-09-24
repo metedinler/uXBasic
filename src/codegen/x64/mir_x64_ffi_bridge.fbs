@@ -1,0 +1,84 @@
+#ifndef UXB_MIR_X64_FFI_BRIDGE_FBS
+#define UXB_MIR_X64_FFI_BRIDGE_FBS
+
+Function MIRX64FfiDirectSymbolFromOperand(ByRef textValue As String) As String
+    Dim t As String
+    t = Trim(textValue)
+    If Left(UCase(t), 7) = "DIRECT:" Then Return Mid(t, 8)
+    If Left(UCase(t), 7) = "IMPORT:" Then Return Mid(t, 8)
+    If Left(UCase(t), 7) = "SYMBOL:" Then Return Mid(t, 8)
+    Return ""
+End Function
+
+Function MIRX64EmitDirectExternCallInstruction( _
+    ByRef cg As MIRX64Context, _
+    ByRef symbolName As String, _
+    ByRef ins As MIRIRInstruction, _
+    ByVal firstArgIndex As Integer, _
+    ByRef resultVar As String, _
+    ByRef errText As String _
+) As Integer
+    Dim sym As String
+    sym = Trim(symbolName)
+    If sym = "" Then
+        errText = "MIR x64 FFI: direct external symbol is empty"
+        Return 0
+    End If
+
+    MIRX64EmitRuntimeExtern cg, sym
+
+    Dim argCount As Integer
+    argCount = ins.operandCount - firstArgIndex
+    If argCount < 0 Then argCount = 0
+
+    Dim extraCount As Integer
+    extraCount = argCount - 4
+    If extraCount < 0 Then extraCount = 0
+
+    Dim reserveBytes As Integer
+    reserveBytes = UXBWin64AlignStackBytes(UXB_WIN64_SHADOW_SPACE_BYTES + extraCount * 8)
+    MIRX64Emit cg, "    sub rsp, " & MIRX64ToStr(reserveBytes)
+
+    Dim i As Integer
+    For i = 4 To argCount - 1
+        If MIRX64LoadOperandToReg(cg, ins.operands(firstArgIndex + i), "r11", errText) = 0 Then Return 0
+        MIRX64Emit cg, "    mov qword [rsp+" & MIRX64ToStr(UXB_WIN64_SHADOW_SPACE_BYTES + (i - 4) * 8) & "], r11"
+    Next i
+
+    If argCount >= 1 Then If MIRX64LoadOperandToReg(cg, ins.operands(firstArgIndex), "rcx", errText) = 0 Then Return 0
+    If argCount >= 2 Then If MIRX64LoadOperandToReg(cg, ins.operands(firstArgIndex + 1), "rdx", errText) = 0 Then Return 0
+    If argCount >= 3 Then If MIRX64LoadOperandToReg(cg, ins.operands(firstArgIndex + 2), "r8", errText) = 0 Then Return 0
+    If argCount >= 4 Then If MIRX64LoadOperandToReg(cg, ins.operands(firstArgIndex + 3), "r9", errText) = 0 Then Return 0
+
+    MIRX64Emit cg, "    call " & sym
+    MIRX64Emit cg, "    add rsp, " & MIRX64ToStr(reserveBytes)
+
+    If Trim(resultVar) <> "" Then Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+    Return 1
+End Function
+
+Function MIRX64EmitFfiBridgeInstruction( _
+    ByRef cg As MIRX64Context, _
+    ByRef op As String, _
+    ByRef ins As MIRIRInstruction, _
+    ByRef errText As String _
+) As Integer
+    Dim directSymbol As String
+    directSymbol = ""
+    If ins.operandCount >= 1 Then directSymbol = MIRX64FfiDirectSymbolFromOperand(ins.operands(0))
+    If directSymbol = "" And ins.operandCount >= 2 Then directSymbol = MIRX64FfiDirectSymbolFromOperand(ins.operands(1))
+
+    If directSymbol <> "" Then
+        Dim firstArg As Integer
+        firstArg = 1
+        If Left(UCase(Trim(ins.operands(0))), 7) <> "DIRECT:" And Left(UCase(Trim(ins.operands(0))), 7) <> "IMPORT:" And Left(UCase(Trim(ins.operands(0))), 7) <> "SYMBOL:" Then firstArg = 2
+        Return MIRX64EmitDirectExternCallInstruction(cg, directSymbol, ins, firstArg, ins.result, errText)
+    End If
+
+    If ins.operandCount >= 1 Then
+        Return MIRX64EmitRuntimeHostCallInstruction(cg, ins.operands(0), ins, 1, ins.result, errText)
+    End If
+    Return MIRX64EmitRuntimeHostCallNamed(cg, op, ins.result, errText)
+End Function
+
+#endif

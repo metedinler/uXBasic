@@ -1,0 +1,327 @@
+#ifndef UXB_MIR_X64_COLLECTIONS_FBS
+#define UXB_MIR_X64_COLLECTIONS_FBS
+
+' mir_x64_fp64.fbs is included AFTER this file (see mir_x64_codegen.fbs /
+' main_x64_mir_include_bundle.fbs) -- forward-declare the float-literal-label
+' helper we need (MIRX64IsFloatLiteral is already forward-declared by
+' mir_x64_emit_helpers.fbs, included earlier), same pattern
+' mir_x64_builtins.fbs already uses for its own fp64 dependencies.
+Declare Function MIRX64EnsureFloatLiteralLabel(ByRef cg As MIRX64Context, ByRef literalText As String, ByRef labelOut As String) As Integer
+
+' S-019: native x64 LIST/DICT/SET. Mirrors mir_interp_collections.fbs's
+' canonical-MIR semantics via native/uxb_runtime's __uxb_rt_list_*/dict_*/set_*
+' C ABI (native/uxb_runtime/uxb_runtime.h) -- a pure status/out-value
+' convention, no DLL-side abort. On a checked failure this emits a call to the
+' generic __uxb_rt_runtime_error_exit (prints a TR/EN message, clean exit(1))
+' -- the collection functions themselves never print/exit.
+'
+' v1 scope: I64 and STRING values/keys only. A F64 value or key gives a clear
+' compile-time diagnostic (not silently mishandled) since this backend keeps
+' floats in a separate xmm-based local representation that this pass does not
+' touch; DICTHAS/SETHAS deliberately do not distinguish "key not found" from
+' "invalid handle" (both just return false) -- a documented v1 simplification,
+' not a silent-wrong-result risk on the scale of the ones this backend already
+' guards against elsewhere.
+
+Private Function MIRX64EmitCollectionErrorExit(ByRef cg As MIRX64Context, ByRef message As String, ByRef errText As String) As Integer
+    Dim litLabel As String
+    If MIRX64EnsureStringLiteralLabel(cg, Chr(34) & message & Chr(34), litLabel) = 0 Then
+        errText = "MIR x64 emitter: collection error-message label creation failed"
+        Return 0
+    End If
+    MIRX64EmitRuntimeExtern cg, "__uxb_rt_runtime_error_exit"
+    MIRX64Emit cg, "    lea rcx, [rel " & litLabel & "]"
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call __uxb_rt_runtime_error_exit"
+    MIRX64Emit cg, "    add rsp, 32"
+    Return 1
+End Function
+
+' Emits a call to symbolName with 0-4 already-loaded register/immediate
+' operands, then compares RAX against failValue; on a match it jumps to a
+' fresh __uxb_rt_runtime_error_exit sequence naming failureMessage, otherwise
+' falls through with RAX intact (the caller still reads RAX afterwards, e.g.
+' to store a status into a MIR result).
+Private Function MIRX64EmitCollectionCallChecked(ByRef cg As MIRX64Context, ByRef symbolName As String, ByRef failValue As String, ByRef failureMessage As String, ByRef errText As String, ByVal argCount As Integer, ByVal a0 As String = "", ByVal a1 As String = "", ByVal a2 As String = "", ByVal a3 As String = "") As Integer
+    Select Case argCount
+    Case 0: MIRX64EmitRuntimeCall0 cg, symbolName
+    Case 1: MIRX64EmitRuntimeCall1Reg cg, symbolName, a0
+    Case 2: MIRX64EmitRuntimeCall2Reg cg, symbolName, a0, a1
+    Case 3: MIRX64EmitRuntimeCall3Reg cg, symbolName, a0, a1, a2
+    Case 4: MIRX64EmitRuntimeCall4Reg cg, symbolName, a0, a1, a2, a3
+    End Select
+
+    Dim okLabel As String
+    okLabel = MIRX64NextLabel(cg, "collok")
+    MIRX64Emit cg, "    cmp rax, " & failValue
+    MIRX64Emit cg, "    jne " & okLabel
+    If MIRX64EmitCollectionErrorExit(cg, failureMessage, errText) = 0 Then Return 0
+    MIRX64Emit cg, okLabel & ":"
+    Return 1
+End Function
+
+' Loads operandText's raw 64-bit representation into regName, whatever its
+' kind: an integer literal/variable's value, a string's address, or -- unlike
+' MIRX64LoadOperandToReg, which cannot resolve a bare float literal at all --
+' an F64 literal's exact IEEE-754 bit pattern (NASM's `dq <literal>` encodes a
+' floating literal directly, so no xmm/conversion is needed, just a plain
+' qword load of the data-section constant). A float VARIABLE already loads
+' correctly via MIRX64LoadOperandToReg, since that helper is type-agnostic
+' for locals (a plain `mov reg, qword [rbp-off]` copies whatever bits are
+' there, including a BYREF float parameter's already-dereferenced value).
+Private Function MIRX64EmitCollectionRawOperand(ByRef cg As MIRX64Context, ByRef operandText As String, ByRef regName As String, ByRef errText As String) As Integer
+    Dim opText As String
+    opText = Trim(operandText)
+    If MIRX64IsFloatLiteral(opText) <> 0 Then
+        Dim lbl As String
+        If MIRX64EnsureFloatLiteralLabel(cg, opText, lbl) = 0 Then
+            errText = "MIR x64 emitter: collection float literal label failed"
+            Return 0
+        End If
+        MIRX64Emit cg, "    mov " & regName & ", qword [rel " & lbl & "]"
+        Return 1
+    End If
+    Return MIRX64LoadOperandToReg(cg, operandText, regName, errText)
+End Function
+
+' Resolves operandText's static kind for the collection value ABI (1=I64,
+' 2=F64, 3=STRING) and loads it into regName as the exact "packed_value" bit
+' pattern the runtime expects.
+Private Function MIRX64EmitCollectionValueOperand(ByRef cg As MIRX64Context, ByRef operandText As String, ByRef regName As String, ByRef kindOut As Integer, ByRef errText As String) As Integer
+    If MIRX64OperandIsFloat(cg, operandText) <> 0 Then
+        kindOut = 2
+        Return MIRX64EmitCollectionRawOperand(cg, operandText, regName, errText)
+    End If
+    kindOut = IIf(MIRX64OperandIsString(cg, operandText) <> 0, 3, 1)
+    Return MIRX64EmitCollectionRawOperand(cg, operandText, regName, errText)
+End Function
+
+' Resolves a DICT/SET key operand to a `const char*` in regName, matching
+' UXBInterpValueToString's stringification for STRING (as-is), I64/I32/...
+' (via __uxb_rt_str_i64, same std::to_string formatting FreeBASIC's own Str()
+' produces for an integer), and F64 (via __uxb_rt_str_f64 -- the language's
+' floating text rule, 16 significant digits and no padding zeros, S-142b, the
+' same text the interpreters produce).
+Private Function MIRX64EmitCollectionKeyOperand(ByRef cg As MIRX64Context, ByRef operandText As String, ByRef regName As String, ByRef errText As String) As Integer
+    If MIRX64OperandIsString(cg, operandText) <> 0 Then
+        Return MIRX64LoadOperandToReg(cg, operandText, regName, errText)
+    End If
+    If MIRX64OperandIsFloat(cg, operandText) <> 0 Then
+        If MIRX64EmitCollectionRawOperand(cg, operandText, regName, errText) = 0 Then Return 0
+        MIRX64EmitRuntimeExtern cg, "__uxb_rt_str_f64"
+        MIRX64Emit cg, "    movq xmm0, " & regName
+        MIRX64Emit cg, "    sub rsp, 32"
+        MIRX64Emit cg, "    call __uxb_rt_str_f64"
+        MIRX64Emit cg, "    add rsp, 32"
+        MIRX64Emit cg, "    mov " & regName & ", rax"
+        Return 1
+    End If
+    If MIRX64LoadOperandToReg(cg, operandText, regName, errText) = 0 Then Return 0
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_str_i64", regName
+    MIRX64Emit cg, "    mov " & regName & ", rax"
+    Return 1
+End Function
+
+Function MIRX64TryEmitCollectionCall(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    handledOut = 0
+    If ins.operandCount < 1 Then Return 1
+
+    Dim target As String
+    target = UCase(Trim(ins.operands(0)))
+
+    Select Case target
+    Case "LIST_NEW", "DICT_NEW", "SET_NEW"
+        handledOut = 1
+        Dim ctorSymbol As String
+        If target = "LIST_NEW" Then ctorSymbol = "__uxb_rt_list_new"
+        If target = "DICT_NEW" Then ctorSymbol = "__uxb_rt_dict_new"
+        If target = "SET_NEW" Then ctorSymbol = "__uxb_rt_set_new"
+        MIRX64EmitRuntimeCall0 cg, ctorSymbol
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "LISTLEN", "DICTLEN", "SETLEN"
+        handledOut = 1
+        If ins.operandCount <> 2 Then errText = "MIR x64 emitter: " & target & " expects 1 argument": Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        Dim lenSymbol As String
+        If target = "LISTLEN" Then lenSymbol = "__uxb_rt_list_len"
+        If target = "DICTLEN" Then lenSymbol = "__uxb_rt_dict_len"
+        If target = "SETLEN" Then lenSymbol = "__uxb_rt_set_len"
+        If MIRX64EmitCollectionCallChecked(cg, lenSymbol, "-1", "TR: " & target & " gecersiz handle | EN: " & target & " invalid handle", errText, 1, "r10") = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "LISTGET"
+        handledOut = 1
+        If ins.operandCount <> 3 Then errText = "MIR x64 emitter: LISTGET expects handle,index": Return 0
+        If Trim(ins.result) = "" Then errText = "MIR x64 emitter: LISTGET requires a result": Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        Dim lgOff As Integer
+        If MIRX64EnsureLocalSlot(cg, ins.result, lgOff) = 0 Then errText = "MIR x64 emitter: cannot allocate LISTGET result slot": Return 0
+        If MIRX64TypeIsFloat(ins.resultType) <> 0 Then MIRX64SetLocalType cg, ins.result, "F64"
+        Dim lgAddr As String
+        lgAddr = "r13"
+        If MIRX64AddressOfVarToReg(cg, ins.result, lgAddr, errText) = 0 Then Return 0
+        Return MIRX64EmitCollectionCallChecked(cg, "__uxb_rt_list_get", "0", "TR: LIST dizin siniri disi veya gecersiz handle | EN: LIST index out of range or handle invalid", errText, 3, "r10", "r11", lgAddr)
+
+    Case "LISTSET"
+        handledOut = 1
+        If ins.operandCount <> 4 Then errText = "MIR x64 emitter: LISTSET expects handle,index,value": Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        Dim lsKind As Integer
+        If MIRX64EmitCollectionValueOperand(cg, ins.operands(3), "r13", lsKind, errText) = 0 Then Return 0
+        If MIRX64EmitCollectionCallChecked(cg, "__uxb_rt_list_set", "0", "TR: LIST dizin siniri disi veya gecersiz handle | EN: LIST index out of range or handle invalid", errText, 4, "r10", "r11", LTrim(Str(lsKind)), "r13") = 0 Then Return 0
+        If Trim(ins.result) <> "" Then Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        Return 1
+
+    Case "LISTADD"
+        handledOut = 1
+        If ins.operandCount <> 3 Then errText = "MIR x64 emitter: LISTADD expects handle,value": Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        Dim laKind As Integer
+        If MIRX64EmitCollectionValueOperand(cg, ins.operands(2), "r11", laKind, errText) = 0 Then Return 0
+        If MIRX64EmitCollectionCallChecked(cg, "__uxb_rt_list_add", "0", "TR: LIST'e ekleme basarisiz (gecersiz handle) | EN: LIST add failed (invalid handle)", errText, 3, "r10", LTrim(Str(laKind)), "r11") = 0 Then Return 0
+        If Trim(ins.result) <> "" Then Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        Return 1
+
+    Case "LISTREMOVE"
+        handledOut = 1
+        If ins.operandCount <> 3 Then errText = "MIR x64 emitter: LISTREMOVE expects handle,index": Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        If MIRX64EmitCollectionCallChecked(cg, "__uxb_rt_list_remove", "0", "TR: LIST dizin siniri disi | EN: LIST index out of range", errText, 2, "r10", "r11") = 0 Then Return 0
+        If Trim(ins.result) <> "" Then Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        Return 1
+
+    Case "LISTCLEAR", "DICTCLEAR", "SETCLEAR"
+        handledOut = 1
+        If ins.operandCount <> 2 Then errText = "MIR x64 emitter: " & target & " expects 1 argument": Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        Dim clearSymbol As String
+        If target = "LISTCLEAR" Then clearSymbol = "__uxb_rt_list_clear"
+        If target = "DICTCLEAR" Then clearSymbol = "__uxb_rt_dict_clear"
+        If target = "SETCLEAR" Then clearSymbol = "__uxb_rt_set_clear"
+        If MIRX64EmitCollectionCallChecked(cg, clearSymbol, "0", "TR: " & target & " basarisiz (gecersiz handle) | EN: " & target & " failed (invalid handle)", errText, 1, "r10") = 0 Then Return 0
+        If Trim(ins.result) <> "" Then Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        Return 1
+
+    Case "DICTHAS", "SETHAS"
+        handledOut = 1
+        If ins.operandCount <> 3 Then errText = "MIR x64 emitter: " & target & " expects handle,key": Return 0
+        ' Key is resolved BEFORE handle: a numeric key goes through a nested
+        ' __uxb_rt_str_i64 call, and r10/r11 are volatile (caller-saved) in the
+        ' Win64 ABI -- any call is free to clobber them. Loading handle last
+        ' guarantees nothing after it can stomp on r10.
+        If MIRX64EmitCollectionKeyOperand(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        MIRX64EmitRuntimeCall2Reg cg, IIf(target = "DICTHAS", "__uxb_rt_dict_has", "__uxb_rt_set_has"), "r10", "r11"
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "DICTGET"
+        handledOut = 1
+        If ins.operandCount <> 3 Then errText = "MIR x64 emitter: DICTGET expects handle,key": Return 0
+        If Trim(ins.result) = "" Then errText = "MIR x64 emitter: DICTGET requires a result": Return 0
+        ' Key first, handle last -- see DICTHAS/SETHAS above (numeric-key
+        ' stringification is a nested call that would otherwise clobber a
+        ' handle already sitting in the volatile r10).
+        If MIRX64EmitCollectionKeyOperand(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        Dim dgOff As Integer
+        If MIRX64EnsureLocalSlot(cg, ins.result, dgOff) = 0 Then errText = "MIR x64 emitter: cannot allocate DICTGET result slot": Return 0
+        If MIRX64TypeIsFloat(ins.resultType) <> 0 Then MIRX64SetLocalType cg, ins.result, "F64"
+        Dim dgAddr As String
+        dgAddr = "r13"
+        If MIRX64AddressOfVarToReg(cg, ins.result, dgAddr, errText) = 0 Then Return 0
+        Return MIRX64EmitCollectionCallChecked(cg, "__uxb_rt_dict_get", "0", "TR: DICT anahtari bulunamadi veya handle gecersiz | EN: DICT key not found or handle invalid", errText, 3, "r10", "r11", dgAddr)
+
+    Case "DICTSET"
+        handledOut = 1
+        If ins.operandCount <> 4 Then errText = "MIR x64 emitter: DICTSET expects handle,key,value": Return 0
+        ' Key (and then value) first, handle last -- see DICTHAS/SETHAS above.
+        ' Value processing never makes a nested call in the current I64/STRING
+        ' scope, but key processing can (numeric-key stringification), and
+        ' r10/r11 are volatile across any call in the Win64 ABI.
+        If MIRX64EmitCollectionKeyOperand(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        Dim dsKind As Integer
+        If MIRX64EmitCollectionValueOperand(cg, ins.operands(3), "r13", dsKind, errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        If MIRX64EmitCollectionCallChecked(cg, "__uxb_rt_dict_set", "0", "TR: DICT'e yazma basarisiz (gecersiz handle) | EN: DICT set failed (invalid handle)", errText, 4, "r10", "r11", LTrim(Str(dsKind)), "r13") = 0 Then Return 0
+        If Trim(ins.result) <> "" Then Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        Return 1
+
+    Case "DICTKEYAT"
+        handledOut = 1
+        If ins.operandCount <> 3 Then errText = "MIR x64 emitter: DICTKEYAT expects handle,index": Return 0
+        If Trim(ins.result) = "" Then errText = "MIR x64 emitter: DICTKEYAT requires a result": Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        Dim dkaOff As Integer
+        If MIRX64EnsureLocalSlot(cg, ins.result, dkaOff) = 0 Then errText = "MIR x64 emitter: cannot allocate DICTKEYAT result slot": Return 0
+        ' DICTKEYAT always returns a string (unlike LISTGET/DICTGET/DICTVALUEAT,
+        ' whose value is dynamically kinded) -- mark the temp's static type so
+        ' a later MIRX64OperandIsString check (e.g. this same result feeding
+        ' into a DICTSET/SETADD key argument, as MIRLowerDictEachLoop's own
+        ' snapshot-copy loop does) doesn't fall through to the wrong,
+        ' numeric-stringification branch and corrupt the key.
+        MIRX64SetLocalType cg, ins.result, "STRING"
+        Dim dkaAddr As String
+        dkaAddr = "r13"
+        If MIRX64AddressOfVarToReg(cg, ins.result, dkaAddr, errText) = 0 Then Return 0
+        Return MIRX64EmitCollectionCallChecked(cg, "__uxb_rt_dict_key_at", "0", "TR: DICT konumu siniri disi | EN: DICT position out of range", errText, 3, "r10", "r11", dkaAddr)
+
+    Case "DICTVALUEAT"
+        handledOut = 1
+        If ins.operandCount <> 3 Then errText = "MIR x64 emitter: DICTVALUEAT expects handle,index": Return 0
+        If Trim(ins.result) = "" Then errText = "MIR x64 emitter: DICTVALUEAT requires a result": Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        Dim dvaOff As Integer
+        If MIRX64EnsureLocalSlot(cg, ins.result, dvaOff) = 0 Then errText = "MIR x64 emitter: cannot allocate DICTVALUEAT result slot": Return 0
+        If MIRX64TypeIsFloat(ins.resultType) <> 0 Then MIRX64SetLocalType cg, ins.result, "F64"
+        Dim dvaAddr As String
+        dvaAddr = "r13"
+        If MIRX64AddressOfVarToReg(cg, ins.result, dvaAddr, errText) = 0 Then Return 0
+        Return MIRX64EmitCollectionCallChecked(cg, "__uxb_rt_dict_value_at", "0", "TR: DICT konumu siniri disi | EN: DICT position out of range", errText, 3, "r10", "r11", dvaAddr)
+
+    Case "SETADD"
+        handledOut = 1
+        If ins.operandCount <> 3 Then errText = "MIR x64 emitter: SETADD expects handle,member": Return 0
+        ' Member first, handle last -- see DICTHAS/SETHAS above.
+        If MIRX64EmitCollectionKeyOperand(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        If MIRX64EmitCollectionCallChecked(cg, "__uxb_rt_set_add", "0", "TR: SET'e ekleme basarisiz (gecersiz handle) | EN: SET add failed (invalid handle)", errText, 2, "r10", "r11") = 0 Then Return 0
+        If Trim(ins.result) <> "" Then Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        Return 1
+
+    Case "SETREMOVE"
+        handledOut = 1
+        If ins.operandCount <> 3 Then errText = "MIR x64 emitter: SETREMOVE expects handle,member": Return 0
+        ' Member first, handle last -- see DICTHAS/SETHAS above.
+        If MIRX64EmitCollectionKeyOperand(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        If MIRX64EmitCollectionCallChecked(cg, "__uxb_rt_set_remove", "0", "TR: SET'ten cikarma basarisiz (gecersiz handle) | EN: SET remove failed (invalid handle)", errText, 2, "r10", "r11") = 0 Then Return 0
+        If Trim(ins.result) <> "" Then Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        Return 1
+
+    Case "SETMEMBERAT"
+        handledOut = 1
+        If ins.operandCount <> 3 Then errText = "MIR x64 emitter: SETMEMBERAT expects handle,index": Return 0
+        If Trim(ins.result) = "" Then errText = "MIR x64 emitter: SETMEMBERAT requires a result": Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        Dim smaOff As Integer
+        If MIRX64EnsureLocalSlot(cg, ins.result, smaOff) = 0 Then errText = "MIR x64 emitter: cannot allocate SETMEMBERAT result slot": Return 0
+        ' SETMEMBERAT always returns a string -- see the DICTKEYAT comment above.
+        MIRX64SetLocalType cg, ins.result, "STRING"
+        Dim smaAddr As String
+        smaAddr = "r13"
+        If MIRX64AddressOfVarToReg(cg, ins.result, smaAddr, errText) = 0 Then Return 0
+        Return MIRX64EmitCollectionCallChecked(cg, "__uxb_rt_set_member_at", "0", "TR: SET konumu siniri disi | EN: SET position out of range", errText, 3, "r10", "r11", smaAddr)
+
+    End Select
+
+    Return 1
+End Function
+
+#endif

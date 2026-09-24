@@ -1,0 +1,568 @@
+
+Private Function ParserLookAheadHasEndBlock(ByRef ps As ParseState, ByRef endKeyword As String) As Integer
+    Dim i As Integer
+    i = ps.cursorIndex
+    Do While i < ps.lx.tokens.count
+        Dim tk As Token
+        tk = TokenListAt(ps.lx.tokens, i)
+        If tk.kind = "EOF" Then Exit Do
+        If tk.kind = "KEYWORD" And UCase(Trim(tk.lexeme)) = "END" Then
+            Dim nt As Token
+            nt = TokenListAt(ps.lx.tokens, i + 1)
+            If nt.kind = "KEYWORD" Or nt.kind = "IDENT" Then
+                If UCase(Trim(nt.lexeme)) = UCase(Trim(endKeyword)) Then Return 1
+            End If
+        End If
+        i += 1
+    Loop
+    Return 0
+End Function
+
+Private Function ParseSimpleNamedRuntimeDecl(ByRef ps As ParseState, ByRef firstTok As Token, ByRef nodeKind As String) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" And nameTok.kind <> "KEYWORD" Then
+        ps.lastError = firstTok.lexeme & ": name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = firstTok.lexeme & ": unexpected trailing tokens"
+        Return -1
+    End If
+    Return MakeNodeFromToken(ps, nodeKind, nameTok.lexeme, UCase(firstTok.lexeme), firstTok)
+End Function
+
+Private Function ParseSlotSimpleControlStmt(ByRef ps As ParseState, ByRef firstTok As Token, ByRef targetTok As Token, ByRef opTok As Token) As Integer
+    Dim nodeIdx As Integer
+    nodeIdx = MakeNodeFromToken(ps, "SLOT_CONTROL_STMT", "THREAD", UCase(Trim(opTok.lexeme)), firstTok)
+    Dim targetNode As Integer
+    targetNode = MakeNodeFromToken(ps, "IDENT", targetTok.lexeme, "", targetTok)
+    ASTAddChild ps.ast, nodeIdx, targetNode
+    AdvanceTok ps ' target name
+    AdvanceTok ps ' ON/OFF
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "SLOT " & opTok.lexeme & ": unexpected trailing tokens"
+        Return -1
+    End If
+    Return nodeIdx
+End Function
+
+Private Function ParseSlotKindToken(ByRef ps As ParseState, ByRef kindOut As String) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+    If tk.kind <> "KEYWORD" And tk.kind <> "IDENT" Then
+        ps.lastError = "slot kind expected"
+        Return 0
+    End If
+
+    kindOut = UCase(Trim(tk.lexeme))
+
+    Select Case kindOut
+    Case "EVENT", "PIPE", "THREAD", "PARALEL"
+        AdvanceTok ps
+        Return 1
+    End Select
+
+    ps.lastError = "invalid slot kind " & tk.lexeme
+    Return 0
+End Function
+
+
+Private Function ParserTaskScopeCurrent(ByRef ps As ParseState) As String
+    If ps.taskScopeDepth <= 0 Then Return ""
+    Return ps.taskScopeNames(ps.taskScopeDepth - 1)
+End Function
+
+Private Function ParserTaskQualifiedName(ByRef ps As ParseState, ByRef localName As String) As String
+    Dim pfx As String
+    pfx = ParserTaskScopeCurrent(ps)
+    If Trim(pfx) = "" Then Return localName
+    Return pfx & "." & localName
+End Function
+
+Private Sub ParserTaskScopePush(ByRef ps As ParseState, ByRef qualifiedName As String)
+    If ps.taskScopeDepth = 0 Then
+        ReDim ps.taskScopeNames(0)
+    Else
+        ReDim Preserve ps.taskScopeNames(ps.taskScopeDepth)
+    End If
+    ps.taskScopeNames(ps.taskScopeDepth) = qualifiedName
+    ps.taskScopeDepth += 1
+End Sub
+
+Private Sub ParserTaskScopePop(ByRef ps As ParseState)
+    If ps.taskScopeDepth <= 0 Then Exit Sub
+    ps.taskScopeDepth -= 1
+    If ps.taskScopeDepth <= 0 Then
+        Erase ps.taskScopeNames
+    Else
+        ReDim Preserve ps.taskScopeNames(ps.taskScopeDepth - 1)
+    End If
+End Sub
+
+Private Function ParserTaskTryParsePipeInput(ByRef ps As ParseState, ByVal blockNode As Integer) As Integer
+    Dim inputTok As Token
+    inputTok = CurToken(ps)
+    If inputTok.kind <> "IDENT" And inputTok.kind <> "KEYWORD" Then Return 1
+
+    Dim u As String
+    u = UCase(Trim(inputTok.lexeme))
+    If u = "END" Or u = "AS" Or u = "ON" Or u = "OFF" Or u = "SLOT" Then Return 1
+
+    Dim paramNode As Integer
+    paramNode = MakeNodeFromToken(ps, "PARAM_DECL", inputTok.lexeme, "PIPE_INPUT", inputTok)
+    ps.ast.nodes(paramNode).role = "PARAMS"
+    ASTAddChild ps.ast, blockNode, paramNode
+    AdvanceTok ps
+
+    If IsKw(ps, "AS") Then
+        AdvanceTok ps
+        Dim typeTok As Token
+        typeTok = CurToken(ps)
+        If typeTok.kind <> "IDENT" And typeTok.kind <> "KEYWORD" Then
+            ps.lastError = "PIPE: input type expected after AS"
+            Return 0
+        End If
+        Dim typeNode As Integer
+        typeNode = MakeNodeFromToken(ps, "TYPE_REF", UCase(Trim(typeTok.lexeme)), "", typeTok)
+        ps.ast.nodes(typeNode).role = "TYPE"
+        ASTAddChild ps.ast, paramNode, typeNode
+        AdvanceTok ps
+    End If
+
+    Return 1
+End Function
+
+Private Function ParseNamedSlotHeader(ByRef ps As ParseState, ByRef firstTok As Token, ByRef nodeKind As String, ByRef endKeyword As String, ByVal allowPipeInput As Integer = 0) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" And nameTok.kind <> "KEYWORD" Then
+        ps.lastError = firstTok.lexeme & ": name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim blockNode As Integer
+    blockNode = MakeNodeFromToken(ps, nodeKind, nameTok.lexeme, UCase(firstTok.lexeme), firstTok)
+
+    Dim qualifiedName As String
+    qualifiedName = ParserTaskQualifiedName(ps, nameTok.lexeme)
+    ps.ast.nodes(blockNode).symbolName = qualifiedName
+    ps.ast.nodes(blockNode).typeName = UCase(firstTok.lexeme)
+
+    ' UXB_TYPED_TASK_ROUTINES_20260728:
+    ' EVENT/PIPE/THREAD/PARALEL use the same typed parameter grammar as
+    ' SUB/FUNCTION.  The old PIPE bare-input form remains accepted when no
+    ' parenthesized signature is present.
+    If CurToken(ps).kind = "OP" AndAlso CurToken(ps).lexeme = "(" Then
+        If ParseParamList(ps, blockNode) = 0 Then Return -1
+    ElseIf allowPipeInput <> 0 Then
+        If ParserTaskTryParsePipeInput(ps, blockNode) = 0 Then Return -1
+    End If
+
+    ' Only PIPE is value-producing.  Its declared result type is represented
+    ' by the same RETURN_TYPE AST node used by FUNCTION.
+    If IsKw(ps, "AS") Then
+        If UCase(Trim(firstTok.lexeme)) <> "PIPE" Then
+            ps.lastError = firstTok.lexeme & ": return type is only valid for PIPE"
+            Return -1
+        End If
+        AdvanceTok ps
+        Dim returnTypeTok As Token
+        returnTypeTok = CurToken(ps)
+        If ValidateTypeToken(ps, returnTypeTok) = 0 Then
+            If ps.lastError = "" Then ps.lastError = "PIPE: return type expected after AS"
+            Return -1
+        End If
+        Dim returnTypeNode As Integer
+        Dim canonicalReturnType As String
+        canonicalReturnType = CanonicalTypeNameForParser(returnTypeTok.lexeme)
+        returnTypeNode = MakeNodeFromToken(ps, "RETURN_TYPE", canonicalReturnType, "", returnTypeTok)
+        ps.ast.nodes(returnTypeNode).role = "RETURN_TYPE"
+        ASTAddChild ps.ast, blockNode, returnTypeNode
+        ps.ast.nodes(blockNode).typeName = canonicalReturnType
+        AdvanceTok ps
+    End If
+
+    Dim headerArgs As Integer
+    headerArgs = ASTNewNode(ps.ast, "SLOT_HEADER_ARGS", "", "", firstTok.lineNo, firstTok.colNo)
+    ps.ast.nodes(headerArgs).role = "ARGS"
+
+    If MatchOp(ps, ",") Then
+        Do
+            Dim argExpr As Integer
+            argExpr = ParseExpression(ps)
+            If argExpr = -1 Then
+                ps.lastError = firstTok.lexeme & ": header argument expected"
+                Return -1
+            End If
+            ASTAddChild ps.ast, headerArgs, argExpr
+            If MatchOp(ps, ",") = 0 Then Exit Do
+        Loop
+    End If
+
+    If ASTChildCount(ps, headerArgs) > 0 Then ASTAddChild ps.ast, blockNode, headerArgs
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = firstTok.lexeme & ": unexpected trailing tokens"
+        Return -1
+    End If
+
+    ' Yama 2: EVENT/PIPE/THREAD/PARALEL are task-like blocks.  Existing
+    ' single-line declarations remain accepted for old sources, but when an
+    ' END <kind> exists the body is parsed under a task-qualified scope.
+    If ParserLookAheadHasEndBlock(ps, endKeyword) = 0 Then
+        Return blockNode
+    End If
+
+    ParserTaskScopePush ps, qualifiedName
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsKw(ps, "END") And UCase(LookToken(ps, 1).lexeme) = endKeyword Then Exit Do
+
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then
+            ParserTaskScopePop ps
+            Return -1
+        End If
+        ps.ast.nodes(st).role = "BODY"
+        ASTAddChild ps.ast, blockNode, st
+        SkipSeparators ps
+    Loop
+    ParserTaskScopePop ps
+
+    If IsKw(ps, "END") = 0 Or UCase(LookToken(ps, 1).lexeme) <> endKeyword Then
+        ps.lastError = "missing END " & endKeyword
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    Return blockNode
+End Function
+
+Function ParseEventStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseNamedSlotHeader(ps, firstTok, "EVENT_STMT", "EVENT")
+End Function
+
+Function ParseThreadStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseNamedSlotHeader(ps, firstTok, "THREAD_STMT", "THREAD")
+End Function
+
+Function ParseParalelStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseNamedSlotHeader(ps, firstTok, "PARALEL_STMT", "PARALEL")
+End Function
+
+Function ParsePipeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseNamedSlotHeader(ps, firstTok, "PIPE_STMT", "PIPE", 1)
+End Function
+
+
+
+Private Function ParseSlotTableTargetKindToken(ByRef ps As ParseState, ByRef kindOut As String) As Integer
+    kindOut = ""
+    Dim tk As Token
+    tk = CurToken(ps)
+    If tk.kind <> "KEYWORD" And tk.kind <> "IDENT" Then Return 0
+
+    Dim u As String
+    u = UCase(Trim(tk.lexeme))
+    Select Case u
+    Case "EVENT", "PIPE", "THREAD", "PARALEL"
+        kindOut = u
+        AdvanceTok ps
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function ParseSlotTableEntry(ByRef ps As ParseState) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" And nameTok.kind <> "KEYWORD" Then
+        ps.lastError = "SLOT table: slot name expected"
+        Return -1
+    End If
+    Dim entryNode As Integer
+    entryNode = ASTNewNode(ps.ast, "SLOT_BIND_ENTRY", nameTok.lexeme, "", nameTok.lineNo, nameTok.colNo)
+    Dim nameNode As Integer
+    nameNode = MakeNodeFromToken(ps, "IDENT", nameTok.lexeme, "", nameTok)
+    ASTAddRoleChild ps.ast, entryNode, nameNode, "SLOT_NAME"
+    AdvanceTok ps
+
+    Dim idExpr As Integer
+    idExpr = ParseExpression(ps)
+    If idExpr = -1 Then
+        ps.lastError = "SLOT table: slot id expected"
+        Return -1
+    End If
+    ASTAddRoleChild ps.ast, entryNode, idExpr, "SLOT_ID"
+
+    Dim opTok As Token
+    opTok = CurToken(ps)
+    If opTok.kind <> "KEYWORD" And opTok.kind <> "IDENT" Then
+        ps.lastError = "SLOT table: ON/OFF expected"
+        Return -1
+    End If
+    Dim opUpper As String
+    opUpper = UCase(Trim(opTok.lexeme))
+    If opUpper <> "ON" And opUpper <> "OFF" Then
+        ps.lastError = "SLOT table: ON/OFF expected"
+        Return -1
+    End If
+    ps.ast.nodes(entryNode).op = opUpper
+    AdvanceTok ps
+
+    Dim explicitKind As String
+    If ParseSlotTableTargetKindToken(ps, explicitKind) <> 0 Then
+        ps.ast.nodes(entryNode).typeName = explicitKind
+    End If
+
+    Dim targetExpr As Integer
+    targetExpr = ParseExpression(ps)
+    If targetExpr = -1 Then
+        ps.lastError = "SLOT table: target expected"
+        Return -1
+    End If
+    ASTAddRoleChild ps.ast, entryNode, targetExpr, "TARGET"
+    ps.ast.nodes(entryNode).symbolName = ps.ast.nodes(targetExpr).value
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "SLOT table: unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return entryNode
+End Function
+
+Private Function ParseSlotTableStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim tableNode As Integer
+    tableNode = MakeNodeFromToken(ps, "SLOT_TABLE_STMT", "TABLE", "SLOT", firstTok)
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "SLOT table: newline expected after SLOT"
+        Return -1
+    End If
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsKw(ps, "END") And UCase(LookToken(ps, 1).lexeme) = "SLOT" Then Exit Do
+
+        Dim entryNode As Integer
+        entryNode = ParseSlotTableEntry(ps)
+        If entryNode = -1 Then Return -1
+        ASTAddRoleChild ps.ast, tableNode, entryNode, "SLOT_BIND"
+        SkipSeparators ps
+    Loop
+
+    If IsKw(ps, "END") = 0 Or UCase(LookToken(ps, 1).lexeme) <> "SLOT" Then
+        ps.lastError = "SLOT table: missing END SLOT"
+        Return -1
+    End If
+    AdvanceTok ps
+    AdvanceTok ps
+    Return tableNode
+End Function
+
+Function ParseSlotStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    ' Yama 3: canonical PCK form.  Bare SLOT opens a 0..255 binding table:
+    ' SLOT / name id ON|OFF [EVENT|PIPE|THREAD|PARALEL] target / END SLOT.
+    If IsBasicStmtTerminator(CurToken(ps)) <> 0 Then
+        Return ParseSlotTableStmt(ps, firstTok)
+    End If
+
+    ' Legacy/control form: SLOT Worker ON / SLOT Worker OFF.
+    Dim possibleTargetTok As Token
+    possibleTargetTok = CurToken(ps)
+    Dim possibleOpTok As Token
+    possibleOpTok = LookToken(ps, 1)
+    If (possibleTargetTok.kind = "IDENT" Or possibleTargetTok.kind = "KEYWORD") And (possibleOpTok.kind = "IDENT" Or possibleOpTok.kind = "KEYWORD") Then
+        Dim opUpper As String
+        opUpper = UCase(Trim(possibleOpTok.lexeme))
+        If opUpper = "ON" Or opUpper = "OFF" Then
+            Return ParseSlotSimpleControlStmt(ps, firstTok, possibleTargetTok, possibleOpTok)
+        End If
+    End If
+
+    Dim slotKind As String
+    If ParseSlotKindToken(ps, slotKind) = 0 Then Return -1
+
+    Dim slotNode As Integer
+    slotNode = MakeNodeFromToken(ps, "SLOT_STMT", slotKind, "", firstTok)
+
+    If MatchOp(ps, "<") Then
+        Dim typeTok As Token
+        typeTok = CurToken(ps)
+        If typeTok.kind <> "KEYWORD" And typeTok.kind <> "IDENT" Then
+            ps.lastError = "SLOT: byte annotation expected"
+            Return -1
+        End If
+        If UCase(typeTok.lexeme) <> "I8" And UCase(typeTok.lexeme) <> "U8" Then
+            ps.lastError = "SLOT: only I8/U8 slot count is supported"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim byteCountExpr As Integer
+        ' The closing ">" belongs to the SLOT annotation, not to a relation.
+        byteCountExpr = ParseShift(ps)
+        If byteCountExpr = -1 Then Return -1
+        ps.ast.nodes(byteCountExpr).op = UCase(typeTok.lexeme)
+        ASTAddChild ps.ast, slotNode, byteCountExpr
+
+        If MatchOp(ps, ">") = 0 Then
+            ps.lastError = "SLOT: missing >"
+            Return -1
+        End If
+    Else
+        Dim countExpr As Integer
+        countExpr = ParseExpression(ps)
+        If countExpr = -1 Then Return -1
+        ASTAddChild ps.ast, slotNode, countExpr
+    End If
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "SLOT: unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return slotNode
+End Function
+
+Private Function ParseSlotControlCore(ByRef ps As ParseState, ByRef firstTok As Token, ByRef opText As String, ByRef nodeKind As String) As Integer
+    Dim slotKind As String
+    If ParseSlotKindToken(ps, slotKind) = 0 Then Return -1
+
+    Dim nodeIdx As Integer
+    nodeIdx = MakeNodeFromToken(ps, nodeKind, slotKind, opText, firstTok)
+
+    Dim targetExpr As Integer
+    targetExpr = ParseExpression(ps)
+    If targetExpr = -1 Then
+        ps.lastError = opText & ": target expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, nodeIdx, targetExpr
+
+    ' ADIM31B/ADIM44: ON/OFF forms may carry optional slot suffix:
+    ' ON THREAD Worker SLOT <U8 0>
+    ' OFF EVENT Tick SLOT <U8 1>
+    If opText = "ON" Or opText = "OFF" Then
+        Dim slotTok As Token
+        slotTok = CurToken(ps)
+        If slotTok.kind = "KEYWORD" Or slotTok.kind = "IDENT" Then
+            If UCase(Trim(slotTok.lexeme)) = "SLOT" Then
+                AdvanceTok ps
+                If MatchOp(ps, "<") Then
+                    Dim annTypeTok As Token
+                    annTypeTok = CurToken(ps)
+                    If annTypeTok.kind <> "KEYWORD" And annTypeTok.kind <> "IDENT" Then
+                        ps.lastError = opText & ": SLOT annotation type expected"
+                        Return -1
+                    End If
+                    Dim annTypeUpper As String
+                    annTypeUpper = UCase(Trim(annTypeTok.lexeme))
+                    If annTypeUpper <> "I8" And annTypeUpper <> "U8" Then
+                        ps.lastError = opText & ": SLOT annotation supports only I8/U8"
+                        Return -1
+                    End If
+                    AdvanceTok ps
+
+                    Dim slotExpr As Integer
+                    slotExpr = ParseShift(ps)
+                    If slotExpr = -1 Then
+                        ps.lastError = opText & ": SLOT value expected"
+                        Return -1
+                    End If
+                    ps.ast.nodes(slotExpr).op = annTypeUpper
+                    ASTAddChild ps.ast, nodeIdx, slotExpr
+
+                    If MatchOp(ps, ">") = 0 Then
+                        ps.lastError = opText & ": missing > in SLOT annotation"
+                        Return -1
+                    End If
+                Else
+                    Dim plainSlotExpr As Integer
+                    plainSlotExpr = ParseExpression(ps)
+                    If plainSlotExpr = -1 Then
+                        ps.lastError = opText & ": SLOT value expected"
+                        Return -1
+                    End If
+                    ASTAddChild ps.ast, nodeIdx, plainSlotExpr
+                End If
+            End If
+        End If
+    End If
+
+    If opText = "TRIGGER" Then
+        Do While MatchOp(ps, ",")
+            Dim argExpr As Integer
+            argExpr = ParseExpression(ps)
+            If argExpr = -1 Then Return -1
+            ASTAddChild ps.ast, nodeIdx, argExpr
+        Loop
+    End If
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = opText & ": unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return nodeIdx
+End Function
+
+Function ParseSlotOnStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseSlotControlCore(ps, firstTok, "ON", "SLOT_CONTROL_STMT")
+End Function
+
+Function ParseSlotOffStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseSlotControlCore(ps, firstTok, "OFF", "SLOT_CONTROL_STMT")
+End Function
+
+Function ParseTriggerStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    ' Yama 4: TRIGGER is a general task trigger.
+    ' Short form:
+    '     TRIGGER Hedef[, veri]
+    ' resolves through the SLOT table at semantic/runtime time.
+    ' Explicit form is still accepted:
+    '     TRIGGER EVENT Hedef[, veri]
+    '     TRIGGER PIPE Hedef[, veri]
+    Dim tk As Token
+    tk = CurToken(ps)
+    If tk.kind = "IDENT" Or tk.kind = "KEYWORD" Then
+        Dim u As String
+        u = UCase(Trim(tk.lexeme))
+        If u <> "EVENT" And u <> "PIPE" And u <> "THREAD" And u <> "PARALEL" Then
+            Dim nodeIdx As Integer
+            nodeIdx = MakeNodeFromToken(ps, "TRIGGER_STMT", "TASK", "TRIGGER", firstTok)
+
+            Dim targetExpr As Integer
+            targetExpr = ParseExpression(ps)
+            If targetExpr = -1 Then
+                ps.lastError = "TRIGGER: target expected"
+                Return -1
+            End If
+            ASTAddChild ps.ast, nodeIdx, targetExpr
+
+            Do While MatchOp(ps, ",")
+                Dim argExpr As Integer
+                argExpr = ParseExpression(ps)
+                If argExpr = -1 Then
+                    ps.lastError = "TRIGGER: argument expression expected"
+                    Return -1
+                End If
+                ASTAddChild ps.ast, nodeIdx, argExpr
+            Loop
+
+            If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+                ps.lastError = "TRIGGER: unexpected trailing tokens"
+                Return -1
+            End If
+            Return nodeIdx
+        End If
+    End If
+
+    Return ParseSlotControlCore(ps, firstTok, "TRIGGER", "TRIGGER_STMT")
+End Function

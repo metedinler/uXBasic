@@ -1,0 +1,167 @@
+#ifndef UXB_TYPE_CLASS_FFI_BACKEND_CONTRACT_FBS
+#define UXB_TYPE_CLASS_FFI_BACKEND_CONTRACT_FBS
+
+' Semantic/backend contract for TYPE / CLASS / FFI lowering.
+' This module centralizes decisions and diagnostics without replacing existing parser/semantic code.
+
+Const UXB_TCFFI_KIND_UNKNOWN = 0
+Const UXB_TCFFI_KIND_TYPE_FIELD = 1
+Const UXB_TCFFI_KIND_CLASS_METHOD = 2
+Const UXB_TCFFI_KIND_OBJECT_LIFECYCLE = 3
+Const UXB_TCFFI_KIND_CALL_DLL = 4
+Const UXB_TCFFI_KIND_CALL_API = 5
+Const UXB_TCFFI_KIND_IMPORT = 6
+Const UXB_TCFFI_KIND_INLINE = 7
+
+Const UXB_TCFFI_STATUS_SUPPORTED = 1
+Const UXB_TCFFI_STATUS_DIAGNOSTIC = 2
+Const UXB_TCFFI_STATUS_PENDING = 3
+Const UXB_TCFFI_STATUS_REJECTED = 4
+
+Type UXBTypeClassFfiDecision
+    kind As Integer
+    status As Integer
+    surfaceName As String
+    targetOpcode As String
+    runtimeSymbol As String
+    diagnosticCode As String
+    diagnosticText As String
+    requiresLayout As Integer
+    requiresAbi As Integer
+    requiresSigner As Integer
+End Type
+
+Sub UXBTCFFIDecisionInit(ByRef d As UXBTypeClassFfiDecision)
+    d.kind = UXB_TCFFI_KIND_UNKNOWN
+    d.status = UXB_TCFFI_STATUS_PENDING
+    d.surfaceName = ""
+    d.targetOpcode = ""
+    d.runtimeSymbol = ""
+    d.diagnosticCode = ""
+    d.diagnosticText = ""
+    d.requiresLayout = 0
+    d.requiresAbi = 0
+    d.requiresSigner = 0
+End Sub
+
+Function UXBTCFFIKindName(ByVal k As Integer) As String
+    Select Case k
+    Case UXB_TCFFI_KIND_TYPE_FIELD
+        Return "type_field"
+    Case UXB_TCFFI_KIND_CLASS_METHOD
+        Return "class_method"
+    Case UXB_TCFFI_KIND_OBJECT_LIFECYCLE
+        Return "object_lifecycle"
+    Case UXB_TCFFI_KIND_CALL_DLL
+        Return "call_dll"
+    Case UXB_TCFFI_KIND_CALL_API
+        Return "call_api"
+    Case UXB_TCFFI_KIND_IMPORT
+        Return "import"
+    Case UXB_TCFFI_KIND_INLINE
+        Return "inline"
+    Case Else
+        Return "unknown"
+    End Select
+End Function
+
+Function UXBTCFFIStatusName(ByVal s As Integer) As String
+    Select Case s
+    Case UXB_TCFFI_STATUS_SUPPORTED
+        Return "supported"
+    Case UXB_TCFFI_STATUS_DIAGNOSTIC
+        Return "diagnostic"
+    Case UXB_TCFFI_STATUS_PENDING
+        Return "pending"
+    Case UXB_TCFFI_STATUS_REJECTED
+        Return "rejected"
+    Case Else
+        Return "unknown"
+    End Select
+End Function
+
+Function UXBTCFFIDecide(ByRef surfaceName As String, ByRef d As UXBTypeClassFfiDecision) As Integer
+    UXBTCFFIDecisionInit d
+
+    Dim As String s
+    s = UCase(Trim(surfaceName))
+    d.surfaceName = s
+
+    Select Case s
+    Case "LOAD_FIELD", "STORE_FIELD", "FIELD_ADDR", "TYPE_FIELD"
+        d.kind = UXB_TCFFI_KIND_TYPE_FIELD
+        d.status = UXB_TCFFI_STATUS_SUPPORTED
+        d.targetOpcode = s
+        d.requiresLayout = 1
+        Return 1
+
+    Case "METHOD_CALL", "THIS", "DIRECT_METHOD"
+        d.kind = UXB_TCFFI_KIND_CLASS_METHOD
+        d.status = UXB_TCFFI_STATUS_SUPPORTED
+        d.targetOpcode = s
+        d.requiresLayout = 1
+        Return 1
+
+    Case "NEW", "DELETE", "CTOR", "DTOR"
+        d.kind = UXB_TCFFI_KIND_OBJECT_LIFECYCLE
+        d.status = UXB_TCFFI_STATUS_SUPPORTED
+        d.targetOpcode = s
+        d.requiresLayout = 1
+        d.runtimeSymbol = "__uxb_rt_object_" & LCase(s)
+        Return 1
+
+    Case "CALL_DLL"
+        d.kind = UXB_TCFFI_KIND_CALL_DLL
+        d.status = UXB_TCFFI_STATUS_SUPPORTED
+        d.targetOpcode = "CALL_DLL"
+        d.requiresAbi = 1
+        d.requiresSigner = 1
+        Return 1
+
+    Case "CALL_API"
+        d.kind = UXB_TCFFI_KIND_CALL_API
+        d.status = UXB_TCFFI_STATUS_SUPPORTED
+        d.targetOpcode = "CALL_API"
+        d.requiresAbi = 1
+        d.requiresSigner = 1
+        Return 1
+
+    Case "IMPORT"
+        d.kind = UXB_TCFFI_KIND_IMPORT
+        d.status = UXB_TCFFI_STATUS_SUPPORTED
+        d.targetOpcode = "IMPORT"
+        d.requiresSigner = 1
+        Return 1
+
+    Case "INLINE"
+        d.kind = UXB_TCFFI_KIND_INLINE
+        d.status = UXB_TCFFI_STATUS_DIAGNOSTIC
+        d.targetOpcode = "INLINE"
+        d.requiresAbi = 1
+        d.diagnosticCode = "UXB_INLINE_GUARD_REQUIRED"
+        d.diagnosticText = "INLINE x64 requires preserve/clobber/ABI metadata before emit."
+        Return 0
+
+    Case "VIRTUAL_DISPATCH", "INHERITANCE_DISPATCH"
+        d.kind = UXB_TCFFI_KIND_CLASS_METHOD
+        d.status = UXB_TCFFI_STATUS_DIAGNOSTIC
+        d.targetOpcode = s
+        d.diagnosticCode = "UXB_CLASS_VIRTUAL_DISPATCH_PENDING"
+        d.diagnosticText = "Virtual/inheritance backend is pending; direct method dispatch is the current target."
+        Return 0
+
+    Case Else
+        d.status = UXB_TCFFI_STATUS_PENDING
+        d.diagnosticCode = "UXB_TCFFI_SURFACE_UNKNOWN"
+        d.diagnosticText = "Unknown TYPE/CLASS/FFI backend surface: " & surfaceName
+        Return 0
+    End Select
+End Function
+
+Function UXBTCFFIDiagnosticText(ByRef surfaceName As String) As String
+    Dim As UXBTypeClassFfiDecision d
+    If UXBTCFFIDecide(surfaceName, d) <> 0 Then Return ""
+    Return d.diagnosticCode & ": " & d.diagnosticText
+End Function
+
+#endif

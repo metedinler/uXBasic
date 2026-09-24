@@ -1,0 +1,269 @@
+#ifndef UXB_MIR_INTERP_ARITH_FBS
+#define UXB_MIR_INTERP_ARITH_FBS
+
+#include once "../../mir/mir_instruction.fbs"
+#include once "../common/interp_context.fbs"
+#include once "../common/interp_extnum_runtime.fbs"
+
+Private Function UXBMIRInterpAsDouble(ByRef v As UXBInterpValue) As Double
+    If v.kind = UXB_VAL_STRING Or v.kind = UXB_VAL_WSTRING Then Return Val(v.stringValue)
+    If v.kind = UXB_VAL_BOOL Then Return CDbl(v.boolValue)
+    If v.floatValue <> 0 Then Return v.floatValue
+    Return CDbl(v.intValue)
+End Function
+
+Private Function UXBMIRInterpAsInt(ByRef v As UXBInterpValue) As LongInt
+    If v.kind = UXB_VAL_STRING Or v.kind = UXB_VAL_WSTRING Then Return ValInt(v.stringValue)
+    If v.kind = UXB_VAL_BOOL Then Return IIf(v.boolValue <> 0, -1, 0)
+    If v.intValue <> 0 Then Return v.intValue
+    Return CLngInt(v.floatValue)
+End Function
+
+Private Function UXBMIRInterpNeedsFloat(ByRef a As UXBInterpValue, ByRef b As UXBInterpValue, ByVal op As String) As Integer
+    If InStr(op, "F") > 0 Then Return 1
+    If a.kind = UXB_VAL_F32 Or a.kind = UXB_VAL_F64 Then Return 1
+    If b.kind = UXB_VAL_F32 Or b.kind = UXB_VAL_F64 Then Return 1
+    Return 0
+End Function
+
+Private Function UXBMIRInterpIsUnsignedInteger(ByRef v As UXBInterpValue) As Integer
+    If v.kind = UXB_VAL_U32 Or v.kind = UXB_VAL_U64 Then Return 1
+    Dim t As String = UCase(Trim(v.typeName))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Select Case t
+    Case "U8", "U16", "U32", "U64", "UBYTE", "USHORT", "UINTEGER", "ULONG", "ULONGINT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+' S-077: the raw 64 bits of an integer value, read as unsigned. U32/U64 keep
+' their bits in uintValue; every other kind stores a signed two's-complement
+' intValue whose bit pattern is what an unsigned opcode must see.
+Private Function UXBMIRInterpUnsignedBits(ByRef v As UXBInterpValue) As ULongInt
+    If v.kind = UXB_VAL_U32 Or v.kind = UXB_VAL_U64 Then Return v.uintValue
+    Return CULngInt(UXBMIRInterpAsInt(v))
+End Function
+
+' S-077: exact (non-floating) comparison is valid only when both sides are
+' machine integers/booleans. Doubles lose the low bits of 64-bit values, so
+' `9007199254740993 > 9007199254740992` was false and any value >= 2^53 was unreliable.
+Private Function UXBMIRInterpBothMachineIntegers(ByRef a As UXBInterpValue, ByRef b As UXBInterpValue) As Integer
+    Select Case a.kind
+    Case UXB_VAL_BOOL, UXB_VAL_I32, UXB_VAL_U32, UXB_VAL_I64, UXB_VAL_U64
+    Case Else
+        Return 0
+    End Select
+    Select Case b.kind
+    Case UXB_VAL_BOOL, UXB_VAL_I32, UXB_VAL_U32, UXB_VAL_I64, UXB_VAL_U64
+    Case Else
+        Return 0
+    End Select
+    Return 1
+End Function
+
+' S-077: a MIR arithmetic result typed U64 must carry the unsigned kind so
+' printing, later comparisons and conversion to floating point see 2^64-1 rather than -1.
+Private Function UXBMIRInterpResultIsU64(ByRef ins As UXBMIRInstructionRecord) As Integer
+    Dim t As String = UCase(Trim(ins.resultType))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Return IIf(t = "U64" Or t = "ULONGINT", 1, 0)
+End Function
+
+Private Function UXBMIRInterpIntResult(ByRef ins As UXBMIRInstructionRecord, ByVal bits As LongInt) As UXBInterpValue
+    If UXBMIRInterpResultIsU64(ins) <> 0 Then Return UXBInterpValueUInt(CULngInt(bits))
+    Return UXBInterpValueInt(bits)
+End Function
+
+Private Function UXBMIRInterpArithmeticShr64(ByVal value As LongInt, ByVal countValue As LongInt) As LongInt
+    Dim shiftBits As Integer = countValue And 63
+    If shiftBits = 0 Then Return value
+    If value >= 0 Then Return CLngInt(CULngInt(value) Shr shiftBits)
+    Return Not CLngInt(CULngInt(Not value) Shr shiftBits)
+End Function
+
+Private Function UXBMIRInterpRol64(ByVal value As ULongInt, ByVal countValue As LongInt) As ULongInt
+    Dim shiftBits As Integer = countValue And 63
+    If shiftBits = 0 Then Return value
+    Return (value Shl shiftBits) Or (value Shr (64 - shiftBits))
+End Function
+
+Private Function UXBMIRInterpRor64(ByVal value As ULongInt, ByVal countValue As LongInt) As ULongInt
+    Dim shiftBits As Integer = countValue And 63
+    If shiftBits = 0 Then Return value
+    Return (value Shr shiftBits) Or (value Shl (64 - shiftBits))
+End Function
+
+Private Function UXBMIRInterpIntegerPow(ByVal baseValue As LongInt, ByVal exponentValue As LongInt) As UXBInterpValue
+    If exponentValue < 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR integer exponent cannot be negative")
+    Dim baseWork As LongInt = baseValue
+    Dim exponentWork As ULongInt = CULngInt(exponentValue)
+    Dim resultValue As LongInt = 1
+    Do While exponentWork <> 0
+        If (exponentWork And 1) <> 0 Then resultValue *= baseWork
+        exponentWork = exponentWork Shr 1
+        If exponentWork <> 0 Then baseWork *= baseWork
+    Loop
+    Return UXBInterpValueInt(resultValue)
+End Function
+
+Private Function UXBMIRInterpLogic16Value(ByVal op As String, ByRef leftValue As UXBInterpValue, ByRef rightValue As UXBInterpValue) As UXBInterpValue
+    ' BASIC compatible Logic16: full-width bit logic over -1/0 truth values,
+    ' but it also behaves correctly for integer bit masks.
+    Dim A As LongInt = UXBMIRInterpAsInt(leftValue)
+    Dim B As LongInt = UXBMIRInterpAsInt(rightValue)
+    Select Case UCase(Trim(op))
+    Case "MIR_NAND": Return UXBInterpValueInt(Not (A And B))
+    Case "MIR_NOR": Return UXBInterpValueInt(Not (A Or B))
+    Case "MIR_XNOR": Return UXBInterpValueInt(Not (A Xor B))
+    Case "MIR_IMP": Return UXBInterpValueInt((Not A) Or B)
+    Case "MIR_CIMP": Return UXBInterpValueInt(A Or (Not B))
+    Case "MIR_NIMP": Return UXBInterpValueInt(A And (Not B))
+    Case "MIR_NCIMP": Return UXBInterpValueInt((Not A) And B)
+    Case "MIR_IDA": Return UXBInterpValueInt(A)
+    Case "MIR_IDB": Return UXBInterpValueInt(B)
+    Case "MIR_NOTA": Return UXBInterpValueInt(Not A)
+    Case "MIR_NOTB": Return UXBInterpValueInt(Not B)
+    End Select
+    Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR Logic16 opcode not executable: " & op)
+End Function
+
+Function UXBMIRInterpExecArith(ByRef ins As UXBMIRInstructionRecord, ByRef ctx As UXBInterpContext, ByRef leftValue As UXBInterpValue, ByRef rightValue As UXBInterpValue) As UXBInterpValue
+    Dim op As String = UXBMIRStep4CanonicalOpcode(ins.opcode)
+    Dim hasExternalNumber As Integer
+    hasExternalNumber = IIf(UXBInterpExtNumIsValue(leftValue) <> 0 Or UXBInterpExtNumIsValue(rightValue) <> 0, 1, 0)
+    If hasExternalNumber <> 0 Then
+        Dim extErr As String
+        Select Case op
+        Case "MIR_ADD", "MIR_FADD": Return UXBInterpExtNumBinary("ADD", leftValue, rightValue, extErr)
+        Case "MIR_SUB", "MIR_FSUB": Return UXBInterpExtNumBinary("SUB", leftValue, rightValue, extErr)
+        Case "MIR_MUL", "MIR_FMUL": Return UXBInterpExtNumBinary("MUL", leftValue, rightValue, extErr)
+        Case "MIR_DIV", "MIR_FDIV": Return UXBInterpExtNumBinary("DIV", leftValue, rightValue, extErr)
+        Case "MIR_IDIV": Return UXBInterpExtNumBinary("IDIV", leftValue, rightValue, extErr)
+        Case "MIR_MOD": Return UXBInterpExtNumBinary("MOD", leftValue, rightValue, extErr)
+        Case "MIR_NEG", "MIR_FNEG"
+            Dim zeroValue As UXBInterpValue = UXBInterpExtNumCreate(leftValue.typeName, "0", leftValue.externalPrecision, extErr)
+            If UXBInterpIsError(zeroValue) <> 0 Then Return zeroValue
+            Return UXBInterpExtNumBinary("SUB", zeroValue, leftValue, extErr)
+        Case "MIR_EQ", "MIR_NE", "MIR_LT", "MIR_LE", "MIR_GT", "MIR_GE"
+            Dim cmpResult As Long = UXBInterpExtNumCompare(leftValue, rightValue, extErr)
+            If cmpResult = UXB_INTERP_EXT_CMP_ERROR Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, extErr)
+            Select Case op
+            Case "MIR_EQ": Return UXBInterpValueBool(cmpResult = 0)
+            Case "MIR_NE": Return UXBInterpValueBool(cmpResult <> 0)
+            Case "MIR_LT": Return UXBInterpValueBool(cmpResult < 0)
+            Case "MIR_LE": Return UXBInterpValueBool(cmpResult <= 0)
+            Case "MIR_GT": Return UXBInterpValueBool(cmpResult > 0)
+            Case "MIR_GE": Return UXBInterpValueBool(cmpResult >= 0)
+            End Select
+        End Select
+        Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR external-number opcode unsupported: " & op)
+    End If
+    Select Case op
+    Case "MIR_ADD"
+        If leftValue.kind = UXB_VAL_STRING Or rightValue.kind = UXB_VAL_STRING Then Return UXBInterpValueString(UXBInterpValueToString(leftValue) & UXBInterpValueToString(rightValue))
+        If UXBMIRInterpNeedsFloat(leftValue, rightValue, op) <> 0 Then Return UXBInterpValueFloat(UXBMIRInterpAsDouble(leftValue) + UXBMIRInterpAsDouble(rightValue))
+        Return UXBMIRInterpIntResult(ins, UXBMIRInterpAsInt(leftValue) + UXBMIRInterpAsInt(rightValue))
+    Case "MIR_SUB"
+        If UXBMIRInterpNeedsFloat(leftValue, rightValue, op) <> 0 Then Return UXBInterpValueFloat(UXBMIRInterpAsDouble(leftValue) - UXBMIRInterpAsDouble(rightValue))
+        Return UXBMIRInterpIntResult(ins, UXBMIRInterpAsInt(leftValue) - UXBMIRInterpAsInt(rightValue))
+    Case "MIR_MUL"
+        If UXBMIRInterpNeedsFloat(leftValue, rightValue, op) <> 0 Then Return UXBInterpValueFloat(UXBMIRInterpAsDouble(leftValue) * UXBMIRInterpAsDouble(rightValue))
+        Return UXBMIRInterpIntResult(ins, UXBMIRInterpAsInt(leftValue) * UXBMIRInterpAsInt(rightValue))
+    Case "MIR_DIV", "MIR_IDIV"
+        If UXBMIRInterpAsDouble(rightValue) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_DIV_ZERO, "MIR division by zero")
+        If op = "MIR_IDIV" Then Return UXBInterpValueInt(UXBMIRInterpAsInt(leftValue) \ UXBMIRInterpAsInt(rightValue))
+        If UXBMIRInterpNeedsFloat(leftValue, rightValue, op) <> 0 Then Return UXBInterpValueFloat(UXBMIRInterpAsDouble(leftValue) / UXBMIRInterpAsDouble(rightValue))
+        Return UXBInterpValueInt(UXBMIRInterpAsInt(leftValue) \ UXBMIRInterpAsInt(rightValue))
+    Case "MIR_MOD"
+        If UXBMIRInterpAsInt(rightValue) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_DIV_ZERO, "MIR modulo by zero")
+        Return UXBInterpValueInt(UXBMIRInterpAsInt(leftValue) Mod UXBMIRInterpAsInt(rightValue))
+    Case "MIR_UIDIV"
+        If UXBMIRInterpUnsignedBits(rightValue) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_DIV_ZERO, "MIR division by zero")
+        Return UXBInterpValueUInt(UXBMIRInterpUnsignedBits(leftValue) \ UXBMIRInterpUnsignedBits(rightValue))
+    Case "MIR_UMOD"
+        If UXBMIRInterpUnsignedBits(rightValue) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_DIV_ZERO, "MIR modulo by zero")
+        Return UXBInterpValueUInt(UXBMIRInterpUnsignedBits(leftValue) Mod UXBMIRInterpUnsignedBits(rightValue))
+    Case "MIR_ULT": Return UXBInterpValueBool(UXBMIRInterpUnsignedBits(leftValue) < UXBMIRInterpUnsignedBits(rightValue))
+    Case "MIR_ULE": Return UXBInterpValueBool(UXBMIRInterpUnsignedBits(leftValue) <= UXBMIRInterpUnsignedBits(rightValue))
+    Case "MIR_UGT": Return UXBInterpValueBool(UXBMIRInterpUnsignedBits(leftValue) > UXBMIRInterpUnsignedBits(rightValue))
+    Case "MIR_UGE": Return UXBInterpValueBool(UXBMIRInterpUnsignedBits(leftValue) >= UXBMIRInterpUnsignedBits(rightValue))
+    Case "MIR_NEG", "MIR_FNEG"
+        If UXBMIRInterpNeedsFloat(leftValue, rightValue, op) <> 0 Then Return UXBInterpValueFloat(-UXBMIRInterpAsDouble(leftValue))
+        Return UXBMIRInterpIntResult(ins, -UXBMIRInterpAsInt(leftValue))
+    Case "MIR_INC"
+        Return UXBInterpValueInt(UXBMIRInterpAsInt(leftValue) + 1)
+    Case "MIR_DEC"
+        Return UXBInterpValueInt(UXBMIRInterpAsInt(leftValue) - 1)
+    Case "MIR_FADD": Return UXBInterpValueFloat(UXBMIRInterpAsDouble(leftValue) + UXBMIRInterpAsDouble(rightValue))
+    Case "MIR_FSUB": Return UXBInterpValueFloat(UXBMIRInterpAsDouble(leftValue) - UXBMIRInterpAsDouble(rightValue))
+    Case "MIR_FMUL": Return UXBInterpValueFloat(UXBMIRInterpAsDouble(leftValue) * UXBMIRInterpAsDouble(rightValue))
+    Case "MIR_FDIV"
+        If UXBMIRInterpAsDouble(rightValue) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_DIV_ZERO, "MIR float division by zero")
+        Return UXBInterpValueFloat(UXBMIRInterpAsDouble(leftValue) / UXBMIRInterpAsDouble(rightValue))
+    Case "MIR_EQ": Return UXBInterpValueBool(UXBInterpValuesEqual(leftValue, rightValue))
+    Case "MIR_NE": Return UXBInterpValueBool(UXBInterpValuesEqual(leftValue, rightValue) = 0)
+    ' S-133: a STRING/WSTRING operand needs a LEXICOGRAPHIC (ordinal) comparison, not the numeric path
+    ' below -- UXBMIRInterpAsDouble of a non-numeric string is Val()'s 0, so e.g. "abc" < "abd" compared
+    ' 0 < 0 and was always false (both `=`/`<>` above already special-case strings via UXBInterpValuesEqual;
+    ' `<`/`<=`/`>`/`>=` never did).
+    Case "MIR_LT"
+        If leftValue.kind = UXB_VAL_STRING Or leftValue.kind = UXB_VAL_WSTRING Or rightValue.kind = UXB_VAL_STRING Or rightValue.kind = UXB_VAL_WSTRING Then Return UXBInterpValueBool(UXBInterpValueToString(leftValue) < UXBInterpValueToString(rightValue))
+        If UXBMIRInterpBothMachineIntegers(leftValue, rightValue) <> 0 Then Return UXBInterpValueBool(UXBMIRInterpAsInt(leftValue) < UXBMIRInterpAsInt(rightValue))
+        Return UXBInterpValueBool(UXBMIRInterpAsDouble(leftValue) < UXBMIRInterpAsDouble(rightValue))
+    Case "MIR_LE"
+        If leftValue.kind = UXB_VAL_STRING Or leftValue.kind = UXB_VAL_WSTRING Or rightValue.kind = UXB_VAL_STRING Or rightValue.kind = UXB_VAL_WSTRING Then Return UXBInterpValueBool(UXBInterpValueToString(leftValue) <= UXBInterpValueToString(rightValue))
+        If UXBMIRInterpBothMachineIntegers(leftValue, rightValue) <> 0 Then Return UXBInterpValueBool(UXBMIRInterpAsInt(leftValue) <= UXBMIRInterpAsInt(rightValue))
+        Return UXBInterpValueBool(UXBMIRInterpAsDouble(leftValue) <= UXBMIRInterpAsDouble(rightValue))
+    Case "MIR_GT"
+        If leftValue.kind = UXB_VAL_STRING Or leftValue.kind = UXB_VAL_WSTRING Or rightValue.kind = UXB_VAL_STRING Or rightValue.kind = UXB_VAL_WSTRING Then Return UXBInterpValueBool(UXBInterpValueToString(leftValue) > UXBInterpValueToString(rightValue))
+        If UXBMIRInterpBothMachineIntegers(leftValue, rightValue) <> 0 Then Return UXBInterpValueBool(UXBMIRInterpAsInt(leftValue) > UXBMIRInterpAsInt(rightValue))
+        Return UXBInterpValueBool(UXBMIRInterpAsDouble(leftValue) > UXBMIRInterpAsDouble(rightValue))
+    Case "MIR_GE"
+        If leftValue.kind = UXB_VAL_STRING Or leftValue.kind = UXB_VAL_WSTRING Or rightValue.kind = UXB_VAL_STRING Or rightValue.kind = UXB_VAL_WSTRING Then Return UXBInterpValueBool(UXBInterpValueToString(leftValue) >= UXBInterpValueToString(rightValue))
+        If UXBMIRInterpBothMachineIntegers(leftValue, rightValue) <> 0 Then Return UXBInterpValueBool(UXBMIRInterpAsInt(leftValue) >= UXBMIRInterpAsInt(rightValue))
+        Return UXBInterpValueBool(UXBMIRInterpAsDouble(leftValue) >= UXBMIRInterpAsDouble(rightValue))
+    Case "MIR_AND"
+        Return UXBInterpValueInt(UXBMIRInterpAsInt(leftValue) And UXBMIRInterpAsInt(rightValue))
+    Case "MIR_OR"
+        Return UXBInterpValueInt(UXBMIRInterpAsInt(leftValue) Or UXBMIRInterpAsInt(rightValue))
+    Case "MIR_XOR"
+        Return UXBInterpValueInt(UXBMIRInterpAsInt(leftValue) Xor UXBMIRInterpAsInt(rightValue))
+    Case "MIR_NOT"
+        If leftValue.kind = UXB_VAL_BOOL Then Return UXBInterpValueBool(UXBInterpTruth(leftValue) = 0)
+        Return UXBInterpValueInt(Not UXBMIRInterpAsInt(leftValue))
+    Case "MIR_BAND": Return UXBInterpValueInt(UXBMIRInterpAsInt(leftValue) And UXBMIRInterpAsInt(rightValue))
+    Case "MIR_BOR": Return UXBInterpValueInt(UXBMIRInterpAsInt(leftValue) Or UXBMIRInterpAsInt(rightValue))
+    Case "MIR_BXOR": Return UXBInterpValueInt(UXBMIRInterpAsInt(leftValue) Xor UXBMIRInterpAsInt(rightValue))
+    Case "MIR_BNOT": Return UXBInterpValueInt(Not UXBMIRInterpAsInt(leftValue))
+    Case "MIR_POW"
+        If UXBMIRInterpNeedsFloat(leftValue, rightValue, op) <> 0 Then Return UXBInterpValueFloat(UXBMIRInterpAsDouble(leftValue) ^ UXBMIRInterpAsDouble(rightValue))
+        Return UXBMIRInterpIntegerPow(UXBMIRInterpAsInt(leftValue), UXBMIRInterpAsInt(rightValue))
+    Case "MIR_NAND", "MIR_NOR", "MIR_XNOR", "MIR_IMP", "MIR_CIMP", "MIR_NIMP", "MIR_NCIMP", "MIR_IDA", "MIR_IDB", "MIR_NOTA", "MIR_NOTB"
+        Return UXBMIRInterpLogic16Value(op, leftValue, rightValue)
+    Case "MIR_SHL"
+        If UXBMIRInterpIsUnsignedInteger(leftValue) <> 0 Then Return UXBInterpValueUInt(leftValue.uintValue Shl (UXBMIRInterpAsInt(rightValue) And 63))
+        Return UXBInterpValueInt(CLngInt(CULngInt(UXBMIRInterpAsInt(leftValue)) Shl (UXBMIRInterpAsInt(rightValue) And 63)))
+    Case "MIR_SHR"
+        Return UXBInterpValueInt(UXBMIRInterpArithmeticShr64(UXBMIRInterpAsInt(leftValue), UXBMIRInterpAsInt(rightValue)))
+    Case "MIR_USHR"
+        Return UXBInterpValueUInt(CULngInt(UXBMIRInterpAsInt(leftValue)) Shr (UXBMIRInterpAsInt(rightValue) And 63))
+    Case "MIR_ROL"
+        Dim rolResult As ULongInt = UXBMIRInterpRol64(CULngInt(UXBMIRInterpAsInt(leftValue)), UXBMIRInterpAsInt(rightValue))
+        If UXBMIRInterpIsUnsignedInteger(leftValue) <> 0 Then Return UXBInterpValueUInt(rolResult)
+        Return UXBInterpValueInt(CLngInt(rolResult))
+    Case "MIR_ROR"
+        Dim rorResult As ULongInt = UXBMIRInterpRor64(CULngInt(UXBMIRInterpAsInt(leftValue)), UXBMIRInterpAsInt(rightValue))
+        If UXBMIRInterpIsUnsignedInteger(leftValue) <> 0 Then Return UXBInterpValueUInt(rorResult)
+        Return UXBInterpValueInt(CLngInt(rorResult))
+    Case "MIR_CAST", "MIR_COERCE"
+        Return UXBInterpApplyDeclaredType(leftValue, ins.resultType)
+    Case "MIR_CODEPTR", "MIR_LPTR"
+        ' S-076: same refusal as the AST interpreter -- a routine/label has no address
+        ' inside an interpreter (native x64 returns the real code address).
+        Return UXBInterpValueError(UXB_INTERP_ERR_NATIVE_ONLY, "MIR CODEPTR/LPTR requires native x64 (an interpreter has no code address to return)")
+    End Select
+    Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR arithmetic opcode not executable: " & ins.opcode)
+End Function
+
+#endif

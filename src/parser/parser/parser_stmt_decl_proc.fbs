@@ -1,0 +1,352 @@
+Private Function IsEndSubStart(ByRef ps As ParseState) As Integer
+    If IsKw(ps, "END") = 0 Then Return 0
+    Dim t1 As Token
+    t1 = LookToken(ps, 1)
+    If t1.kind <> "KEYWORD" And t1.kind <> "IDENT" Then Return 0
+    Return IIf(UCase(t1.lexeme) = "SUB", 1, 0)
+End Function
+
+Private Function IsEndFunctionStart(ByRef ps As ParseState) As Integer
+    If IsKw(ps, "END") = 0 Then Return 0
+    Dim t1 As Token
+    t1 = LookToken(ps, 1)
+    If t1.kind <> "KEYWORD" And t1.kind <> "IDENT" Then Return 0
+    Return IIf(UCase(t1.lexeme) = "FUNCTION", 1, 0)
+End Function
+
+' S-128: a top-level SUB/FUNCTION/DECLARE cannot carry a keyword name (`FUNCTION Str()` would shadow the
+' builtin STR and read as a call to it). Routines inside a NAMESPACE/MODULE stay free (they are reached
+' through the qualified `ns.Open(...)` form, e.g. uxsqlite.Open), and MAIN keeps its own dedicated
+' diagnostic (S-067) in the semantic pass.
+Private Function ParserRoutineNameIsReserved(ByRef ps As ParseState, ByRef nameTok As Token) As Integer
+    If ps.namespaceDepth > 0 Or ps.moduleDepth > 0 Then Return 0
+    If UCase(Trim(nameTok.lexeme)) = "MAIN" Then Return 0
+    Return ParserTokenIsReservedName(nameTok)
+End Function
+
+Private Function ParseParamDeclarator(ByRef ps As ParseState) As Integer
+    Dim modeText As String
+    modeText = ""
+
+    Dim modeTok As Token
+    modeTok = CurToken(ps)
+    If modeTok.kind = "KEYWORD" Or modeTok.kind = "IDENT" Then
+        Dim modeUpper As String
+        modeUpper = UCase(modeTok.lexeme)
+        If modeUpper = "BYREF" Or modeUpper = "BYVAL" Then
+            modeText = modeUpper
+            AdvanceTok ps
+        End If
+    End If
+
+    Dim identTok As Token
+    identTok = CurToken(ps)
+    If identTok.kind <> "IDENT" And identTok.kind <> "KEYWORD" Then
+        ps.lastError = "parameter identifier expected"
+        Return -1
+    End If
+    If identTok.kind = "KEYWORD" Then
+        Dim badParamKeyword As String
+        badParamKeyword = UCase(Trim(identTok.lexeme))
+        Select Case badParamKeyword
+        Case "AS", "BYVAL", "BYREF", "LIB", "ALIAS", "CDECL", "STDCALL", "FUNCTION", "SUB", "DECLARE", "METHOD", "PROPERTY", "OPERATOR", "CONSTRUCTOR", "DESTRUCTOR"
+            ps.lastError = "parameter identifier expected"
+            Return -1
+        End Select
+    End If
+    ' S-128: a keyword (builtin-function or statement word, type name, ...) cannot name a parameter.
+    If ParserTokenIsReservedName(identTok) <> 0 Then
+        ParserSetReservedNameError ps, identTok, "parameter", "parameter"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim paramNode As Integer
+    paramNode = MakeNodeFromToken(ps, "PARAM_DECL", identTok.lexeme, "", identTok)
+    If modeText <> "" Then
+        ps.ast.nodes(paramNode).op = modeText
+    End If
+
+    If MatchKeyword(ps, "AS") Then
+        Dim typeTok As Token
+        typeTok = CurToken(ps)
+        If ValidateTypeToken(ps, typeTok) = 0 Then
+            If ps.lastError = "" Then ps.lastError = "parameter type expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim typeNode As Integer
+        Dim canonicalParamType As String
+        canonicalParamType = CanonicalTypeNameForParser(typeTok.lexeme)
+        ' Preserve an unsized array parameter suffix (for example STRING[]).
+        ' Array/object values keep their backend representation and are never
+        ' routed through the scalar task-cast path.
+        If MatchOp(ps, "[") Then
+            If MatchOp(ps, "]") = 0 Then
+                ps.lastError = "parameter array type expects []"
+                Return -1
+            End If
+            canonicalParamType &= "[]"
+        End If
+        typeNode = MakeNodeFromToken(ps, "TYPE_REF", canonicalParamType, "", typeTok)
+        ASTAddChild ps.ast, paramNode, typeNode
+        ps.ast.nodes(paramNode).typeName = canonicalParamType
+    End If
+
+    Return paramNode
+End Function
+
+Private Function ParseParamList(ByRef ps As ParseState, ByVal ownerNode As Integer) As Integer
+    If MatchOp(ps, "(") = 0 Then
+        ps.lastError = "missing ( in signature"
+        Return 0
+    End If
+
+    SkipSeparators ps
+    If MatchOp(ps, ")") Then Return 1
+
+    Do
+        SkipSeparators ps
+        Dim paramNode As Integer
+        paramNode = ParseParamDeclarator(ps)
+        If paramNode = -1 Then Return 0
+        ASTAddChild ps.ast, ownerNode, paramNode
+
+        SkipSeparators ps
+        If MatchOp(ps, ",") = 0 Then Exit Do
+        SkipSeparators ps
+    Loop
+
+    SkipSeparators ps
+    If MatchOp(ps, ")") = 0 Then
+        ps.lastError = "missing ) in signature"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ParseDeclareQualifiers(ByRef ps As ParseState, ByVal declNode As Integer) As Integer
+    Dim consumed As Integer
+    consumed = 0
+
+    Do
+        Dim qTok As Token
+        qTok = CurToken(ps)
+        If qTok.kind <> "KEYWORD" And qTok.kind <> "IDENT" Then Exit Do
+
+        Dim qText As String
+        qText = UCase(Trim(qTok.lexeme))
+
+        If qText = "CDECL" Or qText = "STDCALL" Then
+            ps.ast.nodes(declNode).op = qText
+            AdvanceTok ps
+            consumed = 1
+            Continue Do
+        End If
+
+        If qText = "LIB" Then
+            AdvanceTok ps
+            Dim libTok As Token
+            libTok = CurToken(ps)
+            If libTok.kind <> "STRING" Then
+                ps.lastError = "DECLARE: LIB expects string literal"
+                Return -1
+            End If
+            AdvanceTok ps
+            If Trim(ps.ast.nodes(declNode).typeName) = "" Then
+                ps.ast.nodes(declNode).typeName = "LIB=" & libTok.lexeme
+            Else
+                ps.ast.nodes(declNode).typeName &= ";LIB=" & libTok.lexeme
+            End If
+            consumed = 1
+            Continue Do
+        End If
+
+        If qText = "ALIAS" Then
+            AdvanceTok ps
+            Dim aliasTok As Token
+            aliasTok = CurToken(ps)
+            If aliasTok.kind <> "STRING" And aliasTok.kind <> "IDENT" Then
+                ps.lastError = "DECLARE: ALIAS expects string or identifier"
+                Return -1
+            End If
+            AdvanceTok ps
+            If Trim(ps.ast.nodes(declNode).symbolName) = "" Then
+                ps.ast.nodes(declNode).symbolName = aliasTok.lexeme
+            End If
+            consumed = 1
+            Continue Do
+        End If
+
+        Exit Do
+    Loop
+
+    Return consumed
+End Function
+
+Function ParseDeclareStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim kindTok As Token
+    kindTok = CurToken(ps)
+    If kindTok.kind <> "KEYWORD" And kindTok.kind <> "IDENT" Then
+        ps.lastError = "DECLARE: expected SUB or FUNCTION"
+        Return -1
+    End If
+
+    Dim declKind As String
+    declKind = UCase(kindTok.lexeme)
+    If declKind <> "SUB" And declKind <> "FUNCTION" Then
+        ps.lastError = "DECLARE: expected SUB or FUNCTION"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If ParserRoutineNameIsReserved(ps, nameTok) <> 0 Then
+        ParserSetReservedNameError ps, nameTok, "DECLARE", "routine"
+        Return -1
+    End If
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "DECLARE: name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim declNode As Integer
+    If declKind = "SUB" Then
+        declNode = MakeNodeFromToken(ps, "DECLARE_SUB_STMT", nameTok.lexeme, "", firstTok)
+    Else
+        declNode = MakeNodeFromToken(ps, "DECLARE_FUNCTION_STMT", nameTok.lexeme, "", firstTok)
+    End If
+
+    If ParseDeclareQualifiers(ps, declNode) = -1 Then Return -1
+
+    ' Tolerate repeated/late qualifiers before signature.
+    If CurToken(ps).kind <> "OP" Or CurToken(ps).lexeme <> "(" Then
+        If ParseDeclareQualifiers(ps, declNode) = -1 Then Return -1
+    End If
+
+    If ParseParamList(ps, declNode) = 0 Then Return -1
+
+    If declKind = "FUNCTION" Then
+        If MatchKeyword(ps, "AS") = 0 Then
+            ps.lastError = "DECLARE FUNCTION: missing AS return type"
+            Return -1
+        End If
+
+        Dim retTok As Token
+        retTok = CurToken(ps)
+        If ValidateTypeToken(ps, retTok) = 0 Then
+            If ps.lastError = "" Then ps.lastError = "DECLARE FUNCTION: return type expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim retNode As Integer
+        Dim canonicalRetTypeDecl As String
+        canonicalRetTypeDecl = CanonicalTypeNameForParser(retTok.lexeme)
+        retNode = MakeNodeFromToken(ps, "RETURN_TYPE", canonicalRetTypeDecl, "", retTok)
+        ASTAddChild ps.ast, declNode, retNode
+    End If
+
+    Return declNode
+End Function
+
+Function ParseSubStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If ParserRoutineNameIsReserved(ps, nameTok) <> 0 Then
+        ParserSetReservedNameError ps, nameTok, "SUB", "routine"
+        Return -1
+    End If
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "SUB: name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim subNode As Integer
+    subNode = MakeNodeFromToken(ps, "SUB_STMT", nameTok.lexeme, "", firstTok)
+
+    If ParseParamList(ps, subNode) = 0 Then Return -1
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndSubStart(ps) Then Exit Do
+
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then Return -1
+        ASTAddChild ps.ast, subNode, st
+        SkipSeparators ps
+    Loop
+
+    If IsEndSubStart(ps) = 0 Then
+        ps.lastError = "missing END SUB"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    Return subNode
+End Function
+
+Function ParseFunctionStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If ParserRoutineNameIsReserved(ps, nameTok) <> 0 Then
+        ParserSetReservedNameError ps, nameTok, "FUNCTION", "routine"
+        Return -1
+    End If
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "FUNCTION: name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim fnNode As Integer
+    fnNode = MakeNodeFromToken(ps, "FUNCTION_STMT", nameTok.lexeme, "", firstTok)
+
+    If ParseParamList(ps, fnNode) = 0 Then Return -1
+
+    If MatchKeyword(ps, "AS") = 0 Then
+        ps.lastError = "FUNCTION: missing AS return type"
+        Return -1
+    End If
+
+    Dim retTok As Token
+    retTok = CurToken(ps)
+    If ValidateTypeToken(ps, retTok) = 0 Then
+        If ps.lastError = "" Then ps.lastError = "FUNCTION: return type expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim retNode As Integer
+    Dim canonicalRetType As String
+    canonicalRetType = CanonicalTypeNameForParser(retTok.lexeme)
+    retNode = MakeNodeFromToken(ps, "RETURN_TYPE", canonicalRetType, "", retTok)
+    ASTAddChild ps.ast, fnNode, retNode
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndFunctionStart(ps) Then Exit Do
+
+        Dim st As Integer
+        st = ParseSimpleStatement(ps)
+        If st = -1 Then Return -1
+        ASTAddChild ps.ast, fnNode, st
+        SkipSeparators ps
+    Loop
+
+    If IsEndFunctionStart(ps) = 0 Then
+        ps.lastError = "missing END FUNCTION"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    Return fnNode
+End Function

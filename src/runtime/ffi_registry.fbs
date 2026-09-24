@@ -1,0 +1,136 @@
+#ifndef UXB_FFI_REGISTRY_FBS
+#define UXB_FFI_REGISTRY_FBS
+
+#include once "../semantic/ffi_signature_binding.fbs"
+
+Const UXB_FFI_REGISTRY_MAX As Integer = 1024
+
+Type UXBFFIContract
+    kind As String          ' DLL, API, CALL_EXTERNAL, IMPORT
+    libraryName As String
+    symbolName As String
+    signatureText As String
+    conventionText As String
+    targetPolicy As String  ' NATIVE_ONLY, ANY, UNSUPPORTED
+    allowlisted As Integer
+    signerRequired As Integer
+    signature As UXBFFISignature
+End Type
+
+Dim Shared gUXBFFIRegistry(0 To UXB_FFI_REGISTRY_MAX - 1) As UXBFFIContract
+Dim Shared gUXBFFIRegistryCount As Integer
+
+Sub UXBFFIRegistryReset()
+    gUXBFFIRegistryCount = 0
+End Sub
+
+Function UXBFFITargetIsNative(ByRef targetText As String) As Integer
+    Dim t As String
+    t = UCase(Trim(targetText))
+    If t = "NATIVE" Or t = "X64" Or t = "X86" Or t = "WIN64" Or t = "WIN32" Then Return 1
+    Return 0
+End Function
+
+Private Function UXBFFIRegistrySame(ByRef a As UXBFFIContract, ByRef kindText As String, ByRef libText As String, ByRef symText As String) As Integer
+    If UCase(Trim(a.kind)) <> UCase(Trim(kindText)) Then Return 0
+    If UCase(Trim(a.libraryName)) <> UCase(Trim(libText)) Then Return 0
+    If UCase(Trim(a.symbolName)) <> UCase(Trim(symText)) Then Return 0
+    Return 1
+End Function
+
+Function UXBFFIRegistryFind(ByRef kindText As String, ByRef libText As String, ByRef symText As String) As Integer
+    Dim i As Integer
+    For i = 0 To gUXBFFIRegistryCount - 1
+        If UXBFFIRegistrySame(gUXBFFIRegistry(i), kindText, libText, symText) <> 0 Then Return i
+    Next i
+    Return -1
+End Function
+
+Function UXBFFIRegistryAdd(ByRef c As UXBFFIContract, ByRef errText As String) As Integer
+    errText = ""
+    If gUXBFFIRegistryCount >= UXB_FFI_REGISTRY_MAX Then
+        errText = "FFI_REGISTRY_FULL"
+        Return 0
+    End If
+
+    Dim idx As Integer
+    idx = UXBFFIRegistryFind(c.kind, c.libraryName, c.symbolName)
+    If idx >= 0 Then
+        gUXBFFIRegistry(idx) = c
+        Return 1
+    End If
+
+    gUXBFFIRegistry(gUXBFFIRegistryCount) = c
+    gUXBFFIRegistryCount += 1
+    Return 1
+End Function
+
+Function UXBFFIRegistryMakeContract( _
+    ByRef kindText As String, _
+    ByRef libText As String, _
+    ByRef symText As String, _
+    ByRef sigText As String, _
+    ByRef convText As String, _
+    ByRef targetText As String, _
+    ByRef outContract As UXBFFIContract, _
+    ByRef errText As String _
+) As Integer
+
+    errText = ""
+    outContract.kind = UCase(Trim(kindText))
+    outContract.libraryName = Trim(libText)
+    outContract.symbolName = Trim(symText)
+    outContract.signatureText = Trim(sigText)
+    outContract.conventionText = UCase(Trim(convText))
+    If outContract.conventionText = "" Then outContract.conventionText = "CDECL"
+    outContract.targetPolicy = "NATIVE_ONLY"
+    outContract.allowlisted = 0
+    outContract.signerRequired = 0
+
+    If outContract.kind = "" Then errText = "FFI_CONTRACT_ERROR: kind is empty": Return 0
+    If outContract.symbolName = "" Then errText = "FFI_CONTRACT_ERROR: symbol is empty": Return 0
+
+    If UXBFFIParseSignature(outContract.signatureText, outContract.signature) = 0 Then
+        errText = outContract.signature.errorText
+        Return 0
+    End If
+
+    If UXBFFICallingConventionValid(outContract.conventionText, targetText, errText) = 0 Then Return 0
+
+    If UXBFFITargetIsNative(targetText) = 0 Then
+        Dim targetUpper As String
+        targetUpper = UCase(Trim(targetText))
+        If targetUpper = "WASM" Or targetUpper = "WAT" Then
+            errText = "FFI_NATIVE_ONLY_UNSUPPORTED_ON_WASM: FFI call '" & outContract.kind & " " & outContract.symbolName & "' is not available for target " & targetText
+        Else
+            errText = "FFI_NATIVE_ONLY_UNSUPPORTED_ON_JS: FFI call '" & outContract.kind & " " & outContract.symbolName & "' is not available for target " & targetText
+        End If
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Function UXBFFIRegistryResolveCall( _
+    ByRef libText As String, _
+    ByRef symText As String, _
+    ByRef sigText As String, _
+    ByRef convText As String, _
+    ByRef targetText As String, _
+    ByRef outContract As UXBFFIContract, _
+    ByRef errText As String _
+) As Integer
+    If UXBFFIRegistryMakeContract("DLL", libText, symText, sigText, convText, targetText, outContract, errText) = 0 Then Return 0
+    Return UXBFFIRegistryAdd(outContract, errText)
+End Function
+
+Function UXBFFIRegistryContractToCsvRow(ByRef c As UXBFFIContract) As String
+    Return c.kind & "," & c.libraryName & "," & c.symbolName & "," & UXBFFISignatureToText(c.signature) & "," & c.conventionText & "," & c.targetPolicy
+End Function
+
+
+' ADIM50 RECOVERY NOTE:
+' Eski parser/semantic FFI contract API korunur; yeni runtime FFI service dispatcher da kaybedilmez.
+#include once "ffi/runtime_ffi.fbs"
+
+#endif

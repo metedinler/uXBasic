@@ -1,0 +1,338 @@
+#ifndef UXB_WASM_INSTR_EMIT_FBS
+#define UXB_WASM_INSTR_EMIT_FBS
+
+Private Function UXBWasmIsIntLiteral(ByRef s As String) As Integer
+    Dim t As String
+    Dim i As Integer
+    Dim c As String
+    t = Trim(s)
+    If t = "" Then Return 0
+    If Left(t, 1) = "-" Or Left(t, 1) = "+" Then t = Mid(t, 2)
+    If t = "" Then Return 0
+    For i = 1 To Len(t)
+        c = Mid(t, i, 1)
+        If c < "0" Or c > "9" Then Return 0
+    Next i
+    Return 1
+End Function
+
+
+Public Function UXBWasmHashText(ByRef textValue As String) As Integer
+    Dim h As ULongInt
+    Dim i As Integer
+    h = &h811C9DC5
+    For i = 1 To Len(textValue)
+        h = (h Xor Asc(Mid(textValue, i, 1)))
+        h = (h * &h01000193) And &hFFFFFFFF
+    Next i
+    If h > &h7FFFFFFF Then Return CInt(h - &h100000000) Else Return CInt(h)
+End Function
+
+Public Function UXBWasmClassIndex(ByRef module As MIRModule, ByRef className As String) As Integer
+    Dim n As String
+    n = UCase(Trim(className))
+    Dim i As Integer
+    For i = 0 To module.vtableClassCount - 1
+        If UCase(Trim(module.vtableClassNames(i))) = n Then Return i
+    Next i
+    Return -1
+End Function
+
+Public Function UXBWasmFieldKey(ByRef fieldName As String) As Integer
+    Return UXBWasmHashText(UCase(Trim(fieldName)))
+End Function
+
+Public Function UXBWasmMethodTargetId(ByRef targetName As String) As Integer
+    Return UXBWasmHashText(UCase(Trim(targetName)))
+End Function
+
+Public Function UXBWasmCanonicalOpcode(ByRef opcodeText As String) As String
+    Dim op As String
+    op = UCase(Trim(opcodeText))
+    If Left(op, 4) = "MIR_" Then op = Mid(op, 5)
+    Select Case op
+    Case "NOP": Return "NOP"
+    Case "LOAD_CONST", "CONST": Return "LOAD_CONST"
+    Case "DIM": Return "DIM"
+    Case "LOCAL_DECL", "GLOBAL_DECL", "PARAM_DECL", "DECLARE", "AS": Return "DECL"
+    Case "LOAD_LOCAL", "LOAD_GLOBAL", "LOAD_VAR", "LOAD": Return "LOAD_VAR"
+    Case "STORE_LOCAL", "STORE_GLOBAL", "STORE_VAR", "STORE": Return "STORE_VAR"
+    Case "+", "ADD": Return "ADD"
+    Case "-", "SUB": Return "SUB"
+    Case "*", "MUL": Return "MUL"
+    Case "/", "DIV", "IDIV": Return "DIV"
+    Case "%", "MOD": Return "MOD"
+    Case "**", "POW": Return "POW"
+    Case "=", "==", "EQ": Return "EQ"
+    Case "<>", "!=", "NE": Return "NE"
+    Case "<", "LT": Return "LT"
+    Case "<=", "LE": Return "LE"
+    Case ">", "GT": Return "GT"
+    Case ">=", "GE": Return "GE"
+    Case "AND", "BAND": Return "AND"
+    Case "OR", "BOR": Return "OR"
+    Case "XOR", "^", "BXOR", "BITXOR": Return "XOR"
+    Case "NAND": Return "NAND"
+    Case "NOR": Return "NOR"
+    Case "XNOR", "NXOR", "EQV", "EQA", "IFF": Return "XNOR"
+    Case "IMP": Return "IMP"
+    Case "CIMP": Return "CIMP"
+    Case "NIMP": Return "NIMP"
+    Case "NCIMP": Return "NCIMP"
+    Case "IDA": Return "IDA"
+    Case "IDB": Return "IDB"
+    Case "NOTA": Return "NOTA"
+    Case "NOTB": Return "NOTB"
+    Case "NOT", "BNOT": Return "NOT"
+    Case "<<", "SHL": Return "SHL"
+    Case ">>", "SHR": Return "SHR"
+    Case "JMP_IF_FALSE", "JZ": Return "JZ"
+    Case "JMP_IF_TRUE", "JNZ": Return "JNZ"
+    Case "JMP", "GOTO": Return "JMP"
+    Case "RETURN", "RET", "EXIT": Return "RET"
+    Case "CALL_RUNTIME", "PRINT", "INPUT", "TIMER", "RND", "RANDOMIZE", "CALL_BUILTIN", "CALL_EXTERNAL", "CALL", "HOST_CALL", "LIBRARY_CALL", "BROWSER_CALL", "JS_CALL", "EXTFP_CALL": Return "HOST_IMPORT"
+    Case "CALL_DLL", "CALL_API", "INLINE", "INLINE_ASM", "NATIVE_ONLY": Return "WASM_BLOCKED"
+    Case "FILE_OPEN", "OPEN", "FILE_CLOSE", "CLOSE", "FILE_READ", "GET", "FILE_WRITE", "PUT", "FILE_SEEK", "SEEK", "FILE_DELETE", "EOF", "LOF": Return "HOST_IMPORT"
+    Case "MEM_COPY", "MEMCOPY", "MEM_FILL", "MEMFILL", "MEM_LOAD", "PEEK", "MEM_STORE", "POKE", "MEMORY_LOAD", "MEMORY_STORE", "MEMORY_COPY", "MEMORY_FILL", "MEMORY_READ_SEQUENCE", "MEMORY_WRITE_SEQUENCE", "MIR_MEMORY_LOAD", "MIR_MEMORY_STORE", "MIR_MEMORY_COPY", "MIR_MEMORY_FILL", "MIR_MEMORY_READ_SEQUENCE", "MIR_MEMORY_WRITE_SEQUENCE": Return op
+    Case "ARRAY_NEW", "ARRAY_LOAD", "ARRAY_STORE": Return "HOST_IMPORT"
+    Case "MEMORY_REF": Return "WASM_BLOCKED"
+    Case "ARRAY_SIZEOF": Return "DIRECT"
+    Case "OBJECT_NEW", "FIELD_LOAD", "FIELD_STORE", "METHOD_CALL", "VIRTUAL_CALL", "DELETE_OBJECT": Return op
+    Case "JSON", "REGEX", "HTTP", "OS", "STRINGX", "LLAMA", "LUA", "PROLOG", "SQLITE", "CURL", "CRYPTO", "ARCHIVE", "IMAGE", "AUDIO", "GRAPHICS", "SERVER", "ONNX", "WEBGPU", "CANVAS": Return "HOST_IMPORT"
+    End Select
+    Return op
+End Function
+
+Public Function UXBWasmBinaryInstr(ByRef opcode As String) As String
+    Dim op As String
+    op = UXBWasmCanonicalOpcode(opcode)
+    Select Case op
+    Case "ADD": Return "i32.add"
+    Case "SUB": Return "i32.sub"
+    Case "MUL": Return "i32.mul"
+    Case "DIV": Return "i32.div_s"
+    Case "MOD": Return "i32.rem_s"
+    ' S-077: unsigned forms (the WAT numeric model is i32; a 64-bit integer
+    ' model for the WASM target is a separate registered item).
+    Case "UIDIV": Return "i32.div_u"
+    Case "UMOD": Return "i32.rem_u"
+    Case "ULT": Return "i32.lt_u"
+    Case "ULE": Return "i32.le_u"
+    Case "UGT": Return "i32.gt_u"
+    Case "UGE": Return "i32.ge_u"
+    Case "EQ": Return "i32.eq"
+    Case "NE": Return "i32.ne"
+    Case "LT": Return "i32.lt_s"
+    Case "LE": Return "i32.le_s"
+    Case "GT": Return "i32.gt_s"
+    Case "GE": Return "i32.ge_s"
+    Case "AND": Return "i32.and"
+    Case "OR": Return "i32.or"
+    Case "XOR": Return "i32.xor"
+    Case "SHL": Return "i32.shl"
+    Case "SHR": Return "i32.shr_s"
+    End Select
+    Return ""
+End Function
+
+
+Private Function UXBWasmLooksLikeStringSymbol(ByRef rawText As String) As Integer
+    Dim t As String
+    t = Trim(rawText)
+    If t = "" Then Return 0
+    If Left(t, 1) = Chr(34) Then Return 1
+    Return 0
+End Function
+
+Public Function UXBWasmEmitValue(ByRef valueText As String) As String
+    Dim t As String
+    t = Trim(valueText)
+    If UXBWasmIsIntLiteral(t) <> 0 Then Return "      i32.const " & t & Chr(10)
+    If LCase(t) = "true" Then Return "      i32.const -1" & Chr(10)
+    If LCase(t) = "false" Then Return "      i32.const 0" & Chr(10)
+    If UXBWasmLooksLikeStringSymbol(t) <> 0 Then Return ""
+    Return UXBWasmEmitVarGet(t)
+End Function
+
+Private Function UXBWasmIsLogic16Opcode(ByRef opcodeText As String) As Integer
+    Dim op As String
+    op = UXBWasmCanonicalOpcode(opcodeText)
+    Select Case op
+    Case "NAND", "NOR", "XNOR", "IMP", "CIMP", "NIMP", "NCIMP", "IDA", "IDB", "NOTA", "NOTB"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Public Function UXBWasmEmitBitNot32() As String
+    Dim outText As String
+    outText = "      i32.const -1" & Chr(10)
+    outText &= "      i32.xor" & Chr(10)
+    Return outText
+End Function
+
+Public Function UXBWasmEmitLogic16Binary(ByRef opcodeText As String, ByRef lhsText As String, ByRef rhsText As String, ByRef resultName As String, ByRef errText As String) As String
+    ' WASM MVP path is i32, so Logic16 is emitted as 32-bit bit logic.
+    ' TRUE is i32.const -1, FALSE is i32.const 0.
+    Dim op As String
+    Dim outText As String
+    op = UXBWasmCanonicalOpcode(opcodeText)
+    outText = ""
+    Select Case op
+    Case "NAND"
+        outText &= UXBWasmEmitValue(lhsText)
+        outText &= UXBWasmEmitValue(rhsText)
+        outText &= "      i32.and" & Chr(10)
+        outText &= UXBWasmEmitBitNot32()
+    Case "NOR"
+        outText &= UXBWasmEmitValue(lhsText)
+        outText &= UXBWasmEmitValue(rhsText)
+        outText &= "      i32.or" & Chr(10)
+        outText &= UXBWasmEmitBitNot32()
+    Case "XNOR"
+        outText &= UXBWasmEmitValue(lhsText)
+        outText &= UXBWasmEmitValue(rhsText)
+        outText &= "      i32.xor" & Chr(10)
+        outText &= UXBWasmEmitBitNot32()
+    Case "IMP"
+        outText &= UXBWasmEmitValue(lhsText)
+        outText &= UXBWasmEmitBitNot32()
+        outText &= UXBWasmEmitValue(rhsText)
+        outText &= "      i32.or" & Chr(10)
+    Case "CIMP"
+        outText &= UXBWasmEmitValue(lhsText)
+        outText &= UXBWasmEmitValue(rhsText)
+        outText &= UXBWasmEmitBitNot32()
+        outText &= "      i32.or" & Chr(10)
+    Case "NIMP"
+        outText &= UXBWasmEmitValue(lhsText)
+        outText &= UXBWasmEmitValue(rhsText)
+        outText &= UXBWasmEmitBitNot32()
+        outText &= "      i32.and" & Chr(10)
+    Case "NCIMP"
+        outText &= UXBWasmEmitValue(lhsText)
+        outText &= UXBWasmEmitBitNot32()
+        outText &= UXBWasmEmitValue(rhsText)
+        outText &= "      i32.and" & Chr(10)
+    Case "IDA"
+        outText &= UXBWasmEmitValue(lhsText)
+    Case "IDB"
+        outText &= UXBWasmEmitValue(rhsText)
+    Case "NOTA"
+        outText &= UXBWasmEmitValue(lhsText)
+        outText &= UXBWasmEmitBitNot32()
+    Case "NOTB"
+        outText &= UXBWasmEmitValue(rhsText)
+        outText &= UXBWasmEmitBitNot32()
+    Case Else
+        errText = "WAT Logic16 mapping missing: " & opcodeText
+        Return ""
+    End Select
+    If Trim(resultName) <> "" Then outText &= UXBWasmEmitVarSet(resultName)
+    Return outText
+End Function
+
+Public Function UXBWasmOpcodeIsDirect(ByRef opcodeText As String) As Integer
+    Dim op As String
+    op = UXBWasmCanonicalOpcode(opcodeText)
+    Select Case op
+    Case "NOP", "DECL", "LOAD_CONST", "LOAD_VAR", "STORE_VAR", "ADD", "SUB", "MUL", "DIV", "MOD", "POW", "EQ", "NE", "LT", "LE", "GT", "GE", "AND", "OR", "XOR", "NAND", "NOR", "XNOR", "IMP", "CIMP", "NIMP", "NCIMP", "IDA", "IDB", "NOTA", "NOTB", "SHL", "SHR", "JMP", "JZ", "JNZ", "RET"
+        Return 1
+    End Select
+    If UXBWasmBinaryInstr(op) <> "" Then Return 1
+    Return 0
+End Function
+
+Public Function UXBWasmHostCallId(ByRef callName As String) As Integer
+    Dim n As String
+    n = UCase(Trim(callName))
+    Select Case n
+    Case "PRINT": Return 1
+    Case "INPUT": Return 2
+    Case "TIMER": Return 3
+    Case "RND": Return 4
+    Case "RANDOMIZE": Return 5
+    Case "ABS": Return 10
+    Case "SQR", "SQRT": Return 11
+    Case "SIN": Return 12
+    Case "COS": Return 13
+    Case "TAN": Return 14
+    Case "ATN": Return 15
+    Case "LOG": Return 16
+    Case "EXP": Return 17
+    Case "LEN": Return 30
+    Case "ASC": Return 31
+    Case "CHR": Return 32
+    Case "VAL": Return 33
+    Case "STR": Return 34
+    Case "OPEN": Return 50
+    Case "CLOSE": Return 51
+    Case "GET": Return 52
+    Case "PUT": Return 53
+    Case "SEEK": Return 54
+    Case "EOF": Return 55
+    Case "LOF": Return 56
+    Case "MEMCOPY": Return 70
+    Case "MEMFILL": Return 71
+    Case "PEEK": Return 72
+    Case "POKE": Return 73
+    Case "ARRAY_NEW": Return 80
+    Case "ARRAY_LOAD": Return 81
+    Case "ARRAY_STORE": Return 82
+    Case "OBJECT_NEW": Return 90
+    Case "FIELD_LOAD": Return 91
+    Case "FIELD_STORE": Return 92
+    Case "METHOD_CALL": Return 93
+    Case "VIRTUAL_CALL": Return 94
+    Case "DELETE_OBJECT": Return 95
+    End Select
+    Return 1000
+End Function
+
+Public Function UXBWasmEmitHostCall4(ByRef callName As String, ByRef ins As MIRIRInstruction, ByVal startIndex As Integer, ByVal resultName As String) As String
+    Dim outText As String
+    Dim i As Integer
+    outText = ""
+    outText &= "      i32.const " & Str(UXBWasmHostCallId(callName)) & Chr(10)
+    For i = 0 To 3
+        If startIndex + i < ins.operandCount Then
+            outText &= UXBWasmEmitValue(ins.operands(startIndex + i))
+        Else
+            outText &= "      i32.const 0" & Chr(10)
+        End If
+    Next i
+    outText &= "      call $uxb_host_call4" & Chr(10)
+    If Trim(resultName) <> "" Then
+        outText &= UXBWasmEmitVarSet(resultName)
+    Else
+        outText &= "      drop" & Chr(10)
+    End If
+    Return outText
+End Function
+
+
+Public Function UXBWasmEmitHostCall16(ByVal callId As Integer, ByRef ins As MIRIRInstruction, ByVal startIndex As Integer, ByVal resultName As String, ByRef encodedFirst As String = "", ByRef encodedSecond As String = "") As String
+    Dim outText As String
+    Dim i As Integer
+    outText = "      i32.const " & LTrim(Str(callId)) & Chr(10)
+    For i = 0 To 15
+        If i = 0 And Trim(encodedFirst) <> "" Then
+            outText &= UXBWasmEmitValue(encodedFirst)
+        ElseIf i = 1 And Trim(encodedSecond) <> "" Then
+            outText &= UXBWasmEmitValue(encodedSecond)
+        ElseIf startIndex + i < ins.operandCount Then
+            outText &= UXBWasmEmitValue(ins.operands(startIndex + i))
+        Else
+            outText &= "      i32.const 0" & Chr(10)
+        End If
+    Next i
+    outText &= "      call $uxb_host_call16" & Chr(10)
+    If Trim(resultName) <> "" Then
+        outText &= UXBWasmEmitVarSet(resultName)
+    Else
+        outText &= "      drop" & Chr(10)
+    End If
+    Return outText
+End Function
+
+#endif

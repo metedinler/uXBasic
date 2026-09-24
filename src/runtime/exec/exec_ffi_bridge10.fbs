@@ -1,0 +1,284 @@
+#ifndef UXB_EXEC_FFI_BRIDGE10_FBS
+#define UXB_EXEC_FFI_BRIDGE10_FBS
+
+' Optional ABI10 interpreter bridge.
+' The DLL is deployed beside bin\uxb.exe. Windows resolves it from the executable
+' directory, so the project working directory does not affect native library lookup.
+
+Const UXFFI_KIND_VOID As Long = 0
+Const UXFFI_KIND_I32 As Long = 1
+Const UXFFI_KIND_U32 As Long = 2
+Const UXFFI_KIND_I64 As Long = 3
+Const UXFFI_KIND_U64 As Long = 4
+Const UXFFI_KIND_F64 As Long = 5
+Const UXFFI_KIND_PTR As Long = 6
+Const UXFFI_KIND_STRPTR As Long = 7
+Const UXFFI_REQUIRED_VERSION As Long = 131
+Const UXFFI_REQUIRED_MAX_ARGS As Long = 10
+
+Declare Function GetModuleFileNameA Lib "kernel32" Alias "GetModuleFileNameA" (ByVal hModule As Any Ptr, ByVal lpFilename As ZString Ptr, ByVal nSize As ULong) As ULong
+Declare Function ExecFfiBridge10FreeLibrary Lib "kernel32" Alias "FreeLibrary" (ByVal hModule As Any Ptr) As Long
+
+Type ExecUxFfiInvoke10Fn As Function Cdecl ( _
+    ByVal dllName As ZString Ptr, _
+    ByVal symbolName As ZString Ptr, _
+    ByVal returnKind As Long, _
+    ByVal argCount As Long, _
+    ByVal argKinds As Long Ptr, _
+    ByVal argU64 As ULongInt Ptr, _
+    ByVal argF64 As Double Ptr, _
+    ByVal returnU64 As ULongInt Ptr, _
+    ByVal returnF64 As Double Ptr, _
+    ByVal errorText As ZString Ptr, _
+    ByVal errorCapacity As Long _
+ ) As Long
+
+Type ExecUxFfiVersionFn As Function Cdecl () As Long
+Type ExecUxFfiMaxArgsFn As Function Cdecl () As Long
+
+Type ExecUxFfiStringLengthFn As Function Cdecl ( _
+    ByVal tokenValue As ULong _
+) As Long
+
+Type ExecUxFfiCopyStringFn As Function Cdecl ( _
+    ByVal tokenValue As ULong, _
+    ByVal textOut As ZString Ptr, _
+    ByVal textCapacity As Long _
+) As Long
+
+Private Sub ExecFfiBridge10UnloadModule(ByRef moduleHandle As Any Ptr)
+    If moduleHandle = 0 Then Exit Sub
+    Dim ignored As Long
+    ignored = ExecFfiBridge10FreeLibrary(moduleHandle)
+    moduleHandle = 0
+End Sub
+
+Private Function ExecFfiBridge10ValidateModule(ByRef moduleHandle As Any Ptr, ByRef errText As String) As Integer
+    If moduleHandle = 0 Then Return 0
+
+    Dim versionProc As Any Ptr
+    Dim maxArgsProc As Any Ptr
+    versionProc = GetProcAddress(moduleHandle, StrPtr("uxffi_version"))
+    maxArgsProc = GetProcAddress(moduleHandle, StrPtr("uxffi_max_args"))
+    If versionProc = 0 Or maxArgsProc = 0 Then
+        errText = "exec: stale uxffi.dll: version/max-args exports are missing"
+        ExecFfiBridge10UnloadModule moduleHandle
+        Return 0
+    End If
+
+    Dim versionFn As ExecUxFfiVersionFn
+    Dim maxArgsFn As ExecUxFfiMaxArgsFn
+    versionFn = CPtr(ExecUxFfiVersionFn, versionProc)
+    maxArgsFn = CPtr(ExecUxFfiMaxArgsFn, maxArgsProc)
+    If versionFn() < UXFFI_REQUIRED_VERSION Then
+        errText = "exec: stale uxffi.dll version; rebuild runtime_ext\uxffi (required >= " & LTrim(Str(UXFFI_REQUIRED_VERSION)) & ")"
+        ExecFfiBridge10UnloadModule moduleHandle
+        Return 0
+    End If
+    If maxArgsFn() < UXFFI_REQUIRED_MAX_ARGS Then
+        errText = "exec: incompatible uxffi.dll ABI limit"
+        ExecFfiBridge10UnloadModule moduleHandle
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function ExecFfiBridge10Kind(ByRef typeText As String, ByRef kindOut As Long) As Integer
+    Select Case UCase(Trim(typeText))
+    Case "VOID"
+        kindOut = UXFFI_KIND_VOID
+    Case "I32"
+        kindOut = UXFFI_KIND_I32
+    Case "U32"
+        kindOut = UXFFI_KIND_U32
+    Case "I64"
+        kindOut = UXFFI_KIND_I64
+    Case "U64"
+        kindOut = UXFFI_KIND_U64
+    Case "F64"
+        kindOut = UXFFI_KIND_F64
+    Case "PTR"
+        kindOut = UXFFI_KIND_PTR
+    Case "STRPTR"
+        kindOut = UXFFI_KIND_STRPTR
+    Case Else
+        kindOut = -1
+        Return 0
+    End Select
+    Return 1
+End Function
+
+Private Function ExecFfiBridge10TryLoadCandidate(ByRef moduleOut As Any Ptr, ByRef candidate As String) As Integer
+    If moduleOut <> 0 Then Return 1
+    If Trim(candidate) = "" Then Return 0
+    moduleOut = LoadLibraryA(StrPtr(candidate))
+    Return IIf(moduleOut <> 0, 1, 0)
+End Function
+
+Private Sub ExecFfiBridge10LoadModule(ByRef moduleOut As Any Ptr)
+    If moduleOut <> 0 Then Exit Sub
+
+    Dim exeDir As String
+    Dim exeFilePath As String
+    Dim exeBuf As ZString * 32768
+    exeBuf = ""
+    If GetModuleFileNameA(0, @exeBuf, 32767) <> 0 Then
+        exeFilePath = exeBuf
+        exeDir = DirNameFromPath(exeFilePath)
+    Else
+        exeDir = DirNameFromPath(Command(0))
+    End If
+
+    Dim candidate As String
+    candidate = exeDir & "\uxffi.dll": ExecFfiBridge10TryLoadCandidate moduleOut, candidate
+    candidate = CurDir & "\dist\runtime_ext\uxffi.dll": ExecFfiBridge10TryLoadCandidate moduleOut, candidate
+    candidate = CurDir & "\uxffi.dll": ExecFfiBridge10TryLoadCandidate moduleOut, candidate
+    candidate = CurDir & "\uxb\dist\runtime_ext\uxffi.dll": ExecFfiBridge10TryLoadCandidate moduleOut, candidate
+    candidate = exeDir & "\..\dist\runtime_ext\uxffi.dll": ExecFfiBridge10TryLoadCandidate moduleOut, candidate
+    candidate = exeDir & "\..\bin\uxffi.dll": ExecFfiBridge10TryLoadCandidate moduleOut, candidate
+    candidate = "uxffi.dll": ExecFfiBridge10TryLoadCandidate moduleOut, candidate
+End Sub
+
+Private Function ExecFfiBridge10Invoke( _
+    ByRef dllName As String, _
+    ByRef symbolName As String, _
+    ByRef returnTypeText As String, _
+    ByRef callingConventionText As String, _
+    argTypes() As String, _
+    ByVal argCount As Long, _
+    argU64() As ULongInt, _
+    argF64() As Double, _
+    ByRef returnU64Out As ULongInt, _
+    ByRef returnF64Out As Double, _
+    ByRef invokedOut As Integer, _
+    ByRef errText As String _
+) As Integer
+    Static bridgeModule As Any Ptr
+    Static bridgeProc As Any Ptr
+    Static bridgeTried As Integer
+
+    invokedOut = 0
+    returnU64Out = 0
+    returnF64Out = 0.0
+
+    If UCase(Trim(callingConventionText)) <> "CDECL" And UCase(Trim(callingConventionText)) <> "STDCALL" Then
+        errText = "exec: ABI10 invalid calling convention " & Trim(callingConventionText)
+        Return 0
+    End If
+    If argCount < 0 Or argCount > 10 Then
+        errText = "exec: ABI10 argument count must be 0..10"
+        Return 0
+    End If
+
+    If bridgeTried = 0 Then
+        bridgeTried = 1
+        ExecFfiBridge10LoadModule bridgeModule
+        If bridgeModule <> 0 Then
+            If ExecFfiBridge10ValidateModule(bridgeModule, errText) = 0 Then Return 0
+            bridgeProc = GetProcAddress(bridgeModule, StrPtr("uxffi_invoke10"))
+        End If
+    End If
+
+    ' Typed ABI10 execution is fail-closed. Falling back to the handwritten mixed
+    ' dispatcher can reintroduce the PTR/STRPTR crash this bridge exists to prevent.
+    If bridgeModule = 0 Then
+        errText = "exec: ABI10 requires bin\uxffi.dll API 131; rebuild runtime_ext\uxffi"
+        Return 0
+    End If
+    If bridgeProc = 0 Then
+        errText = "exec: uxffi.dll loaded but uxffi_invoke10 export is missing"
+        Return 0
+    End If
+
+    Dim returnKind As Long
+    If ExecFfiBridge10Kind(returnTypeText, returnKind) = 0 Then
+        errText = "exec: ABI10 unsupported return type " & Trim(returnTypeText)
+        Return 0
+    End If
+
+    Dim argKinds(0 To 9) As Long
+    Dim i As Integer
+    For i = 0 To argCount - 1
+        If ExecFfiBridge10Kind(argTypes(i), argKinds(i)) = 0 Then
+            errText = "exec: ABI10 unsupported argument type " & Trim(argTypes(i))
+            Return 0
+        End If
+        If argKinds(i) = UXFFI_KIND_VOID Then
+            errText = "exec: ABI10 VOID is not a valid argument type"
+            Return 0
+        End If
+    Next i
+
+    Dim errorBuffer As ZString * 512
+    errorBuffer = ""
+    Dim invokeFn As ExecUxFfiInvoke10Fn
+    invokeFn = CPtr(ExecUxFfiInvoke10Fn, bridgeProc)
+
+    Dim okValue As Long
+    okValue = invokeFn( _
+        StrPtr(dllName), StrPtr(symbolName), returnKind, argCount, _
+        @argKinds(0), @argU64(0), @argF64(0), _
+        @returnU64Out, @returnF64Out, @errorBuffer, 512 _
+    )
+    If okValue = 0 Then
+        errText = "exec: ABI10 invoke failed"
+        If Len(errorBuffer) > 0 Then errText &= ": " & errorBuffer
+        Return 0
+    End If
+
+    invokedOut = 1
+    Return 1
+End Function
+
+Private Function ExecFfiBridge10CopyString(ByVal tokenValue As ULongInt, ByRef textOut As String, ByRef errText As String) As Integer
+    Static bridgeModule As Any Ptr
+    Static lengthProc As Any Ptr
+    Static copyProc As Any Ptr
+    Static bridgeTried As Integer
+
+    textOut = ""
+    If tokenValue = 0 Then Return 1
+    If bridgeTried = 0 Then
+        bridgeTried = 1
+        ExecFfiBridge10LoadModule bridgeModule
+        If bridgeModule <> 0 Then
+            If ExecFfiBridge10ValidateModule(bridgeModule, errText) = 0 Then Return 0
+            lengthProc = GetProcAddress(bridgeModule, StrPtr("uxffi_string_length"))
+            copyProc = GetProcAddress(bridgeModule, StrPtr("uxffi_copy_string"))
+        End If
+    End If
+    If bridgeModule = 0 Or lengthProc = 0 Or copyProc = 0 Then
+        errText = "exec: uxffi_string_length/copy_string exports are required for STRPTR returns"
+        Return 0
+    End If
+
+    Dim lengthFn As ExecUxFfiStringLengthFn
+    Dim copyFn As ExecUxFfiCopyStringFn
+    lengthFn = CPtr(ExecUxFfiStringLengthFn, lengthProc)
+    copyFn = CPtr(ExecUxFfiCopyStringFn, copyProc)
+
+    Dim requiredBytes As Long
+    requiredBytes = lengthFn(CUInt(tokenValue))
+    If requiredBytes <= 0 Or requiredBytes > 16777217 Then
+        errText = "exec: invalid or oversized STRPTR result length"
+        Return 0
+    End If
+
+    Dim textBuffer As ZString Ptr
+    textBuffer = CAllocate(requiredBytes)
+    If textBuffer = 0 Then
+        errText = "exec: STRPTR result allocation failed"
+        Return 0
+    End If
+    *textBuffer = ""
+    If copyFn(CUInt(tokenValue), textBuffer, requiredBytes) = 0 Then
+        Deallocate(textBuffer)
+        errText = "exec: uxffi_copy_string failed for STRPTR return"
+        Return 0
+    End If
+    textOut = *textBuffer
+    Deallocate(textBuffer)
+    Return 1
+End Function
+
+#endif

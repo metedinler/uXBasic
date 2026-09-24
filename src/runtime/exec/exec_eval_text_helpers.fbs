@@ -1,0 +1,909 @@
+
+#ifndef UXB_WIN32_LOADER_DECLARED
+#define UXB_WIN32_LOADER_DECLARED
+Declare Function LoadLibraryA Lib "kernel32" Alias "LoadLibraryA" (ByVal lpLibFileName As ZString Ptr) As Any Ptr
+Declare Function GetProcAddress Lib "kernel32" Alias "GetProcAddress" (ByVal hModule As Any Ptr, ByVal lpProcName As ZString Ptr) As Any Ptr
+#endif
+
+Type ExecBigInitFn As Function Cdecl (ByVal kindText As ZString Ptr, ByVal valueText As ZString Ptr, ByVal precisionValue As Long) As Any Ptr
+Type ExecBigToStrFn As Function Cdecl (ByVal kindText As ZString Ptr, ByVal handle As Any Ptr, ByVal textOut As ZString Ptr, ByVal textCapacity As Long) As Long
+Type ExecBigFreeFn As Sub Cdecl (ByVal kindText As ZString Ptr, ByVal handle As Any Ptr)
+Type ExecBigBinaryFn As Sub Cdecl (ByVal leftHandle As Any Ptr, ByVal rightHandle As Any Ptr, ByVal outHandle As Any Ptr)
+Type ExecBigIntegerBinaryFn As Function Cdecl (ByVal outHandle As Any Ptr, ByVal leftHandle As Any Ptr, ByVal rightHandle As Any Ptr) As Long
+Type ExecBigCompareFn As Function Cdecl (ByVal leftHandle As Any Ptr, ByVal rightHandle As Any Ptr) As Long
+
+Type ExecBigHandleEntry
+    kindText As String
+    handle As Any Ptr
+End Type
+
+Private Dim Shared gExecBigModule As Any Ptr
+Private Dim Shared gExecBigInitProc As Any Ptr
+Private Dim Shared gExecBigToStrProc As Any Ptr
+Private Dim Shared gExecBigFreeProc As Any Ptr
+Private Dim Shared gExecBigLoadTried As Integer
+Private Dim Shared gExecBigHandles(Any) As ExecBigHandleEntry
+Private Dim Shared gExecBigHandleCount As Integer
+
+Private Function ExecBigTryLoadCandidate(ByRef candidate As String) As Integer
+    If gExecBigModule <> 0 Or Trim(candidate) = "" Then Return IIf(gExecBigModule <> 0, 1, 0)
+    gExecBigModule = LoadLibraryA(StrPtr(candidate))
+    Return IIf(gExecBigModule <> 0, 1, 0)
+End Function
+
+Private Function ExecBigRuntimeLoad(ByRef errText As String) As Integer
+    If gExecBigModule <> 0 And gExecBigInitProc <> 0 And gExecBigToStrProc <> 0 And gExecBigFreeProc <> 0 Then Return 1
+    If gExecBigLoadTried <> 0 Then
+        errText = "exec: uxb_bigfp.dll was not loaded or required BIGINIT exports are missing"
+        Return 0
+    End If
+    gExecBigLoadTried = 1
+
+    Dim exeDir As String
+    exeDir = DirNameFromPath(Command(0))
+    Dim candidate As String
+    candidate = exeDir & "\uxb_bigfp.dll": ExecBigTryLoadCandidate candidate
+    candidate = CurDir & "\dist\runtime_ext\uxb_bigfp.dll": ExecBigTryLoadCandidate candidate
+    candidate = CurDir & "\uxb\dist\runtime_ext\uxb_bigfp.dll": ExecBigTryLoadCandidate candidate
+    candidate = exeDir & "\..\dist\runtime_ext\uxb_bigfp.dll": ExecBigTryLoadCandidate candidate
+    If gExecBigModule = 0 Then
+        errText = "exec: real big-number runtime not found: uxb_bigfp.dll"
+        Return 0
+    End If
+
+    gExecBigInitProc = GetProcAddress(gExecBigModule, StrPtr("__uxb_rt_biginit"))
+    gExecBigToStrProc = GetProcAddress(gExecBigModule, StrPtr("__uxb_rt_big_to_str"))
+    gExecBigFreeProc = GetProcAddress(gExecBigModule, StrPtr("__uxb_rt_big_free"))
+    If gExecBigInitProc = 0 Or gExecBigToStrProc = 0 Or gExecBigFreeProc = 0 Then
+        errText = "exec: uxb_bigfp.dll does not export the required BIGINIT ABI"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function ExecBigNormalizeKind(ByRef rawKind As String, ByRef kindOut As String, ByRef defaultPrecisionOut As Integer) As Integer
+    kindOut = UCase(Trim(rawKind))
+    defaultPrecisionOut = 0
+    Select Case kindOut
+    Case "BIGI", "BIGINT"
+        Return 1
+    Case "BIGF"
+        defaultPrecisionOut = 256
+        Return 1
+    Case "BIGD"
+        defaultPrecisionOut = 80
+        Return 1
+    Case "BALL"
+        defaultPrecisionOut = 256
+        Return 1
+    Case "EXTFP", "FP80"
+        kindOut = "BIGF": defaultPrecisionOut = 80
+        Return 1
+    Case "FP128"
+        kindOut = "BIGF": defaultPrecisionOut = 128
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function ExecBigReadCallArgs(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef kindOut As String, ByRef valueOut As String, ByRef precisionOut As Integer, ByRef errText As String) As Integer
+    Dim callName As String
+    callName = ExecFix8BNodeName(ps.ast.nodes(callNodeIdx))
+    Dim argc As Integer
+    argc = ExecChildCount(ps, callNodeIdx)
+    Dim valuePos As Integer
+    Dim precisionPos As Integer
+    precisionPos = -1
+
+    If callName = "BIGINIT" Then
+        If argc < 2 Or argc > 3 Then errText = "exec: BIGINIT expects kind, value and optional precision": Return 0
+        Dim kindNodeIdx As Integer
+        kindNodeIdx = ExecChildAt(ps, callNodeIdx, 0)
+        If kindNodeIdx = -1 Then errText = "exec: BIGINIT kind missing": Return 0
+        Dim kindNode As ASTNode
+        kindNode = ps.ast.nodes(kindNodeIdx)
+        Select Case UCase(kindNode.kind)
+        Case "IDENT", "KEYWORD_REF", "STRING"
+            kindOut = kindNode.value
+            If Trim(kindOut) = "" Then kindOut = kindNode.symbolName
+        Case Else
+            errText = "exec: BIGINIT kind must be a type name or string literal"
+            Return 0
+        End Select
+        valuePos = 1
+        If argc = 3 Then precisionPos = 2
+    Else
+        If argc < 1 Or argc > 2 Then errText = "exec: " & callName & " expects value and optional precision": Return 0
+        kindOut = callName
+        valuePos = 0
+        If argc = 2 Then precisionPos = 1
+    End If
+
+    Dim defaultPrecision As Integer
+    If ExecBigNormalizeKind(kindOut, kindOut, defaultPrecision) = 0 Then
+        errText = "exec: BIGINIT unknown kind " & UCase(Trim(kindOut))
+        Return 0
+    End If
+    precisionOut = defaultPrecision
+
+    Dim valueNodeIdx As Integer
+    valueNodeIdx = ExecChildAt(ps, callNodeIdx, valuePos)
+    If valueNodeIdx = -1 Then errText = "exec: BIGINIT value missing": Return 0
+    If ExecEvalNodeAsText(ps, es, valueNodeIdx, valueOut, errText) = 0 Then Return 0
+    If Trim(valueOut) = "" Then errText = "exec: BIGINIT value cannot be empty": Return 0
+
+    If precisionPos >= 0 Then
+        Dim precisionNodeIdx As Integer
+        precisionNodeIdx = ExecChildAt(ps, callNodeIdx, precisionPos)
+        If precisionNodeIdx = -1 Then errText = "exec: BIGINIT precision missing": Return 0
+        precisionOut = ExecEvalNode(ps, es, precisionNodeIdx, errText)
+        If errText <> "" Then Return 0
+        If kindOut <> "BIGI" And kindOut <> "BIGINT" And precisionOut <= 0 Then
+            errText = "exec: BIGINIT precision must be positive"
+            Return 0
+        End If
+    End If
+    Return 1
+End Function
+
+Private Function ExecBigCreateRaw(ByRef kindText As String, ByRef valueText As String, ByVal precisionValue As Integer, ByRef handleOut As Any Ptr, ByRef runtimeTextOut As String, ByRef errText As String) As Integer
+    handleOut = 0
+    runtimeTextOut = ""
+    If ExecBigRuntimeLoad(errText) = 0 Then Return 0
+    Dim initFn As ExecBigInitFn
+    initFn = CPtr(ExecBigInitFn, gExecBigInitProc)
+    handleOut = initFn(StrPtr(kindText), StrPtr(valueText), CLng(precisionValue))
+    If handleOut = 0 Then
+        errText = "exec: BIGINIT rejected value for " & kindText
+        Return 0
+    End If
+
+    Dim textBuf As ZString * 65536
+    textBuf = ""
+    Dim toStrFn As ExecBigToStrFn
+    toStrFn = CPtr(ExecBigToStrFn, gExecBigToStrProc)
+    If toStrFn(StrPtr(kindText), handleOut, @textBuf, CLng(65536)) = 0 Then
+        Dim freeFn As ExecBigFreeFn
+        freeFn = CPtr(ExecBigFreeFn, gExecBigFreeProc)
+        freeFn(StrPtr(kindText), handleOut)
+        handleOut = 0
+        errText = "exec: BIGINIT runtime could not serialize " & kindText
+        Return 0
+    End If
+    runtimeTextOut = textBuf
+    Return 1
+End Function
+
+Private Sub ExecBigRegisterHandle(ByRef kindText As String, ByVal handle As Any Ptr)
+    If handle = 0 Then Exit Sub
+    If gExecBigHandleCount = 0 Then ReDim gExecBigHandles(0) Else ReDim Preserve gExecBigHandles(gExecBigHandleCount)
+    gExecBigHandles(gExecBigHandleCount).kindText = kindText
+    gExecBigHandles(gExecBigHandleCount).handle = handle
+    gExecBigHandleCount += 1
+End Sub
+
+Private Sub ExecBigRuntimeReleaseAll()
+    If gExecBigFreeProc <> 0 Then
+        Dim freeFn As ExecBigFreeFn
+        freeFn = CPtr(ExecBigFreeFn, gExecBigFreeProc)
+        Dim i As Integer
+        For i = 0 To gExecBigHandleCount - 1
+            If gExecBigHandles(i).handle <> 0 Then freeFn(StrPtr(gExecBigHandles(i).kindText), gExecBigHandles(i).handle)
+        Next i
+    End If
+    Erase gExecBigHandles
+    gExecBigHandleCount = 0
+End Sub
+
+Private Function ExecBigCreateValue(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef result As ExecValue, ByRef errText As String) As Integer
+    Dim kindText As String, valueText As String, runtimeText As String
+    Dim precisionValue As Integer
+    If ExecBigReadCallArgs(ps, es, callNodeIdx, kindText, valueText, precisionValue, errText) = 0 Then Return 0
+    Dim handle As Any Ptr
+    If ExecBigCreateRaw(kindText, valueText, precisionValue, handle, runtimeText, errText) = 0 Then Return 0
+    ExecValueInit result
+    result.valueType = "EXTERNAL_BIG"
+    result.externalHandle = handle
+    result.externalKind = kindText
+    result.externalText = runtimeText
+    result.externalPrecision = precisionValue
+    ExecBigRegisterHandle kindText, handle
+    Return 1
+End Function
+
+Private Function ExecBigSerialize(ByRef kindText As String, ByVal handle As Any Ptr, ByRef textOut As String, ByRef errText As String) As Integer
+    textOut = ""
+    If handle = 0 Then errText = "exec: external-number handle is null": Return 0
+    Dim textBuf As ZString * 65536
+    textBuf = ""
+    Dim toStrFn As ExecBigToStrFn
+    toStrFn = CPtr(ExecBigToStrFn, gExecBigToStrProc)
+    If toStrFn(StrPtr(kindText), handle, @textBuf, CLng(65536)) = 0 Then
+        errText = "exec: external-number runtime could not serialize " & kindText
+        Return 0
+    End If
+    textOut = textBuf
+    Return 1
+End Function
+
+Private Function ExecBigEvalBinaryValues(ByRef leftValue As ExecValue, ByRef rightValue As ExecValue, ByRef opText As String, ByRef result As ExecValue, ByRef errText As String) As Integer
+    Dim leftIsBig As Integer = IIf(leftValue.valueType = "EXTERNAL_BIG", 1, 0)
+    Dim rightIsBig As Integer = IIf(rightValue.valueType = "EXTERNAL_BIG", 1, 0)
+    If leftIsBig = 0 And rightIsBig = 0 Then Return -1
+    If leftIsBig = 0 Or rightIsBig = 0 Then
+        errText = "exec: external-number arithmetic requires matching kinds or an explicit cast"
+        Return 0
+    End If
+
+    Dim kindText As String = UCase(Trim(leftValue.externalKind))
+    If kindText = "BIGINT" Then kindText = "BIGI"
+    Dim rightKind As String = UCase(Trim(rightValue.externalKind))
+    If rightKind = "BIGINT" Then rightKind = "BIGI"
+    If kindText = "" Or kindText <> rightKind Then
+        errText = "exec: external-number arithmetic requires matching kinds or an explicit cast"
+        Return 0
+    End If
+    If leftValue.externalHandle = 0 Or rightValue.externalHandle = 0 Then
+        errText = "exec: external-number handle is null"
+        Return 0
+    End If
+    If ExecBigRuntimeLoad(errText) = 0 Then Return 0
+
+    Dim opUpper As String = UCase(Trim(opText))
+    If opUpper = "=" Or opUpper = "<>" Or opUpper = "<" Or opUpper = "<=" Or opUpper = ">" Or opUpper = ">=" Then
+        Dim compareSymbol As String
+        Select Case kindText
+        Case "BIGI": compareSymbol = "uxb_bigi_cmp"
+        Case "BALL": compareSymbol = "uxb_ball_cmp_mid"
+        Case Else: compareSymbol = "uxb_" & LCase(kindText) & "_cmp"
+        End Select
+        Dim compareProc As Any Ptr = GetProcAddress(gExecBigModule, StrPtr(compareSymbol))
+        If compareProc = 0 Then errText = "exec: external-number symbol missing: " & compareSymbol: Return 0
+        Dim compareFn As ExecBigCompareFn = CPtr(ExecBigCompareFn, compareProc)
+        Dim compareResult As Long = compareFn(leftValue.externalHandle, rightValue.externalHandle)
+        Dim truthValue As Integer
+        Select Case opUpper
+        Case "=": truthValue = IIf(compareResult = 0, -1, 0)
+        Case "<>": truthValue = IIf(compareResult <> 0, -1, 0)
+        Case "<": truthValue = IIf(compareResult < 0, -1, 0)
+        Case "<=": truthValue = IIf(compareResult <= 0, -1, 0)
+        Case ">": truthValue = IIf(compareResult > 0, -1, 0)
+        Case ">=": truthValue = IIf(compareResult >= 0, -1, 0)
+        End Select
+        ExecValueSetInteger result, truthValue
+        Return 1
+    End If
+
+    Dim operationName As String
+    Select Case opUpper
+    Case "+": operationName = "add"
+    Case "-": operationName = "sub"
+    Case "*": operationName = "mul"
+    Case "/", "\": operationName = IIf(kindText = "BIGI", "tdiv_q", "div")
+    Case "MOD", "%": operationName = "mod"
+    End Select
+    If operationName = "" OrElse (kindText <> "BIGI" And operationName = "mod") Then
+        errText = "exec: external-number operation unsupported: " & opUpper
+        Return 0
+    End If
+
+    Dim precisionValue As Integer = leftValue.externalPrecision
+    If rightValue.externalPrecision > precisionValue Then precisionValue = rightValue.externalPrecision
+    Dim resultHandle As Any Ptr
+    Dim resultText As String
+    If ExecBigCreateRaw(kindText, "0", precisionValue, resultHandle, resultText, errText) = 0 Then Return 0
+
+    Dim operationSymbol As String = "uxb_" & LCase(kindText) & "_" & operationName
+    Dim operationProc As Any Ptr = GetProcAddress(gExecBigModule, StrPtr(operationSymbol))
+    If operationProc = 0 Then errText = "exec: external-number symbol missing: " & operationSymbol: Return 0
+    If kindText = "BIGI" Then
+        Dim integerFn As ExecBigIntegerBinaryFn = CPtr(ExecBigIntegerBinaryFn, operationProc)
+        If integerFn(resultHandle, leftValue.externalHandle, rightValue.externalHandle) = 0 Then
+            errText = "exec: BIGI operation failed: " & opUpper
+            Return 0
+        End If
+    Else
+        Dim binaryFn As ExecBigBinaryFn = CPtr(ExecBigBinaryFn, operationProc)
+        binaryFn(leftValue.externalHandle, rightValue.externalHandle, resultHandle)
+    End If
+
+    If ExecBigSerialize(kindText, resultHandle, resultText, errText) = 0 Then Return 0
+    ExecValueInit result
+    result.valueType = "EXTERNAL_BIG"
+    result.externalHandle = resultHandle
+    result.externalKind = kindText
+    result.externalText = resultText
+    result.externalPrecision = precisionValue
+    ExecBigRegisterHandle kindText, resultHandle
+    Return 1
+End Function
+
+Private Function ExecFix16BigSurfaceValueAsText(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef textOut As String, ByRef errText As String) As Integer
+    Dim kindText As String, valueText As String, runtimeText As String
+    Dim precisionValue As Integer
+    If ExecBigReadCallArgs(ps, es, callNodeIdx, kindText, valueText, precisionValue, errText) = 0 Then Return 0
+    Dim handle As Any Ptr
+    If ExecBigCreateRaw(kindText, valueText, precisionValue, handle, runtimeText, errText) = 0 Then Return 0
+    Dim freeFn As ExecBigFreeFn
+    freeFn = CPtr(ExecBigFreeFn, gExecBigFreeProc)
+    freeFn(StrPtr(kindText), handle)
+    textOut = runtimeText
+    Return 1
+End Function
+
+Private Function ExecBuiltinGetArgNode(ByRef ps As ParseState, ByVal callNodeIdx As Integer, ByRef callName As String, ByRef argNodeIdx As Integer, ByRef errText As String) As Integer
+    argNodeIdx = ExecChildAt(ps, callNodeIdx, 0)
+    If argNodeIdx = -1 Then
+        errText = "exec: " & callName & " arg missing"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function ExecBuiltinArgAsInt(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef callName As String, ByRef valueOut As Integer, ByRef errText As String, ByVal allowString As Integer) As Integer
+    Dim a0 As Integer
+    If ExecBuiltinGetArgNode(ps, callNodeIdx, callName, a0, errText) = 0 Then Return 0
+
+    Dim argNode As ASTNode
+    argNode = ps.ast.nodes(a0)
+    If allowString <> 0 And UCase(argNode.kind) = "STRING" Then
+        valueOut = ValInt(argNode.value)
+        Return 1
+    End If
+
+    valueOut = ExecEvalNode(ps, es, a0, errText)
+    If errText <> "" Then Return 0
+    Return 1
+End Function
+
+Private Function ExecBuiltinTextMidCall( _
+    ByRef ps As ParseState, ByRef es As ExecState, ByVal callExprIdx As Integer, _
+    ByRef textOut As String, ByRef errText As String _
+) As Integer
+    Dim midArgc As Integer
+    midArgc = ExecChildCount(ps, callExprIdx)
+    If midArgc < 2 Or midArgc > 3 Then
+        errText = "exec: MID expects 2 or 3 arguments"
+        Return 0
+    End If
+
+    Dim midSrcNode As Integer
+    Dim midStartNode As Integer
+    midSrcNode = ExecChildAt(ps, callExprIdx, 0)
+    midStartNode = ExecChildAt(ps, callExprIdx, 1)
+    If midSrcNode = -1 Or midStartNode = -1 Then
+        errText = "exec: MID args missing"
+        Return 0
+    End If
+
+    Dim midSrc As String
+    If ExecEvalNodeAsText(ps, es, midSrcNode, midSrc, errText) = 0 Then Return 0
+
+    Dim midStart As Integer
+    midStart = ExecEvalNode(ps, es, midStartNode, errText)
+    If errText <> "" Then Return 0
+    If midStart < 1 Then
+        errText = "exec: MID start must be >= 1"
+        Return 0
+    End If
+
+    If midStart > Len(midSrc) Then
+        textOut = ""
+        Return 1
+    End If
+
+    If midArgc = 2 Then
+        textOut = Mid(midSrc, midStart)
+        Return 1
+    End If
+
+    Dim midLenNode As Integer
+    midLenNode = ExecChildAt(ps, callExprIdx, 2)
+    If midLenNode = -1 Then
+        errText = "exec: MID length arg missing"
+        Return 0
+    End If
+
+    Dim midLen As Integer
+    midLen = ExecEvalNode(ps, es, midLenNode, errText)
+    If errText <> "" Then Return 0
+    If midLen < 0 Then
+        errText = "exec: MID length must be >= 0"
+        Return 0
+    End If
+
+    textOut = Mid(midSrc, midStart, midLen)
+    Return 1
+End Function
+
+Private Function ExecBuiltinTextSpaceCall( _
+    ByRef ps As ParseState, ByRef es As ExecState, ByVal callExprIdx As Integer, _
+    ByRef callName As String, ByRef textOut As String, ByRef errText As String _
+) As Integer
+    Dim spaceCount As Integer
+    If ExecBuiltinArgAsInt(ps, es, callExprIdx, callName, spaceCount, errText, 1) = 0 Then Return 0
+    If spaceCount < 0 Then
+        errText = "exec: SPACE count must be >= 0"
+        Return 0
+    End If
+    If spaceCount > EXEC_MAX_TEXT_LEN Then
+        errText = "exec: SPACE count too large"
+        Return 0
+    End If
+
+    textOut = Space(spaceCount)
+    Return 1
+End Function
+
+Private Function ExecBuiltinTextStringCall( _
+    ByRef ps As ParseState, ByRef es As ExecState, ByVal callExprIdx As Integer, _
+    ByRef textOut As String, ByRef errText As String _
+) As Integer
+    Dim stringArgc As Integer
+    stringArgc = ExecChildCount(ps, callExprIdx)
+    If stringArgc <> 2 Then
+        errText = "exec: STRING expects 2 arguments"
+        Return 0
+    End If
+
+    Dim stringCountNode As Integer
+    Dim stringCharNode As Integer
+    stringCountNode = ExecChildAt(ps, callExprIdx, 0)
+    stringCharNode = ExecChildAt(ps, callExprIdx, 1)
+    If stringCountNode = -1 Or stringCharNode = -1 Then
+        errText = "exec: STRING args missing"
+        Return 0
+    End If
+
+    Dim stringCount As Integer
+    stringCount = ExecEvalNode(ps, es, stringCountNode, errText)
+    If errText <> "" Then Return 0
+    If stringCount < 0 Then
+        errText = "exec: STRING count must be >= 0"
+        Return 0
+    End If
+    If stringCount > EXEC_MAX_TEXT_LEN Then
+        errText = "exec: STRING count too large"
+        Return 0
+    End If
+
+    Dim stringCharCode As Integer
+    Dim stringCharAst As ASTNode
+    stringCharAst = ps.ast.nodes(stringCharNode)
+    If UCase(stringCharAst.kind) = "STRING" Then
+        If Len(stringCharAst.value) = 0 Then
+            errText = "exec: STRING char arg empty"
+            Return 0
+        End If
+        stringCharCode = Asc(Left(stringCharAst.value, 1))
+    Else
+        stringCharCode = ExecEvalNode(ps, es, stringCharNode, errText)
+        If errText <> "" Then Return 0
+    End If
+
+    If stringCharCode < 0 Or stringCharCode > 255 Then
+        errText = "exec: STRING char code range error"
+        Return 0
+    End If
+
+    textOut = String(stringCount, stringCharCode)
+    Return 1
+End Function
+
+Private Function ExecBuiltinArgAsText( _
+    ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, _
+    ByRef callName As String, ByRef textOut As String, ByRef errText As String _
+) As Integer
+    Dim a0 As Integer
+    If ExecBuiltinGetArgNode(ps, callNodeIdx, callName, a0, errText) = 0 Then Return 0
+
+    Dim argNode As ASTNode
+    argNode = ps.ast.nodes(a0)
+
+    If UCase(argNode.kind) = "STRING" Then
+        textOut = argNode.value
+        Return 1
+    End If
+
+    If UCase(argNode.kind) = "CALL_EXPR" Then
+        Dim textCallName As String
+        textCallName = ExecFix8BNodeName(argNode)
+
+        Select Case textCallName
+        Case "STR"
+            Dim strArgNode As Integer
+            strArgNode = ExecChildAt(ps, a0, 0)
+            If strArgNode = -1 Then
+                errText = "exec: STR arg missing"
+                Return 0
+            End If
+
+            Dim magicStrText As String
+            Dim magicStrRv As Integer
+            Dim strValue As ExecValue
+            Dim strValueReady As Integer
+            magicStrRv = ExecTryEvalMagicToString(ps, es, strArgNode, magicStrText, errText, strValue, strValueReady)
+            If magicStrRv > 0 Then
+                textOut = magicStrText
+                Return 1
+            End If
+            If magicStrRv = 0 Then Return 0
+
+            If strValueReady = 0 Then
+                If ExecEvalExpression(ps, strArgNode, es, strValue, errText) = 0 Then Return 0
+            End If
+            textOut = ExecValueToString(strValue)
+            Return 1
+
+        Case "UCASE"
+            Dim ucSrc As String
+            If ExecBuiltinArgAsText(ps, es, a0, textCallName, ucSrc, errText) = 0 Then Return 0
+            textOut = UCase(ucSrc)
+            Return 1
+
+        Case "LCASE"
+            Dim lcSrc As String
+            If ExecBuiltinArgAsText(ps, es, a0, textCallName, lcSrc, errText) = 0 Then Return 0
+            textOut = LCase(lcSrc)
+            Return 1
+
+        Case "CHR"
+            Dim chrValue As Integer
+            If ExecBuiltinArgAsInt(ps, es, a0, textCallName, chrValue, errText, 1) = 0 Then Return 0
+            If chrValue < 0 Or chrValue > 255 Then
+                errText = "exec: CHR range error"
+                Return 0
+            End If
+            textOut = Chr(chrValue)
+            Return 1
+
+        Case "LTRIM"
+            Dim ltrimSrc As String
+            If ExecBuiltinArgAsText(ps, es, a0, textCallName, ltrimSrc, errText) = 0 Then Return 0
+            textOut = LTrim(ltrimSrc)
+            Return 1
+
+        Case "RTRIM"
+            Dim rtrimSrc As String
+            If ExecBuiltinArgAsText(ps, es, a0, textCallName, rtrimSrc, errText) = 0 Then Return 0
+            textOut = RTrim(rtrimSrc)
+            Return 1
+
+
+        Case "TRIM"
+            Dim trimSrc43 As String
+            If ExecBuiltinArgAsText(ps, es, a0, textCallName, trimSrc43, errText) = 0 Then Return 0
+            textOut = Trim(trimSrc43)
+            Return 1
+
+        Case "LEFT"
+            Dim leftArgc43 As Integer
+            leftArgc43 = ExecChildCount(ps, a0)
+            If leftArgc43 <> 2 Then
+                errText = "exec: LEFT expects 2 arguments"
+                Return 0
+            End If
+            Dim leftSrc43 As String
+            If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, a0, 0), leftSrc43, errText) = 0 Then Return 0
+            Dim leftLen43 As Integer
+            leftLen43 = ExecEvalNode(ps, es, ExecChildAt(ps, a0, 1), errText)
+            If errText <> "" Then Return 0
+            If leftLen43 < 0 Then leftLen43 = 0
+            textOut = Left(leftSrc43, leftLen43)
+            Return 1
+
+        Case "RIGHT"
+            Dim rightArgc43 As Integer
+            rightArgc43 = ExecChildCount(ps, a0)
+            If rightArgc43 <> 2 Then
+                errText = "exec: RIGHT expects 2 arguments"
+                Return 0
+            End If
+            Dim rightSrc43 As String
+            If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, a0, 0), rightSrc43, errText) = 0 Then Return 0
+            Dim rightLen43 As Integer
+            rightLen43 = ExecEvalNode(ps, es, ExecChildAt(ps, a0, 1), errText)
+            If errText <> "" Then Return 0
+            If rightLen43 < 0 Then rightLen43 = 0
+            textOut = Right(rightSrc43, rightLen43)
+            Return 1
+
+        Case "INSTR"
+            Dim instrArgc43 As Integer
+            instrArgc43 = ExecChildCount(ps, a0)
+            If instrArgc43 < 2 Or instrArgc43 > 3 Then
+                errText = "exec: INSTR expects 2 or 3 arguments"
+                Return 0
+            End If
+            Dim instrStart43 As Integer
+            Dim instrHay43 As String
+            Dim instrNeedle43 As String
+            If instrArgc43 = 2 Then
+                instrStart43 = 1
+                If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, a0, 0), instrHay43, errText) = 0 Then Return 0
+                If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, a0, 1), instrNeedle43, errText) = 0 Then Return 0
+            Else
+                instrStart43 = ExecEvalNode(ps, es, ExecChildAt(ps, a0, 0), errText)
+                If errText <> "" Then Return 0
+                If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, a0, 1), instrHay43, errText) = 0 Then Return 0
+                If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, a0, 2), instrNeedle43, errText) = 0 Then Return 0
+            End If
+            textOut = LTrim(Str(InStr(instrStart43, instrHay43, instrNeedle43)))
+            Return 1
+
+        Case "MID"
+            If ExecBuiltinTextMidCall(ps, es, a0, textOut, errText) = 0 Then Return 0
+            Return 1
+
+        Case "SPACE"
+            If ExecBuiltinTextSpaceCall(ps, es, a0, textCallName, textOut, errText) = 0 Then Return 0
+            Return 1
+
+        Case "STRING"
+            If ExecBuiltinTextStringCall(ps, es, a0, textOut, errText) = 0 Then Return 0
+            Return 1
+        End Select
+    End If
+
+    Dim valueOut As ExecValue
+    If ExecEvalExpression(ps, a0, es, valueOut, errText) = 0 Then Return 0
+
+    textOut = ExecValueToStringForNode(ps, a0, valueOut)
+    Return 1
+End Function
+
+Private Function ExecTryEvalCallExprAsText(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNodeIdx As Integer, ByRef textOut As String, ByRef errText As String, ByRef handledOut As Integer) As Integer
+    Dim callNode As ASTNode
+    callNode = ps.ast.nodes(callNodeIdx)
+
+    Dim textCallName As String
+    textCallName = ExecFix8BNodeName(callNode)
+    ' FIX8_STR_NS_INC_FIXED_20260611: normalize string builtin aliases with trailing $.
+    If Right(textCallName, 1) = "$" Then textCallName = Left(textCallName, Len(textCallName) - 1)
+
+    handledOut = 1
+
+    Select Case textCallName
+    Case "STR"
+        Dim strArgNode As Integer
+        strArgNode = ExecChildAt(ps, callNodeIdx, 0)
+        If strArgNode = -1 Then
+            errText = "exec: STR arg missing"
+            Return 0
+        End If
+
+        Dim strValue As ExecValue
+        If ExecEvalExpression(ps, strArgNode, es, strValue, errText) = 0 Then Return 0
+        textOut = ExecValueToStringForNode(ps, strArgNode, strValue)
+        Return 1
+
+    Case "UCASE"
+        Dim ucText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, textCallName, ucText, errText) = 0 Then Return 0
+        textOut = UCase(ucText)
+        Return 1
+
+    Case "LCASE"
+        Dim lcText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, textCallName, lcText, errText) = 0 Then Return 0
+        textOut = LCase(lcText)
+        Return 1
+
+    Case "CHR"
+        Dim chrValue As Integer
+        If ExecBuiltinArgAsInt(ps, es, callNodeIdx, textCallName, chrValue, errText, 1) = 0 Then Return 0
+        If chrValue < 0 Or chrValue > 255 Then
+            errText = "exec: CHR range error"
+            Return 0
+        End If
+        textOut = Chr(chrValue)
+        Return 1
+
+    Case "LTRIM"
+        Dim ltrimText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, textCallName, ltrimText, errText) = 0 Then Return 0
+        textOut = LTrim(ltrimText)
+        Return 1
+
+    Case "RTRIM"
+        Dim rtrimText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, textCallName, rtrimText, errText) = 0 Then Return 0
+        textOut = RTrim(rtrimText)
+        Return 1
+
+    Case "TRIM"
+        Dim trimText As String
+        If ExecBuiltinArgAsText(ps, es, callNodeIdx, textCallName, trimText, errText) = 0 Then Return 0
+        textOut = Trim(trimText)
+        Return 1
+
+    Case "LEFT"
+        Dim leftArgc As Integer
+        leftArgc = ExecChildCount(ps, callNodeIdx)
+        If leftArgc <> 2 Then
+            errText = "exec: LEFT expects 2 arguments"
+            Return 0
+        End If
+        Dim leftSrc As String
+        If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, callNodeIdx, 0), leftSrc, errText) = 0 Then Return 0
+        Dim leftLen As Integer
+        leftLen = ExecEvalNode(ps, es, ExecChildAt(ps, callNodeIdx, 1), errText)
+        If errText <> "" Then Return 0
+        If leftLen < 0 Then leftLen = 0
+        textOut = Left(leftSrc, leftLen)
+        Return 1
+
+    Case "RIGHT"
+        Dim rightArgc As Integer
+        rightArgc = ExecChildCount(ps, callNodeIdx)
+        If rightArgc <> 2 Then
+            errText = "exec: RIGHT expects 2 arguments"
+            Return 0
+        End If
+        Dim rightSrc As String
+        If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, callNodeIdx, 0), rightSrc, errText) = 0 Then Return 0
+        Dim rightLen As Integer
+        rightLen = ExecEvalNode(ps, es, ExecChildAt(ps, callNodeIdx, 1), errText)
+        If errText <> "" Then Return 0
+        If rightLen < 0 Then rightLen = 0
+        textOut = Right(rightSrc, rightLen)
+        Return 1
+
+    Case "INSTR"
+        Dim instrArgc As Integer
+        instrArgc = ExecChildCount(ps, callNodeIdx)
+        If instrArgc < 2 Or instrArgc > 3 Then
+            errText = "exec: INSTR expects 2 or 3 arguments"
+            Return 0
+        End If
+        Dim instrStart As Integer
+        Dim instrHay As String
+        Dim instrNeedle As String
+        If instrArgc = 2 Then
+            instrStart = 1
+            If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, callNodeIdx, 0), instrHay, errText) = 0 Then Return 0
+            If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, callNodeIdx, 1), instrNeedle, errText) = 0 Then Return 0
+        Else
+            instrStart = ExecEvalNode(ps, es, ExecChildAt(ps, callNodeIdx, 0), errText)
+            If errText <> "" Then Return 0
+            If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, callNodeIdx, 1), instrHay, errText) = 0 Then Return 0
+            If ExecEvalNodeAsText(ps, es, ExecChildAt(ps, callNodeIdx, 2), instrNeedle, errText) = 0 Then Return 0
+        End If
+        textOut = LTrim(Str(InStr(instrStart, instrHay, instrNeedle)))
+        Return 1
+
+    Case "MID"
+        Return ExecBuiltinTextMidCall(ps, es, callNodeIdx, textOut, errText)
+
+    Case "SPACE"
+        Return ExecBuiltinTextSpaceCall(ps, es, callNodeIdx, textCallName, textOut, errText)
+
+    Case "STRING"
+        Return ExecBuiltinTextStringCall(ps, es, callNodeIdx, textOut, errText)
+
+    Case "PEEKS"
+        ' S-059: PEEKS had NO AST implementation at all (any mode) --
+        ' canonical-MIR/native x64 both support it via MIR_MEMORY_READ_SEQUENCE,
+        ' but the AST interpreter fell through to the generic numeric builtin
+        ' dispatcher (ExecEvalBuiltinPeekCategory in memory_exec.fbs, which
+        ' only returns Integer) and then to its "unsupported call" fallback,
+        ' since PEEKS returns a STRING and was never wired into ANY
+        ' string-returning path. Mirrors PEEKB's own mode-prefix parsing
+        ' (exec_eval_builtin_categories.fbs) and NATIVE POKES's real
+        ' ExecNativeAddrReadable-checked byte read (ExecRunPokeSStmt,
+        ' exec_stmt_memory_core.fbs) for the write side.
+        Dim peeksModeOffset As Integer = 0
+        Dim peeksMode As String = ""
+        Dim peeksFirstNode As Integer = ExecChildAt(ps, callNodeIdx, 0)
+        If peeksFirstNode <> -1 And UCase(ps.ast.nodes(peeksFirstNode).kind) = "KEYWORD_REF" Then
+            Dim peeksModeName As String = UCase(Trim(ps.ast.nodes(peeksFirstNode).value))
+            If peeksModeName = "NATIVE" Then peeksMode = "NATIVE": peeksModeOffset = 1
+            If peeksModeName = "VIRTUAL" Then peeksMode = "VIRTUAL": peeksModeOffset = 1
+        End If
+        Dim peeksAddrNode As Integer = ExecChildAt(ps, callNodeIdx, peeksModeOffset)
+        Dim peeksLenNode As Integer = ExecChildAt(ps, callNodeIdx, peeksModeOffset + 1)
+        ' S-069: AUTO -- pointer-typed address means NATIVE.
+        If peeksMode = "" Then
+            If UXBMemoryAddrIsPointer(ps, peeksAddrNode) <> 0 Then peeksMode = "NATIVE"
+        End If
+        If peeksAddrNode = -1 Or peeksLenNode = -1 Then
+            errText = "exec: PEEKS expects address,length"
+            Return 0
+        End If
+        Dim peeksAddr As Integer
+        peeksAddr = ExecEvalNode(ps, es, peeksAddrNode, errText)
+        If errText <> "" Then Return 0
+        Dim peeksLen As Integer
+        peeksLen = ExecEvalNode(ps, es, peeksLenNode, errText)
+        If errText <> "" Or peeksLen < 0 Then errText = "exec: PEEKS invalid length": Return 0
+        If peeksMode = "NATIVE" Then
+            If peeksLen > 0 And ExecNativeAddrReadable(CUInt(peeksAddr), CUInt(peeksLen)) = 0 Then
+                errText = "exec: NATIVE PEEKS out of range" & UXBMemRefReason()
+                Return 0
+            End If
+            Dim peeksNativeOut As String = String(peeksLen, Chr(0))
+            Dim peeksSrcPtr As UByte Ptr = CPtr(UByte Ptr, CUInt(peeksAddr))
+            Dim peeksNi As Integer
+            For peeksNi = 0 To peeksLen - 1
+                Mid(peeksNativeOut, peeksNi + 1, 1) = Chr(peeksSrcPtr[peeksNi])
+            Next peeksNi
+            textOut = peeksNativeOut
+            Return 1
+        End If
+        If VMemInRange(CUInt(peeksAddr), CUInt(peeksLen)) = 0 And peeksLen <> 0 Then
+            errText = "exec: PEEKS out of range"
+            Return 0
+        End If
+        Dim peeksVOut As String = String(peeksLen, Chr(0))
+        Dim peeksVi As Integer
+        For peeksVi = 0 To peeksLen - 1
+            Mid(peeksVOut, peeksVi + 1, 1) = Chr(VMemPeekB(CUInt(peeksAddr) + peeksVi))
+        Next peeksVi
+        textOut = peeksVOut
+        Return 1
+
+    Case "BIGINIT", "BIGI", "BIGINT", "BIGD", "BIGF", "BALL", "EXTFP", "FP80", "FP128"
+        Return ExecFix16BigSurfaceValueAsText(ps, es, callNodeIdx, textOut, errText)
+    End Select
+
+    handledOut = 0
+    Return 1
+End Function
+
+Private Function ExecEvalNodeAsText(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef textOut As String, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then
+        errText = "exec: invalid text node"
+        Return 0
+    End If
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    If UCase(n.kind) = "STRING" Then
+        textOut = n.value
+        Return 1
+    End If
+
+    If UCase(n.kind) = "CALL_EXPR" Then
+        Dim handledCallExpr As Integer
+        If ExecTryEvalCallExprAsText(ps, es, nodeIdx, textOut, errText, handledCallExpr) = 0 Then Return 0
+        If handledCallExpr <> 0 Then
+            Return 1
+        End If
+
+        ' A normal user FUNCTION can have observable side effects.  The generic
+        ' MAGIC_TOSTRING probe below evaluates CALL_EXPR in order to discover an
+        ' object receiver; when the result is scalar it returned -1 and the
+        ' ordinary expression path invoked the same FUNCTION a second time.
+        ' Resolve declared routines directly and stringify their one evaluation.
+        ' NEW_EXPR, fields, and dynamically typed calls retain the object/magic
+        ' route below; a declared routine is no longer speculatively invoked.
+        Dim plainCallName As String
+        plainCallName = ExecFix8BNodeName(n)
+        If ExecRoutineIndexOf(es, plainCallName) <> -1 Then
+            Dim plainCallValue As ExecValue
+            If ExecEvalExpression(ps, nodeIdx, es, plainCallValue, errText) = 0 Then Return 0
+            textOut = ExecValueToStringForNode(ps, nodeIdx, plainCallValue)
+            Return 1
+        End If
+    End If
+
+    Dim magicText As String
+    Dim magicRv As Integer
+    Dim valueOut As ExecValue
+    Dim valueReady As Integer
+    magicRv = ExecTryEvalMagicToString(ps, es, nodeIdx, magicText, errText, valueOut, valueReady)
+    If magicRv > 0 Then
+        textOut = magicText
+        Return 1
+    End If
+    If magicRv = 0 Then Return 0
+
+    ' The magic probe may already have evaluated the node once; never evaluate it again (S-124).
+    If valueReady = 0 Then
+        If ExecEvalExpression(ps, nodeIdx, es, valueOut, errText) = 0 Then Return 0
+    End If
+
+    textOut = ExecValueToStringForNode(ps, nodeIdx, valueOut)
+    Return 1
+End Function

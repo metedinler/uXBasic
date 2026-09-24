@@ -1,0 +1,215 @@
+#ifndef UXB_JS_MIR_OPCODE_COVERAGE_ADIM26_FBS
+#define UXB_JS_MIR_OPCODE_COVERAGE_ADIM26_FBS
+
+#include once "../../semantic/mir_model.fbs"
+#include once "../../backend/common/backend_emit_policy.fbs"
+#include once "js_expr_emit.fbs"
+
+' ADIM26: MIR -> JS opcode coverage gate.
+' Bu gate emitter'ın kodunu bypass etmez; emit öncesi tüm MIR opcode'larının JS tarafında
+' DIRECT / RUNTIME / HOST_FALLBACK / METADATA / NATIVE_BLOCKED kararına sahip olmasını ister.
+' Amaç: "MIR -> JS eksiksiz olacak" kuralını ölçülebilir hale getirmek.
+
+Private Function UXBAdim26NormalizePath(ByRef pathText As String) As String
+    Dim rawText As String
+    rawText = Trim(pathText)
+
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        If ch = "/" Then
+            outText &= "\"
+        Else
+            outText &= ch
+        End If
+    Next i
+
+    Return outText
+End Function
+
+#ifdef __FB_WIN32__
+Declare Function _mkdir CDecl Alias "_mkdir" (ByVal path As Const ZString Ptr) As Integer
+#endif
+
+Private Function UXBAdim26EnsureParentDir(ByRef filePath As String) As Integer
+    Dim norm As String
+    norm = UXBAdim26NormalizePath(filePath)
+    Dim cutAt As Integer = 0
+    Dim i As Integer
+    For i = Len(norm) To 1 Step -1
+        If Mid(norm, i, 1) = "\" Then
+            cutAt = i
+            Exit For
+        End If
+    Next i
+
+    If cutAt <= 0 Then Return 1
+
+    Dim parentDir As String = Left(norm, cutAt - 1)
+    If Trim(parentDir) = "" Then Return 1
+
+    Dim currentPath As String = ""
+    For i = 1 To Len(parentDir)
+        Dim ch As String = Mid(parentDir, i, 1)
+        currentPath &= ch
+        If ch = "\" Or i = Len(parentDir) Then
+            Dim partialPath As String = IIf(Right(currentPath, 1) = "\", Left(currentPath, Len(currentPath) - 1), currentPath)
+            If Len(partialPath) > 0 And Right(partialPath, 1) <> ":" Then
+                #ifdef __FB_WIN32__
+                _mkdir(partialPath)
+                #else
+                MkDir partialPath
+                #endif
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function UXBAdim26CsvEscape(ByVal rawText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    Dim ch As String
+    outText = ""
+    For i = 1 To Len(rawText)
+        ch = Mid(rawText, i, 1)
+        If ch = Chr(34) Then
+            outText &= Chr(34) & Chr(34)
+        Else
+            outText &= ch
+        End If
+    Next i
+    Return Chr(34) & outText & Chr(34)
+End Function
+
+#ifdef __FB_WIN32__
+Declare Function fopen CDecl Alias "fopen" (ByVal filename As Const ZString Ptr, ByVal mode As Const ZString Ptr) As Any Ptr
+Declare Function fputs CDecl Alias "fputs" (ByVal strText As Const ZString Ptr, ByVal fp As Any Ptr) As Integer
+Declare Function fclose CDecl Alias "fclose" (ByVal fp As Any Ptr) As Integer
+#endif
+
+Private Function UXBAdim26WriteText(ByRef filePath As String, ByRef textValue As String, ByRef errText As String) As Integer
+    errText = ""
+    If Trim(filePath) = "" Then Return 1
+    UXBAdim26EnsureParentDir(filePath)
+    
+    #ifdef __FB_WIN32__
+    Dim fp As Any Ptr = fopen(filePath, "w")
+    If fp = 0 Then
+        errText = "ADIM26 cannot open file for writing: " & filePath
+        Return 0
+    End If
+    fputs(textValue, fp)
+    fclose(fp)
+    Return 1
+    #else
+    Dim ff As Integer = FreeFile
+    Open filePath For Output As #ff
+    Print #ff, textValue;
+    Close #ff
+    Return 1
+    #endif
+End Function
+
+Function UXBJsOpcodeEmitClassAdim26(ByVal opcodeText As String) As String
+    Dim op As String
+    Dim d As String
+    op = UXBJsCanonicalOpcode(opcodeText)
+
+    If UXBJsSurfaceIsMetadata(op) <> 0 Then Return "METADATA_ONLY"
+    If UXBJsNativeOnly(op) <> 0 Then Return "NATIVE_ONLY_DIAGNOSTIC"
+    If UXBJsIsBinaryOpcode(op) <> 0 Then Return "DIRECT_JS"
+
+    Select Case op
+    Case "LOAD_CONST", "LOAD_VAR", "STORE_VAR", "INC", "DEC", "ADD_ASSIGN", "SUB_ASSIGN", "MUL_ASSIGN", "DIV_ASSIGN", "IDIV_ASSIGN", "MOD_ASSIGN", "SHL_ASSIGN", "SHR_ASSIGN", "OR_ASSIGN", "XOR_ASSIGN"
+        Return "DIRECT_JS"
+    Case "MEMORY_REF", "ARRAY_SIZEOF", "ARRAY_LBOUND", "ARRAY_UBOUND": Return "DIRECT_JS"
+    Case "NEG", "NOT", "ROL", "ROR", "POW", "CAST", "COERCE", "TYPEOF", "SIZEOF", "OFFSETOF", "CODEPTR", "LPTR", "ADDR_OF"
+        Return "DIRECT_OR_BUILTIN_JS"
+    Case "CALL", "CALL_BUILTIN", "CALL_RUNTIME", "PRINT", "INPUT", "CLS", "COLOR", "LOCATE", "RANDOMIZE", "TIMER", "RND"
+        Return "RUNTIME_JS"
+    Case "JMP", "JZ", "JNZ", "RET"
+        Return "CONTROL_JS"
+    Case "DIM", "REDIM", "ARRAY_NEW", "ARRAY_LOAD", "ARRAY_STORE", "OBJECT_NEW", "FIELD_LOAD", "FIELD_STORE", "METHOD_CALL", "VIRTUAL_CALL"
+        Return "RUNTIME_OBJECT_JS"
+    Case "OPEN", "CLOSE", "GET", "PUT", "SEEK", "DELETE", "EOF", "LOF", "MEMCOPY", "MEMFILL", "PEEK", "POKE"
+        Return "HOST_FALLBACK_JS"
+    Case "BROWSER_CALL", "HOST_CALL", "LIBRARY_CALL", "JS_CALL", "EXTFP_CALL", "JSON", "REGEX", "HTTP", "OS", "STRINGX", "LLAMA", "LUA", "PROLOG", "SQLITE", "CURL", "CRYPTO", "ARCHIVE", "IMAGE", "AUDIO", "GRAPHICS", "SERVER", "ONNX", "WEBGPU", "CANVAS"
+        Return "HOST_FALLBACK_JS"
+    End Select
+
+    d = UXBBackendTargetDecisionForOpcode(op, UXB_TARGET_JS)
+    If d = UXB_EMIT_IMPLEMENTED Or d = UXB_EMIT_RUNTIME_CALL Then Return "POLICY_JS"
+    If d = UXB_EMIT_NATIVE_ONLY Then Return "NATIVE_ONLY_DIAGNOSTIC"
+    If d = UXB_EMIT_COMPILE_TIME_ONLY Then Return "METADATA_ONLY"
+
+    ' Son çare: JS backend bu opcode'u sessizce yutmaz; ux.callHost ile açık host route'a gönderir.
+    Return "HOST_FALLBACK_JS"
+End Function
+
+Private Function UXBAdim26SetHas(ByRef setText As String, ByRef keyText As String) As Integer
+    If InStr(setText, "|" & UCase(Trim(keyText)) & "|") > 0 Then Return 1
+    Return 0
+End Function
+
+Private Sub UXBAdim26SetAdd(ByRef setText As String, ByRef keyText As String)
+    Dim k As String
+    k = UCase(Trim(keyText))
+    If k = "" Then Exit Sub
+    If UXBAdim26SetHas(setText, k) = 0 Then setText &= "|" & k & "|"
+End Sub
+
+Function UXBJsMirOpcodeCoverageGateAdim26(ByRef m As MIRModule, ByRef csvOutPath As String, ByRef errText As String) As Integer
+    Dim opSet As String
+    Dim csvText As String
+    Dim fi As Integer
+    Dim bi As Integer
+    Dim ii As Integer
+    Dim op As String
+    Dim emitClass As String
+    Dim failCount As Integer
+    Dim checkedCount As Integer
+    Dim writeErr As String
+
+    errText = ""
+    opSet = ""
+    For fi = 0 To m.functionCount - 1
+        For bi = 0 To m.functions(fi).blockCount - 1
+            For ii = 0 To m.functions(fi).blocks(bi).instructionCount - 1
+                UXBAdim26SetAdd opSet, m.functions(fi).blocks(bi).instructions(ii).opcode
+            Next ii
+        Next bi
+    Next fi
+
+    csvText = "opcode,canonical,emit_class,status,action" & Chr(10)
+    Do While opSet <> ""
+        Dim p As Integer
+        p = InStr(opSet, "|")
+        If p <= 0 Then Exit Do
+        op = Mid(opSet, 2, p - 2)
+        opSet = Mid(opSet, p + 1)
+        If Trim(op) = "" Then Continue Do
+        checkedCount += 1
+        emitClass = UXBJsOpcodeEmitClassAdim26(op)
+        If emitClass = "NATIVE_ONLY_DIAGNOSTIC" Then
+            csvText &= UXBAdim26CsvEscape(op) & "," & UXBAdim26CsvEscape(UXBJsCanonicalOpcode(op)) & "," & UXBAdim26CsvEscape(emitClass) & "," & UXBAdim26CsvEscape("FAIL_FOR_JS_TARGET") & "," & UXBAdim26CsvEscape("Use native target or replace DLL/API/native call with host-safe API") & Chr(10)
+            failCount += 1
+        Else
+            csvText &= UXBAdim26CsvEscape(op) & "," & UXBAdim26CsvEscape(UXBJsCanonicalOpcode(op)) & "," & UXBAdim26CsvEscape(emitClass) & "," & UXBAdim26CsvEscape("OK") & "," & UXBAdim26CsvEscape("Emitter has direct/runtime/host route") & Chr(10)
+        End If
+    Loop
+
+    If UXBAdim26WriteText(csvOutPath, csvText, writeErr) = 0 Then errText = writeErr: Return 0
+    If failCount > 0 Then
+        errText = "ADIM26 JS coverage failed: native-only opcode count=" & LTrim(Str(failCount))
+        Return 0
+    End If
+    Return 1
+End Function
+
+#endif

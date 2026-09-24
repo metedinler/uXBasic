@@ -1,0 +1,649 @@
+Declare Function IsBasicStmtTerminator(ByRef tk As Token) As Integer
+
+Private Function ParsePrintStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim stmtIdx As Integer
+    stmtIdx = MakeNodeFromToken(ps, "PRINT_STMT", "", "", firstTok)
+
+    ' ADIM31: support BASIC file-output form: PRINT #handle, expr[, expr...]
+    If MatchOp(ps, "#") Then
+        ps.ast.nodes(stmtIdx).op = "FILE"
+        Dim handleExpr As Integer
+        handleExpr = ParseExpression(ps)
+        If handleExpr = -1 Then
+            ps.lastError = "PRINT #: file handle expected"
+            Return -1
+        End If
+        ASTAddChild ps.ast, stmtIdx, handleExpr
+        If MatchOp(ps, ",") = 0 Then
+            If IsBasicStmtTerminator(CurToken(ps)) Then Return stmtIdx
+            ps.lastError = "PRINT #: comma expected after handle"
+            Return -1
+        End If
+    End If
+
+    Do
+        Dim exprIdx As Integer
+        exprIdx = ParseExpression(ps)
+        If exprIdx = -1 Then Exit Do
+
+        Dim printItem As Integer
+        printItem = ASTNewNode(ps.ast, "PRINT_ITEM", "", "", ps.ast.nodes(exprIdx).lineNo, ps.ast.nodes(exprIdx).colNo)
+        ps.ast.nodes(printItem).left = exprIdx
+
+        If MatchOp(ps, ",") Then
+            ps.ast.nodes(printItem).op = ","
+        ElseIf MatchOp(ps, ";") Then
+            ps.ast.nodes(printItem).op = ";"
+        Else
+            ps.ast.nodes(printItem).op = ""
+        End If
+
+        ASTAddChild ps.ast, stmtIdx, printItem
+        If ps.ast.nodes(printItem).op = "" Then Exit Do
+    Loop
+
+    Return stmtIdx
+End Function
+
+Private Function ParseInlineStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim stmtIdx As Integer
+    stmtIdx = MakeNodeFromToken(ps, "INLINE_STMT", "", "", firstTok)
+
+    Dim headerText As String
+    Dim bodyText As String
+    Dim depth As Integer
+    Dim headerDone As Integer
+    Dim bodyStarted As Integer
+    headerText = ""
+    bodyText = ""
+    depth = 0
+    headerDone = 0
+    bodyStarted = 0
+
+    Do While CurToken(ps).kind <> "EOF"
+        If IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "INLINE") Then
+            AdvanceTok ps
+            AdvanceTok ps
+            Exit Do
+        End If
+
+        Dim tk As Token
+        tk = CurToken(ps)
+
+        If headerDone = 0 Then
+            If tk.kind = "OP" And tk.lexeme = "(" Then
+                depth += 1
+            ElseIf tk.kind = "OP" And tk.lexeme = ")" Then
+                depth -= 1
+            End If
+
+            If tk.kind <> "EOL" Then
+                If Len(headerText) > 0 Then headerText &= " "
+                headerText &= tk.lexeme
+            End If
+
+            If depth <= 0 And Len(headerText) > 0 Then
+                headerDone = 1
+            End If
+        Else
+            If tk.kind = "EOL" Then
+                If bodyStarted <> 0 Then bodyText &= Chr(10)
+            Else
+                If bodyStarted <> 0 Then
+                    If Len(bodyText) > 0 And Right(bodyText, 1) <> Chr(10) Then bodyText &= " "
+                End If
+                bodyText &= tk.lexeme
+                bodyStarted = 1
+            End If
+        End If
+
+        AdvanceTok ps
+    Loop
+
+    ps.ast.nodes(stmtIdx).value = Trim(headerText)
+    ps.ast.nodes(stmtIdx).op = Trim(bodyText)
+    ps.ast.nodes(stmtIdx).flags = ps.ast.nodes(stmtIdx).flags Or AST_FLAG_INLINE
+
+    Return stmtIdx
+End Function
+
+Private Function IsBasicStmtTerminator(ByRef tk As Token) As Integer
+    If tk.kind = "EOF" Or tk.kind = "EOL" Then Return 1
+    If tk.kind = "OP" And tk.lexeme = ":" Then Return 1
+    Return 0
+End Function
+
+
+Private Function ParseShellOptionPayloadExpr(ByRef ps As ParseState, ByRef optName As String, ByRef payloadOut As Integer) As Integer
+    payloadOut = -1
+
+    If MatchOp(ps, "(") Then
+        payloadOut = ParseExpression(ps)
+        If payloadOut = -1 Then
+            ps.lastError = "SHELL " & optName & ": option expression expected"
+            Return 0
+        End If
+        If MatchOp(ps, ")") = 0 Then
+            ps.lastError = "SHELL " & optName & ": missing )"
+            Return 0
+        End If
+        Return 1
+    End If
+
+    payloadOut = ParseExpression(ps)
+    If payloadOut = -1 Then
+        ps.lastError = "SHELL " & optName & ": option expression expected"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function ParseShellOptionPayloadIdent(ByRef ps As ParseState, ByRef optName As String, ByRef payloadOut As Integer) As Integer
+    payloadOut = -1
+    Dim tk As Token
+    tk = CurToken(ps)
+    If tk.kind <> "IDENT" Then
+        ps.lastError = "SHELL " & optName & ": variable name expected"
+        Return 0
+    End If
+    payloadOut = MakeNodeFromToken(ps, "IDENT", tk.lexeme, "", tk)
+    AdvanceTok ps
+    Return 1
+End Function
+
+Private Function ParseShellAddOption(ByRef ps As ParseState, ByRef stmtNode As Integer, ByRef optTok As Token, ByRef optName As String, ByVal payloadNode As Integer) As Integer
+    Dim optNode As Integer
+    optNode = MakeNodeFromToken(ps, "SHELL_OPTION", UCase(Trim(optName)), "", optTok)
+    If optNode = -1 Then Return 0
+    If payloadNode <> -1 Then
+        ' AST contract: SHELL_OPTION carries its payload as child[0].
+        ' Older runtime/MIR code can still fallback to left if it sees legacy AST.
+        ASTAddChild ps.ast, optNode, payloadNode
+    End If
+    ASTAddChild ps.ast, stmtNode, optNode
+    Return 1
+End Function
+
+Function ParseShellStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim stmtNode As Integer
+    stmtNode = MakeNodeFromToken(ps, "SHELL_STMT", "", "", firstTok)
+    If stmtNode = -1 Then Return -1
+
+    Dim commandExpr As Integer
+    commandExpr = ParseExpression(ps)
+    If commandExpr = -1 Then
+        ps.lastError = "SHELL: command expression expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, stmtNode, commandExpr
+
+    Do While IsBasicStmtTerminator(CurToken(ps)) = 0
+        Dim optTok As Token
+        optTok = CurToken(ps)
+        If optTok.kind <> "KEYWORD" And optTok.kind <> "IDENT" Then
+            ps.lastError = "SHELL: option keyword expected"
+            Return -1
+        End If
+
+        Dim optName As String
+        optName = UCase(Trim(optTok.lexeme))
+        AdvanceTok ps
+
+        Dim payloadNode As Integer
+        payloadNode = -1
+
+        Select Case optName
+        Case "NOWAIT"
+            payloadNode = -1
+        Case "TIMEOUT", "RUNPATH", "OUTPATH", "ERRPATH"
+            If ParseShellOptionPayloadExpr(ps, optName, payloadNode) = 0 Then Return -1
+        Case "OUTVAR", "ERRVAR", "CODEVAR"
+            If ParseShellOptionPayloadIdent(ps, optName, payloadNode) = 0 Then Return -1
+        Case Else
+            ps.lastError = "SHELL: unsupported option " & optTok.lexeme
+            Return -1
+        End Select
+
+        If ParseShellAddOption(ps, stmtNode, optTok, optName, payloadNode) = 0 Then Return -1
+    Loop
+
+    Return stmtNode
+End Function
+
+
+Private Function ParseCallableName(ByRef ps As ParseState, ByRef nameOut As String) As Integer
+    Dim firstTok As Token
+    firstTok = CurToken(ps)
+    If firstTok.kind <> "IDENT" And firstTok.kind <> "KEYWORD" Then
+        ps.lastError = "CALL: callee name expected"
+        Return 0
+    End If
+
+    nameOut = firstTok.lexeme
+    AdvanceTok ps
+
+    If MatchOp(ps, ".") Then
+        Dim methodTok As Token
+        methodTok = CurToken(ps)
+        If methodTok.kind <> "IDENT" And methodTok.kind <> "KEYWORD" Then
+            ps.lastError = "CALL: method name expected after ."
+            Return 0
+        End If
+
+        nameOut &= "." & methodTok.lexeme
+        AdvanceTok ps
+    End If
+
+    Return 1
+End Function
+
+Function ParseCallStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    If MatchOp(ps, "(") Then
+        Dim canonicalCalleeName As String
+        If ParseCallableName(ps, canonicalCalleeName) = 0 Then Return -1
+
+        Dim canonicalStmtNode As Integer
+        canonicalStmtNode = MakeNodeFromToken(ps, "CALL_STMT", canonicalCalleeName, "", firstTok)
+
+        If MatchOp(ps, ",") Then
+            Do
+                Dim canonicalArgExpr As Integer
+                canonicalArgExpr = ParseExpression(ps)
+                If canonicalArgExpr = -1 Then
+                    ps.lastError = "CALL: argument expression expected"
+                    Return -1
+                End If
+                ASTAddChild ps.ast, canonicalStmtNode, canonicalArgExpr
+
+                If MatchOp(ps, ",") = 0 Then Exit Do
+            Loop
+        End If
+
+        If MatchOp(ps, ")") = 0 Then
+            ps.lastError = "CALL: missing )"
+            Return -1
+        End If
+
+        If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+            ps.lastError = "CALL: unexpected trailing tokens"
+            Return -1
+        End If
+
+        If UXBParserNormalizeCallInteropNode(ps, canonicalStmtNode, firstTok) = 0 Then Return -1
+
+        Return canonicalStmtNode
+    End If
+
+    Dim calleeName As String
+    If ParseCallableName(ps, calleeName) = 0 Then Return -1
+
+    If MatchOp(ps, "(") = 0 Then
+        ps.lastError = "CALL: missing ("
+        Return -1
+    End If
+
+    Dim stmtNode As Integer
+    stmtNode = MakeNodeFromToken(ps, "CALL_STMT", calleeName, "", firstTok)
+
+    If MatchOp(ps, ")") = 0 Then
+        Do
+            Dim argExpr As Integer
+            argExpr = ParseExpression(ps)
+            If argExpr = -1 Then
+                ps.lastError = "CALL: argument expression expected"
+                Return -1
+            End If
+            ASTAddChild ps.ast, stmtNode, argExpr
+
+            If MatchOp(ps, ",") = 0 Then Exit Do
+        Loop
+
+        If MatchOp(ps, ")") = 0 Then
+            ps.lastError = "CALL: missing )"
+            Return -1
+        End If
+    End If
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "CALL: unexpected trailing tokens"
+        Return -1
+    End If
+
+    If UXBParserNormalizeCallInteropNode(ps, stmtNode, firstTok) = 0 Then Return -1
+
+    Return stmtNode
+End Function
+
+Private Function ParseIncDecKeywordStmt(ByRef ps As ParseState, ByRef firstTok As Token, ByRef opText As String, ByRef kwName As String) As Integer
+    Dim identTok As Token
+    identTok = CurToken(ps)
+    If identTok.kind <> "IDENT" Then
+        ps.lastError = kwName & ": identifier expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim lhs As Integer
+    lhs = MakeNodeFromToken(ps, "IDENT", identTok.lexeme, "", identTok)
+
+    Dim stmtNode As Integer
+    stmtNode = MakeNodeFromToken(ps, "INCDEC_STMT", "", opText, firstTok)
+    ps.ast.nodes(stmtNode).left = lhs
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = kwName & ": unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return stmtNode
+End Function
+
+Private Function ParseFixedArityKeywordStmt(ByRef ps As ParseState, ByRef firstTok As Token, ByVal nodeKind As String, ByVal kwName As String, ByVal argCount As Integer) As Integer
+    Dim stmtNode As Integer
+    stmtNode = MakeNodeFromToken(ps, nodeKind, "", "", firstTok)
+
+    Dim i As Integer
+    For i = 1 To argCount
+        Dim argExpr As Integer
+        argExpr = ParseExpression(ps)
+        If argExpr = -1 Then
+            ps.lastError = kwName & ": missing argument"
+            Return -1
+        End If
+        ASTAddChild ps.ast, stmtNode, argExpr
+
+        If i < argCount Then
+            If MatchOp(ps, ",") = 0 Then
+                ps.lastError = kwName & ": missing comma"
+                Return -1
+            End If
+        End If
+    Next i
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = kwName & ": unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return stmtNode
+End Function
+
+Function ParseIncStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim opText As String
+    opText = "++"
+    Dim kwName As String
+    kwName = "INC"
+    Return ParseIncDecKeywordStmt(ps, firstTok, opText, kwName)
+End Function
+
+Function ParseDecStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim opText As String
+    opText = "--"
+    Dim kwName As String
+    kwName = "DEC"
+    Return ParseIncDecKeywordStmt(ps, firstTok, opText, kwName)
+End Function
+
+Function ParseRandomizeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim stmtNode As Integer
+    stmtNode = MakeNodeFromToken(ps, "RANDOMIZE_STMT", "", "", firstTok)
+
+    If IsBasicStmtTerminator(CurToken(ps)) Then
+        Return stmtNode
+    End If
+
+    Dim seedExpr As Integer
+    seedExpr = ParseExpression(ps)
+    If seedExpr = -1 Then
+        ps.lastError = "RANDOMIZE: seed expression expected"
+        Return -1
+    End If
+
+    ASTAddChild ps.ast, stmtNode, seedExpr
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "RANDOMIZE: unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return stmtNode
+End Function
+
+' S-036/S-049 locked design point #5: VIRTUAL <ramSize>[, <diskSize>]
+' e.g. VIRTUAL 2M, 16G -- (re)configures the interpreter's VIRTUAL memory
+' sandbox at runtime. Sizes are literal K/M/G(/T)-suffixed byte counts, not
+' general expressions (matching how the language already spells sizes
+' elsewhere) -- deliberately kept as a single NUMBER token per operand and
+' parsed at statement-EXECUTION time (see ExecRunVirtualStmt), not here, so
+' this parse function only needs to shape the AST, never touch byte math.
+Function ParseVirtualStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim stmtNode As Integer
+    stmtNode = MakeNodeFromToken(ps, "VIRTUAL_STMT", "", "", firstTok)
+
+    Dim ramTok As Token
+    ramTok = CurToken(ps)
+    If ramTok.kind <> "NUMBER" Then
+        ps.lastError = "VIRTUAL: ram boyutu bekleniyor (ornek: VIRTUAL 2M, 16G)"
+        Return -1
+    End If
+    AdvanceTok ps
+    Dim ramNode As Integer
+    ramNode = MakeNodeFromToken(ps, "NUMBER", ramTok.lexeme, "", ramTok)
+    ASTAddChild ps.ast, stmtNode, ramNode
+
+    If CurToken(ps).kind = "OP" And CurToken(ps).lexeme = "," Then
+        MatchOp ps, ","
+        Dim diskTok As Token
+        diskTok = CurToken(ps)
+        If diskTok.kind <> "NUMBER" Then
+            ps.lastError = "VIRTUAL: disk boyutu bekleniyor (ornek: VIRTUAL 2M, 16G)"
+            Return -1
+        End If
+        AdvanceTok ps
+        Dim diskNode As Integer
+        diskNode = MakeNodeFromToken(ps, "NUMBER", diskTok.lexeme, "", diskTok)
+        ASTAddChild ps.ast, stmtNode, diskNode
+    End If
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "VIRTUAL: unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return stmtNode
+End Function
+
+Private Function ParseMemoryStmtOptionalMode(ByRef ps As ParseState, ByRef firstTok As Token, ByVal nodeKind As String, ByVal kwName As String, ByVal legacyArity As Integer) As Integer
+    Dim stmtNode As Integer
+    stmtNode = MakeNodeFromToken(ps, nodeKind, "", "", firstTok)
+
+    Dim firstExpr As Integer
+    firstExpr = ParseExpression(ps)
+    If firstExpr = -1 Then
+        ps.lastError = kwName & ": missing argument"
+        Return -1
+    End If
+    ASTAddChild ps.ast, stmtNode, firstExpr
+
+    Dim expected As Integer
+    expected = legacyArity
+    If UCase(ps.ast.nodes(firstExpr).kind) = "KEYWORD_REF" Then
+        Dim modeName As String
+        modeName = UCase(Trim(ps.ast.nodes(firstExpr).value))
+        If modeName = "VIRTUAL" Or modeName = "NATIVE" Then expected += 1
+    End If
+
+    Dim i As Integer
+    For i = 2 To expected
+        If MatchOp(ps, ",") = 0 Then
+            ps.lastError = kwName & ": missing comma"
+            Return -1
+        End If
+        Dim argExpr As Integer
+        argExpr = ParseExpression(ps)
+        If argExpr = -1 Then
+            ps.lastError = kwName & ": missing argument"
+            Return -1
+        End If
+        ASTAddChild ps.ast, stmtNode, argExpr
+    Next i
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = kwName & ": unexpected trailing tokens"
+        Return -1
+    End If
+    Return stmtNode
+End Function
+
+Private Function ParseMemorySequenceStmt(ByRef ps As ParseState, ByRef firstTok As Token, ByVal nodeKind As String, ByVal kwName As String) As Integer
+    Dim stmtNode As Integer
+    stmtNode = MakeNodeFromToken(ps, nodeKind, "", "", firstTok)
+
+    Dim firstExpr As Integer
+    firstExpr = ParseExpression(ps)
+    If firstExpr = -1 Then ps.lastError = kwName & ": missing argument": Return -1
+    ASTAddChild ps.ast, stmtNode, firstExpr
+
+    Dim hasMode As Integer
+    hasMode = 0
+    If UCase(ps.ast.nodes(firstExpr).kind) = "KEYWORD_REF" Then
+        Dim modeName As String
+        modeName = UCase(Trim(ps.ast.nodes(firstExpr).value))
+        If modeName = "VIRTUAL" Or modeName = "NATIVE" Then hasMode = 1
+    End If
+
+    Dim maxCount As Integer
+    maxCount = IIf(hasMode <> 0, 4, 3)
+    Do While ASTChildCount(ps, stmtNode) < maxCount And CurToken(ps).kind = "OP" And CurToken(ps).lexeme = ","
+        MatchOp ps, ","
+        Dim nextExpr As Integer
+        nextExpr = ParseExpression(ps)
+        If nextExpr = -1 Then ps.lastError = kwName & ": missing argument": Return -1
+        ASTAddChild ps.ast, stmtNode, nextExpr
+    Loop
+
+    Dim actualArgs As Integer
+    actualArgs = ASTChildCount(ps, stmtNode)
+    Dim minCount As Integer
+    minCount = IIf(hasMode <> 0, 3, 2)
+    If actualArgs < minCount Or actualArgs > maxCount Then
+        ps.lastError = kwName & ": expects address,text[,length]"
+        Return -1
+    End If
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then ps.lastError = kwName & ": unexpected trailing tokens": Return -1
+    Return stmtNode
+End Function
+
+Function ParsePokebStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "POKEB_STMT", "POKEB", 2)
+End Function
+
+Function ParsePokewStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "POKEW_STMT", "POKEW", 2)
+End Function
+
+Function ParsePokedStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "POKED_STMT", "POKED", 2)
+End Function
+
+' S-055: Q (64-bit) memory family, parallel to POKEB/W/D above.
+Function ParsePokeqStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "POKEQ_STMT", "POKEQ", 2)
+End Function
+
+Function ParsePokeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    ' Legacy compatibility: POKE addr,val remains a dword write. An optional
+    ' first VIRTUAL/NATIVE argument selects the explicit memory domain.
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "POKED_STMT", "POKE", 2)
+End Function
+
+Function ParseDeleteStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim targetExpr As Integer
+    targetExpr = ParseExpression(ps)
+    If targetExpr = -1 Then
+        ps.lastError = "DELETE: target expression expected"
+        Return -1
+    End If
+
+    Dim stmtNode As Integer
+    stmtNode = MakeNodeFromToken(ps, "DELETE_STMT", "", "", firstTok)
+    ' AST contract: DELETE_STMT is a ROLE_LIST node. The target expression
+    ' must be carried as child[0], not in left/right.
+    ASTAddChild ps.ast, stmtNode, targetExpr
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "DELETE: unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return stmtNode
+End Function
+
+Function ParseMemcopybStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "MEMCOPYB_STMT", "MEMCOPYB", 3)
+End Function
+
+Function ParseMemfillbStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "MEMFILLB_STMT", "MEMFILLB", 3)
+End Function
+
+Function ParsePokesStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemorySequenceStmt(ps, firstTok, "POKES_STMT", "POKES")
+End Function
+
+Function ParseMemcopywStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "MEMCOPYW_STMT", "MEMCOPYW", 3)
+End Function
+
+Function ParseMemcopydStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "MEMCOPYD_STMT", "MEMCOPYD", 3)
+End Function
+
+' S-055: Q (64-bit) memory family, parallel to MEMCOPYB/W/D above.
+Function ParseMemcopyqStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "MEMCOPYQ_STMT", "MEMCOPYQ", 3)
+End Function
+
+Function ParseMemfillwStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "MEMFILLW_STMT", "MEMFILLW", 3)
+End Function
+
+Function ParseMemfilldStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "MEMFILLD_STMT", "MEMFILLD", 3)
+End Function
+
+Function ParseMemfillqStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Return ParseMemoryStmtOptionalMode(ps, firstTok, "MEMFILLQ_STMT", "MEMFILLQ", 3)
+End Function
+
+Function ParseSetnewoffsetStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim stmtNode As Integer
+    stmtNode = MakeNodeFromToken(ps, "SETNEWOFFSET_STMT", "", "", firstTok)
+
+    Dim targetExpr As Integer
+    targetExpr = ParseExpression(ps)
+    If targetExpr = -1 Then
+        ps.lastError = "SETNEWOFFSET: target expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, stmtNode, targetExpr
+
+    If MatchOp(ps, ",") Then
+        ' Comma-separated and whitespace-separated forms are both accepted.
+    End If
+
+    Dim addrExpr As Integer
+    addrExpr = ParseExpression(ps)
+    If addrExpr = -1 Then
+        ps.lastError = "SETNEWOFFSET: new address expected"
+        Return -1
+    End If
+    ASTAddChild ps.ast, stmtNode, addrExpr
+
+    If IsBasicStmtTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "SETNEWOFFSET: unexpected trailing tokens"
+        Return -1
+    End If
+
+    Return stmtNode
+End Function

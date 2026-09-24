@@ -1,0 +1,99 @@
+#ifndef UXB_HIR_SCOPE_BRIDGE_FBS
+#define UXB_HIR_SCOPE_BRIDGE_FBS
+
+Type HIRScopeInfo
+    id As Integer
+    parentId As Integer
+    ownerAstNode As Integer
+    name As String
+    kind As String
+    depth As Integer
+End Type
+
+Type HIRScopeMap
+    scopes(Any) As HIRScopeInfo
+    scopeCount As Integer
+    astNodeToScope(Any) As Integer
+    astNodeToOwnerScope(Any) As Integer
+End Type
+
+Private Function HIRNodeStartsRealScope(ByRef kindText As String) As Integer
+    Dim k As String = UCase(Trim(kindText))
+    Select Case k
+    Case "NAMESPACE_STMT", "MODULE_STMT", "MAIN_STMT", "SUB_STMT", "FUNCTION_STMT", "CLASS_STMT", "TYPE_STMT", "ENUM_STMT", "INTERFACE_STMT", "EVENT_STMT", "THREAD_STMT", "PARALEL_STMT", "PIPE_STMT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Sub HIRScopeMapEnsure(ByRef sm As HIRScopeMap, ByVal minCount As Integer)
+    If sm.scopeCount = 0 Then ReDim sm.scopes(15)
+    If UBound(sm.scopes) + 1 >= minCount Then Exit Sub
+    Dim newCap As Integer = UBound(sm.scopes) + 1
+    If newCap < 16 Then newCap = 16
+    Do While newCap < minCount
+        newCap *= 2
+    Loop
+    ReDim Preserve sm.scopes(newCap - 1)
+End Sub
+
+Private Function HIRScopeAdd(ByRef sm As HIRScopeMap, ByVal parentId As Integer, ByVal ownerAstNode As Integer, ByRef nameText As String, ByRef kindText As String, ByVal depthValue As Integer) As Integer
+    HIRScopeMapEnsure sm, sm.scopeCount + 1
+    Dim id As Integer = sm.scopeCount
+    sm.scopeCount += 1
+    sm.scopes(id).id = id
+    sm.scopes(id).parentId = parentId
+    sm.scopes(id).ownerAstNode = ownerAstNode
+    sm.scopes(id).name = UCase(Trim(nameText))
+    sm.scopes(id).kind = UCase(Trim(kindText))
+    sm.scopes(id).depth = depthValue
+    Return id
+End Function
+
+Private Function HIRBuildScopeMapNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef sm As HIRScopeMap, ByVal currentScope As Integer, ByVal depthValue As Integer, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
+    sm.astNodeToOwnerScope(nodeIdx) = currentScope
+
+    Dim nextScope As Integer = currentScope
+    Dim k As String = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    If HIRNodeStartsRealScope(k) <> 0 Then
+        Dim scopeName As String = ps.ast.nodes(nodeIdx).value
+        If Trim(scopeName) = "" Then scopeName = k & "_" & LTrim(Str(nodeIdx))
+        nextScope = HIRScopeAdd(sm, currentScope, nodeIdx, scopeName, k, depthValue + 1)
+        sm.astNodeToScope(nodeIdx) = nextScope
+    End If
+
+    Dim childPos As Integer = 0
+    Do
+        Dim ch As Integer = HIRAstChildAt(ps, nodeIdx, childPos)
+        If ch = -1 Then Exit Do
+        If HIRBuildScopeMapNode(ps, ch, sm, nextScope, depthValue + 1, errText) = 0 Then Return 0
+        childPos += 1
+    Loop
+    Return 1
+End Function
+
+Function HIRBuildScopeMap(ByRef ps As ParseState, ByRef sm As HIRScopeMap, ByRef errText As String) As Integer
+    errText = ""
+    If ps.rootNode < 0 Or ps.ast.count <= 0 Then errText = "hir_scope: bos AST": Return 0
+
+    sm.scopeCount = 0
+    ReDim sm.scopes(15)
+    ReDim sm.astNodeToScope(ps.ast.count - 1)
+    ReDim sm.astNodeToOwnerScope(ps.ast.count - 1)
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        sm.astNodeToScope(i) = -1
+        sm.astNodeToOwnerScope(i) = 0
+    Next i
+
+    HIRScopeAdd sm, -1, ps.rootNode, "$GLOBAL", "GLOBAL", 0
+    Return HIRBuildScopeMapNode(ps, ps.rootNode, sm, 0, 0, errText)
+End Function
+
+Function HIRScopeParent(ByRef sm As HIRScopeMap, ByVal scopeId As Integer) As Integer
+    If scopeId < 0 Or scopeId >= sm.scopeCount Then Return -1
+    Return sm.scopes(scopeId).parentId
+End Function
+
+#endif

@@ -1,0 +1,202 @@
+#ifndef UXB_CLI_BACKEND_ROUTE_CLOSE_ADIM27_FBS
+#define UXB_CLI_BACKEND_ROUTE_CLOSE_ADIM27_FBS
+
+#include once "cli_args.fbs"
+#include once "cli_route_matrix.fbs"
+
+' ADIM27: 3 harfli CLI köprüsü kapanış kapısı.
+' Amaç: lex/par/ast/sem/hir/mir/int/x64/x86/jsw/wat/bld/run/chk/fmt/map/doc/rel/hlp/ver
+' komutlarının eski flag sisteminde gerçek karşılığı olduğunu kanıtlamak.
+
+Private Function UXBAdim27NormalizePath(ByRef pathText As String) As String
+    Dim rawText As String
+    rawText = Trim(pathText)
+
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        If ch = "/" Then
+            outText &= "\"
+        Else
+            outText &= ch
+        End If
+    Next i
+
+    Return outText
+End Function
+
+Private Function UXBAdim27EnsureParentDir(ByRef filePath As String) As Integer
+    Dim norm As String
+    norm = UXBAdim27NormalizePath(filePath)
+    Dim cutAt As Integer
+    cutAt = 0
+
+    Dim i As Integer
+    For i = Len(norm) To 1 Step -1
+        If Mid(norm, i, 1) = "\" Then
+            cutAt = i
+            Exit For
+        End If
+    Next i
+
+    If cutAt <= 0 Then Return 1
+
+    Dim parentDir As String
+    parentDir = Left(norm, cutAt - 1)
+    If Trim(parentDir) = "" Then Return 1
+    If Dir(parentDir, 16) <> "" Then Return 1
+
+    Dim currentPath As String
+    currentPath = ""
+    For i = 1 To Len(parentDir)
+        Dim ch As String
+        ch = Mid(parentDir, i, 1)
+        currentPath &= ch
+        If ch = "\" Then
+            Dim partialPath As String
+            partialPath = Left(currentPath, Len(currentPath) - 1)
+            If Len(partialPath) > 0 And Right(partialPath, 1) <> ":" Then
+                If Dir(partialPath, 16) = "" Then MkDir partialPath
+            End If
+        End If
+    Next i
+
+    If Right(parentDir, 1) <> ":" Then
+        If Dir(parentDir, 16) = "" Then MkDir parentDir
+    End If
+
+    Return 1
+End Function
+
+Private Function UXBAdim27CsvEscape(ByVal rawText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    Dim ch As String
+    outText = ""
+    For i = 1 To Len(rawText)
+        ch = Mid(rawText, i, 1)
+        If ch = Chr(34) Then
+            outText &= Chr(34) & Chr(34)
+        Else
+            outText &= ch
+        End If
+    Next i
+    Return Chr(34) & outText & Chr(34)
+End Function
+
+Private Function UXBAdim27WriteText(ByRef filePath As String, ByRef textValue As String, ByRef errText As String) As Integer
+    errText = ""
+    If Trim(filePath) = "" Then Return 1
+    If UXBAdim27EnsureParentDir(filePath) = 0 Then
+        errText = "ADIM27 cannot create parent dir: " & filePath
+        Return 0
+    End If
+    Dim ff As Integer
+    ff = FreeFile
+    Open filePath For Output As #ff
+    If Err <> 0 Then
+        errText = "ADIM27 cannot write file: " & filePath
+        Return 0
+    End If
+    Print #ff, textValue;
+    Close #ff
+    Return 1
+End Function
+
+Function UXBAdim27RequiredVerbList() As String
+    Return "lex|par|ast|sem|hir|mir|int|x64|x86|jsw|wat|bld|run|chk|fmt|map|doc|rel|hlp|ver"
+End Function
+
+' INT_VERB_AST_COMPAT_FIX_20260711: int route includes explicit AST backend compatibility alias.
+Function UXBAdim27VerbExpectedFlags(ByVal verbText As String) As String
+    Select Case LCase(Trim(verbText))
+    Case "lex": Return "--debug-token-dump|--tokens-json-out|--lexer-diagnostics-json-out|--preprocessed-out|--pp|--preprocessor"
+    Case "par": Return "--parse-only|--ast-json-out|--parser-diagnostics-json-out"
+    Case "ast": Return "--ast-contract-check|--ast-json-out|--ast-contract-json-out|--ast-contract-matrix-out"
+    Case "sem": Return "--semantic|--semantic-diagnostics-json-out|--symbol-table-json-out|--type-table-json-out|--layout-report-json-out"
+    Case "hir": Return "--semantic|--hir-inventory-json-out|--hir-json-out"
+    Case "mir": Return "--mir-verify|--mir-json-out|--mir-verify-json-out|--mir-opt-report-json-out"
+    Case "int": Return "--execmem|--interpreter-backend|--run-report-json-out|--stdout-out|--stderr-out|--runtime-trace-json-out"
+    Case "x64": Return "--emit-x64-nasm|--backend-report-json-out|--emit-nasm"
+    Case "x86": Return "EMEKLI: x86 kod uretimi kaldirildi, x64 kullanin (--emit-x86|--backend-report-json-out artik CLI_TARGET_RETIRED doner)"
+    Case "jsw": Return "--emit-js|--js-out|--backend-report-json-out"
+    Case "wat": Return "--emit-wat|--wat-out|--backend-report-json-out"
+    Case "bld": Return "--build-x64|--backend-report-json-out"
+    Case "run": Return "--execmem|--run-report-json-out"
+    Case "chk": Return "--validate-all|--validate-all-report-json-out"
+    Case "fmt": Return "--format-check"
+    Case "map": Return "--source-map|--source-map-json-out"
+    Case "doc": Return "--doc|--doc-json-out"
+    Case "rel": Return "--release-gate|--release-json-out"
+    Case "hlp": Return "--help"
+    Case "ver": Return "--version"
+    End Select
+    Return ""
+End Function
+
+Private Function UXBAdim27StateHasAnyExpected(ByRef s As UXBCliState, ByRef pipeList As String) As Integer
+    Dim scanText As String
+    Dim tokenText As String
+    Dim p As Integer
+    scanText = pipeList & "|"
+    Do While scanText <> ""
+        p = InStr(scanText, "|")
+        If p <= 0 Then Exit Do
+        tokenText = Left(scanText, p - 1)
+        scanText = Mid(scanText, p + 1)
+        If Trim(tokenText) <> "" Then
+            If UXBCliHasAliasFlag(s, tokenText) <> 0 Then Return 1
+            Dim aliasValueScratch As String
+            If UXBCliGetAliasValue(s, tokenText, aliasValueScratch) <> 0 Then Return 1
+        End If
+    Loop
+    Return 0
+End Function
+
+Function UXBAdim27CliRouteCloseGate(ByRef s As UXBCliState, ByRef csvOutPath As String, ByRef errText As String) As Integer
+    Dim csvText As String
+    Dim verbs As String
+    Dim verbText As String
+    Dim p As Integer
+    Dim expected As String
+    Dim statusText As String
+    Dim failCount As Integer
+    Dim writeErr As String
+
+    errText = ""
+    csvText = "verb,expected_flags,status,action" & Chr(10)
+    verbs = UXBAdim27RequiredVerbList() & "|"
+    Do While verbs <> ""
+        p = InStr(verbs, "|")
+        If p <= 0 Then Exit Do
+        verbText = Left(verbs, p - 1)
+        verbs = Mid(verbs, p + 1)
+        If Trim(verbText) = "" Then Continue Do
+
+        expected = UXBAdim27VerbExpectedFlags(verbText)
+        statusText = "OK"
+        If UXBCliIsKnownVerb(verbText) = 0 Then
+            statusText = "FAIL_UNKNOWN_VERB"
+            failCount += 1
+        ElseIf LCase(Trim(s.route.verb)) = LCase(Trim(verbText)) Then
+            If UXBAdim27StateHasAnyExpected(s, expected) = 0 And verbText <> "hlp" And verbText <> "ver" Then
+                statusText = "FAIL_NO_COMPAT_FLAG_FOR_ACTIVE_VERB"
+                failCount += 1
+            End If
+        End If
+        csvText &= UXBAdim27CsvEscape(verbText) & "," & UXBAdim27CsvEscape(expected) & "," & UXBAdim27CsvEscape(statusText) & "," & UXBAdim27CsvEscape("3-letter verb must expand to old CLI flags and output contract paths") & Chr(10)
+    Loop
+
+    If UXBAdim27WriteText(csvOutPath, csvText, writeErr) = 0 Then errText = writeErr: Return 0
+    If failCount > 0 Then
+        errText = "ADIM27 CLI route close failed: " & LTrim(Str(failCount)) & " route problem(s)"
+        Return 0
+    End If
+    Return 1
+End Function
+
+#endif

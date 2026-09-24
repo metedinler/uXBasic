@@ -1,0 +1,131 @@
+#ifndef UXB_RUNTIME_BRIDGE_FBS
+#define UXB_RUNTIME_BRIDGE_FBS
+#include once "uxb_runtime_loader.fbs"
+
+Type UXBRtInitFn As Function Cdecl () As Long
+Type UXBRtShutdownFn As Function Cdecl () As Long
+Type UXBRtBackendFn As Function Cdecl (ByVal textOut As ZString Ptr, ByVal textCapacity As Long) As Long
+Type UXBRtTaskRegisterFn As Function Cdecl (ByVal slotId As Long, ByVal taskType As Long, ByVal taskName As ZString Ptr) As Long
+Type UXBRtTaskSetCallbackFn As Function Cdecl (ByVal slotId As Long, ByVal callbackPtr As Any Ptr, ByVal userData As Any Ptr) As Long
+Type UXBRtSlotControlFn As Function Cdecl (ByVal slotId As Long, ByVal stateValue As Long) As Long
+Type UXBRtTriggerFn As Function Cdecl (ByVal slotId As Long, ByVal inputValue As Long, ByVal outputValue As Long Ptr) As Long
+Type UXBRtShellFn As Function Cdecl (ByVal commandText As ZString Ptr, ByVal runPath As ZString Ptr, ByVal timeoutMs As Long, ByVal outText As ZString Ptr, ByVal outCapacity As Long, ByVal errText As ZString Ptr, ByVal errCapacity As Long, ByVal exitCode As Long Ptr) As Long
+Type UXBRtLastErrorFn As Function Cdecl () As ZString Ptr
+
+Private Function UXBRuntimeNativeError() As String
+    If uxb_runtime_is_loaded()=0 Or __uxb_native_runtime_state.symbols.lastError=0 Then Return uxb_runtime_last_error()
+    Dim fn As UXBRtLastErrorFn = CPtr(UXBRtLastErrorFn,__uxb_native_runtime_state.symbols.lastError)
+    Dim p As ZString Ptr = fn()
+    If p=0 Then Return ""
+    Return *p
+End Function
+
+Function uxb_rt_init() As Integer
+    If uxb_runtime_is_loaded()=0 Then If uxb_runtime_load()=0 Then Return 0
+    Dim fn As UXBRtInitFn = CPtr(UXBRtInitFn,__uxb_native_runtime_state.symbols.rtInit)
+    Dim rc As Long=fn()
+    __uxb_native_runtime_state.initialized=IIf(rc<>0,1,0)
+    If rc=0 Then __uxb_native_runtime_state.lastError=UXBRuntimeNativeError()
+    Return rc
+End Function
+Function uxb_rt_shutdown() As Integer
+    Dim rc As Long=1
+    If uxb_runtime_is_loaded() And __uxb_native_runtime_state.symbols.rtShutdown<>0 Then
+        Dim fn As UXBRtShutdownFn = CPtr(UXBRtShutdownFn,__uxb_native_runtime_state.symbols.rtShutdown)
+        rc=fn()
+    End If
+    uxb_runtime_unload()
+    Return rc
+End Function
+Function uxb_runtime_backend_name() As String
+    If uxb_runtime_is_loaded()=0 Or __uxb_native_runtime_state.symbols.rtBackend=0 Then Return "fallback"
+    Dim buffer As ZString * 128: buffer=""
+    Dim fn As UXBRtBackendFn=CPtr(UXBRtBackendFn,__uxb_native_runtime_state.symbols.rtBackend)
+    If fn(@buffer,CLng(128))=0 Then Return "fallback"
+    Return buffer
+End Function
+Function uxb_last_error() As String
+    Return UXBRuntimeNativeError()
+End Function
+
+Private Function UXBRuntimeTaskType(ByRef kindText As String) As Integer
+    Select Case UCase(Trim(kindText))
+    Case "EVENT": Return UXB_RT_TASK_EVENT
+    Case "PIPE": Return UXB_RT_TASK_PIPE
+    Case "THREAD": Return UXB_RT_TASK_THREAD
+    Case "PARALEL": Return UXB_RT_TASK_PARALEL
+    End Select
+    Return 0
+End Function
+
+Function uxb_task_register(ByVal slotId As Integer, ByRef kindText As String, ByRef taskName As String) As Integer
+    If slotId<0 Or slotId>=UXB_RT_MAX_SLOTS Then Return 0
+    If uxb_runtime_is_loaded()=0 Then Return 0
+    Dim taskType As Integer=UXBRuntimeTaskType(kindText): If taskType=0 Then Return 0
+    Dim fn As UXBRtTaskRegisterFn=CPtr(UXBRtTaskRegisterFn,__uxb_native_runtime_state.symbols.taskRegister)
+    Return fn(CLng(slotId),CLng(taskType),StrPtr(taskName))
+End Function
+Function uxb_slot_bind(ByVal slotId As Integer, ByRef kindText As String, ByRef taskName As String) As Integer
+    If slotId<0 Or slotId>=UXB_RT_MAX_SLOTS Then Return 0
+    If uxb_runtime_is_loaded()=0 Then Return 0
+    Dim taskType As Integer=UXBRuntimeTaskType(kindText): If taskType=0 Then Return 0
+    Dim fn As UXBRtTaskRegisterFn=CPtr(UXBRtTaskRegisterFn,__uxb_native_runtime_state.symbols.slotBind)
+    Return fn(CLng(slotId),CLng(taskType),StrPtr(taskName))
+End Function
+Function uxb_task_set_callback(ByVal slotId As Integer, ByVal callbackPtr As Any Ptr, ByVal userData As Any Ptr) As Integer
+    If uxb_runtime_is_loaded()=0 Then Return 0
+    Dim fn As UXBRtTaskSetCallbackFn=CPtr(UXBRtTaskSetCallbackFn,__uxb_native_runtime_state.symbols.taskSetCallback)
+    Return fn(CLng(slotId),callbackPtr,userData)
+End Function
+Function uxb_slot_control(ByVal slotId As Integer, ByVal stateValue As Integer) As Integer
+    If uxb_runtime_is_loaded()=0 Then Return 0
+    Dim fn As UXBRtSlotControlFn=CPtr(UXBRtSlotControlFn,__uxb_native_runtime_state.symbols.slotControl)
+    Return fn(CLng(slotId),CLng(IIf(stateValue<>0,1,0)))
+End Function
+
+Private Function UXBRuntimeTriggerByPtr(ByVal nativeProc As Any Ptr, ByVal slotId As Integer, ByVal inputValue As Integer, ByRef outputValue As Integer) As Integer
+    If uxb_runtime_is_loaded() = 0 Then Return 0
+    If nativeProc = 0 Then Return 0
+
+    Dim triggerFn As UXBRtTriggerFn
+    triggerFn = CPtr(UXBRtTriggerFn, nativeProc)
+    Dim nativeOutput As Long
+    Dim nativeResult As Long = triggerFn(CLng(slotId), CLng(inputValue), @nativeOutput)
+    outputValue = nativeOutput
+    Return nativeResult
+End Function
+Function uxb_task_trigger(ByVal slotId As Integer, ByVal inputValue As Integer, ByRef outputValue As Integer) As Integer
+    Return UXBRuntimeTriggerByPtr(__uxb_native_runtime_state.symbols.taskTrigger,slotId,inputValue,outputValue)
+End Function
+Function uxb_thread_start(ByVal slotId As Integer, ByVal inputValue As Integer, ByRef outputValue As Integer) As Integer
+    Return UXBRuntimeTriggerByPtr(__uxb_native_runtime_state.symbols.threadStart,slotId,inputValue,outputValue)
+End Function
+Function uxb_pipe_run(ByVal slotId As Integer, ByVal inputValue As Integer, ByRef outputValue As Integer) As Integer
+    Return UXBRuntimeTriggerByPtr(__uxb_native_runtime_state.symbols.pipeRun,slotId,inputValue,outputValue)
+End Function
+Function uxb_parallel_run(ByVal slotId As Integer, ByVal inputValue As Integer, ByRef outputValue As Integer) As Integer
+    Return UXBRuntimeTriggerByPtr(__uxb_native_runtime_state.symbols.parallelRun,slotId,inputValue,outputValue)
+End Function
+
+Function uxb_shell_run(ByVal cmdText As String, ByVal runPath As String, ByVal timeoutMs As Integer, ByRef outText As String, ByRef errText As String, ByRef exitCode As Integer) As Integer
+    outText="": errText="": exitCode=0
+    If Trim(cmdText)="" Then errText="empty shell command": Return 0
+    If uxb_runtime_is_loaded()<>0 And __uxb_native_runtime_state.symbols.shellRun<>0 Then
+        Dim outBuffer As ZString * 65536: Dim errBuffer As ZString * 65536
+        outBuffer="": errBuffer=""
+        Dim fn As UXBRtShellFn=CPtr(UXBRtShellFn,__uxb_native_runtime_state.symbols.shellRun)
+        Dim nativeExitCode As Long
+        Dim rc As Long=fn(StrPtr(cmdText),StrPtr(runPath),CLng(timeoutMs),@outBuffer,CLng(65536),@errBuffer,CLng(65536),@nativeExitCode)
+        exitCode=nativeExitCode
+        outText=outBuffer: errText=errBuffer
+        If rc=0 And errText="" Then errText=UXBRuntimeNativeError()
+        Return rc
+    End If
+    If Trim(runPath)<>"" Then
+        exitCode=Shell("cmd /c cd /d " & Chr(34) & runPath & Chr(34) & " && " & cmdText)
+    Else
+        exitCode=Shell(cmdText)
+    End If
+    Return 1
+End Function
+#endif

@@ -1,0 +1,320 @@
+#ifndef UXB_AST_MIR_COVERAGE_GATE_ADIM25_FBS
+#define UXB_AST_MIR_COVERAGE_GATE_ADIM25_FBS
+
+#include once "../parser/ast.fbs"
+#include once "mir_model.fbs"
+#include once "ast_mir_route_table_adim25.fbs"
+
+Type UXBAstMirCoverageResult
+    ok As Integer
+    astKindCount As Integer
+    checkedCount As Integer
+    missingCount As Integer
+    unknownRouteCount As Integer
+    warningCount As Integer
+    firstError As String
+End Type
+
+Private Sub UXBAdim25CoverageInit(ByRef r As UXBAstMirCoverageResult)
+    r.ok = 1
+    r.astKindCount = 0
+    r.checkedCount = 0
+    r.missingCount = 0
+    r.unknownRouteCount = 0
+    r.warningCount = 0
+    r.firstError = ""
+End Sub
+
+Private Function UXBAdim25NormalizePath(ByRef pathText As String) As String
+    Dim rawText As String
+    rawText = Trim(pathText)
+
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        If ch = "/" Then
+            outText &= "\"
+        Else
+            outText &= ch
+        End If
+    Next i
+
+    Return outText
+End Function
+
+Private Function UXBAdim25EnsureParentDir(ByRef filePath As String) As Integer
+    Dim norm As String
+    norm = UXBAdim25NormalizePath(filePath)
+    Dim cutAt As Integer
+    cutAt = 0
+
+    Dim i As Integer
+    For i = Len(norm) To 1 Step -1
+        If Mid(norm, i, 1) = "\" Then
+            cutAt = i
+            Exit For
+        End If
+    Next i
+
+    If cutAt <= 0 Then Return 1
+
+    Dim parentDir As String
+    parentDir = Left(norm, cutAt - 1)
+    If Trim(parentDir) = "" Then Return 1
+    If Dir(parentDir, 16) <> "" Then Return 1
+
+    Dim currentPath As String
+    currentPath = ""
+
+    For i = 1 To Len(parentDir)
+        Dim ch As String
+        ch = Mid(parentDir, i, 1)
+        currentPath &= ch
+        If ch = "\" Then
+            Dim partialPath As String
+            partialPath = Left(currentPath, Len(currentPath) - 1)
+            If Len(partialPath) > 0 And Right(partialPath, 1) <> ":" Then
+                If Dir(partialPath, 16) = "" Then MkDir partialPath
+            End If
+        End If
+    Next i
+
+    If Right(parentDir, 1) <> ":" Then
+        If Dir(parentDir, 16) = "" Then MkDir parentDir
+    End If
+
+    Return 1
+End Function
+
+Private Function UXBAdim25CsvEscape(ByVal rawText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    Dim ch As String
+    outText = ""
+    For i = 1 To Len(rawText)
+        ch = Mid(rawText, i, 1)
+        If ch = Chr(34) Then
+            outText &= Chr(34) & Chr(34)
+        Else
+            outText &= ch
+        End If
+    Next i
+    Return Chr(34) & outText & Chr(34)
+End Function
+
+Private Function UXBAdim25JsonEscape(ByVal rawText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    Dim ch As String
+    outText = ""
+    For i = 1 To Len(rawText)
+        ch = Mid(rawText, i, 1)
+        Select Case ch
+        Case Chr(34): outText &= "\" & Chr(34)
+        Case Chr(92): outText &= "\\"
+        Case Chr(10): outText &= "\n"
+        Case Chr(13): outText &= "\r"
+        Case Chr(9): outText &= "\t"
+        Case Else: outText &= ch
+        End Select
+    Next i
+    Return outText
+End Function
+
+Private Function UXBAdim25WriteTextFile(ByRef filePath As String, ByRef textValue As String, ByRef errText As String) As Integer
+    errText = ""
+    If Trim(filePath) = "" Then Return 1
+    If UXBAdim25EnsureParentDir(filePath) = 0 Then
+        errText = "ADIM25 cannot create parent dir: " & filePath
+        Return 0
+    End If
+    Dim ff As Integer
+    ff = FreeFile
+    Open filePath For Output As #ff
+    If Err <> 0 Then
+        errText = "ADIM25 cannot write file: " & filePath
+        Return 0
+    End If
+    Print #ff, textValue;
+    Close #ff
+    Return 1
+End Function
+
+Private Function UXBAdim25SetHas(ByRef setText As String, ByRef keyText As String) As Integer
+    If InStr(setText, "|" & UCase(Trim(keyText)) & "|") > 0 Then Return 1
+    Return 0
+End Function
+
+Private Sub UXBAdim25SetAdd(ByRef setText As String, ByRef keyText As String)
+    Dim k As String
+    k = UCase(Trim(keyText))
+    If k = "" Then Exit Sub
+    If UXBAdim25SetHas(setText, k) = 0 Then setText &= "|" & k & "|"
+End Sub
+
+Private Sub UXBAdim25CollectAstKindsNode(ByRef p As ASTPool, ByVal nodeIndex As Integer, ByRef kindSet As String)
+    If nodeIndex < 0 Or nodeIndex >= p.count Then Exit Sub
+    UXBAdim25SetAdd kindSet, p.nodes(nodeIndex).kind
+    If p.nodes(nodeIndex).left <> -1 Then UXBAdim25CollectAstKindsNode p, p.nodes(nodeIndex).left, kindSet
+    If p.nodes(nodeIndex).right <> -1 Then UXBAdim25CollectAstKindsNode p, p.nodes(nodeIndex).right, kindSet
+
+    Dim childIndex As Integer
+    Dim safety As Integer
+    childIndex = p.nodes(nodeIndex).firstChild
+    safety = 0
+    Do While childIndex <> -1
+        UXBAdim25CollectAstKindsNode p, childIndex, kindSet
+        If childIndex < 0 Or childIndex >= p.count Then Exit Do
+        childIndex = p.nodes(childIndex).nextSibling
+        safety += 1
+        If safety > p.count Then Exit Do
+    Loop
+End Sub
+
+Private Function UXBAdim25MirOpcodeSet(ByRef m As MIRModule) As String
+    Dim setText As String
+    Dim fi As Integer
+    Dim bi As Integer
+    Dim ii As Integer
+    setText = ""
+    For fi = 0 To m.functionCount - 1
+        For bi = 0 To m.functions(fi).blockCount - 1
+            For ii = 0 To m.functions(fi).blocks(bi).instructionCount - 1
+                Dim mirOpText As String
+                mirOpText = Trim(m.functions(fi).blocks(bi).instructions(ii).opcode)
+                UXBAdim25SetAdd setText, mirOpText
+                ' S-075: canonical opcodes carry a `MIR_` prefix (`MIR_MEMORY_STORE`) but the
+                ' route table names them without it (`MEMORY_STORE`). The exact-token match
+                ' therefore never found POKED/POKEB/... in a program that contained no
+                ' other listed opcode (a lone `POKED 100, 777` failed the gate; adding a
+                ' PRINT made it pass only because `CALL` is also in the list). Record both
+                ' spellings.
+                If UCase(Left(mirOpText, 4)) = "MIR_" Then UXBAdim25SetAdd setText, Mid(mirOpText, 5)
+            Next ii
+        Next bi
+    Next fi
+    Return setText
+End Function
+
+Private Function UXBAdim25ExpectedSetMatches(ByRef mirSet As String, ByRef expectedText As String) As Integer
+    Dim workText As String
+    Dim tokenText As String
+    Dim p As Integer
+    workText = expectedText & "|"
+    Do While workText <> ""
+        p = InStr(workText, "|")
+        If p <= 0 Then Exit Do
+        tokenText = Left(workText, p - 1)
+        workText = Mid(workText, p + 1)
+        If Trim(tokenText) <> "" Then
+            If UXBAdim25SetHas(mirSet, tokenText) <> 0 Then Return 1
+        End If
+    Loop
+    Return 0
+End Function
+
+Private Function UXBAdim25KindCsvRows(ByRef kindSet As String, ByRef mirSet As String, ByVal mirReady As Integer, ByRef r As UXBAstMirCoverageResult) As String
+    Dim csv As String
+    Dim scanText As String
+    Dim tokenText As String
+    Dim p As Integer
+    Dim routeText As String
+    Dim expectedText As String
+    Dim statusText As String
+    Dim required As Integer
+
+    csv = "ast_kind,route,expected_mir_opcode_set,status,action" & Chr(10)
+    scanText = kindSet
+    Do While scanText <> ""
+        ' UXB_007_REL10_FIX_20260712:
+        ' kindSet is stored as |KIND|KIND|.  Consume the leading delimiter first;
+        ' the old Mid(...,2,...) removed the first character of every kind.
+        If Left(scanText, 1) = "|" Then scanText = Mid(scanText, 2)
+        p = InStr(scanText, "|")
+        If p <= 0 Then Exit Do
+        tokenText = Left(scanText, p - 1)
+        scanText = Mid(scanText, p + 1)
+        If Trim(tokenText) = "" Then Continue Do
+
+        r.astKindCount += 1
+        routeText = UXBAstMirRouteForKind(tokenText)
+        expectedText = UXBAstMirExpectedOpcodesForKind(tokenText)
+        required = UXBAstMirRouteRequiresEvidence(routeText)
+        statusText = "OK"
+
+        If routeText = UXB_AST_MIR_ROUTE_UNKNOWN Then
+            r.warningCount += 1
+            r.unknownRouteCount += 1
+            statusText = "WARN_UNKNOWN_ROUTE"
+        ElseIf required <> 0 Then
+            r.checkedCount += 1
+            If mirReady = 0 Then
+                statusText = "FAIL_MIR_NOT_READY"
+                r.missingCount += 1
+                r.ok = 0
+            ElseIf Trim(expectedText) <> "" And UXBAdim25ExpectedSetMatches(mirSet, expectedText) = 0 Then
+                statusText = "FAIL_EXPECTED_OPCODE_NOT_FOUND"
+                r.missingCount += 1
+                r.ok = 0
+            End If
+        End If
+
+        If r.ok = 0 And r.firstError = "" Then r.firstError = tokenText & ": " & statusText
+        csv &= UXBAdim25CsvEscape(tokenText) & "," & UXBAdim25CsvEscape(routeText) & "," & UXBAdim25CsvEscape(expectedText) & "," & UXBAdim25CsvEscape(statusText) & "," & UXBAdim25CsvEscape("AST node must lower to MIR or be explicitly declared compile-time/native/meta") & Chr(10)
+    Loop
+    Return csv
+End Function
+
+Function UXBAstMirCoverageGateAdim25( _
+    ByRef p As ASTPool, _
+    ByVal rootNodeIndex As Integer, _
+    ByRef m As MIRModule, _
+    ByVal mirReady As Integer, _
+    ByRef csvOutPath As String, _
+    ByRef jsonOutPath As String, _
+    ByRef errText As String _
+) As Integer
+    Dim r As UXBAstMirCoverageResult
+    Dim kindSet As String
+    Dim mirSet As String
+    Dim csvText As String
+    Dim jsonText As String
+    Dim writeErr As String
+
+    errText = ""
+    UXBAdim25CoverageInit r
+    kindSet = ""
+
+    If rootNodeIndex >= 0 And rootNodeIndex < p.count Then
+        UXBAdim25CollectAstKindsNode p, rootNodeIndex, kindSet
+    End If
+
+    mirSet = ""
+    If mirReady <> 0 Then mirSet = UXBAdim25MirOpcodeSet(m)
+
+    csvText = UXBAdim25KindCsvRows(kindSet, mirSet, mirReady, r)
+    jsonText = "{" & Chr(10)
+    jsonText &= "  " & Chr(34) & "step" & Chr(34) & ": " & Chr(34) & "ADIM25" & Chr(34) & "," & Chr(10)
+    jsonText &= "  " & Chr(34) & "ok" & Chr(34) & ": " & IIf(r.ok <> 0, "true", "false") & "," & Chr(10)
+    jsonText &= "  " & Chr(34) & "ast_kind_count" & Chr(34) & ": " & LTrim(Str(r.astKindCount)) & "," & Chr(10)
+    jsonText &= "  " & Chr(34) & "checked_count" & Chr(34) & ": " & LTrim(Str(r.checkedCount)) & "," & Chr(10)
+    jsonText &= "  " & Chr(34) & "missing_count" & Chr(34) & ": " & LTrim(Str(r.missingCount)) & "," & Chr(10)
+    jsonText &= "  " & Chr(34) & "unknown_route_count" & Chr(34) & ": " & LTrim(Str(r.unknownRouteCount)) & "," & Chr(10)
+    jsonText &= "  " & Chr(34) & "first_error" & Chr(34) & ": " & Chr(34) & UXBAdim25JsonEscape(r.firstError) & Chr(34) & Chr(10)
+    jsonText &= "}" & Chr(10)
+
+    If UXBAdim25WriteTextFile(csvOutPath, csvText, writeErr) = 0 Then errText = writeErr: Return 0
+    If UXBAdim25WriteTextFile(jsonOutPath, jsonText, writeErr) = 0 Then errText = writeErr: Return 0
+
+    If r.ok = 0 Then
+        errText = "ADIM25 AST->MIR coverage failed: " & r.firstError
+        Return 0
+    End If
+    Return 1
+End Function
+
+#endif

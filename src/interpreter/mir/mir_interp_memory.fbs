@@ -1,0 +1,210 @@
+#ifndef UXB_MIR_INTERP_MEMORY_FBS
+#define UXB_MIR_INTERP_MEMORY_FBS
+
+#include once "../../mir/mir_instruction.fbs"
+#include once "../common/interp_context.fbs"
+#include once "mir_interp_state.fbs"
+#include once "../../runtime/runtime_service_dispatch.fbs"
+
+Private Function UXBMIRInterpMemoryU64(ByRef st As UXBMIRInterpState, ByRef token As String) As ULongInt
+    Dim v As UXBInterpValue
+    v = UXBMIRInterpGetOperand(st, token)
+    Select Case v.kind
+    Case UXB_VAL_U64, UXB_VAL_PTR, UXB_VAL_FUNCTION
+        Return v.uintValue
+    Case UXB_VAL_I64
+        Return CULngInt(v.intValue)
+    Case Else
+        Return CULngInt(v.intValue)
+    End Select
+End Function
+
+Private Function UXBMIRInterpParseVirtualBytes(ByRef rawText As String, ByRef bytesOut As ULongInt) As Integer
+    Dim s As String = Trim(rawText)
+    If s = "" Then Return 0
+    Dim suffix As String = UCase(Right(s, 1))
+    Dim mult As ULongInt = 1
+    If suffix = "K" Then mult = 1024: s = Left(s, Len(s) - 1)
+    If suffix = "M" Then mult = 1048576: s = Left(s, Len(s) - 1)
+    If suffix = "G" Then mult = 1073741824: s = Left(s, Len(s) - 1)
+    If suffix = "T" Then mult = 1099511627776ULL: s = Left(s, Len(s) - 1)
+    s = Trim(s)
+    If s = "" Then Return 0
+    Dim i As Integer
+    For i = 1 To Len(s)
+        Dim c As String = Mid(s, i, 1)
+        If c < "0" Or c > "9" Then Return 0
+    Next i
+    Dim n As ULongInt = CULngInt(Val(s))
+    ' S-057 follow-up crash: FreeBASIC's "And" does not short-circuit, so
+    ' "n <> 0 And mult > ... \ n" always evaluates the division too, even
+    ' when n=0 (e.g. VIRTUAL's disk size defaults to the literal "0" when no
+    ' disk argument is given) -- an integer divide-by-zero, real SIGFPE
+    ' crash, not a silent-wrong-result. Split into nested Ifs so the division
+    ' is only ever reached once n<>0 is already known.
+    If n <> 0 Then
+        If mult > &hFFFFFFFFFFFFFFFFULL \ n Then Return 0
+    End If
+    bytesOut = n * mult
+    Return 1
+End Function
+
+Function UXBMIRInterpExecMemory(ByRef ins As UXBMIRInstructionRecord, ByRef ctx As UXBInterpContext, ByRef st As UXBMIRInterpState) As UXBInterpValue
+    Dim op As String = UXBMIRStep4CanonicalOpcode(ins.opcode)
+    If op = "MIR_VIRTUAL_INIT" Then
+        If ins.operandCount <> 2 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_VIRTUAL_INIT requires ram,disk")
+        Dim ramBytes As ULongInt
+        Dim diskBytes As ULongInt
+        If UXBMIRInterpParseVirtualBytes(ins.operands(0), ramBytes) = 0 Or UXBMIRInterpParseVirtualBytes(ins.operands(1), diskBytes) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "VIRTUAL size is invalid")
+        If ramBytes < 65536 Or ramBytes > 2147483647ULL Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "VIRTUAL ram size must be between 64K and 2G")
+        Dim vmemErr As String
+        If VMemInit(CUInt(ramBytes), diskBytes, vmemErr) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "VIRTUAL init failed: " & vmemErr)
+        Return UXBInterpValueVoid()
+    End If
+    If op = "MIR_MEMORY_REF" Then
+        ' S-033 follow-up: MIRLowerMemoryOperandPatch4 (memory_ref_lowering.fbs)
+        ' emits this for a bare array name passed directly to MEMCOPY/MEMFILL
+        ' (no VARPTR, no explicit NATIVE/VIRTUAL). Until now nothing executed
+        ' this opcode at all ("MIR memory opcode not executable"); the array's
+        ' real address now comes from its heap slot's own rawData buffer (see
+        ' interp_heap.fbs's isNativeScalar/elemStride/rawData, mirroring the
+        ' AST interpreter's S-036 ExecArray.rawData fix exactly) so the
+        ' consuming MIR_MEMORY_COPY/MIR_MEMORY_FILL can do a real memcpy
+        ' instead of failing closed or touching disconnected boxed values.
+        If ins.operandCount <> 4 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_MEMORY_REF requires kind,name,elemBytes,byteLength")
+        Dim refKind As String = UCase(Trim(ins.operands(0)))
+        If refKind <> "ARRAY" Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "MemoryRef kind not supported: " & refKind)
+        Dim refValue As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(1))
+        Dim refArrId As Integer = refValue.arrayId
+        If refArrId < 0 Or refArrId >= ctx.heap.slotCount Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "MemoryRef: array handle invalid: " & ins.operands(1))
+        If ctx.heap.slots(refArrId).isNativeScalar = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "MemoryRef requires a native-scalar-typed array: " & ins.operands(1))
+        If ctx.heap.slots(refArrId).count <= 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "MemoryRef: array has no elements: " & ins.operands(1))
+        Dim refAddr As ULongInt = CULngInt(@ctx.heap.slots(refArrId).rawData(0))
+        Return UXBInterpValueUInt(refAddr)
+    End If
+    If op = "MIR_ARRAY_SIZEOF" Then
+        ' S-082: operands are (array name, element cell bytes, element count), all
+        ' compile-time facts the lowering already resolved (a dynamically bounded
+        ' array is rejected there), so the byte length is their product.
+        If ins.operandCount <> 3 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_ARRAY_SIZEOF requires name,elementBytes,elementCount")
+        Return UXBInterpValueInt(ValLng(Trim(ins.operands(1))) * ValLng(Trim(ins.operands(2))))
+    End If
+    If op = "MIR_ARRAY_LBOUND" Or op = "MIR_ARRAY_UBOUND" Then
+        ' S-101: run-time bounds of a 1-D array (REDIM'd / runtime-bound DIM / `arr AS T[]`
+        ' parameter): operands are (array name, dimension). Compile-time bounds were folded to
+        ' constants by the lowering. An array that was never allocated reads LBOUND 0 / UBOUND -1.
+        If ins.operandCount <> 2 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, op & " requires array name and dimension")
+        Dim bndName As String = Trim(ins.operands(0))
+        Dim bndLabel As String = IIf(op = "MIR_ARRAY_LBOUND", "LBOUND", "UBOUND")
+        Dim bndValue As UXBInterpValue = UXBMIRInterpGetOperand(st, bndName)
+        If bndValue.kind <> UXB_VAL_ARRAY Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, bndLabel & ": not an array: " & bndName)
+        Dim bndId As Integer = bndValue.arrayId
+        If bndId < 0 Or bndId >= ctx.heap.slotCount Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, bndLabel & ": array handle invalid: " & bndName)
+        If ValInt(Trim(ins.operands(1))) <> 1 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, bndLabel & " dimension " & Trim(ins.operands(1)) & " is out of range: array " & bndName & " has 1 dimension")
+        If op = "MIR_ARRAY_LBOUND" Then Return UXBInterpValueInt(ctx.heap.slots(bndId).lowerBound)
+        Return UXBInterpValueInt(ctx.heap.slots(bndId).upperBound)
+    End If
+    If op = "MIR_VARPTR" Then
+        ' S-049: VARPTR was never lowered before (fell through to an unbound
+        ' generic host/library call). MIRLowerExprNode now emits MIR_VARPTR
+        ' with the identifier as a quoted literal operand (a compile-time
+        ' reference, not a runtime value). Routed through the MIR_MEMORY
+        ' group specifically because only MIR_MEMORY/MIR_CALL/MIR_FILE
+        ' handlers receive `st` -- MIR_EXPR's UXBMIRInterpExecArith does not,
+        ' so it could never have implemented this regardless of opcode name.
+        ' S-071: st.vars() now holds POINTERS to per-variable heap cells (see
+        ' mir_interp_state.fbs), so a scalar's address stays stable for the
+        ' variable's whole scope regardless of later variables/temporaries
+        ' being added. It is still invalid after the variable's scope ends
+        ' (like a native local going out of scope). An ARRAY variable's
+        ' VARPTR is the address of its one real backing buffer (heap slot
+        ' rawData), never of the array handle -- same as MIR_MEMORY_REF and
+        ' the AST interpreter -- so POKE/PEEK/MEMCOPY through it and indexed
+        ' reads/writes observe each other directly.
+        If ins.operandCount <> 1 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_VARPTR requires exactly one identifier operand")
+        Dim varptrName As String = Trim(ins.operands(0))
+        If Len(varptrName) >= 2 And Left(varptrName, 1) = Chr(34) And Right(varptrName, 1) = Chr(34) Then
+            varptrName = Mid(varptrName, 2, Len(varptrName) - 2)
+        End If
+        Dim varptrIdx As Integer = UXBMIRInterpFindVar(st, varptrName)
+        If varptrIdx < 0 Then
+            Dim varptrFreshVal As UXBInterpValue = UXBInterpValueInt(0)
+            UXBMIRInterpSetVar st, varptrName, varptrFreshVal
+            varptrIdx = UXBMIRInterpFindVar(st, varptrName)
+        End If
+        If st.vars(varptrIdx)->value.kind = UXB_VAL_ARRAY Then
+            Dim vpArrId As Integer = st.vars(varptrIdx)->value.arrayId
+            If vpArrId < 0 Or vpArrId >= ctx.heap.slotCount Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "VARPTR: array handle invalid: " & varptrName)
+            If ctx.heap.slots(vpArrId).isNativeScalar = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "VARPTR requires a native-scalar-typed array: " & varptrName)
+            If ctx.heap.slots(vpArrId).count <= 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "VARPTR: array has no elements: " & varptrName)
+            Return UXBInterpValueUInt(CULngInt(@ctx.heap.slots(vpArrId).rawData(0)))
+        End If
+        ' VARPTR denotes the address of variable storage, not its numeric
+        ' contents. Returning the value itself made MIR NATIVE POKE/PEEK use
+        ' address zero (S-059). Preserve the full host pointer as U64.
+        ' S-071: the address is the variable's raw, declared-WIDTH cell (see
+        ' UXBMIRInterpVar.pinCell), not &value.intValue: the value struct
+        ' keeps separate int/float fields, so that address was the wrong
+        ' bytes for F64/F32 and let a 4-byte POKE spill into a wider field.
+        Dim vpType As String = UCase(Trim(st.vars(varptrIdx)->value.typeName))
+        If Left(vpType, 5) = "TYPE_" Then vpType = Mid(vpType, 6)
+        If vpType = "" Then vpType = "I64"
+        Dim vpWidth As Integer = UXBMIRInterpPinWidth(vpType)
+        If vpWidth = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "VARPTR: no native scalar layout for type " & vpType & ": " & varptrName)
+        If st.vars(varptrIdx)->pinned = 0 Then
+            st.vars(varptrIdx)->pinType = vpType
+            st.vars(varptrIdx)->pinWidth = vpWidth
+            UXBMIRInterpPinStore *st.vars(varptrIdx)
+            st.vars(varptrIdx)->pinned = 1
+        End If
+        Return UXBInterpValueUInt(CULngInt(@st.vars(varptrIdx)->pinCell(0)))
+    End If
+    If op = "MIR_MEMORY_LOAD" Or op = "MIR_MEM_LOAD" Or op = "MIR_PEEK" Then
+        If ins.operandCount <> 3 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_MEMORY_LOAD requires mode,address,width")
+        Dim okLoad As Integer
+        Dim vLoad As LongInt
+        vLoad = UXBRuntimeMemoryLoadWidth(ins.operands(0), UXBMIRInterpMemoryU64(st, ins.operands(1)), CInt(UXBMIRInterpMemoryU64(st, ins.operands(2))), okLoad)
+        If okLoad = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "memory load failed" & UXBMemRefReason())
+        Return UXBInterpValueInt(vLoad)
+    End If
+    If op = "MIR_MEMORY_STORE" Or op = "MIR_MEM_STORE" Or op = "MIR_POKE" Then
+        If ins.operandCount <> 4 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_MEMORY_STORE requires mode,address,value,width")
+        If UXBRuntimeMemoryStoreWidth(ins.operands(0), UXBMIRInterpMemoryU64(st, ins.operands(1)), UXBMIRInterpGetOperand(st, ins.operands(2)).intValue, CInt(UXBMIRInterpMemoryU64(st, ins.operands(3)))) = 0 Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "memory store failed" & UXBMemRefReason())
+        End If
+        Return UXBInterpValueVoid()
+    End If
+    If op = "MIR_MEMORY_COPY" Or op = "MIR_MEM_COPY" Then
+        If ins.operandCount <> 5 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_MEMORY_COPY requires mode,src,dst,count,width")
+        Dim copyCount As ULongInt = UXBMIRInterpMemoryU64(st, ins.operands(3)) * UXBMIRInterpMemoryU64(st, ins.operands(4))
+        If UXBRuntimeMemoryCopyMode(ins.operands(0), UXBMIRInterpMemoryU64(st, ins.operands(1)), UXBMIRInterpMemoryU64(st, ins.operands(2)), copyCount) = 0 Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "memory copy failed" & UXBMemRefReason())
+        End If
+        Return UXBInterpValueVoid()
+    End If
+    If op = "MIR_MEMORY_FILL" Or op = "MIR_MEM_FILL" Then
+        If ins.operandCount <> 5 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_MEMORY_FILL requires mode,dst,value,count,width")
+        If UXBRuntimeMemoryFillMode(ins.operands(0), UXBMIRInterpMemoryU64(st, ins.operands(1)), UXBMIRInterpGetOperand(st, ins.operands(2)).intValue, UXBMIRInterpMemoryU64(st, ins.operands(3)), CInt(UXBMIRInterpMemoryU64(st, ins.operands(4)))) = 0 Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "memory fill failed" & UXBMemRefReason())
+        End If
+        Return UXBInterpValueVoid()
+    End If
+    If op = "MIR_MEMORY_READ_SEQUENCE" Then
+        If ins.operandCount <> 3 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_MEMORY_READ_SEQUENCE requires mode,address,length")
+        Dim okRead As Integer
+        Dim seqText As String = UXBRuntimeMemoryReadSequence(ins.operands(0), UXBMIRInterpMemoryU64(st, ins.operands(1)), UXBMIRInterpMemoryU64(st, ins.operands(2)), okRead)
+        If okRead = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "memory sequence read failed")
+        Return UXBInterpValueString(seqText)
+    End If
+    If op = "MIR_MEMORY_WRITE_SEQUENCE" Then
+        If ins.operandCount <> 4 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_MEMORY_WRITE_SEQUENCE requires mode,dst,source,length")
+        Dim sourceValue As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(2))
+        If UXBRuntimeMemoryWriteSequence(ins.operands(0), UXBMIRInterpMemoryU64(st, ins.operands(1)), sourceValue.stringValue, UXBMIRInterpMemoryU64(st, ins.operands(3))) = 0 Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "memory sequence write failed")
+        End If
+        Return UXBInterpValueVoid()
+    End If
+    Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR memory opcode not executable: " & ins.opcode)
+End Function
+
+#endif

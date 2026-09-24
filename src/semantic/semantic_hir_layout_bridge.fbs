@@ -1,0 +1,325 @@
+#ifndef UXB_SEMANTIC_HIR_LAYOUT_BRIDGE_FBS
+#define UXB_SEMANTIC_HIR_LAYOUT_BRIDGE_FBS
+
+#include once "semantic_type_result.fbs"
+#include once "semantic_layout_snapshot.fbs"
+#include once "hir_builder.fbs"
+#include once "hir_mir_bridge.fbs"
+#include once "../symbols/symbol_integrity_gate.fbs"
+#include once "../type_binding/type_infer_expr.fbs"
+
+Type UXBSemanticStep5Result
+    ok As Integer
+    symbolCount As Integer
+    scopeCount As Integer
+    typeFactCount As Integer
+    layoutFactCount As Integer
+    hirFactCount As Integer
+    errorCount As Integer
+    warningCount As Integer
+    errorsText As String
+    warningsText As String
+    typeTable As UXBSemanticTypeTable
+    layoutSnapshot As UXBSemanticLayoutSnapshot
+End Type
+
+Dim Shared gUXBStep5LastResult As UXBSemanticStep5Result
+
+Sub UXBSemanticStep5Init(ByRef r As UXBSemanticStep5Result)
+    r.ok = 0
+    r.symbolCount = 0
+    r.scopeCount = 0
+    r.typeFactCount = 0
+    r.layoutFactCount = 0
+    r.hirFactCount = 0
+    r.errorCount = 0
+    r.warningCount = 0
+    r.errorsText = ""
+    r.warningsText = ""
+End Sub
+
+Private Function UXBStep5NodeKind(ByRef ps As ParseState, ByVal nodeIdx As Integer) As String
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return ""
+    Return UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+End Function
+
+Private Function UXBStep5NodeName(ByRef ps As ParseState, ByVal nodeIdx As Integer) As String
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return ""
+    If Trim(ps.ast.nodes(nodeIdx).symbolName) <> "" Then Return UCase(Trim(ps.ast.nodes(nodeIdx).symbolName))
+    Return UCase(Trim(ps.ast.nodes(nodeIdx).value))
+End Function
+
+Private Function UXBStep5NodeRequiresType(ByRef kindText As String) As Integer
+    Dim k As String = UCase(Trim(kindText))
+    Select Case k
+    Case "DIM_DECL", "DIM_STMT", "REDIM_DECL", "REDIM_STMT", "PARAM_DECL", "CONST_DECL", "TYPE_FIELD", "CLASS_FIELD", "CLASS_PROPERTY_DECL", "IDENT", "IDENTIFIER", "BINARY", "BINARY_EXPR", "UNARY", "UNARY_EXPR", "RETURN_STMT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function UXBStep5ParentKind(ByRef ps As ParseState, ByVal nodeIdx As Integer) As String
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return ""
+    Dim p As Integer
+    p = ps.ast.nodes(nodeIdx).parent
+    If p < 0 Or p >= ps.ast.count Then Return ""
+    Return UXBStep5NodeKind(ps, p)
+End Function
+
+Private Function UXBStep5IsBareFfiMetaName(ByRef rawName As String) As Integer
+    Dim s As String
+    s = UCase(Trim(rawName))
+    Select Case s
+    Case "DLL", "API", "VOID", "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "F80", "F128", "PTR", "STRPTR", "WSTRPTR", "CDECL", "STDCALL", "BYREF", "BYVAL"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function UXBStep5IsNameOnlyIdentContext(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim pk As String
+    pk = UXBStep5ParentKind(ps, nodeIdx)
+    Select Case pk
+    Case "FUNCTION_STMT", "SUB_STMT", "DECLARE_FUNCTION_STMT", "DECLARE_SUB_STMT", "PARAM_DECL", "TYPE_REF", "RETURN_TYPE", "MODE_REF", "ALIAS_TARGET", "USING_ITEM", "IMPLEMENTS_REF", "EXTENDS_REF"
+        Return 1
+    End Select
+
+    ' Is this node the right-hand operand of a "|>" BINARY node? That is always
+    ' its structural parent, so read it directly via the AST's own parent link
+    ' instead of rescanning every node in the program to find it - this used to
+    ' be a full-tree scan called once per IDENT/IDENTIFIER/KEYWORD_REF node
+    ' (i.e. O(ast size) work per identifier, O(n^2) overall for the whole pass).
+    If nodeIdx >= 0 And nodeIdx < ps.ast.count Then
+        Dim parentIdx As Integer
+        parentIdx = ps.ast.nodes(nodeIdx).parent
+        If parentIdx >= 0 And parentIdx < ps.ast.count Then
+            If UCase(Trim(ps.ast.nodes(parentIdx).kind)) = "BINARY" And Trim(ps.ast.nodes(parentIdx).op) = "|>" Then
+                If ps.ast.nodes(parentIdx).right = nodeIdx Then Return 1
+            End If
+        End If
+    End If
+    Return 0
+End Function
+
+Private Function UXBStep5ChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+    Dim i As Integer = 0
+    Dim ch As Integer = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return -1
+End Function
+
+Private Function UXBStep5NodeDeclaredType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    If Trim(ps.ast.nodes(nodeIdx).typeName) <> "" Then
+        typeOut = UCase(Trim(UXBStep3TypeCanonical(ps.ast.nodes(nodeIdx).typeName)))
+        If typeOut = "" Then typeOut = UCase(Trim(ps.ast.nodes(nodeIdx).typeName))
+        Return IIf(typeOut <> "", 1, 0)
+    End If
+    Dim ch As Integer = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "TYPE_REF" Then
+            typeOut = UCase(Trim(UXBStep3TypeCanonical(ps.ast.nodes(ch).value)))
+            If typeOut = "" Then typeOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(typeOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 0
+End Function
+
+Private Function UXBStep5ResolveTypeName(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    If UXBStep5NodeDeclaredType(ps, nodeIdx, typeOut) <> 0 Then Return 1
+
+    Dim k As String = UXBStep5NodeKind(ps, nodeIdx)
+    If k = "DIM_STMT" Or k = "REDIM_STMT" Then
+        Dim declIdx As Integer = UXBStep5ChildAt(ps, nodeIdx, 0)
+        If declIdx <> -1 Then
+            If UXBStep5NodeDeclaredType(ps, declIdx, typeOut) <> 0 Then Return 1
+        End If
+    ElseIf k = "RETURN_STMT" Then
+        Dim exprIdx As Integer = UXBStep5ChildAt(ps, nodeIdx, 0)
+        If exprIdx = -1 Then
+            typeOut = TYPE_VOID
+            Return 1
+        End If
+
+        Dim t As String, inferErr As String
+        If UXBStep3InferExprType(ps, exprIdx, t, inferErr) <> 0 Then
+            Dim rawT As String
+            rawT = UCase(Trim(t))
+            t = UCase(Trim(UXBStep3TypeCanonical(t)))
+            If t = "" Then t = rawT
+            If t <> "" Then typeOut = t: Return 1
+        End If
+    End If
+
+    Dim inferType As String, errText As String
+    If UXBStep3InferExprType(ps, nodeIdx, inferType, errText) <> 0 Then
+        Dim canonInfer As String
+        canonInfer = UCase(Trim(UXBStep3TypeCanonical(inferType)))
+        If canonInfer = "" Then canonInfer = UCase(Trim(inferType))
+        If canonInfer <> "" And canonInfer <> TYPE_OBJECT Then
+            inferType = canonInfer
+            typeOut = inferType
+            Return 1
+        End If
+    End If
+    Return 0
+End Function
+
+Function UXBSemanticStep5BuildTypeFacts(ByRef ps As ParseState, ByRef r As UXBSemanticStep5Result, ByRef errText As String) As Integer
+    errText = ""
+    UXBSemanticTypeTableInit r.typeTable, ps.ast.count
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = UXBStep5NodeKind(ps, i)
+        r.typeTable.facts(i).astNode = i
+        r.typeTable.facts(i).kind = k
+        r.typeTable.facts(i).name = UXBStep5NodeName(ps, i)
+        r.typeTable.facts(i).typeName = UCase(Trim(ps.ast.nodes(i).typeName))
+
+        ' YAMA2-OOP-POSTFIX-2:
+        ' SUPER/THIS/ME normal degisken degildir. Bunlar OOP dispatch alicilaridir.
+        ' Type fact kapisi bunlari sembol tablosunda arayip MISSING_TYPE saymamali.
+        If (k = "IDENT" Or k = "IDENTIFIER") Then
+            Dim oopReceiverName As String
+            oopReceiverName = UCase(Trim(r.typeTable.facts(i).name))
+            If oopReceiverName = "SUPER" Or oopReceiverName = "THIS" Or oopReceiverName = "ME" Or oopReceiverName = UXB_TASK_INPUT_NAME Or oopReceiverName = UXB_TASK_RESULT_NAME Then
+                r.typeTable.facts(i).typeName = TYPE_OBJECT
+            End If
+        End If
+
+        If Trim(r.typeTable.facts(i).typeName) = "" Then
+            Dim resolvedType As String
+            If UXBStep5ResolveTypeName(ps, i, resolvedType) <> 0 Then
+                r.typeTable.facts(i).typeName = resolvedType
+            End If
+        End If
+
+        Dim symIdx As Integer = -1
+        If Trim(r.typeTable.facts(i).name) <> "" Then symIdx = UXBStep3SymbolFind(r.typeTable.facts(i).name, "", 0)
+        r.typeTable.facts(i).symbolIndex = symIdx
+        If symIdx <> -1 Then r.typeTable.facts(i).scopeId = gUXBStep3Symbols(symIdx).scopeId
+
+        If Trim(r.typeTable.facts(i).typeName) <> "" Then
+            r.typeTable.facts(i).typeStatus = "OK"
+        ElseIf k = "CONST_STMT" Or k = "CALL_EXPR" Then
+            r.typeTable.facts(i).typeStatus = "NOT_REQUIRED"
+        ElseIf (k = "IDENT" Or k = "IDENTIFIER" Or k = "KEYWORD_REF") And UXBStep5IsBareFfiMetaName(r.typeTable.facts(i).name) <> 0 Then
+            r.typeTable.facts(i).typeStatus = "NOT_REQUIRED"
+        ElseIf (k = "IDENT" Or k = "IDENTIFIER" Or k = "KEYWORD_REF") And UXBStep5IsNameOnlyIdentContext(ps, i) <> 0 Then
+            r.typeTable.facts(i).typeStatus = "NOT_REQUIRED"
+        ElseIf (k = "IDENT" Or k = "IDENTIFIER") And (UXBStep5ParentKind(ps, i) = "SLOT_CONTROL_STMT" Or UXBStep5ParentKind(ps, i) = "TRIGGER_STMT" Or UXBStep5ParentKind(ps, i) = "SLOT_STMT" Or UXBStep5ParentKind(ps, i) = "SLOT_TABLE_STMT" Or UXBStep5ParentKind(ps, i) = "SLOT_BIND_ENTRY" Or UXBStep5ParentKind(ps, i) = "EVENT_STMT" Or UXBStep5ParentKind(ps, i) = "THREAD_STMT" Or UXBStep5ParentKind(ps, i) = "PIPE_STMT" Or UXBStep5ParentKind(ps, i) = "PARALEL_STMT" Or UXBStep5ParentKind(ps, i) = "CLASS_STMT" Or UXBStep5ParentKind(ps, i) = "INTERFACE_STMT" Or UXBStep5ParentKind(ps, i) = "CLASS_METHOD_DECL" Or UXBStep5ParentKind(ps, i) = "INTERFACE_METHOD_DECL" Or UXBStep5ParentKind(ps, i) = "CLASS_CONSTRUCTOR_DECL" Or UXBStep5ParentKind(ps, i) = "CLASS_DESTRUCTOR_DECL" Or UXBStep5ParentKind(ps, i) = "CLASS_OPERATOR_DECL" Or UXBStep5ParentKind(ps, i) = "CLASS_PROPERTY_DECL" Or UXBStep5ParentKind(ps, i) = "CLASS_FIELD_DECL" Or UXBStep5ParentKind(ps, i) = "TYPE_REF" Or UXBStep5ParentKind(ps, i) = "RETURN_TYPE" Or UXBStep5ParentKind(ps, i) = "PARAM_DECL" Or UXBStep5ParentKind(ps, i) = "CLASS_FLAG" Or UXBStep5ParentKind(ps, i) = "CLASS_METHOD_FLAG" Or UXBStep5ParentKind(ps, i) = "CLASS_FIELD_FLAG" Or UXBStep5ParentKind(ps, i) = "IMPLEMENTS_REF" Or UXBStep5ParentKind(ps, i) = "EXTENDS_REF") Then
+            r.typeTable.facts(i).typeStatus = "NOT_REQUIRED"
+        ElseIf UXBStep5NodeRequiresType(k) <> 0 Then
+            r.typeTable.facts(i).typeStatus = "MISSING_TYPE"
+            r.typeTable.facts(i).diagnostic = "semantic required type missing"
+        Else
+            r.typeTable.facts(i).typeStatus = "NOT_REQUIRED"
+        End If
+    Next i
+    r.typeFactCount = ps.ast.count
+    Return 1
+End Function
+
+Private Function UXBStep5CountFields(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim cnt As Integer = 0
+    Dim ch As Integer = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        Dim k As String = UXBStep5NodeKind(ps, ch)
+        If k = "TYPE_FIELD" Or k = "CLASS_FIELD" Or k = "CLASS_PROPERTY_DECL" Then cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return cnt
+End Function
+
+Private Function UXBStep5LayoutNodeCount(ByRef ps As ParseState) As Integer
+    Dim cnt As Integer = 0
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = UXBStep5NodeKind(ps, i)
+        Select Case k
+        Case "TYPE_STMT", "CLASS_STMT", "ENUM_STMT", "TYPE_FIELD", "CLASS_FIELD", "CLASS_PROPERTY_DECL", "DIM_DECL", "DIM_STMT", "PARAM_DECL"
+            cnt += 1
+        End Select
+    Next i
+    Return cnt
+End Function
+
+Function UXBSemanticStep5BuildLayoutFacts(ByRef ps As ParseState, ByRef r As UXBSemanticStep5Result, ByRef errText As String) As Integer
+    errText = ""
+    Dim wanted As Integer = UXBStep5LayoutNodeCount(ps)
+    UXBSemanticLayoutSnapshotInit r.layoutSnapshot, wanted
+    Dim outIdx As Integer = 0
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = UXBStep5NodeKind(ps, i)
+        Select Case k
+        Case "TYPE_STMT", "CLASS_STMT", "ENUM_STMT", "TYPE_FIELD", "CLASS_FIELD", "CLASS_PROPERTY_DECL", "DIM_DECL", "DIM_STMT", "PARAM_DECL"
+            r.layoutSnapshot.facts(outIdx).astNode = i
+            r.layoutSnapshot.facts(outIdx).name = UXBStep5NodeName(ps, i)
+            r.layoutSnapshot.facts(outIdx).layoutKind = k
+            r.layoutSnapshot.facts(outIdx).typeName = UCase(Trim(ps.ast.nodes(i).typeName))
+            If Trim(r.layoutSnapshot.facts(outIdx).typeName) = "" Then r.layoutSnapshot.facts(outIdx).typeName = UCase(Trim(ps.ast.nodes(i).value))
+            r.layoutSnapshot.facts(outIdx).sizeBytes = UXBStep5TypeSizeBytes(r.layoutSnapshot.facts(outIdx).typeName)
+            r.layoutSnapshot.facts(outIdx).alignBytes = UXBStep5TypeAlignBytes(r.layoutSnapshot.facts(outIdx).typeName)
+            r.layoutSnapshot.facts(outIdx).fieldCount = UXBStep5CountFields(ps, i)
+            r.layoutSnapshot.facts(outIdx).status = "OK"
+            outIdx += 1
+        End Select
+    Next i
+    r.layoutFactCount = wanted
+    Return 1
+End Function
+
+Function UXBSemanticStep5Run(ByRef ps As ParseState, ByRef r As UXBSemanticStep5Result, ByRef errText As String) As Integer
+    UXBSemanticStep5Init r
+    errText = ""
+
+    If ps.rootNode < 0 Or ps.ast.count <= 0 Then
+        errText = "step5: AST bos"
+        r.errorsText = errText
+        r.errorCount = 1
+        Return 0
+    End If
+
+    Dim symGate As UXBSymbolIntegrityResult
+    If UXBSymbolIntegrityCheck(symGate) = 0 Then
+        r.errorsText = symGate.errorText
+        r.errorCount += 1
+        errText = r.errorsText
+        Return 0
+    End If
+
+    r.symbolCount = gUXBStep3SymbolCount
+    r.scopeCount = UXBScopeCount()
+
+    If UXBSemanticStep5BuildTypeFacts(ps, r, errText) = 0 Then Return 0
+    If UXBSemanticStep5BuildLayoutFacts(ps, r, errText) = 0 Then Return 0
+
+    If HIRBuildBridgeAfterSemantic(ps, gHIRBridge, errText) = 0 Then
+        r.errorsText = errText
+        r.errorCount += 1
+        Return 0
+    End If
+    If HIRPrepareMirLowering(ps, gHIRBridge, errText) = 0 Then
+        r.errorsText = errText
+        r.errorCount += 1
+        Return 0
+    End If
+
+    r.hirFactCount = gHIRBridge.facts.factCount
+    r.ok = 1
+    gUXBStep5LastResult = r
+    Return 1
+End Function
+
+#endif

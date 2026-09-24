@@ -1,0 +1,130 @@
+#ifndef UXB_AST_MIR_ROUTE_TABLE_ADIM25_FBS
+#define UXB_AST_MIR_ROUTE_TABLE_ADIM25_FBS
+
+' ADIM25: AST -> MIR yaşam yolu sözleşmesi.
+' Bu dosya AST node kind adını doğrudan backend'e çevirmeye çalışmaz.
+' Görevi: her AST kind için MIR tarafında beklenen rota tipini ve beklenen opcode ailesini tanımlamak.
+' Ana kural:
+'   AST -> MIR eksiksiz olacak.
+'   JS/WAT/WASM doğrudan AST okumayacak; AST yalnız coverage/source-map/diagnostic desteği verecek.
+
+Const UXB_AST_MIR_ROUTE_MIR_REQUIRED As String = "MIR_REQUIRED"
+Const UXB_AST_MIR_ROUTE_DECL_ONLY As String = "DECL_ONLY"
+Const UXB_AST_MIR_ROUTE_EXPR_ONLY As String = "EXPR_ONLY"
+Const UXB_AST_MIR_ROUTE_META_ONLY As String = "META_ONLY"
+Const UXB_AST_MIR_ROUTE_COMPILE_TIME_ONLY As String = "COMPILE_TIME_ONLY"
+Const UXB_AST_MIR_ROUTE_NATIVE_ONLY As String = "NATIVE_ONLY"
+Const UXB_AST_MIR_ROUTE_CONTAINER As String = "CONTAINER"
+Const UXB_AST_MIR_ROUTE_LITERAL As String = "LITERAL"
+Const UXB_AST_MIR_ROUTE_UNKNOWN As String = "UNKNOWN"
+
+Private Function UXBAdim25Upper(ByVal textValue As String) As String
+    Return UCase(Trim(textValue))
+End Function
+
+Private Function UXBAdim25Contains(ByVal textValue As String, ByVal needleText As String) As Integer
+    If InStr(UXBAdim25Upper(textValue), UXBAdim25Upper(needleText)) > 0 Then Return 1
+    Return 0
+End Function
+
+Private Function UXBAdim25EndsWith(ByVal textValue As String, ByVal suffixText As String) As Integer
+    Dim t As String
+    Dim s As String
+    t = UXBAdim25Upper(textValue)
+    s = UXBAdim25Upper(suffixText)
+    If Len(t) < Len(s) Then Return 0
+    If Right(t, Len(s)) = s Then Return 1
+    Return 0
+End Function
+
+Function UXBAstMirRouteForKind(ByVal kindText As String) As String
+    Dim k As String
+    k = UXBAdim25Upper(kindText)
+
+    ' UXB_007_REL10_FIX_20260712:
+    ' Route by execution responsibility.  Declaration/container/compile-time
+    ' nodes own children or metadata but do not require a standalone MIR opcode.
+    Select Case k
+    Case "PROGRAM", "BLOCK", "TRY_BODY", "ELSE_PART", "ELSEIF_PART", "CASE_BLOCK", "CASE_ELSE", "EACH_ITEMS", "EACH_BODY", _
+         "FUNCTION_STMT", "SUB_STMT", "CLASS_STMT", "TYPE_STMT", "INTERFACE_STMT", "MAIN_STMT", "PRINT_ITEM"
+        Return UXB_AST_MIR_ROUTE_CONTAINER
+
+    Case "TYPE_REF", "PARAM_DECL", "RETURN_TYPE", "DIM_DECL", "DIM_BOUNDS", "REDIM_DECL", "CONST_DECL", "TYPE_FIELD", "CLASS_FIELD", "CLASS_BASE_REF", "CLASS_IMPLEMENTS_REF", "CLASS_DECORATOR_REF", "CLASS_MIXIN_REF", "CLASS_FLAG", "CLASS_FIELD_FLAG", "CLASS_METHOD_FLAG", "CLASS_PROPERTY_FLAG", "CLASS_ACCESS", "FRIEND_ITEM", "USING_ITEM", "ALIAS_TARGET", "MODE_REF", "SLOT_HEADER_ARGS", _
+         "CLASS_METHOD_DECL", "CLASS_CONSTRUCTOR_DECL", "CLASS_DESTRUCTOR_DECL", "CLASS_OPERATOR_DECL", "CLASS_PROPERTY_DECL", "CLASS_PROPERTY_GET_STMT", "CLASS_PROPERTY_SET_STMT", "INTERFACE_METHOD_DECL"
+        Return UXB_AST_MIR_ROUTE_DECL_ONLY
+
+    Case "INCLUDE_STMT", "IMPORT_STMT", "USING_STMT", "ALIAS_STMT", "NAMESPACE_STMT", "MODULE_STMT", "DEFTYPE_STMT", "SETSTRINGSIZE_STMT", "CONST_STMT"
+        Return UXB_AST_MIR_ROUTE_COMPILE_TIME_ONLY
+
+    Case "DECLARE_SUB_STMT", "DECLARE_FUNCTION_STMT"
+        Return UXB_AST_MIR_ROUTE_NATIVE_ONLY
+
+    Case "IDENT", "NUMBER", "STRING", "BOOLEAN", "KEYWORD_REF"
+        Return UXB_AST_MIR_ROUTE_LITERAL
+
+    Case "BINARY", "UNARY", "TERNARY_EXPR", "CALL_EXPR", "FIELD_EXPR", "INDEX_EXPR", "MEMBER_EXPR", "CAST_EXPR", "SIZEOF_EXPR", "NEW_EXPR", "RANGE_EXPR", "INCDEC_EXPR", "PROMPT_EXPR", "INIT_EXPR"
+        Return UXB_AST_MIR_ROUTE_EXPR_ONLY
+    End Select
+
+    If UXBAdim25EndsWith(k, "_STMT") <> 0 Then Return UXB_AST_MIR_ROUTE_MIR_REQUIRED
+    If UXBAdim25EndsWith(k, "_EXPR") <> 0 Then Return UXB_AST_MIR_ROUTE_EXPR_ONLY
+    If UXBAdim25Contains(k, "DECL") <> 0 Then Return UXB_AST_MIR_ROUTE_DECL_ONLY
+    If UXBAdim25Contains(k, "CLASS") <> 0 Or UXBAdim25Contains(k, "INTERFACE") <> 0 Or UXBAdim25Contains(k, "TYPE") <> 0 Then Return UXB_AST_MIR_ROUTE_DECL_ONLY
+
+    Return UXB_AST_MIR_ROUTE_UNKNOWN
+End Function
+
+Function UXBAstMirExpectedOpcodesForKind(ByVal kindText As String) As String
+    Dim k As String
+    k = UXBAdim25Upper(kindText)
+
+    ' UXB_007_REL10_FIX_20260712:
+    ' Semantic MIR represents many surface services through CALL.  Include the
+    ' concrete DIM/index/FFI opcodes actually emitted by the current lowerer.
+    Select Case k
+    Case "BINARY": Return "ADD|SUB|MUL|DIV|IDIV|MOD|POW|EQ|NE|LT|LE|GT|GE|AND|OR|XOR|NAND|NOR|XNOR|IMP|CIMP|NIMP|NCIMP|IDA|IDB|NOTA|NOTB|SHL|SHR|FADD|FSUB|FMUL|FDIV|STR_CONCAT"
+    Case "UNARY": Return "NEG|NOT|FNEG"
+    Case "TERNARY_EXPR": Return "JZ|JNZ|JMP|SELECT"
+    Case "CALL_EXPR", "CALL_STMT", "CALL_DLL_STMT", "CALL_API_STMT": Return "CALL|CALL_BUILTIN|CALL_RUNTIME|CALL_EXTERNAL|CALL_DLL|CALL_API|HOST_CALL|LIBRARY_CALL|MEMORY_LOAD|MEMORY_READ_SEQUENCE|ARRAY_LBOUND|ARRAY_UBOUND|LOAD_CONST"
+    Case "INLINE_STMT", "NLINE_STMT": Return "INLINE|MIR_INLINE|CALL|CALL_RUNTIME"
+    Case "ASSIGN_STMT": Return "STORE_VAR|STORE_LOCAL|STORE_GLOBAL|FIELD_STORE|STORE_FIELD|ARRAY_STORE|STORE_INDEXED"
+    Case "EXPR_STMT": Return "CALL|CALL_RUNTIME|CALL_BUILTIN|HOST_CALL|STORE_VAR|STORE_INDEXED|FIELD_STORE"
+    Case "DIM_STMT": Return "DIM|STORE_VAR|STORE_LOCAL|STORE_GLOBAL|CALL_RUNTIME"
+    Case "REDIM_STMT": Return "REDIM|DIM|STORE_VAR|CALL_RUNTIME"
+    Case "PRINT_STMT": Return "CALL|PRINT|CALL_RUNTIME|HOST_CALL"
+    Case "INPUT_STMT", "INPUTF_STMT", "INPUT_FILE_STMT": Return "CALL|INPUT|CALL_RUNTIME|HOST_CALL"
+    Case "IF_STMT": Return "JZ|JNZ|JMP"
+    Case "SELECT_STMT", "CASE_IS_VALUE": Return "JZ|JNZ|JMP|EQ|NE"
+    Case "FOR_STMT", "FOR_EACH_STMT", "DO_STMT", "DO_EACH_STMT": Return "JMP|JZ|JNZ|ADD|STORE_VAR|CALL|CALL_RUNTIME"
+    Case "RETURN_STMT", "EXIT_STMT", "END_STMT": Return "RET|JMP"
+    Case "GOTO_STMT", "GOSUB_STMT", "LABEL_STMT": Return "JMP|CALL|CALL_RUNTIME|RET"
+    Case "THROW_STMT", "ASSERT_STMT", "TRY_STMT", "CATCH_PART", "FINALLY_PART": Return "THROW|ASSERT|JMP|JZ|CALL|CALL_RUNTIME"
+    Case "RANDOMIZE_STMT": Return "RANDOMIZE|CALL|CALL_RUNTIME"
+    Case "INCDEC_STMT", "INCDEC_EXPR": Return "INC|DEC|ADD|SUB|STORE_VAR"
+    Case "OPEN_STMT", "CLOSE_STMT", "GET_STMT", "PUT_STMT", "SEEK_STMT", "LOCATE_STMT", "COLOR_STMT", "CLS_STMT": Return "CALL|CALL_RUNTIME|HOST_CALL|OPEN|CLOSE|GET|PUT|SEEK|LOCATE|COLOR|CLS"
+    Case "DELETE_STMT": Return "DELETE|DELETE_OBJECT|CALL|CALL_RUNTIME|HOST_CALL"
+    Case "POKEB_STMT", "POKEW_STMT", "POKED_STMT", "POKES_STMT": Return "MEMORY_STORE|MEMORY_WRITE_SEQUENCE|POKE|CALL|CALL_RUNTIME|HOST_CALL"
+    Case "MEMCOPYB_STMT", "MEMCOPYW_STMT", "MEMCOPYD_STMT": Return "MEMORY_COPY|MEMCOPY|CALL|CALL_RUNTIME|HOST_CALL"
+    Case "MEMFILLB_STMT", "MEMFILLW_STMT", "MEMFILLD_STMT": Return "MEMORY_FILL|MEMFILL|CALL|CALL_RUNTIME|HOST_CALL"
+    Case "SETNEWOFFSET_STMT": Return "SETNEWOFFSET|CALL|CALL_RUNTIME|HOST_CALL"
+    ' Qualified enum/namespace constants resolve to LOAD_CONST without storage.
+    Case "FIELD_EXPR", "MEMBER_EXPR": Return "FIELD_LOAD|FIELD_STORE|LOAD_FIELD|STORE_FIELD|LOAD_VAR|STORE_VAR|LOAD_CONST"
+    Case "INDEX_EXPR": Return "ARRAY_LOAD|ARRAY_STORE|LOAD_INDEXED|STORE_INDEXED"
+    Case "NEW_EXPR": Return "OBJECT_NEW|FIELD_LOAD|FIELD_STORE|CALL|CALL_RUNTIME"
+    Case "EVENT_STMT", "THREAD_STMT", "PARALEL_STMT", "PIPE_STMT", "SLOT_STMT", "SLOT_TABLE_STMT", "SLOT_BIND_ENTRY", "SLOT_CONTROL_STMT", "TRIGGER_STMT": Return "CALL|HOST_CALL|CALL_RUNTIME|EVENT|THREAD|PIPE|SLOT|TRIGGER"
+    End Select
+
+    If UXBAdim25EndsWith(k, "_STMT") <> 0 Then Return "CALL|CALL_RUNTIME|HOST_CALL|JMP|RET|DIM|STORE_VAR|STORE_INDEXED|LOAD_VAR|LOAD_INDEXED"
+    If UXBAdim25EndsWith(k, "_EXPR") <> 0 Then Return "LOAD_VAR|LOAD_CONST|CALL|CALL_RUNTIME|LOAD_INDEXED|FIELD_LOAD"
+    Return ""
+End Function
+
+Function UXBAstMirRouteRequiresEvidence(ByVal routeText As String) As Integer
+    Select Case UXBAdim25Upper(routeText)
+    Case UXB_AST_MIR_ROUTE_MIR_REQUIRED, UXB_AST_MIR_ROUTE_EXPR_ONLY
+        Return 1
+    End Select
+    Return 0
+End Function
+
+#endif

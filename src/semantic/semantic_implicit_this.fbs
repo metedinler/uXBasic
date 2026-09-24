@@ -1,0 +1,220 @@
+#ifndef UXB_SEMANTIC_IMPLICIT_THIS_FBS
+#define UXB_SEMANTIC_IMPLICIT_THIS_FBS
+
+' S-119: implicit THIS in class member bodies (FreeBASIC rule: inside a member procedure a bare
+' field name means THIS.field and a bare method name means THIS.method(...)).
+'
+' Until now only the AST interpreter resolved a bare field name (ExecTryReadImplicitThisField); the
+' canonical-MIR lowering, native x64 and legacy x64 saw an unknown variable and silently used a
+' global / temporary (`n = n + 1` in a method printed 0 | 1 | garbage on three engines), and a bare
+' method call failed on every engine ("unsupported call BUMP").
+'
+' The single root-cause fix is a front-end rewrite, done once for every engine before any other
+' semantic pass looks at the tree:
+'   bare IDENT that names a field of the class (or of a base class)  -> FIELD_EXPR(THIS, field)
+'   bare CALL_EXPR that names a method of the class (or a base class) -> CALL_EXPR THIS.method(...)
+' Resolution order inside a member body is (FreeBASIC): local / parameter -> field or method of the
+' class hierarchy -> global. A name declared by DIM/REDIM/CONST anywhere in the body, or a
+' parameter, therefore always wins over a field of the same name. STATIC members are left alone
+' (no THIS in a static method; a static field is not per-object storage) and array fields are left
+' alone (`arr(i)` is an index expression, not a bare name).
+
+Private Function SemImplicitThisHasName(ByRef setText As String, ByRef nameText As String) As Integer
+    Return IIf(InStr(setText, "|" & UCase(Trim(nameText)) & "|") > 0, 1, 0)
+End Function
+
+Private Sub SemImplicitThisAddName(ByRef setText As String, ByRef nameText As String)
+    Dim key As String
+    key = UCase(Trim(nameText))
+    If key = "" Then Exit Sub
+    If InStr(setText, "|" & key & "|") = 0 Then setText &= key & "|"
+End Sub
+
+Private Function SemImplicitThisFindClass(ByRef ps As ParseState, ByRef className As String) As Integer
+    Dim target As String
+    target = UCase(Trim(className))
+    If target = "" Then Return -1
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = target Then Return i
+        End If
+    Next i
+    Return -1
+End Function
+
+Private Function SemImplicitThisChildHasFlag(ByRef ps As ParseState, ByVal memberNode As Integer, ByRef flagKind As String, ByRef flagValue As String) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(memberNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = flagKind Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = flagValue Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 0
+End Function
+
+' Collects the per-object field names and the instance method names of `classNode` and of every
+' base class above it (a derived class's own declaration comes first; a name is added once).
+Private Sub SemImplicitThisCollectMembers(ByRef ps As ParseState, ByVal classNode As Integer, ByRef fieldSet As String, ByRef methodSet As String)
+    fieldSet = "|"
+    methodSet = "|"
+    Dim cur As Integer
+    cur = classNode
+    Dim hop As Integer
+    Do While cur <> -1 And hop < 64
+        hop += 1
+        Dim ch As Integer
+        ch = ps.ast.nodes(cur).firstChild
+        Dim baseName As String
+        baseName = ""
+        Do While ch <> -1
+            Dim ck As String
+            ck = UCase(Trim(ps.ast.nodes(ch).kind))
+            If ck = "CLASS_FIELD" Then
+                Dim isStatic As Integer
+                isStatic = SemImplicitThisChildHasFlag(ps, ch, "CLASS_FIELD_FLAG", "STATIC")
+                Dim isArray As Integer
+                isArray = 0
+                Dim fc As Integer
+                fc = ps.ast.nodes(ch).firstChild
+                Do While fc <> -1
+                    If UCase(Trim(ps.ast.nodes(fc).kind)) = "DIM_BOUNDS" Then isArray = 1
+                    fc = ps.ast.nodes(fc).nextSibling
+                Loop
+                If isStatic = 0 And isArray = 0 Then SemImplicitThisAddName fieldSet, ps.ast.nodes(ch).value
+            ElseIf ck = "CLASS_METHOD_DECL" Then
+                If SemImplicitThisChildHasFlag(ps, ch, "CLASS_METHOD_FLAG", "STATIC") = 0 Then SemImplicitThisAddName methodSet, ps.ast.nodes(ch).value
+            ElseIf ck = "CLASS_BASE_REF" Then
+                baseName = ps.ast.nodes(ch).value
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+        If baseName = "" Then Exit Do
+        cur = SemImplicitThisFindClass(ps, baseName)
+    Loop
+End Sub
+
+' Names a body declares itself (DIM / REDIM / CONST): they shadow a field for the whole body.
+Private Sub SemImplicitThisCollectLocals(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef localSet As String)
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Exit Sub
+    Dim k As String
+    k = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    If k = "DIM_DECL" Or k = "REDIM_DECL" Or k = "CONST_DECL" Or k = "PARAM_DECL" Then SemImplicitThisAddName localSet, ps.ast.nodes(nodeIdx).value
+    SemImplicitThisCollectLocals ps, ps.ast.nodes(nodeIdx).left, localSet
+    SemImplicitThisCollectLocals ps, ps.ast.nodes(nodeIdx).right, localSet
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        SemImplicitThisCollectLocals ps, ch, localSet
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+End Sub
+
+Private Sub SemImplicitThisWalk(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef fieldSet As String, ByRef methodSet As String, ByRef localSet As String, ByRef rewrites As Integer)
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Exit Sub
+    Dim k As String
+    k = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    Dim key As String
+    key = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+
+    If k = "IDENT" Then
+        If key <> "THIS" And key <> "ME" And key <> "SUPER" And key <> "" Then
+            If SemImplicitThisHasName(fieldSet, key) <> 0 And SemImplicitThisHasName(localSet, key) = 0 Then
+                Dim ln As Integer, cn As Integer
+                ln = ps.ast.nodes(nodeIdx).lineNo
+                cn = ps.ast.nodes(nodeIdx).colNo
+                Dim thisNode As Integer
+                thisNode = ASTNewNode(ps.ast, "IDENT", "THIS", "", ln, cn)
+                ps.ast.nodes(nodeIdx).kind = "FIELD_EXPR"
+                ps.ast.nodes(nodeIdx).op = "."
+                ASTSetLeft ps.ast, nodeIdx, thisNode
+                rewrites += 1
+                Exit Sub
+            End If
+        End If
+    ElseIf k = "CALL_EXPR" Then
+        If InStr(key, ".") = 0 And key <> "" And ps.ast.nodes(nodeIdx).left = -1 Then
+            If SemImplicitThisHasName(methodSet, key) <> 0 And SemImplicitThisHasName(localSet, key) = 0 Then
+                Dim cln As Integer, ccn As Integer
+                cln = ps.ast.nodes(nodeIdx).lineNo
+                ccn = ps.ast.nodes(nodeIdx).colNo
+                Dim callThis As Integer
+                callThis = ASTNewNode(ps.ast, "IDENT", "THIS", "", cln, ccn)
+                ps.ast.nodes(nodeIdx).value = "THIS." & Trim(ps.ast.nodes(nodeIdx).value)
+                ps.ast.nodes(nodeIdx).op = "."
+                ASTSetLeft ps.ast, nodeIdx, callThis
+                rewrites += 1
+            End If
+        End If
+    End If
+
+    SemImplicitThisWalk ps, ps.ast.nodes(nodeIdx).left, fieldSet, methodSet, localSet, rewrites
+    SemImplicitThisWalk ps, ps.ast.nodes(nodeIdx).right, fieldSet, methodSet, localSet, rewrites
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        SemImplicitThisWalk ps, ch, fieldSet, methodSet, localSet, rewrites
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+End Sub
+
+' Rewrites one member body (a method / constructor / destructor / operator / property accessor).
+Private Sub SemImplicitThisRewriteMember(ByRef ps As ParseState, ByVal memberNode As Integer, ByRef fieldSet As String, ByRef methodSet As String, ByRef rewrites As Integer)
+    Dim localSet As String
+    localSet = "|VALUE|"
+    SemImplicitThisCollectLocals ps, memberNode, localSet
+    ' walk the statements only: the member header (PARAM_DECL / TYPE_REF / flags) holds no expressions
+    Dim ch As Integer
+    ch = ps.ast.nodes(memberNode).firstChild
+    Do While ch <> -1
+        Dim ck As String
+        ck = UCase(Trim(ps.ast.nodes(ch).kind))
+        If ck <> "PARAM_DECL" And ck <> "TYPE_REF" And ck <> "RETURN_TYPE" And Left(ck, 6) <> "CLASS_" Then
+            SemImplicitThisWalk ps, ch, fieldSet, methodSet, localSet, rewrites
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+End Sub
+
+Private Function SemRewriteImplicitThis(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim originalCount As Integer
+    originalCount = ps.ast.count
+    Dim i As Integer
+    For i = 0 To originalCount - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "CLASS_STMT" Then Continue For
+
+        Dim fieldSet As String
+        Dim methodSet As String
+        SemImplicitThisCollectMembers ps, i, fieldSet, methodSet
+        If fieldSet = "|" And methodSet = "|" Then Continue For
+
+        Dim rewrites As Integer
+        rewrites = 0
+        Dim m As Integer
+        m = ps.ast.nodes(i).firstChild
+        Do While m <> -1
+            Dim mk As String
+            mk = UCase(Trim(ps.ast.nodes(m).kind))
+            If mk = "CLASS_METHOD_DECL" Then
+                If SemImplicitThisChildHasFlag(ps, m, "CLASS_METHOD_FLAG", "STATIC") = 0 Then SemImplicitThisRewriteMember ps, m, fieldSet, methodSet, rewrites
+            ElseIf mk = "CLASS_CONSTRUCTOR_DECL" Or mk = "CLASS_DESTRUCTOR_DECL" Or mk = "CLASS_OPERATOR_DECL" Then
+                SemImplicitThisRewriteMember ps, m, fieldSet, methodSet, rewrites
+            ElseIf mk = "CLASS_PROPERTY_DECL" Then
+                Dim acc As Integer
+                acc = ps.ast.nodes(m).firstChild
+                Do While acc <> -1
+                    Dim ak As String
+                    ak = UCase(Trim(ps.ast.nodes(acc).kind))
+                    If ak = "CLASS_PROPERTY_GET_STMT" Or ak = "CLASS_PROPERTY_SET_STMT" Then SemImplicitThisRewriteMember ps, acc, fieldSet, methodSet, rewrites
+                    acc = ps.ast.nodes(acc).nextSibling
+                Loop
+            End If
+            m = ps.ast.nodes(m).nextSibling
+        Loop
+    Next i
+    Return 1
+End Function
+
+#endif

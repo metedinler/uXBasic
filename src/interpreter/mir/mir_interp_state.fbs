@@ -1,0 +1,155 @@
+#ifndef UXB_MIR_INTERP_STATE_FBS
+#define UXB_MIR_INTERP_STATE_FBS
+
+#include once "../../mir/mir_instruction.fbs"
+#include once "../common/interp_context.fbs"
+
+Type UXBMIRInterpVar
+    nameText As String
+    ' upper-cased/trimmed copy of nameText, computed once at creation: lookups used
+    ' to UCase(Trim()) EVERY variable name on EVERY lookup (thousands of temporaries
+    ' in a long program => milliseconds per interpreter step)
+    nameKey As String
+    value As UXBInterpValue
+    scopeDepth As Integer
+    ' S-071: once a scalar's address escapes through VARPTR, its value is kept
+    ' in this raw, declared-width cell (the address VARPTR hands out) instead
+    ' of only in the multi-field `value` struct. `value` holds separate
+    ' intValue/floatValue fields, so its own addresses are not the variable's
+    ' typed storage (an F64's bytes are NOT at &intValue, an F32 needs a 4-byte
+    ' single, a 32-bit POKE must not disturb neighbouring bytes). See
+    ' UXBMIRInterpPinStore/PinLoad below: FindVar refreshes `value` from the
+    ' cell before any read, and every write stores back into it.
+    pinned As Integer = 0
+    pinWidth As Integer = 0
+    pinType As String
+    pinCell(0 To 15) As UByte
+End Type
+
+Type UXBMIRInterpLabel
+    nameText As String
+    nameKey As String
+    indexValue As Integer
+End Type
+
+' S-071: each variable lives in its own heap cell and vars() holds only
+' POINTERS to them. With the old by-value vars(Any) As UXBMIRInterpVar, any
+' ReDim (a new variable or compiler temporary appearing) relocated every
+' variable, so a VARPTR address taken earlier silently went stale. Now
+' ReDim moves only the pointer table; a variable's own storage keeps one
+' stable address for its whole scope, which is what NATIVE PEEK/POKE/MEMCOPY
+' through VARPTR need (the locked "one real backing storage" model) -- no
+' mirror copy required. The destructor releases whatever is still alive when
+' the interpreter run ends.
+Type UXBMIRInterpState
+    libraryHeap As UXBInterpHeap Ptr = 0
+    vars(Any) As UXBMIRInterpVar Ptr
+    varCount As Integer = 0
+    Declare Destructor()
+    labels(Any) As UXBMIRInterpLabel
+    labelCount As Integer
+    gosubReturns(Any) As Integer
+    gosubDepth As Integer
+    gosubMaxDepth As Integer
+    nextIndex As Integer
+    jumpRequested As Integer
+    returnRequested As Integer
+    returnValue As UXBInterpValue
+    currentScopeDepth As Integer
+    shellNowait As Integer
+    shellTimeoutMs As Integer
+    shellRunPath As String
+    shellOutPath As String
+    shellErrPath As String
+    shellOutVar As String
+    shellErrVar As String
+    shellCodeVar As String
+    filePrintRuntimeHandle As Integer
+    filePrintBuffer As String
+    filePrintTrailingSep As String
+    filePrintActive As Integer
+End Type
+
+' Byte width of a declared scalar type's raw representation, 0 = no native
+' scalar layout (strings, objects, F80/EXTENDED, ...): VARPTR fails closed there.
+Private Function UXBMIRInterpPinWidth(ByVal typeText As String) As Integer
+    Select Case typeText
+    Case "I8", "BYTE", "SBYTE", "U8", "UBYTE", "BOOL", "BOOLEAN"
+        Return 1
+    Case "I16", "SHORT", "U16", "USHORT"
+        Return 2
+    Case "I32", "INTEGER", "INT", "LONG", "U32", "UINTEGER", "UINT", "ULONG", "F32", "SINGLE"
+        Return 4
+    Case "I64", "LONGINT", "U64", "ULONGINT", "F64", "DOUBLE", "PTR", "STRPTR", "WSTRPTR", "POINTER"
+        Return 8
+    End Select
+    Return 0
+End Function
+
+Private Sub UXBMIRInterpPinStore(ByRef pv As UXBMIRInterpVar)
+    Dim cellPtr As UByte Ptr = @pv.pinCell(0)
+    Select Case pv.pinType
+    Case "F32", "SINGLE"
+        *CPtr(Single Ptr, cellPtr) = CSng(pv.value.floatValue)
+    Case "F64", "DOUBLE"
+        *CPtr(Double Ptr, cellPtr) = pv.value.floatValue
+    Case Else
+        Dim storeBits As ULongInt = CULngInt(pv.value.intValue)
+        Select Case pv.pinWidth
+        Case 1
+            cellPtr[0] = CUByte(storeBits And &hFFULL)
+        Case 2
+            *CPtr(UShort Ptr, cellPtr) = CUShort(storeBits And &hFFFFULL)
+        Case 4
+            *CPtr(ULong Ptr, cellPtr) = CULng(storeBits And &hFFFFFFFFULL)
+        Case Else
+            *CPtr(ULongInt Ptr, cellPtr) = storeBits
+        End Select
+    End Select
+End Sub
+
+Private Sub UXBMIRInterpPinLoad(ByRef pv As UXBMIRInterpVar)
+    Dim cellPtr As UByte Ptr = @pv.pinCell(0)
+    Dim loaded As UXBInterpValue
+    Select Case pv.pinType
+    Case "F32", "SINGLE"
+        loaded = UXBInterpValueFloat(CDbl(*CPtr(Single Ptr, cellPtr)))
+    Case "F64", "DOUBLE"
+        loaded = UXBInterpValueFloat(*CPtr(Double Ptr, cellPtr))
+    Case Else
+        Dim loadBits As ULongInt
+        Select Case pv.pinWidth
+        Case 1
+            loadBits = cellPtr[0]
+        Case 2
+            loadBits = *CPtr(UShort Ptr, cellPtr)
+        Case 4
+            loadBits = *CPtr(ULong Ptr, cellPtr)
+        Case Else
+            loadBits = *CPtr(ULongInt Ptr, cellPtr)
+        End Select
+        loaded = UXBInterpValueUInt(loadBits)
+    End Select
+    pv.value = UXBInterpApplyDeclaredType(loaded, pv.pinType)
+End Sub
+
+Destructor UXBMIRInterpState()
+    Dim i As Integer
+    For i = 0 To varCount - 1
+        If vars(i) <> 0 Then Delete vars(i)
+    Next i
+End Destructor
+
+Declare Sub UXBMIRInterpStateInit(ByRef st As UXBMIRInterpState)
+Declare Sub UXBMIRInterpEnterScope(ByRef st As UXBMIRInterpState)
+Declare Sub UXBMIRInterpLeaveScope(ByRef st As UXBMIRInterpState)
+Declare Sub UXBMIRInterpSetVar(ByRef st As UXBMIRInterpState, ByVal nameText As String, ByRef v As UXBInterpValue)
+Declare Sub UXBMIRInterpAssignVar(ByRef st As UXBMIRInterpState, ByVal nameText As String, ByRef v As UXBInterpValue)
+Declare Function UXBMIRInterpGetOperand(ByRef st As UXBMIRInterpState, ByVal operandText As String) As UXBInterpValue
+Declare Function UXBMIRInterpFindVar(ByRef st As UXBMIRInterpState, ByVal nameText As String) As Integer
+Declare Sub UXBMIRInterpAddLabel(ByRef st As UXBMIRInterpState, ByVal nameText As String, ByVal indexValue As Integer)
+Declare Function UXBMIRInterpFindLabel(ByRef st As UXBMIRInterpState, ByVal nameText As String) As Integer
+Declare Sub UXBMIRInterpBuildLabels(ByRef st As UXBMIRInterpState, instructions() As UXBMIRInstructionRecord, ByVal instructionCount As Integer)
+Declare Function UXBMIRInterpDispatch(ByRef ins As UXBMIRInstructionRecord, ByRef ctx As UXBInterpContext, ByRef st As UXBMIRInterpState) As UXBInterpValue
+
+#endif

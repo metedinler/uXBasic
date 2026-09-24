@@ -1,0 +1,919 @@
+' uXBasic HIR (High-Level Intermediate Representation)
+' Scope/symbol/type metadata katmani. semantic_pass.fbs ile cakismamasi
+' icin burada giris fonksiyonu HIRSemanticAnalyze olarak adlandirildi.
+
+#include once "hir_ast_bridge.fbs"
+#include once "hir_scope_bridge.fbs"
+#include once "hir_symbol_bridge.fbs"
+#include once "hir_fact_table.fbs"
+#include once "hir_builder.fbs"
+#include once "hir_mir_bridge.fbs"
+#include once "hir_json_report.fbs"
+
+' DEPRECATED: HIR local symbol/scope structures are not compiler truth.
+' Use UXBStep3Symbols + HIRFactTable bridge instead.
+Type SymbolEntry
+    name As String
+    kind As String  ' VAR, FUNC, CONST, TYPE, CLASS, SUB
+    typeName As String
+    scopeLevel As Integer
+    addr As UInteger
+    isConst As Integer
+    isArray As Integer
+    bounds As String  ' DIM için
+End Type
+
+Type SymbolTable
+    entries(0 to 255) As SymbolEntry
+    count As Integer
+End Type
+
+Type ScopeStack
+    scopes(0 to 255) As SymbolTable
+    depth As Integer
+End Type
+
+Dim Shared gGlobalScope As SymbolTable
+Dim Shared gScopeStack As ScopeStack
+
+Type HIRInventory
+    commands(Any) As String
+    commandCount As Integer
+    functions(Any) As String
+    functionCount As Integer
+    operators(Any) As String
+    operatorCount As Integer
+    types(Any) As String
+    typeCount As Integer
+    dataStructures(Any) As String
+    dataStructureCount As Integer
+End Type
+
+Sub SymbolTableInit(ByRef st As SymbolTable)
+    st.count = 0
+End Sub
+
+Sub SymbolTableAdd(ByRef st As SymbolTable, ByRef entry As SymbolEntry)
+    If st.count >= 256 Then
+        ' overflow, ama şimdilik ignore
+        Exit Sub
+    End If
+    st.entries(st.count) = entry
+    st.count += 1
+End Sub
+
+Function SymbolTableLookup(ByRef st As SymbolTable, ByRef needleName As String) As Integer
+    Dim i As Integer
+    For i = 0 To st.count - 1
+        If UCase(st.entries(i).name) = UCase(needleName) Then Return i
+    Next
+    Return -1
+End Function
+
+Sub ScopeStackInit(ByRef ss As ScopeStack)
+    ss.depth = 0
+    SymbolTableInit gGlobalScope
+    ss.scopes(0) = gGlobalScope
+End Sub
+
+Sub ScopePush(ByRef ss As ScopeStack)
+    ss.depth += 1
+    If ss.depth >= 256 Then
+        ' overflow
+        Exit Sub
+    End If
+    SymbolTableInit ss.scopes(ss.depth)
+End Sub
+
+Sub ScopePop(ByRef ss As ScopeStack)
+    If ss.depth > 0 Then ss.depth -= 1
+End Sub
+
+Function ScopeLookup(ByRef ss As ScopeStack, ByRef needleName As String) As Integer
+    Dim level As Integer
+    For level = ss.depth To 0 Step -1
+        Dim idx As Integer
+        idx = SymbolTableLookup(ss.scopes(level), needleName)
+        If idx <> -1 Then Return idx
+    Next
+    Return -1
+End Function
+
+Private Sub HIRAddCommand(ByRef inv As HIRInventory, ByRef textRaw As String)
+    Dim t As String
+    t = UCase(Trim(textRaw))
+    If t = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To inv.commandCount - 1
+        If UCase(inv.commands(i)) = t Then Exit Sub
+    Next i
+
+    If inv.commandCount = 0 Then
+        ReDim inv.commands(0)
+    Else
+        ReDim Preserve inv.commands(inv.commandCount)
+    End If
+    inv.commands(inv.commandCount) = t
+    inv.commandCount += 1
+End Sub
+
+Private Sub HIRAddFunction(ByRef inv As HIRInventory, ByRef textRaw As String)
+    Dim t As String
+    t = UCase(Trim(textRaw))
+    If t = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To inv.functionCount - 1
+        If UCase(inv.functions(i)) = t Then Exit Sub
+    Next i
+
+    If inv.functionCount = 0 Then
+        ReDim inv.functions(0)
+    Else
+        ReDim Preserve inv.functions(inv.functionCount)
+    End If
+    inv.functions(inv.functionCount) = t
+    inv.functionCount += 1
+End Sub
+
+Private Sub HIRAddOperator(ByRef inv As HIRInventory, ByRef textRaw As String)
+    Dim t As String
+    t = UCase(Trim(textRaw))
+    If t = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To inv.operatorCount - 1
+        If UCase(inv.operators(i)) = t Then Exit Sub
+    Next i
+
+    If inv.operatorCount = 0 Then
+        ReDim inv.operators(0)
+    Else
+        ReDim Preserve inv.operators(inv.operatorCount)
+    End If
+    inv.operators(inv.operatorCount) = t
+    inv.operatorCount += 1
+End Sub
+
+Private Sub HIRAddTypeName(ByRef inv As HIRInventory, ByRef textRaw As String)
+    Dim t As String
+    t = UCase(Trim(textRaw))
+    If t = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To inv.typeCount - 1
+        If UCase(inv.types(i)) = t Then Exit Sub
+    Next i
+
+    If inv.typeCount = 0 Then
+        ReDim inv.types(0)
+    Else
+        ReDim Preserve inv.types(inv.typeCount)
+    End If
+    inv.types(inv.typeCount) = t
+    inv.typeCount += 1
+End Sub
+
+Private Sub HIRAddDataStructure(ByRef inv As HIRInventory, ByRef textRaw As String)
+    Dim t As String
+    t = UCase(Trim(textRaw))
+    If t = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To inv.dataStructureCount - 1
+        If UCase(inv.dataStructures(i)) = t Then Exit Sub
+    Next i
+
+    If inv.dataStructureCount = 0 Then
+        ReDim inv.dataStructures(0)
+    Else
+        ReDim Preserve inv.dataStructures(inv.dataStructureCount)
+    End If
+    inv.dataStructures(inv.dataStructureCount) = t
+    inv.dataStructureCount += 1
+End Sub
+
+Sub HIRInventoryInit(ByRef inv As HIRInventory)
+    inv.commandCount = 0
+    inv.functionCount = 0
+    inv.operatorCount = 0
+    inv.typeCount = 0
+    inv.dataStructureCount = 0
+    Erase inv.commands
+    Erase inv.functions
+    Erase inv.operators
+    Erase inv.types
+    Erase inv.dataStructures
+End Sub
+
+Private Sub HIRCollectNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef inv As HIRInventory)
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Exit Sub
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    Dim k As String
+    k = UCase(Trim(n.kind))
+
+    If Right(k, 5) = "_STMT" Then
+        HIRAddCommand inv, Left(k, Len(k) - 5)
+    End If
+
+    If k = "CALL_STMT" Or k = "CALL_EXPR" Or k = "FUNCTION_STMT" Or k = "SUB_STMT" Then
+        HIRAddFunction inv, n.value
+    End If
+
+    If k = "BINARY" Or k = "UNARY" Then
+        HIRAddOperator inv, n.op
+    End If
+
+    If k = "TYPE_REF" Then
+        HIRAddTypeName inv, n.value
+
+        Dim tv As String
+        tv = UCase(Trim(n.value))
+        If tv = "LIST" Or tv = "DICT" Or tv = "SET" Then
+            HIRAddDataStructure inv, tv
+        End If
+    End If
+
+    If k = "DIM_STMT" Or k = "REDIM_STMT" Then HIRAddDataStructure inv, "ARRAY"
+    If k = "CLASS_STMT" Then HIRAddDataStructure inv, "CLASS"
+    If k = "TYPE_STMT" Then HIRAddDataStructure inv, "TYPE"
+    If k = "ENUM_STMT" Then HIRAddDataStructure inv, "ENUM"
+    If k = "INTERFACE_STMT" Then HIRAddDataStructure inv, "INTERFACE"
+
+    If n.left <> -1 Then HIRCollectNode ps, n.left, inv
+    If n.right <> -1 Then HIRCollectNode ps, n.right, inv
+
+    Dim ch As Integer
+    ch = n.firstChild
+    Do While ch <> -1
+        HIRCollectNode ps, ch, inv
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+End Sub
+
+Sub HIRCollectInventory(ByRef ps As ParseState, ByRef inv As HIRInventory)
+    HIRInventoryInit inv
+    If ps.rootNode = -1 Then Exit Sub
+    HIRCollectNode ps, ps.rootNode, inv
+End Sub
+
+Private Function HIREscapeJson(ByRef textIn As String) As String
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+
+        Select Case ch
+        Case "\"
+            outText &= "\\\\"
+        Case Chr(34)
+            outText &= "\" & Chr(34)
+        Case Chr(9)
+            outText &= "\t"
+        Case Chr(10)
+            outText &= "\n"
+        Case Chr(13)
+            outText &= "\r"
+        Case Else
+            outText &= ch
+        End Select
+    Next i
+
+    Return outText
+End Function
+
+Private Sub HIRAppendJsonArrayCommands(ByRef jsonOut As String, ByVal addComma As Integer, ByRef inv As HIRInventory)
+    Dim q As String
+    q = Chr(34)
+    jsonOut &= "  " & q & "commands" & q & ": ["
+    Dim i As Integer
+    For i = 0 To inv.commandCount - 1
+        If i > 0 Then jsonOut &= ", "
+        jsonOut &= q & HIREscapeJson(inv.commands(i)) & q
+    Next i
+    jsonOut &= "]"
+    If addComma <> 0 Then jsonOut &= ","
+    jsonOut &= Chr(10)
+End Sub
+
+Private Sub HIRAppendJsonArrayFunctions(ByRef jsonOut As String, ByVal addComma As Integer, ByRef inv As HIRInventory)
+    Dim q As String
+    q = Chr(34)
+    jsonOut &= "  " & q & "functions" & q & ": ["
+    Dim i As Integer
+    For i = 0 To inv.functionCount - 1
+        If i > 0 Then jsonOut &= ", "
+        jsonOut &= q & HIREscapeJson(inv.functions(i)) & q
+    Next i
+    jsonOut &= "]"
+    If addComma <> 0 Then jsonOut &= ","
+    jsonOut &= Chr(10)
+End Sub
+
+Private Sub HIRAppendJsonArrayOperators(ByRef jsonOut As String, ByVal addComma As Integer, ByRef inv As HIRInventory)
+    Dim q As String
+    q = Chr(34)
+    jsonOut &= "  " & q & "operators" & q & ": ["
+    Dim i As Integer
+    For i = 0 To inv.operatorCount - 1
+        If i > 0 Then jsonOut &= ", "
+        jsonOut &= q & HIREscapeJson(inv.operators(i)) & q
+    Next i
+    jsonOut &= "]"
+    If addComma <> 0 Then jsonOut &= ","
+    jsonOut &= Chr(10)
+End Sub
+
+Private Sub HIRAppendJsonArrayTypes(ByRef jsonOut As String, ByVal addComma As Integer, ByRef inv As HIRInventory)
+    Dim q As String
+    q = Chr(34)
+    jsonOut &= "  " & q & "types" & q & ": ["
+    Dim i As Integer
+    For i = 0 To inv.typeCount - 1
+        If i > 0 Then jsonOut &= ", "
+        jsonOut &= q & HIREscapeJson(inv.types(i)) & q
+    Next i
+    jsonOut &= "]"
+    If addComma <> 0 Then jsonOut &= ","
+    jsonOut &= Chr(10)
+End Sub
+
+Private Sub HIRAppendJsonArrayDataStructures(ByRef jsonOut As String, ByVal addComma As Integer, ByRef inv As HIRInventory)
+    Dim q As String
+    q = Chr(34)
+    jsonOut &= "  " & q & "data_structures" & q & ": ["
+    Dim i As Integer
+    For i = 0 To inv.dataStructureCount - 1
+        If i > 0 Then jsonOut &= ", "
+        jsonOut &= q & HIREscapeJson(inv.dataStructures(i)) & q
+    Next i
+    jsonOut &= "]"
+    If addComma <> 0 Then jsonOut &= ","
+    jsonOut &= Chr(10)
+End Sub
+
+Function HIRInventoryToJson(ByRef inv As HIRInventory, ByRef jsonOut As String) As Integer
+    jsonOut = "{" & Chr(10)
+    HIRAppendJsonArrayCommands jsonOut, 1, inv
+    HIRAppendJsonArrayFunctions jsonOut, 1, inv
+    HIRAppendJsonArrayOperators jsonOut, 1, inv
+    HIRAppendJsonArrayTypes jsonOut, 1, inv
+    HIRAppendJsonArrayDataStructures jsonOut, 0, inv
+    jsonOut &= "}" & Chr(10)
+    Return 1
+End Function
+
+Function HIRWriteInventoryJson(ByRef inv As HIRInventory, ByRef outPath As String, ByRef errText As String) As Integer
+    Dim jsonText As String
+    If HIRInventoryToJson(inv, jsonText) = 0 Then
+        errText = "hir: json conversion failed"
+        Return 0
+    End If
+
+    Dim f As Integer
+    f = FreeFile
+
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errText = "hir: json write open failed " & outPath
+        Return 0
+    End If
+
+    Print #f, jsonText;
+    Close #f
+
+    errText = ""
+    Return 1
+End Function
+
+Private Function HIRScopeLookupCurrent(ByRef ss As ScopeStack, ByRef needleName As String) As Integer
+    If ss.depth < 0 Then Return -1
+    Return SymbolTableLookup(ss.scopes(ss.depth), needleName)
+End Function
+
+Private Function HIRScopeLookupEntry(ByRef ss As ScopeStack, ByRef needleName As String, ByRef entryOut As SymbolEntry) As Integer
+    Dim level As Integer
+    For level = ss.depth To 0 Step -1
+        Dim idx As Integer
+        idx = SymbolTableLookup(ss.scopes(level), needleName)
+        If idx <> -1 Then
+            entryOut = ss.scopes(level).entries(idx)
+            Return 1
+        End If
+    Next
+    Return 0
+End Function
+
+Private Function HIRFindChildByKind(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef kindText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    Dim want As String
+    want = UCase(Trim(kindText))
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = want Then Return ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function HIRExtractDeclType(ByRef ps As ParseState, ByVal declNode As Integer, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If declNode < 0 Or declNode >= ps.ast.count Then Return 0
+
+    Dim typeNode As Integer
+    typeNode = HIRFindChildByKind(ps, declNode, "TYPE_REF")
+    If typeNode = -1 Then Return 0
+
+    typeOut = UCase(Trim(ps.ast.nodes(typeNode).value))
+    If typeOut = "" Then Return 0
+    Return 1
+End Function
+
+Private Function HIRRegisterSymbol(ByRef ss As ScopeStack, ByRef nameRaw As String, ByRef kindRaw As String, ByRef typeRaw As String, ByVal enforceUnique As Integer, ByRef errText As String) As Integer
+    Dim symbolName As String
+    symbolName = UCase(Trim(nameRaw))
+    If symbolName = "" Then
+        errText = "hir: bos sembol adi"
+        Return 0
+    End If
+
+    If enforceUnique <> 0 Then
+        If HIRScopeLookupCurrent(ss, symbolName) <> -1 Then
+            errText = "hir: ayni scope icinde tekrar eden sembol " & symbolName
+            Return 0
+        End If
+    End If
+
+    If ss.scopes(ss.depth).count >= 256 Then
+        errText = "hir: symbol table kapasitesi dolu"
+        Return 0
+    End If
+
+    Dim entry As SymbolEntry
+    entry.name = symbolName
+    entry.kind = UCase(Trim(kindRaw))
+    entry.typeName = UCase(Trim(typeRaw))
+    entry.scopeLevel = ss.depth
+    entry.addr = 0
+    entry.isConst = IIf(entry.kind = "CONST", 1, 0)
+    entry.isArray = 0
+    entry.bounds = ""
+    SymbolTableAdd ss.scopes(ss.depth), entry
+    Return 1
+End Function
+
+Private Function HIRMaybeRegisterDecl(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef ss As ScopeStack, ByRef errText As String) As Integer
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+    Dim k As String
+    k = UCase(Trim(n.kind))
+
+    Select Case k
+    Case "DIM_DECL"
+        Dim dimType As String
+        If HIRExtractDeclType(ps, nodeIdx, dimType) = 0 Then
+            errText = "hir: DIM deklarasyonunda TYPE_REF eksik"
+            Return 0
+        End If
+        If HIRRegisterSymbol(ss, n.value, "VAR", dimType, 1, errText) = 0 Then Return 0
+        ps.ast.nodes(nodeIdx).typeName = dimType
+        ps.ast.nodes(nodeIdx).symbolName = UCase(Trim(n.value))
+        Return 1
+
+    Case "CONST_DECL"
+        If HIRRegisterSymbol(ss, n.value, "CONST", "CONST", 1, errText) = 0 Then Return 0
+        ps.ast.nodes(nodeIdx).symbolName = UCase(Trim(n.value))
+        Return 1
+
+    Case "PARAM_DECL"
+        Dim paramType As String
+        If HIRExtractDeclType(ps, nodeIdx, paramType) = 0 Then
+            errText = "hir: PARAM deklarasyonunda TYPE_REF eksik"
+            Return 0
+        End If
+        If HIRRegisterSymbol(ss, n.value, "PARAM", paramType, 1, errText) = 0 Then Return 0
+        ps.ast.nodes(nodeIdx).typeName = paramType
+        ps.ast.nodes(nodeIdx).symbolName = UCase(Trim(n.value))
+        Return 1
+
+    Case "SUB_STMT", "FUNCTION_STMT", "DECLARE_SUB_STMT", "DECLARE_FUNCTION_STMT"
+        If HIRRegisterSymbol(ss, n.value, "ROUTINE", "PROC", 0, errText) = 0 Then Return 0
+        ps.ast.nodes(nodeIdx).symbolName = UCase(Trim(n.value))
+        Return 1
+
+    Case "TYPE_STMT"
+        If HIRRegisterSymbol(ss, n.value, "TYPE", UCase(Trim(n.value)), 0, errText) = 0 Then Return 0
+        ps.ast.nodes(nodeIdx).symbolName = UCase(Trim(n.value))
+        Return 1
+
+    Case "CLASS_STMT"
+        If HIRRegisterSymbol(ss, n.value, "CLASS", UCase(Trim(n.value)), 0, errText) = 0 Then Return 0
+        ps.ast.nodes(nodeIdx).symbolName = UCase(Trim(n.value))
+        Return 1
+
+    Case "INTERFACE_STMT"
+        If HIRRegisterSymbol(ss, n.value, "INTERFACE", UCase(Trim(n.value)), 0, errText) = 0 Then Return 0
+        ps.ast.nodes(nodeIdx).symbolName = UCase(Trim(n.value))
+        Return 1
+    Case "ENUM_STMT"
+        If HIRRegisterSymbol(ss, n.value, "ENUM", UCase(Trim(n.value)), 0, errText) = 0 Then Return 0
+        ps.ast.nodes(nodeIdx).symbolName = UCase(Trim(n.value))
+        Return 1
+    Case "ENUM_ITEM"
+        If HIRRegisterSymbol(ss, n.value, "CONST", "I32", 1, errText) = 0 Then Return 0
+        ps.ast.nodes(nodeIdx).symbolName = UCase(Trim(n.value))
+        ps.ast.nodes(nodeIdx).typeName = "I32"
+        Return 1
+    End Select
+
+    Return 1
+End Function
+
+Private Sub HIRAnnotateIdentifier(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef ss As ScopeStack)
+    Dim k As String
+    k = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    If k <> "IDENT" And k <> "IDENTIFIER" Then Exit Sub
+
+    Dim symbolName As String
+    symbolName = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+    If symbolName = "" Then Exit Sub
+
+    Dim found As SymbolEntry
+    If HIRScopeLookupEntry(ss, symbolName, found) = 0 Then Exit Sub
+
+    ps.ast.nodes(nodeIdx).symbolName = found.name
+    If Trim(ps.ast.nodes(nodeIdx).typeName) = "" Then
+        ps.ast.nodes(nodeIdx).typeName = found.typeName
+    End If
+End Sub
+
+Private Function HIRNodeStartsScope(ByRef kindRaw As String) As Integer
+    Dim k As String
+    k = UCase(Trim(kindRaw))
+    Select Case k
+    Case "PROGRAM", "NAMESPACE_STMT", "MODULE_STMT", "MAIN_STMT", "SUB_STMT", "FUNCTION_STMT", "CLASS_STMT", "TYPE_STMT", "ENUM_STMT", "INTERFACE_STMT", "EVENT_STMT", "THREAD_STMT", "PARALEL_STMT", "PIPE_STMT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function HIRAnalyzeNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef ss As ScopeStack, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
+
+    If HIRMaybeRegisterDecl(ps, nodeIdx, ss, errText) = 0 Then Return 0
+    HIRAnnotateIdentifier ps, nodeIdx, ss
+
+    Dim pushScope As Integer
+    pushScope = HIRNodeStartsScope(ps.ast.nodes(nodeIdx).kind)
+    If pushScope <> 0 Then ScopePush ss
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If HIRAnalyzeNode(ps, ps.ast.nodes(nodeIdx).left, ss, errText) = 0 Then Return 0
+    End If
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If HIRAnalyzeNode(ps, ps.ast.nodes(nodeIdx).right, ss, errText) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If HIRAnalyzeNode(ps, ch, ss, errText) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    If pushScope <> 0 Then ScopePop ss
+    Return 1
+End Function
+
+Function HIRSemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Integer
+    errText = ""
+
+    If ps.rootNode = -1 Or ps.ast.count = 0 Then
+        errText = "hir: bos AST"
+        Return 0
+    End If
+
+    If HIRBuildBridgeAfterSemantic(ps, gHIRBridge, errText) = 0 Then Return 0
+    If HIRPrepareMirLowering(ps, gHIRBridge, errText) = 0 Then Return 0
+
+    Return 1
+End Function
+
+
+' ADIM07: canonical HIR surface contract bridge.
+#include once "../surface/uxb_surface_layer_bridge.fbs"
+Function UXBHIRSurfaceContractStatus(ByRef surfaceText As String) As String
+    Dim layerText As String = "HIR"
+    Select Case UCase(Trim(surfaceText))
+    Case "ABS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ASC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ATN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CDBL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CHR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CINT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "COS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CSNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DECORATOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EVENT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EXP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FIX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GETKEY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INKEY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INLINE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LCASE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LEN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LTRIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MAGIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MID": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MIXIN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OFF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ON": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OVERRIDE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PARALEL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PARALEL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PIPE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RANDOMIZE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RTRIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SETSTRINGSIZE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SGN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MAGIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SIN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SLOT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SPACE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SQR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SQRT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STRPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TAN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THREAD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THREAD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TIMER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TRUE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FALSE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ZERO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ONE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TRIGGER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "UCASE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "VAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NATIVE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "VIRTUAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ARRAY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DICT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LIST": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SET": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ABSTRACT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ALIAS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BYREF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BYVAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CDECL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FINAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FRIEND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMMUTABLE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMPORT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INCLUDE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MODULE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MUTABLE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NAMESPACE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PRIVATE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PROTECTED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PUBLIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "READONLY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RESTRICTED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SEALED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STATIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STDCALL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "USING": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CASE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EACH": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ELSE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ELSEIF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "END": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EXIT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GOSUB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GOTO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOOP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NEXT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RETURN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SELECT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STEP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THEN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "UNTIL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "WHILE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "AS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CONST": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFBYT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFDBL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFEXT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFINT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFLNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFSNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFSTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "REDIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ASSERT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CATCH": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FINALLY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THROW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TRY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".ast.json": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".bas": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".bi": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".h": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".hx": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".js": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".json": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".mir.json": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxb": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxbasic": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxm": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxmh": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".wasm": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".wat": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLOSE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "COLOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GET": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INPUT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOCATE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OPEN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PRINT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PUT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SEEK": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ARCHIVE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "AUDIO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BROWSER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CANVAS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CRYPTO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CURL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GRAPHICS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "HTTP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMAGE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "JSON": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LLAMA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LUA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MATH": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ONNX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PROLOG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "REGEX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SERVER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SQLITE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STRINGX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "WEBGPU": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CODEPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OFFSETOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKEB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKEQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKES": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKEW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SADD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SETNEWOFFSET": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SIZEOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "VARPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LBOUND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "UBOUND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MAIN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "%": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "%=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "&": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "&=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "(": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ")": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "*": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "*=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "**": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "**=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "+": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "++": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "+=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ",": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "-": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "--": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "-=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "/": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "/=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ":": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<<": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<<=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<>": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "==": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">>": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">>=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "@": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "AND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MOD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NOT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ROL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ROR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SHL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SHR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "XOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NAND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "XNOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CIMP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NIMP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NCIMP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IDA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IDB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NOTA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NOTB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NXOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EQV": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EQA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IFF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "[": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "\": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "\=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "]": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "^": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "^=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "|": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "|=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CALL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLASS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CONSTRUCTOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DECLARE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DELETE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DESTRUCTOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FUNCTION": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMPLEMENTS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INTERFACE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "METHOD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NEW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OPERATOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PROPERTY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SUB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TYPE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BALL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BIGD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BIGF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BOOLEAN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BYTE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F128": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F32": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F64": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F80": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I16": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I32": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I64": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I8": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OBJECT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STRING": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U16": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U32": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U64": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U8": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    End Select
+    Return "MISSING"
+End Function
+

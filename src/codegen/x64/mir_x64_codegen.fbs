@@ -1,0 +1,1673 @@
+#ifndef UXB_MIR_X64_CODEGEN_FBS
+#define UXB_MIR_X64_CODEGEN_FBS
+
+#include once "../../semantic/mir_model.fbs"
+#include once "mir_x64_capability.fbs"
+#include once "abi/win64_abi.fbs"
+#include once "nasm/nasm_writer.fbs"
+#include once "mir_x64_context.fbs"
+#include once "mir_x64_emit_helpers.fbs"
+#include once "mir_x64_register_allocator.fbs"
+#include once "mir_x64_runtime_emit_helpers.fbs"
+#include once "mir_x64_arrays.fbs"
+#include once "mir_x64_collections.fbs"
+#include once "mir_x64_builtins.fbs"
+#include once "mir_x64_fp64.fbs"
+#include once "mir_x64_field_synthetic.fbs"
+#include once "mir_x64_runtime_call_contract.fbs"
+#include once "mir_x64_type_class_ffi_emit_helpers.fbs"
+#include once "mir_x64_extfp_emit_helpers.fbs"
+#include once "mir_x64_inline_emit_helpers.fbs"
+
+Declare Function MIRX64TypedStoreParamRegister( _
+    ByRef cg As MIRX64Context, _
+    ByRef fn As MIRFunction, _
+    ByVal paramIndex As Integer, _
+    ByVal paramOffset As Integer _
+) As Integer
+
+Private Sub MIRX64EmitSourceComment(ByRef cg As MIRX64Context, ByRef ins As MIRIRInstruction)
+    Dim lineText As String
+    lineText = MIRGetSourceLine(ins)
+    If lineText = "" Then Exit Sub
+    Dim c As String
+    c = "    ; " & lineText & " " & MIRX64CanonicalEmitterOpcode(ins.opcode)
+    If Trim(ins.srcLoc.lexemeSnippet) <> "" Then c &= " lexeme=" & ins.srcLoc.lexemeSnippet
+    ' Source text must stay on one comment line. NASM joins lines ending in
+    ' backslash even inside comments, swallowing the following instruction.
+    Dim commentPos As Integer
+    For commentPos = 1 To Len(c)
+        If Mid(c, commentPos, 1) = Chr(10) Or Mid(c, commentPos, 1) = Chr(13) Then Mid(c, commentPos, 1) = " "
+    Next commentPos
+    c &= " ;"
+    MIRX64Emit cg, c
+End Sub
+
+Private Function MIRX64SelectEntryFunctionIndex(ByRef m As MIRModule) As Integer
+    Dim i As Integer
+    For i = 0 To m.functionCount - 1
+        If UCase(Trim(m.functions(i).name)) = "MAIN" Then Return i
+    Next i
+    Return 0
+End Function
+
+Private Function MIRX64ModuleHasFfiCalls(ByRef m As MIRModule) As Integer
+    Dim fi As Integer
+    For fi = 0 To m.functionCount - 1
+        Dim bi As Integer
+        For bi = 0 To m.functions(fi).blockCount - 1
+            Dim ii As Integer
+            For ii = 0 To m.functions(fi).blocks(bi).instructionCount - 1
+                If m.functions(fi).blocks(bi).instructions(ii).ffiStubId > 0 Then Return 1
+            Next ii
+        Next bi
+    Next fi
+    Return 0
+End Function
+
+Private Function MIRX64FindUserFunctionIndex(ByRef cg As MIRX64Context, ByRef functionName As String) As Integer
+    If cg.modulePtr = 0 Then Return -1
+
+    Dim target As String
+    target = UCase(Trim(functionName))
+    If target = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To cg.modulePtr->functionCount - 1
+        If UCase(Trim(cg.modulePtr->functions(i).name)) = target Then Return i
+    Next i
+    Return -1
+End Function
+
+#include once "mir_x64_task_shell.fbs"
+
+Private Function MIRX64EmitUserCallInstruction(ByRef ins As MIRIRInstruction, ByVal fnIdx As Integer, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If fnIdx < 0 Or cg.modulePtr = 0 Or fnIdx >= cg.modulePtr->functionCount Then
+        errText = "MIR x64 emitter: invalid user function index"
+        Return 0
+    End If
+
+    Dim argCount As Integer
+    argCount = ins.operandCount - 1
+    If argCount < 0 Then argCount = 0
+    If argCount <> cg.modulePtr->functions(fnIdx).paramVarCount Then
+        errText = "MIR x64 emitter: user function arg count mismatch for " & ins.operands(0)
+        Return 0
+    End If
+
+    Dim extraCount As Integer
+    extraCount = argCount - 4
+    If extraCount < 0 Then extraCount = 0
+
+    Dim callBytes As Integer
+    callBytes = UXBWin64AlignStackBytes(UXB_WIN64_SHADOW_SPACE_BYTES + extraCount * 8)
+    MIRX64Emit cg, "    sub rsp, " & MIRX64ToStr(callBytes)
+
+    Dim i As Integer
+    For i = 4 To argCount - 1
+        Dim argIsByRef As Integer
+        argIsByRef = 0
+        If i < UBound(cg.modulePtr->functions(fnIdx).paramByRef) + 1 Then argIsByRef = cg.modulePtr->functions(fnIdx).paramByRef(i)
+
+        If argIsByRef <> 0 Then
+            If MIRX64IsLikelyVariableToken(ins.operands(i + 1)) = 0 Then
+                errText = "MIR x64 emitter: BYREF argument must be a plain variable: " & ins.operands(i + 1)
+                Return 0
+            End If
+            If MIRX64AddressOfVarToReg(cg, ins.operands(i + 1), "rax", errText) = 0 Then Return 0
+        ElseIf Right(UCase(Trim(cg.modulePtr->functions(fnIdx).paramVarTypes(i))), 2) = "[]" Then
+            ' S-068: an array parameter receives the address of the array's descriptor.
+            If MIRX64EmitArrayDescriptorAddrToReg(cg, ins.operands(i + 1), "rax", errText) = 0 Then Return 0
+        Else
+            Dim stackParamType As String
+            stackParamType = UCase(Trim(cg.modulePtr->functions(fnIdx).paramVarTypes(i)))
+            If MIRX64TypeIsFloat(stackParamType) <> 0 Then
+                If MIRX64LoadFloatOperandToXmm(cg, ins.operands(i + 1), "xmm0", errText) = 0 Then Return 0
+                If stackParamType = "F32" Then
+                    MIRX64Emit cg, "    cvtsd2ss xmm0, xmm0"
+                    MIRX64Emit cg, "    movd eax, xmm0"
+                Else
+                    MIRX64Emit cg, "    movq rax, xmm0"
+                End If
+            Else
+                If MIRX64LoadOperandToReg(cg, ins.operands(i + 1), "rax", errText) = 0 Then Return 0
+            End If
+        End If
+        MIRX64Emit cg, "    mov qword [rsp+" & MIRX64ToStr(UXB_WIN64_SHADOW_SPACE_BYTES + (i - 4) * 8) & "], rax"
+    Next i
+
+    Dim regArgCount As Integer
+    regArgCount = argCount
+    If regArgCount > 4 Then regArgCount = 4
+    For i = 0 To regArgCount - 1
+        Dim argIsByRef As Integer
+        argIsByRef = 0
+        If i < UBound(cg.modulePtr->functions(fnIdx).paramByRef) + 1 Then argIsByRef = cg.modulePtr->functions(fnIdx).paramByRef(i)
+
+        If argIsByRef <> 0 Then
+            If MIRX64IsLikelyVariableToken(ins.operands(i + 1)) = 0 Then
+                errText = "MIR x64 emitter: BYREF argument must be a plain variable: " & ins.operands(i + 1)
+                Return 0
+            End If
+            Dim byRefIntReg As String
+            byRefIntReg = UXBWin64IntegerArgReg(i)
+            If MIRX64AddressOfVarToReg(cg, ins.operands(i + 1), byRefIntReg, errText) = 0 Then Return 0
+        ElseIf Right(UCase(Trim(cg.modulePtr->functions(fnIdx).paramVarTypes(i))), 2) = "[]" Then
+            ' S-068: an array parameter receives the address of the array's descriptor.
+            If MIRX64EmitArrayDescriptorAddrToReg(cg, ins.operands(i + 1), UXBWin64IntegerArgReg(i), errText) = 0 Then Return 0
+        Else
+            Dim paramType As String
+            paramType = cg.modulePtr->functions(fnIdx).paramVarTypes(i)
+            If MIRX64TypeIsFloat(paramType) <> 0 Then
+                Dim xmmReg As String
+                xmmReg = UXBWin64FloatArgReg(i)
+                If MIRX64LoadFloatOperandToXmm(cg, ins.operands(i + 1), xmmReg, errText) = 0 Then Return 0
+                If UCase(Trim(paramType)) = "F32" Then MIRX64Emit cg, "    cvtsd2ss " & xmmReg & ", " & xmmReg
+            Else
+                Dim intReg As String
+                intReg = UXBWin64IntegerArgReg(i)
+                If MIRX64LoadOperandToReg(cg, ins.operands(i + 1), intReg, errText) = 0 Then Return 0
+            End If
+        End If
+    Next i
+
+    MIRX64Emit cg, "    call " & MIRX64FunctionLabel(cg.modulePtr->functions(fnIdx).name)
+    MIRX64Emit cg, "    add rsp, " & MIRX64ToStr(callBytes)
+
+    If Trim(ins.result) <> "" Then
+        If MIRX64TypeIsFloat(cg.modulePtr->functions(fnIdx).returnType) <> 0 Then
+            If UCase(Trim(cg.modulePtr->functions(fnIdx).returnType)) = "F32" Then MIRX64Emit cg, "    cvtss2sd xmm0, xmm0"
+            If MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText) = 0 Then Return 0
+        Else
+            If MIRX64StoreRegToVar(cg, "rax", ins.result, errText) = 0 Then Return 0
+        End If
+    End If
+    Return 1
+End Function
+
+Private Function MIRX64EmitFfiStubCallInstruction(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.ffiStubId <= 0 Then
+        errText = "MIR x64 FFI: CALL(DLL/API) has no resolver stub id"
+        Return 0
+    End If
+    If ins.ffiArgStart < 1 Or ins.ffiArgStart > ins.operandCount Then
+        errText = "MIR x64 FFI: invalid runtime argument start"
+        Return 0
+    End If
+    Dim stubId As String
+    stubId = MIRX64ToStr(ins.ffiStubId)
+    MIRX64EmitExtern cg, "extern __uxb_ffi_stub_" & stubId
+    Dim argCount As Integer
+    argCount = ins.operandCount - ins.ffiArgStart
+    Dim i As Integer
+    For i = 0 To argCount - 1
+        Dim argSymbol As String
+        argSymbol = "__uxb_ffi_arg_" & stubId & "_" & MIRX64ToStr(i + 1)
+        MIRX64EmitExtern cg, "extern " & argSymbol
+        If MIRX64LoadOperandToReg(cg, ins.operands(ins.ffiArgStart + i), "rax", errText) = 0 Then Return 0
+        MIRX64Emit cg, "    mov qword [rel " & argSymbol & "], rax"
+    Next i
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call __uxb_ffi_stub_" & stubId
+    MIRX64Emit cg, "    add rsp, 32"
+    If Trim(ins.result) <> "" Then
+        If MIRX64TypeIsFloat(ins.resultType) <> 0 Then
+            If UCase(Trim(ins.resultType)) = "F32" Then MIRX64Emit cg, "    cvtss2sd xmm0, xmm0"
+            Return MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText)
+        End If
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+    End If
+    Return 1
+End Function
+
+Private Function MIRX64TrackLocalIfNeeded(ByRef cg As MIRX64Context, ByRef tokenText As String) As Integer
+    If MIRX64IsLikelyVariableToken(tokenText) = 0 Then Return 1
+
+    Dim globalIdx As Integer
+    If MIRX64FindGlobalSlot(cg, tokenText, globalIdx) <> 0 Then Return 1
+
+    Dim off As Integer
+    If MIRX64EnsureLocalSlot(cg, tokenText, off) = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function MIRX64TrackDimStorage(ByRef cg As MIRX64Context, ByRef ins As MIRIRInstruction, ByRef errText As String) As Integer
+    If ins.operandCount < 1 Then Return 1
+
+    If ins.operandCount >= 3 Then
+        ' Array DIM. Bounds may be temporary MIR variables; real allocation is
+        ' validated/emitted by MIRX64EmitDimArray. Do not allocate scalar slot for
+        ' the array name here.
+        Return 1
+    End If
+
+    If MIRX64TrackLocalIfNeeded(cg, ins.operands(0)) = 0 Then
+        errText = "MIR x64 emitter: DIM slot allocation failed"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function MIRX64CollectLocals(ByRef fn As MIRFunction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    Dim i As Integer
+    Dim off As Integer
+
+    For i = 0 To fn.paramVarCount - 1
+        If MIRX64EnsureLocalSlot(cg, fn.paramVars(i), off) = 0 Then
+            errText = "MIR x64 emitter: parameter slot allocation failed"
+            Return 0
+        End If
+    Next i
+
+    For i = 0 To fn.localVarCount - 1
+        If MIRX64EnsureLocalSlot(cg, fn.localVars(i), off) = 0 Then
+            errText = "MIR x64 emitter: local slot allocation failed"
+            Return 0
+        End If
+    Next i
+
+    Dim b As Integer
+    For b = 0 To fn.blockCount - 1
+        Dim ii As Integer
+        For ii = 0 To fn.blocks(b).instructionCount - 1
+            Dim ins As MIRIRInstruction
+            ins = fn.blocks(b).instructions(ii)
+
+            Dim op As String
+            op = MIRX64CanonicalEmitterOpcode(ins.opcode)
+
+            If op = "GOSUB" And ins.operandCount >= 1 Then
+                MIRX64AddGosubTarget cg, ins.operands(0)
+            End If
+
+            If Trim(ins.result) <> "" Then
+                If MIRX64TrackLocalIfNeeded(cg, ins.result) = 0 Then
+                    errText = "MIR x64 emitter: result slot allocation failed"
+                    Return 0
+                End If
+            End If
+
+            If op = "DIM" And ins.operandCount >= 1 Then
+                If MIRX64TrackDimStorage(cg, ins, errText) = 0 Then Return 0
+            End If
+
+            Dim oi As Integer
+            For oi = 0 To ins.operandCount - 1
+                If op = "CALL" And oi = 0 Then Continue For
+                If (op = "METHOD_CALL" Or op = "VIRTUAL_CALL") And (oi = 0 Or oi = 2 Or oi = 3) Then Continue For
+                If (op = "CALL_DLL" Or op = "CALL_API" Or op = "HOST_CALL" Or op = "LIBRARY_CALL" Or op = "EXTFP_CALL") And oi = 0 Then Continue For
+                If op = "INLINE" Then Continue For
+                If op = "JMP" And oi = 0 Then Continue For
+                If (op = "JZ" Or op = "JNZ") And oi = 1 Then Continue For
+                If (op = "GOTO" Or op = "GOSUB") And oi = 0 Then Continue For
+                If op = "LABEL" And oi = 0 Then Continue For
+                If op = "DEF_TYPE" Then Continue For
+                If op = "TYPE_DECL" Or op = "CLASS_DECL" Or op = "METHOD_DECL" Or op = "INTERFACE_DECL" Or op = "PROPERTY_DECL" Or op = "OPERATOR_DECL" Or op = "CONSTRUCTOR_DECL" Or op = "DESTRUCTOR_DECL" Or op = "IMPLEMENTS_DECL" Then Continue For
+                If op = "DECORATOR" Or op = "MAGIC" Or op = "MIXIN" Or op = "OVERRIDE" Or op = "VIRTUAL" Or op = "PARALEL_HINT" Or op = "METADATA_ONLY" Then Continue For
+                If op = "SETSTRINGSIZE" Then Continue For
+                If op = "DIM" And ins.operandCount >= 3 And oi = 0 Then Continue For
+
+                If MIRX64TrackLocalIfNeeded(cg, ins.operands(oi)) = 0 Then
+                    errText = "MIR x64 emitter: operand slot allocation failed"
+                    Return 0
+                End If
+            Next oi
+        Next ii
+    Next b
+
+    If cg.localCount < 0 Then cg.localCount = 0
+    cg.stackBytes = MIRX64StackBytesForLocals(cg.localCount)
+    Return 1
+End Function
+
+Private Function MIRX64CallReturnsString(ByRef targetText As String) As Integer
+    Select Case UCase(Trim(targetText))
+    Case "CHR", "CHR$", "STR", "STR$", "LEFT", "LEFT$", "RIGHT", "RIGHT$", _
+         "MID", "MID$", "LCASE", "LCASE$", "UCASE", "UCASE$", "LTRIM", _
+         "LTRIM$", "RTRIM", "RTRIM$", "TRIM", "TRIM$", "SPACE", "SPACE$", _
+         "HEX", "HEX$", "OCT", "OCT$", "BIN", "BIN$", "STR_CONCAT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Sub MIRX64InferLocalTypes(ByRef fn As MIRFunction, ByRef cg As MIRX64Context)
+    Dim declaredIdx As Integer
+    For declaredIdx = 0 To fn.paramVarCount - 1
+        If Trim(fn.paramVarTypes(declaredIdx)) <> "" Then MIRX64SetLocalType cg, fn.paramVars(declaredIdx), fn.paramVarTypes(declaredIdx)
+    Next declaredIdx
+    For declaredIdx = 0 To fn.localVarCount - 1
+        If Trim(fn.localVarTypes(declaredIdx)) <> "" Then MIRX64SetLocalType cg, fn.localVars(declaredIdx), fn.localVarTypes(declaredIdx)
+    Next declaredIdx
+
+    Dim passNo As Integer
+    For passNo = 0 To cg.localCount
+        Dim changed As Integer
+        changed = 0
+        Dim b As Integer
+        For b = 0 To fn.blockCount - 1
+            Dim ii As Integer
+            For ii = 0 To fn.blocks(b).instructionCount - 1
+                Dim ins As MIRIRInstruction
+                ins = fn.blocks(b).instructions(ii)
+                If Trim(ins.result) = "" Then Continue For
+
+                Dim op As String
+                op = MIRX64CanonicalEmitterOpcode(ins.opcode)
+                Dim inferredType As String
+                inferredType = UCase(Trim(ins.resultType))
+                Select Case op
+                Case "LOAD_CONST"
+                    If inferredType = "" And ins.operandCount >= 1 Then
+                        If MIRX64IsQuotedStringLiteral(ins.operands(0)) <> 0 Then
+                            inferredType = "STRING"
+                        ElseIf MIRX64IsFloatLiteral(ins.operands(0)) <> 0 Then
+                            inferredType = "F64"
+                        Else
+                            inferredType = "I64"
+                        End If
+                    End If
+                Case "LOAD_VAR", "STORE_VAR", "MOVE", "ASSIGN", "CAST", "COERCE", "CONV", "CONVERT"
+                    If inferredType = "" And ins.operandCount >= 1 Then
+                        If MIRX64OperandIsString(cg, ins.operands(0)) <> 0 Then inferredType = "STRING"
+                        ' S-142b: a temp loaded from an F32 variable keeps the single-precision type (it prints
+                        ' with the 7 digit rule); any other float is F64.
+                        If MIRX64OperandIsFloat(cg, ins.operands(0)) <> 0 Then inferredType = IIf(MIRX64OperandIsF32(cg, ins.operands(0)) <> 0, "F32", "F64")
+                        ' S-095: a temp loaded from an unsigned 64-bit variable/field stays
+                        ' unsigned, otherwise PRINT of the temp shows 2^64-1 as -1.
+                        If op = "LOAD_VAR" And MIRX64OperandIsU64(cg, ins.operands(0)) <> 0 Then inferredType = "U64"
+                    End If
+                Case "STR_CONCAT", "STR_CONCAT_ASSIGN"
+                    inferredType = "STRING"
+                Case "FADD", "FSUB", "FMUL", "FDIV", "FNEG"
+                    ' S-142b: F32 op F32 is a single-precision value (prints with the 7 digit rule); a mix with
+                    ' an F64 operand or literal is F64.
+                    inferredType = "F64"
+                    If ins.operandCount >= 1 Then
+                        If MIRX64OperandIsF32(cg, ins.operands(0)) <> 0 Then
+                            If op = "FNEG" Then
+                                inferredType = "F32"
+                            ElseIf ins.operandCount >= 2 Then
+                                If MIRX64OperandIsF32(cg, ins.operands(1)) <> 0 Then inferredType = "F32"
+                            End If
+                        End If
+                    End If
+                Case "ADD"
+                    If inferredType = "" And ins.operandCount >= 2 Then
+                        If MIRX64OperandIsString(cg, ins.operands(0)) <> 0 Or MIRX64OperandIsString(cg, ins.operands(1)) <> 0 Then inferredType = "STRING"
+                    End If
+                Case "CALL"
+                    If inferredType = "" And ins.operandCount >= 1 Then
+                        If MIRX64CallReturnsString(ins.operands(0)) <> 0 Then inferredType = "STRING"
+                        Dim calledFnIdx As Integer
+                        calledFnIdx = MIRX64FindUserFunctionIndex(cg, ins.operands(0))
+                        If calledFnIdx >= 0 Then inferredType = UCase(Trim(cg.modulePtr->functions(calledFnIdx).returnType))
+                        If UCase(Trim(ins.operands(0))) = "ABS" And ins.operandCount >= 2 Then
+                            If MIRX64OperandIsFloat(cg, ins.operands(1)) <> 0 Then inferredType = "F64"
+                        End If
+                    End If
+                End Select
+                If inferredType <> "" Then
+                    Dim resultGlobalIdx As Integer
+                    If MIRX64FindGlobalSlot(cg, ins.result, resultGlobalIdx) <> 0 Then
+                        Dim normalizedGlobalType As String
+                        normalizedGlobalType = UCase(Trim(inferredType))
+                        If Left(normalizedGlobalType, 5) = "TYPE_" Then normalizedGlobalType = Mid(normalizedGlobalType, 6)
+                        If normalizedGlobalType <> "" And UCase(Trim(cg.globals(resultGlobalIdx).typeName)) <> normalizedGlobalType Then
+                            cg.globals(resultGlobalIdx).typeName = normalizedGlobalType
+                            changed += 1
+                        End If
+                    Else
+                        changed += MIRX64SetLocalType(cg, ins.result, inferredType)
+                    End If
+                End If
+            Next ii
+        Next b
+        If changed = 0 Then Exit For
+    Next passNo
+End Sub
+
+Private Function MIRX64ConditionCode(ByRef op As String) As String
+    Select Case op
+    Case "EQ": Return "e"
+    Case "NE": Return "ne"
+    Case "LT": Return "l"
+    Case "LE": Return "le"
+    Case "GT": Return "g"
+    Case "GE": Return "ge"
+    ' S-077: unsigned ordering (U64) uses the below/above condition codes.
+    Case "ULT": Return "b"
+    Case "ULE": Return "be"
+    Case "UGT": Return "a"
+    Case "UGE": Return "ae"
+    Case Else: Return ""
+    End Select
+End Function
+
+Private Function MIRX64IsFloatArithmeticOpcode(ByRef op As String) As Integer
+    If Len(op) <> 4 Then Return 0
+    If Left(op, 1) <> "F" Then Return 0
+
+    Dim opTail As String
+    opTail = Mid(op, 2)
+    If opTail = "ADD" Then Return 1
+    If opTail = "SUB" Then Return 1
+    If opTail = "MUL" Then Return 1
+    If opTail = "DIV" Then Return 1
+    If opTail = "NEG" Then Return 1
+    Return 0
+End Function
+
+Private Function MIRX64EmitPrintValue(ByRef cg As MIRX64Context, ByRef operandText As String, ByRef errText As String) As Integer
+    If MIRX64IsQuotedStringLiteral(operandText) <> 0 Then
+        Dim litLabel As String
+        If MIRX64EnsureStringLiteralLabel(cg, operandText, litLabel) = 0 Then
+            errText = "MIR x64 emitter: print string literal label failed"
+            Return 0
+        End If
+        MIRX64Emit cg, "    lea rax, [rel " & litLabel & "]"
+        Return MIRX64EmitRuntimePrintCStr(cg, "rax")
+    End If
+
+    If MIRX64OperandIsFloat(cg, operandText) <> 0 Then
+        If MIRX64LoadFloatOperandToXmm(cg, operandText, "xmm0", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimePrintF64(cg, MIRX64OperandIsF32(cg, operandText))
+    End If
+
+    If MIRX64LoadOperandToReg(cg, operandText, "rax", errText) = 0 Then Return 0
+    If MIRX64OperandIsString(cg, operandText) <> 0 Then Return MIRX64EmitRuntimePrintCStr(cg, "rax")
+    ' S-077: an unsigned 64-bit value prints by its unsigned magnitude.
+    If MIRX64OperandIsU64(cg, operandText) <> 0 Then
+        MIRX64EnsurePrintU64Helper cg
+        MIRX64Emit cg, "    call __uxb_print_u64"
+        Return 1
+    End If
+    Return MIRX64EmitRuntimePrintI64(cg, "rax")
+End Function
+
+Private Function MIRX64EmitInputCall(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    Return MIRX64EmitRuntimeInputI64(cg, ins.result, errText)
+End Function
+
+Private Function MIRX64EmitCallInstruction(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 1 Then
+        errText = "MIR x64 emitter: CALL target missing"
+        Return 0
+    End If
+
+    Dim callTarget As String
+    callTarget = UCase(Trim(ins.operands(0)))
+
+    If callTarget = "DLL" Or callTarget = "API" Then
+        Return MIRX64EmitFfiStubCallInstruction(ins, cg, errText)
+    End If
+
+    Dim taskShellHandled As Integer
+    If MIRX64TryEmitTaskShellCall(ins, cg, taskShellHandled, errText) = 0 Then Return 0
+    If taskShellHandled <> 0 Then Return 1
+
+    Dim userFnIdx As Integer
+    userFnIdx = MIRX64FindUserFunctionIndex(cg, callTarget)
+    If userFnIdx >= 0 Then
+        Return MIRX64EmitUserCallInstruction(ins, userFnIdx, cg, errText)
+    End If
+
+    If MIRX64CallTargetSupported(callTarget) = 0 Then
+        errText = "MIR x64 emitter: CALL target '" & callTarget & "' is neither a known runtime call nor a function in the MIR module"
+        Return 0
+    End If
+
+    Dim builtinHandled As Integer
+    If MIRX64TryEmitBuiltinCall(ins, cg, builtinHandled, errText) = 0 Then Return 0
+    If builtinHandled <> 0 Then Return 1
+
+    If MIRX64CallTargetDiagnosticOnly(callTarget) <> 0 Then
+        errText = MIRX64KeywordDiagnosticText(callTarget)
+        If Trim(errText) = "" Then errText = "MIR x64 emitter: CALL target recognized but native call lowering is pending: " & callTarget
+        Return 0
+    End If
+
+    Dim runtimeSymbol As String
+    runtimeSymbol = MIRX64RuntimeSymbolForOpcode("CALL", callTarget)
+
+    Select Case callTarget
+    Case "PRINT", "CONSOLE_PRINT"
+        If ins.operandCount < 2 Then Return 1
+
+        Dim i As Integer
+        For i = 1 To ins.operandCount - 1
+            If MIRX64EmitPrintValue(cg, ins.operands(i), errText) = 0 Then Return 0
+        Next i
+        Return 1
+
+    Case "PRINTLN", "CONSOLE_PRINTLN"
+        Dim j As Integer
+        For j = 1 To ins.operandCount - 1
+            If MIRX64EmitPrintValue(cg, ins.operands(j), errText) = 0 Then Return 0
+        Next j
+        Return MIRX64EmitRuntimePrintNewline(cg)
+
+    Case "PRINT_SEP_COMMA", "PRINT_SEP_SPACE", "PRINT_SEP_SEMICOLON"
+        errText = "TR: MIR_X64_RUNTIME_LOWERING_PENDING: " & callTarget & " ayirici metaverisi eksik | EN: MIR_X64_RUNTIME_LOWERING_PENDING: " & callTarget & " separator metadata is missing"
+        Return MIRX64EmitRuntimeUnsupportedDiagnostic(cg, callTarget, "separator metadata missing")
+
+    Case "CLS"
+        Return MIRX64EmitRuntimeCls(cg)
+
+    Case "LOCATE"
+        If ins.operandCount < 3 Then
+            errText = "TR: MIR_X64_RUNTIME_LOWERING_PENDING: LOCATE satir/sutun operandlari eksik | EN: MIR_X64_RUNTIME_LOWERING_PENDING: LOCATE row/column operands missing"
+            Return MIRX64EmitRuntimeUnsupportedDiagnostic(cg, callTarget, "row/column operands missing")
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeLocate(cg, "rax", "r10")
+
+    Case "COLOR"
+        If ins.operandCount < 3 Then
+            errText = "TR: MIR_X64_RUNTIME_LOWERING_PENDING: COLOR fg/bg operandlari eksik | EN: MIR_X64_RUNTIME_LOWERING_PENDING: COLOR fg/bg operands missing"
+            Return MIRX64EmitRuntimeUnsupportedDiagnostic(cg, callTarget, "fg/bg operands missing")
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeColor(cg, "rax", "r10")
+
+    Case "RANDOMIZE"
+        Return MIRX64EmitRuntimeHostCallInstruction(cg, "RANDOMIZE", ins, 1, "", errText)
+
+    Case "INPUT"
+        Return MIRX64EmitInputCall(ins, cg, errText)
+
+    Case "STR", "STR$"
+        If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+            errText = "TR: STR sonuc ve bir arguman ister | EN: STR requires a result and one argument"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeStringFromI64(cg, "rax", ins.result, errText)
+
+    Case "LEFT", "LEFT$"
+        If ins.operandCount < 3 Or Trim(ins.result) = "" Then
+            errText = "TR: LEFT iki arguman ve sonuc ister | EN: LEFT requires two arguments and a result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeStringLeft(cg, "rax", "r10", ins.result, errText)
+
+    Case "RIGHT", "RIGHT$"
+        If ins.operandCount < 3 Or Trim(ins.result) = "" Then
+            errText = "TR: RIGHT iki arguman ve sonuc ister | EN: RIGHT requires two arguments and a result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeStringRight(cg, "rax", "r10", ins.result, errText)
+
+    Case "MID", "MID$"
+        If ins.operandCount < 3 Or Trim(ins.result) = "" Then
+            errText = "TR: MID en az iki arguman ve sonuc ister | EN: MID requires at least two arguments and a result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+        If ins.operandCount >= 4 Then
+            If MIRX64LoadOperandToReg(cg, ins.operands(3), "r11", errText) = 0 Then Return 0
+        Else
+            MIRX64Emit cg, "    mov r11, -1"
+        End If
+        Return MIRX64EmitRuntimeStringMid(cg, "rax", "r10", "r11", ins.result, errText)
+
+    Case "INSTR"
+        If ins.operandCount < 3 Or Trim(ins.result) = "" Then
+            errText = "TR: INSTR en az iki arguman ve sonuc ister | EN: INSTR requires at least two arguments and a result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+        If ins.operandCount >= 4 Then
+            If MIRX64LoadOperandToReg(cg, ins.operands(3), "r11", errText) = 0 Then Return 0
+        Else
+            MIRX64Emit cg, "    mov r11, 1"
+        End If
+        Return MIRX64EmitRuntimeStringInstr(cg, "rax", "r10", "r11", ins.result, errText)
+
+    Case "OPEN"
+        If ins.operandCount < 4 Then
+            errText = "TR: OPEN file/mode/handle operandlari ister | EN: OPEN requires file/mode/handle operands"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(3), "r11", errText) = 0 Then Return 0
+        If ins.operandCount >= 5 Then
+            If MIRX64LoadOperandToReg(cg, ins.operands(4), "r8", errText) = 0 Then Return 0
+            Return MIRX64EmitRuntimeFileOpen(cg, "rax", "r10", "r11", "r8")
+        End If
+        Return MIRX64EmitRuntimeFileOpen(cg, "rax", "r10", "r11", "")
+
+    Case "CLOSE"
+        If ins.operandCount = 1 Then
+            errText = "TR: CLOSE all-kanal semantigi runtime sozlesmesine bagli degil | EN: CLOSE all-channel semantics are not wired into runtime contract"
+            Return MIRX64EmitRuntimeUnsupportedDiagnostic(cg, callTarget, "close-all semantics not wired")
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeFileClose(cg, "rax")
+
+    Case "SEEK"
+        If ins.operandCount < 2 Then
+            errText = "TR: SEEK kanal operand ister | EN: SEEK requires channel operand"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        If ins.operandCount >= 3 Then
+            If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+            Return MIRX64EmitRuntimeFileSeek(cg, "rax", "r10", ins.result, errText)
+        End If
+        Return MIRX64EmitRuntimeFileSeek(cg, "rax", "", ins.result, errText)
+
+    Case "EOF"
+        If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+            errText = "TR: EOF kanal operand ve sonuc ister | EN: EOF requires channel operand and result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeFileEof(cg, "rax", ins.result, errText)
+
+    Case "LOF"
+        If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+            errText = "TR: LOF kanal operand ve sonuc ister | EN: LOF requires channel operand and result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeFileLof(cg, "rax", ins.result, errText)
+
+    Case "GET"
+        If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+            errText = "TR: GET kanal operand ve sonuc ister | EN: GET requires channel operand and result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        If ins.operandCount >= 3 Then
+            If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+        Else
+            MIRX64Emit cg, "    mov r10, -1"
+        End If
+        If ins.operandCount >= 4 Then
+            If MIRX64LoadOperandToReg(cg, ins.operands(3), "r11", errText) = 0 Then Return 0
+        Else
+            MIRX64Emit cg, "    mov r11, 0"
+        End If
+        Return MIRX64EmitRuntimeFileGet(cg, "rax", "r10", "r11", ins.result, errText)
+
+    Case "PUT"
+        If ins.operandCount < 3 Then
+            errText = "TR: PUT en az kanal ve kaynak operandlari ister | EN: PUT requires at least channel and source operands"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        If ins.operandCount = 3 Then
+            If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+            Return MIRX64EmitRuntimeFilePut(cg, "rax", "", "", "r10")
+        ElseIf ins.operandCount = 4 Then
+            If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+            If MIRX64LoadOperandToReg(cg, ins.operands(3), "r11", errText) = 0 Then Return 0
+            Return MIRX64EmitRuntimeFilePut(cg, "rax", "r10", "", "r11")
+        Else
+            If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+            If MIRX64LoadOperandToReg(cg, ins.operands(3), "r11", errText) = 0 Then Return 0
+            If MIRX64LoadOperandToReg(cg, ins.operands(4), "r8", errText) = 0 Then Return 0
+            Return MIRX64EmitRuntimeFilePut(cg, "rax", "r10", "r11", "r8")
+        End If
+
+    Case "PRINT_FILE", "INPUT_FILE", "LINE_INPUT_FILE"
+        Return MIRX64EmitRuntimeCallTargetWithArgs(cg, callTarget, ins, errText)
+    End Select
+
+    If runtimeSymbol <> "" Then
+        Return MIRX64EmitRuntimeCallTargetWithArgs(cg, callTarget, ins, errText)
+    End If
+
+    errText = "MIR x64 emitter: CALL target dispatch failed " & callTarget
+    Return 0
+End Function
+
+#include once "mir_x64_opcode_surface_emitters.fbs"
+
+Private Function MIRX64FindOopClassIndex(ByRef cg As MIRX64Context, ByRef classNameRaw As String) As Integer
+    If cg.modulePtr = 0 Then Return -1
+    Dim want As String
+    want = UCase(Trim(classNameRaw))
+    Dim i As Integer
+    For i = 0 To cg.modulePtr->vtableClassCount - 1
+        If UCase(Trim(cg.modulePtr->vtableClassNames(i))) = want Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function MIRX64EmitObjectNew(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+        errText = "MIR x64 OBJECT_NEW requires result, class name and class size"
+        Return 0
+    End If
+    Dim className As String
+    className = UCase(Trim(ins.operands(0)))
+    Dim classIdx As Integer
+    classIdx = MIRX64FindOopClassIndex(cg, className)
+    If classIdx < 0 Then
+        errText = "MIR x64 OBJECT_NEW class metadata is missing: " & className
+        Return 0
+    End If
+    Dim sizeBytes As Integer
+    sizeBytes = Val(Trim(ins.operands(1)))
+    If sizeBytes < 8 Then
+        errText = "MIR x64 OBJECT_NEW class size is invalid for " & className
+        Return 0
+    End If
+
+    ' A new object's fields start as zero (like a DIM'd variable, and like the AST/MIR interpreters and the
+    ' legacy backend, which all calloc). malloc left them as whatever the heap held: `PRINT a.N` of a field
+    ' that was never written printed garbage whenever the block was recycled (a runtime-DLL rebuild changed
+    ' the heap history and turned `oop_parity` dim_then_new/two_objects red).
+    MIRX64EmitExtern cg, "extern calloc"
+    MIRX64Emit cg, "    mov rcx, 1"
+    MIRX64Emit cg, "    mov rdx, " & MIRX64ToStr(sizeBytes)
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call calloc"
+    MIRX64Emit cg, "    add rsp, 32"
+    MIRX64Emit cg, "    test rax, rax"
+    Dim allocFail As String
+    allocFail = MIRX64NextLabel(cg, "oop_alloc_fail")
+    Dim allocDone As String
+    allocDone = MIRX64NextLabel(cg, "oop_alloc_done")
+    MIRX64Emit cg, "    jz " & allocFail
+    MIRX64Emit cg, "    lea r11, [rel __uxb_vtbl_" & MIRX64SanitizeSymbolName(className) & " + 8]"
+    MIRX64Emit cg, "    mov qword [rax], r11"
+    If MIRX64StoreRegToVar(cg, "rax", ins.result, errText) = 0 Then Return 0
+
+    ' Constructors execute base-to-derived.  A base constructor may consume
+    ' a prefix of NEW's explicit arguments; the derived constructor consumes
+    ' the complete NEW argument list.  The function ABI remains exact.
+    Dim ctorChain(0 To 64) As Integer
+    Dim chainCount As Integer
+    Dim curIdx As Integer
+    curIdx = classIdx
+    Do While curIdx >= 0
+        If chainCount >= 65 Then
+            errText = "MIR x64 OBJECT_NEW constructor hierarchy is too deep for " & className
+            Return 0
+        End If
+        ctorChain(chainCount) = curIdx
+        chainCount += 1
+        Dim baseName As String
+        baseName = UCase(Trim(cg.modulePtr->vtableClassBaseNames(curIdx)))
+        If baseName = "" Then Exit Do
+        curIdx = MIRX64FindOopClassIndex(cg, baseName)
+        If curIdx < 0 Then
+            errText = "MIR x64 OBJECT_NEW base class metadata is missing: " & baseName
+            Return 0
+        End If
+    Loop
+
+    Dim ci As Integer
+    For ci = chainCount - 1 To 0 Step -1
+        Dim ctorIdx As Integer
+        ctorIdx = cg.modulePtr->vtableClassCtorFunctionIndex(ctorChain(ci))
+        If ctorIdx < 0 Then Continue For
+        Dim explicitCount As Integer
+        explicitCount = cg.modulePtr->functions(ctorIdx).paramVarCount - 1
+        If explicitCount < 0 Then explicitCount = 0
+        Dim userArgCount As Integer
+        userArgCount = ins.operandCount - 2
+        If explicitCount > userArgCount Then
+            errText = "MIR x64 OBJECT_NEW constructor requires " & MIRX64ToStr(explicitCount) & " arguments but NEW supplies " & MIRX64ToStr(userArgCount) & " for " & cg.modulePtr->functions(ctorIdx).name
+            Return 0
+        End If
+        Dim ctorCall As MIRIRInstruction
+        ctorCall.opcode = "CALL"
+        ctorCall.result = ""
+        ctorCall.operandCount = explicitCount + 2
+        ctorCall.operands(0) = cg.modulePtr->functions(ctorIdx).name
+        ctorCall.operands(1) = ins.result
+        Dim ai As Integer
+        For ai = 0 To explicitCount - 1
+            ctorCall.operands(ai + 2) = ins.operands(ai + 2)
+        Next ai
+        If MIRX64EmitCallInstruction(ctorCall, cg, errText) = 0 Then Return 0
+    Next ci
+    MIRX64Emit cg, "    jmp " & allocDone
+    MIRX64Emit cg, allocFail & ":"
+    MIRX64Emit cg, "    xor rax, rax"
+    If MIRX64StoreRegToVar(cg, "rax", ins.result, errText) = 0 Then Return 0
+    MIRX64Emit cg, allocDone & ":"
+    Return 1
+End Function
+
+Private Function MIRX64EmitInstruction(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    MIRX64EmitSourceComment cg, ins
+    Dim op As String
+    op = MIRX64CanonicalEmitterOpcode(ins.opcode)
+
+    If MIRX64OpcodeSupported(op) = 0 Then
+        errText = "MIR x64 emitter: opcode " & op & " not supported yet"
+        cg.unsupportedInstructionCount += 1
+        Return 0
+    End If
+
+    If MIRX64OpcodeDiagnosticOnly(op) <> 0 Then
+        errText = "MIR x64 emitter: opcode " & op & " is recognized but emitter is missing in native MIR x64"
+        cg.unsupportedInstructionCount += 1
+        Return 0
+    End If
+
+    If MIRX64IsFloatArithmeticOpcode(op) <> 0 Then
+        Return MIRX64EmitFloatOp(ins, cg, errText)
+    End If
+
+    cg.supportedInstructionCount += 1
+
+    Dim surfaceHandled As Integer
+    If MIRX64TryEmitSurfaceOpcode(ins, op, cg, surfaceHandled, errText) = 0 Then Return 0
+    If surfaceHandled <> 0 Then Return 1
+
+    Select Case op
+    Case "NOP"
+        Return 1
+
+    Case "MOVE", "ASSIGN"
+        If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: " & op & " requires source operand and result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "NEW"
+        Return MIRX64EmitObjectNew(ins, cg, errText)
+
+    Case "DIM"
+        If ins.operandCount < 1 Then
+            errText = "MIR x64 emitter: " & op & " requires variable operand"
+            Return 0
+        End If
+        If ins.operandCount >= 3 Then
+            Return MIRX64EmitDimArray(ins, cg, errText)
+        End If
+        Return MIRX64StoreImmediateToVar(cg, ins.operands(0), "0", errText)
+
+    Case "REDIM"
+        ' S-035: REDIM used to alias DIM's emitter, which is a silent no-op
+        ' whenever the array already exists (MIRX64EnsureArraySlot returns
+        ' early) -- meaning REDIM never actually resized anything in native
+        ' x64. Real resize logic now lives in MIRX64EmitRedimArray.
+        If ins.operandCount < 1 Then
+            errText = "MIR x64 emitter: " & op & " requires variable operand"
+            Return 0
+        End If
+        If ins.operandCount >= 3 Then
+            Return MIRX64EmitRedimArray(ins, cg, errText)
+        End If
+        Return MIRX64StoreImmediateToVar(cg, ins.operands(0), "0", errText)
+
+    Case "CONST"
+        If ins.operandCount >= 1 And Trim(ins.result) <> "" Then
+            If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+            Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        End If
+        Return 1
+
+    Case "DEF_TYPE", "SETSTRINGSIZE"
+        ' Compile-time policy instructions. They do not emit runtime code.
+        Return 1
+
+    Case "LOAD_CONST"
+        If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: LOAD_CONST requires operand and result"
+            Return 0
+        End If
+        If MIRX64TypeIsFloat(ins.resultType) <> 0 Or MIRX64IsFloatLiteral(ins.operands(0)) <> 0 Then
+            If MIRX64IsFloatLiteral(ins.operands(0)) <> 0 Then
+                If MIRX64LoadFloatOperandToXmm(cg, ins.operands(0), "xmm0", errText) = 0 Then Return 0
+            Else
+                If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+                MIRX64Emit cg, "    cvtsi2sd xmm0, rax"
+            End If
+            Return MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText)
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "LOAD_VAR"
+        If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: LOAD_VAR requires source and result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "STORE_VAR"
+        If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: STORE_VAR requires source and target"
+            Return 0
+        End If
+
+        Dim storeSourceType As String
+        Dim storeTargetType As String
+        storeSourceType = MIRX64ResolvedOperandType(cg, ins.operands(0))
+        storeTargetType = MIRX64ResolvedOperandType(cg, ins.result)
+        If MIRX64TypeIsFloat(storeTargetType) <> 0 Then
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(0), "xmm0", errText) = 0 Then Return 0
+            Return MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText)
+        End If
+        If MIRX64TypeIsFloat(storeSourceType) <> 0 Then
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(0), "xmm0", errText) = 0 Then Return 0
+            MIRX64Emit cg, "    cvttsd2si rax, xmm0"
+            Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        End If
+
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "ADD"
+        If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: ADD requires 2 operands and result"
+            Return 0
+        End If
+        If MIRX64EmitLoadPairToRaxR10(cg, ins.operands(0), ins.operands(1), errText) = 0 Then Return 0
+        If MIRX64OperandIsString(cg, ins.operands(0)) <> 0 Or MIRX64OperandIsString(cg, ins.operands(1)) <> 0 Then
+            Return MIRX64EmitRuntimeStringConcat(cg, "rax", "r10", ins.result, errText)
+        End If
+        If MIRX64EmitSafeBinaryI64(cg, op, errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "SUB", "MUL", "DIV", "IDIV", "MOD", "UIDIV", "UMOD"
+        If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: " & op & " requires 2 operands and result"
+            Return 0
+        End If
+        If MIRX64EmitLoadPairToRaxR10(cg, ins.operands(0), ins.operands(1), errText) = 0 Then Return 0
+        If MIRX64EmitSafeBinaryI64(cg, op, errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "NEG"
+        If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: NEG requires operand and result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        MIRX64Emit cg, "    neg rax"
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "ULT", "ULE", "UGT", "UGE"
+        If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: " & op & " requires 2 operands and result"
+            Return 0
+        End If
+        If MIRX64EmitLoadPairToRaxR10(cg, ins.operands(0), ins.operands(1), errText) = 0 Then Return 0
+        If MIRX64EmitSafeCompareI64(cg, op, errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "EQ", "NE", "LT", "LE", "GT", "GE"
+        If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: " & op & " requires 2 operands and result"
+            Return 0
+        End If
+        Dim compareLeftType As String
+        Dim compareRightType As String
+        compareLeftType = MIRX64ResolvedOperandType(cg, ins.operands(0))
+        compareRightType = MIRX64ResolvedOperandType(cg, ins.operands(1))
+        MIRX64Emit cg, "    ; resolved compare types: " & compareLeftType & ", " & compareRightType
+        If MIRX64OperandIsString(cg, ins.operands(0)) <> 0 Or MIRX64OperandIsString(cg, ins.operands(1)) <> 0 Then
+            If MIRX64EmitLoadPairToRaxR10(cg, ins.operands(0), ins.operands(1), errText) = 0 Then Return 0
+            Return MIRX64EmitRuntimeStringRelation(cg, "rax", "r10", op, ins.result, errText)
+        ElseIf MIRX64TypeIsFloat(compareLeftType) <> 0 Or MIRX64TypeIsFloat(compareRightType) <> 0 Then
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(0), "xmm0", errText) = 0 Then Return 0
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(1), "xmm1", errText) = 0 Then Return 0
+            MIRX64Emit cg, "    ucomisd xmm0, xmm1"
+            Select Case op
+            Case "EQ"
+                MIRX64Emit cg, "    sete al"
+                MIRX64Emit cg, "    setnp dl"
+                MIRX64Emit cg, "    and al, dl"
+            Case "NE"
+                MIRX64Emit cg, "    setne al"
+                MIRX64Emit cg, "    setp dl"
+                MIRX64Emit cg, "    or al, dl"
+            Case "LT"
+                MIRX64Emit cg, "    setb al"
+                MIRX64Emit cg, "    setnp dl"
+                MIRX64Emit cg, "    and al, dl"
+            Case "LE"
+                MIRX64Emit cg, "    setbe al"
+                MIRX64Emit cg, "    setnp dl"
+                MIRX64Emit cg, "    and al, dl"
+            Case "GT": MIRX64Emit cg, "    seta al"
+            Case "GE": MIRX64Emit cg, "    setae al"
+            End Select
+            MIRX64Emit cg, "    movzx rax, al"
+            MIRX64Emit cg, "    neg rax"
+        Else
+            If MIRX64EmitLoadPairToRaxR10(cg, ins.operands(0), ins.operands(1), errText) = 0 Then Return 0
+            If MIRX64EmitSafeCompareI64(cg, op, errText) = 0 Then Return 0
+        End If
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "AND", "OR", "XOR"
+        If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: " & op & " requires 2 operands and result"
+            Return 0
+        End If
+        If MIRX64EmitLoadPairToRaxR10(cg, ins.operands(0), ins.operands(1), errText) = 0 Then Return 0
+        If MIRX64EmitSafeBinaryI64(cg, op, errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "NOT"
+        If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: NOT requires operand and result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        MIRX64Emit cg, "    not rax"
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "SHL", "SHR", "USHR", "ROL", "ROR"
+        If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: " & op & " requires 2 operands and result"
+            Return 0
+        End If
+        If MIRX64EmitLoadPairToRaxR10(cg, ins.operands(0), ins.operands(1), errText) = 0 Then Return 0
+        If MIRX64EmitSafeShiftRotateI64(cg, op, errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "LABEL"
+        If ins.operandCount < 1 Then
+            errText = "MIR x64 emitter: LABEL requires target operand"
+            Return 0
+        End If
+        cg.inGosubRegion = MIRX64IsGosubTarget(cg, ins.operands(0))
+        Dim lblId As Integer
+        If MIRX64TryParseBlockId(ins.operands(0), lblId) <> 0 Then
+            MIRX64Emit cg, MIRX64BlockLabel(lblId) & ":"
+            Return 1
+        End If
+
+        MIRX64Emit cg, ".Lmir_user_" & MIRX64NormalizeVarName(ins.operands(0)) & ":"
+        Return 1
+
+    Case "JMP"
+        If ins.operandCount < 1 Then
+            errText = "MIR x64 emitter: JMP target missing"
+            Return 0
+        End If
+        Dim targetJmp As Integer
+        If MIRX64TryParseBlockId(ins.operands(0), targetJmp) = 0 Then
+            errText = "MIR x64 emitter: JMP target must be block id"
+            Return 0
+        End If
+        MIRX64Emit cg, "    jmp " & MIRX64BlockLabel(targetJmp)
+        Return 1
+
+    Case "JZ", "JNZ"
+        If ins.operandCount < 2 Then
+            errText = "MIR x64 emitter: " & op & " requires cond and target"
+            Return 0
+        End If
+
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+
+        Dim targetCond As Integer
+        If MIRX64TryParseBlockId(ins.operands(1), targetCond) = 0 Then
+            errText = "MIR x64 emitter: " & op & " target must be block id"
+            Return 0
+        End If
+
+        MIRX64Emit cg, "    cmp rax, 0"
+        If op = "JZ" Then
+            MIRX64Emit cg, "    je " & MIRX64BlockLabel(targetCond)
+        Else
+            MIRX64Emit cg, "    jne " & MIRX64BlockLabel(targetCond)
+        End If
+        Return 1
+
+    Case "LOAD_INDEXED"
+        Return MIRX64EmitLoadIndexed(ins, cg, errText)
+
+    Case "STORE_INDEXED"
+        Return MIRX64EmitStoreIndexed(ins, cg, errText)
+
+    Case "MIR_ARRAY_FIELD_LOAD"
+        Return MIRX64EmitArrayFieldLoad(ins, cg, errText)
+
+    Case "MIR_ARRAY_FIELD_STORE"
+        Return MIRX64EmitArrayFieldStore(ins, cg, errText)
+
+    Case "CAST", "COERCE", "CONV", "CONVERT"
+        If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: " & op & " requires source operand and result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "LOAD_ADDR"
+        If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: LOAD_ADDR requires source variable and result"
+            Return 0
+        End If
+        If MIRX64AddressOfVarToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        ' S-049 note: VARPTR canonicalizes to "ADDR_OF" (see
+        ' MIRX64CanonicalEmitterOpcode), which MIRX64TryEmitSurfaceOpcode /
+        ' mir_x64_opcode_surface_emitters.fbs's "CODEPTR","LPTR","ADDR_OF"
+        ' Case handles (and returns surfaceHandled<>0 for) before this
+        ' Select Case is ever reached -- that is the real VARPTR emitter,
+        ' not this LOAD_ADDR case.
+
+    Case "LOAD_FIELD", "FIELD_GET"
+        Return MIRX64EmitLoadFieldSynthetic(ins, cg, errText)
+
+    Case "STORE_FIELD", "FIELD_SET"
+        Return MIRX64EmitStoreFieldSynthetic(ins, cg, errText)
+
+    Case "METHOD_CALL"
+        Return MIRX64EmitMethodCallSynthetic(ins, cg, errText)
+
+    Case "VIRTUAL_CALL"
+        Return MIRX64EmitVirtualMethodCallSynthetic(ins, cg, errText)
+
+    Case "MEMCOPY"
+        If ins.operandCount < 3 Then
+            errText = "TR: MEMCOPY dst/src/bytes operandlari eksik | EN: MEMCOPY dst/src/bytes operands missing"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeMemoryCopy(cg, "rax", "r10", "r11")
+
+    Case "MEMFILL"
+        If ins.operandCount < 3 Then
+            errText = "TR: MEMFILL dst/value/bytes operandlari eksik | EN: MEMFILL dst/value/bytes operands missing"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "r11", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeMemoryFill(cg, "rax", "r10", "r11")
+
+    Case "PEEK"
+        If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+            errText = "TR: PEEK adres operand ve sonuc ister | EN: PEEK requires address operand and result"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimePeekI64(cg, "rax", ins.result, errText)
+
+    Case "POKE"
+        If ins.operandCount < 2 Then
+            errText = "TR: POKE adres ve deger operandlari ister | EN: POKE requires address and value operands"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "r10", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimePokeI64(cg, "rax", "r10")
+
+
+    Case "MEMORY_REF"
+        Return MIRX64EmitArrayMemoryRef(ins, cg, errText)
+
+    Case "ARRAY_SIZEOF"
+        Return MIRX64EmitArraySizeOf(ins, cg, errText)
+
+    Case "ARRAY_LBOUND"
+        Return MIRX64EmitArrayBound(ins, cg, 0, errText)
+
+    Case "ARRAY_UBOUND"
+        Return MIRX64EmitArrayBound(ins, cg, 1, errText)
+
+    Case "MEMORY_LOAD", "MIR_MEMORY_LOAD", "MIR_MEM_LOAD", "MIR_PEEK"
+        If ins.operandCount <> 3 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: MEMORY_LOAD requires mode,address,width"
+            Return 0
+        End If
+        Dim x64LoadWidth As Integer
+        x64LoadWidth = Val(Trim(ins.operands(2)))
+        Return MIRX64EmitCanonicalMemoryLoad(cg, ins.operands(0), ins.operands(1), x64LoadWidth, ins.result, errText)
+
+    Case "MEMORY_STORE", "MIR_MEMORY_STORE", "MIR_MEM_STORE", "MIR_POKE"
+        If ins.operandCount <> 4 Then errText = "MIR x64 emitter: MEMORY_STORE requires mode,address,value,width": Return 0
+        Dim x64StoreWidth As Integer
+        x64StoreWidth = Val(Trim(ins.operands(3)))
+        Return MIRX64EmitCanonicalMemoryStore(cg, ins.operands(0), ins.operands(1), ins.operands(2), x64StoreWidth, errText)
+
+    Case "MEMORY_COPY", "MIR_MEMORY_COPY", "MIR_MEM_COPY"
+        If ins.operandCount <> 5 Then errText = "MIR x64 emitter: MEMORY_COPY requires mode,src,dst,count,width": Return 0
+        Dim x64CopyWidth As Integer
+        x64CopyWidth = Val(Trim(ins.operands(4)))
+        Return MIRX64EmitCanonicalMemoryCopy(cg, ins.operands(0), ins.operands(1), ins.operands(2), ins.operands(3), x64CopyWidth, errText)
+
+    Case "MEMORY_FILL", "MIR_MEMORY_FILL", "MIR_MEM_FILL"
+        If ins.operandCount <> 5 Then errText = "MIR x64 emitter: MEMORY_FILL requires mode,dst,value,count,width": Return 0
+        Dim x64FillWidth As Integer
+        x64FillWidth = Val(Trim(ins.operands(4)))
+        Return MIRX64EmitCanonicalMemoryFill(cg, ins.operands(0), ins.operands(1), ins.operands(2), ins.operands(3), x64FillWidth, errText)
+
+    Case "MEMORY_READ_SEQUENCE", "MIR_MEMORY_READ_SEQUENCE"
+        If ins.operandCount <> 3 Or Trim(ins.result) = "" Then errText = "MIR x64 emitter: MEMORY_READ_SEQUENCE requires mode,address,length,result": Return 0
+        Return MIRX64EmitCanonicalMemoryReadSequence(cg, ins.operands(0), ins.operands(1), ins.operands(2), ins.result, errText)
+
+    Case "MEMORY_WRITE_SEQUENCE", "MIR_MEMORY_WRITE_SEQUENCE"
+        If ins.operandCount <> 4 Then errText = "MIR x64 emitter: MEMORY_WRITE_SEQUENCE requires mode,dst,source,length": Return 0
+        Return MIRX64EmitCanonicalMemoryWriteSequence(cg, ins.operands(0), ins.operands(1), ins.operands(2), ins.operands(3), errText)
+
+    Case "DELETE_OBJECT"
+        If ins.operandCount < 1 Then
+            errText = "MIR x64 emitter: DELETE_OBJECT requires object operand"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rcx", errText) = 0 Then Return 0
+        MIRX64EmitExtern cg, "extern free"
+        Dim delDone As String
+        delDone = MIRX64NextLabel(cg, "delete_object_done")
+        Dim dtorSkip As String
+        dtorSkip = MIRX64NextLabel(cg, "delete_object_dtor_skip")
+        MIRX64Emit cg, "    test rcx, rcx"
+        MIRX64Emit cg, "    jz " & delDone
+        MIRX64Emit cg, "    mov r11, qword [rcx]"
+        MIRX64Emit cg, "    test r11, r11"
+        MIRX64Emit cg, "    jz " & dtorSkip
+        MIRX64Emit cg, "    mov r10, qword [r11-8]"
+        MIRX64Emit cg, "    test r10, r10"
+        MIRX64Emit cg, "    jz " & dtorSkip
+        MIRX64Emit cg, "    sub rsp, 32"
+        MIRX64Emit cg, "    call r10"
+        MIRX64Emit cg, "    add rsp, 32"
+        MIRX64Emit cg, dtorSkip & ":"
+        ' Reload the original object because the destructor call may clobber RCX/RAX.
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rcx", errText) = 0 Then Return 0
+        MIRX64Emit cg, "    sub rsp, 32"
+        MIRX64Emit cg, "    call free"
+        MIRX64Emit cg, "    add rsp, 32"
+        MIRX64Emit cg, delDone & ":"
+        Return 1
+
+    Case "DELETE_FILE"
+        If ins.operandCount < 1 Then
+            errText = "TR: DELETE_FILE path operand ister | EN: DELETE_FILE requires path operand"
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeFileDelete(cg, "rax", ins.result, errText)
+
+    Case "STR_CONCAT_ASSIGN"
+        If Trim(ins.result) <> "" Then
+            Dim catIns As MIRIRInstruction
+            catIns = ins
+            catIns.opcode = "STR_CONCAT"
+            Return MIRX64EmitRuntimeHostCallInstruction(cg, "STR_CONCAT_ASSIGN", catIns, 0, catIns.result, errText)
+        End If
+        Return MIRX64EmitRuntimeHostCallInstruction(cg, "STR_CONCAT_ASSIGN", ins, 0, "", errText)
+
+    Case "NEW"
+        If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 emitter: NEW requires class name, class size and result"
+            Return 0
+        End If
+
+        Dim newClass As String
+        newClass = UCase(Trim(ins.operands(0)))
+        Dim newSize As Integer
+        newSize = Val(ins.operands(1))
+        If newClass = "" Or newSize < 8 Then
+            errText = "MIR x64 emitter: invalid class allocation metadata for NEW " & newClass
+            Return 0
+        End If
+
+        MIRX64EmitExtern cg, "extern calloc"
+        MIRX64Emit cg, "    mov rcx, 1"
+        MIRX64Emit cg, "    mov rdx, " & MIRX64ToStr(newSize)
+        MIRX64Emit cg, "    sub rsp, 32"
+        MIRX64Emit cg, "    call calloc"
+        MIRX64Emit cg, "    add rsp, 32"
+        MIRX64Emit cg, "    test rax, rax"
+        Dim allocFail As String
+        allocFail = MIRX64NextLabel(cg, "new_alloc_fail")
+        Dim allocDone As String
+        allocDone = MIRX64NextLabel(cg, "new_alloc_done")
+        MIRX64Emit cg, "    jz " & allocFail
+        MIRX64Emit cg, "    lea r11, [rel __uxb_vtbl_" & MIRX64SanitizeSymbolName(newClass) & "]"
+        MIRX64Emit cg, "    mov [rax], r11"
+        If MIRX64StoreRegToVar(cg, "rax", ins.result, errText) = 0 Then Return 0
+        MIRX64Emit cg, "    jmp " & allocDone
+        MIRX64Emit cg, allocFail & ":"
+        MIRX64Emit cg, "    xor eax, eax"
+        If MIRX64StoreRegToVar(cg, "rax", ins.result, errText) = 0 Then Return 0
+        MIRX64Emit cg, allocDone & ":"
+
+        Dim ctorTarget As String
+        ctorTarget = newClass & "_CTOR"
+        Dim ctorIdx As Integer
+        ctorIdx = MIRX64FindUserFunctionIndex(cg, ctorTarget)
+        If ctorIdx >= 0 Then
+            Dim ctorArgCount As Integer
+            ctorArgCount = ins.operandCount - 2
+            If ctorArgCount <> cg.modulePtr->functions(ctorIdx).paramVarCount - 1 Then
+                errText = "MIR x64 emitter: constructor argument count mismatch for " & ctorTarget
+                Return 0
+            End If
+            Dim ctorIns As MIRIRInstruction
+            ctorIns = ins
+            ctorIns.opcode = "CALL"
+            ctorIns.result = ""
+            ctorIns.operandCount = ins.operandCount - 1
+            ctorIns.operands(0) = ctorTarget
+            ctorIns.operands(1) = ins.result
+            Dim ca As Integer
+            For ca = 2 To ins.operandCount - 1
+                ctorIns.operands(ca) = ins.operands(ca)
+            Next ca
+            If MIRX64EmitCallInstruction(ctorIns, cg, errText) = 0 Then Return 0
+        End If
+        Return 1
+
+    Case "CALL"
+        Return MIRX64EmitCallInstruction(ins, cg, errText)
+
+    Case "INLINE"
+        Return MIRX64EmitInlineInstruction(ins, cg, errText)
+
+    Case "RET"
+        Dim isBareReturn As Integer
+        isBareReturn = IIf(ins.operandCount = 0, 1, 0)
+        If ins.operandCount > 0 Then
+            If UCase(Trim(ins.operands(0))) = "__RESULT__" Then isBareReturn = 1
+        End If
+        If cg.inGosubRegion <> 0 And isBareReturn <> 0 Then
+            MIRX64Emit cg, "    ret"
+            Return 1
+        End If
+        If ins.operandCount > 0 And Trim(ins.operands(0)) <> "" Then
+            Dim retOperand As String
+            retOperand = UCase(Trim(ins.operands(0)))
+            If retOperand = "__RESULT__" Then
+                Dim excActiveOffset As Integer
+                If MIRX64FindLocalOffset(cg, "__mir_exc_active", excActiveOffset) <> 0 Then
+                    Dim noExceptionLabel As String
+                    noExceptionLabel = MIRX64NextLabel(cg, "ret_no_exception")
+                    MIRX64Emit cg, "    mov rax, qword " & MIRX64RbpRef(excActiveOffset)
+                    MIRX64Emit cg, "    cmp rax, 0"
+                    MIRX64Emit cg, "    je " & noExceptionLabel
+
+                    Dim excValueOffset As Integer
+                    If MIRX64FindLocalOffset(cg, "__mir_exc_value", excValueOffset) <> 0 Then
+                        MIRX64Emit cg, "    mov rax, qword " & MIRX64RbpRef(excValueOffset)
+                        If MIRX64OperandIsString(cg, "__mir_exc_value") <> 0 Then
+                            MIRX64EmitRuntimePrintCStr cg, "rax"
+                        Else
+                            MIRX64EmitRuntimePrintI64 cg, "rax"
+                        End If
+                        MIRX64EmitRuntimePrintNewline cg
+                    End If
+                    MIRX64Emit cg, "    mov rax, 1"
+                    MIRX64Emit cg, "    jmp " & MIRX64CurrentEpilogueLabel(cg)
+                    MIRX64Emit cg, noExceptionLabel & ":"
+                End If
+                MIRX64Emit cg, "    xor rax, rax"
+            ElseIf retOperand = UCase(Trim(cg.currentFunctionName)) Then
+                If MIRX64TypeIsFloat(cg.modulePtr->functions(cg.currentFunctionIndex).returnType) <> 0 Then
+                    If MIRX64LoadFloatOperandToXmm(cg, ins.operands(0), "xmm0", errText) = 0 Then MIRX64Emit cg, "    pxor xmm0, xmm0"
+                    If UCase(Trim(cg.modulePtr->functions(cg.currentFunctionIndex).returnType)) = "F32" Then MIRX64Emit cg, "    cvtsd2ss xmm0, xmm0"
+                Else
+                    If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then MIRX64Emit cg, "    xor rax, rax"
+                End If
+            Else
+                If MIRX64TypeIsFloat(cg.modulePtr->functions(cg.currentFunctionIndex).returnType) <> 0 Then
+                    If MIRX64LoadFloatOperandToXmm(cg, ins.operands(0), "xmm0", errText) = 0 Then Return 0
+                    If UCase(Trim(cg.modulePtr->functions(cg.currentFunctionIndex).returnType)) = "F32" Then MIRX64Emit cg, "    cvtsd2ss xmm0, xmm0"
+                Else
+                    If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+                End If
+            End If
+        Else
+            MIRX64Emit cg, "    xor rax, rax"
+        End If
+        MIRX64Emit cg, "    jmp " & MIRX64CurrentEpilogueLabel(cg)
+        Return 1
+
+    Case Else
+        errText = "MIR x64 emitter: opcode skeleton exists but implementation missing: " & op
+        Return 0
+    End Select
+End Function
+
+
+Private Function MIRX64EmitClassDestructorThunk(ByRef cg As MIRX64Context, ByRef m As MIRModule, ByVal classIdx As Integer, ByRef errText As String) As Integer
+    If classIdx < 0 Or classIdx >= m.vtableClassCount Then Return 0
+    Dim labelName As String
+    labelName = "__uxb_dtor_" & MIRX64SanitizeSymbolName(m.vtableClassNames(classIdx))
+    MIRX64Emit cg, labelName & ":"
+    MIRX64Emit cg, "    push rbx"
+    MIRX64Emit cg, "    mov rbx, rcx"
+
+    Dim curIdx As Integer
+    curIdx = classIdx
+    Dim hop As Integer
+    Do While curIdx >= 0
+        hop += 1
+        If hop > 65 Then
+            errText = "MIR x64 destructor hierarchy is too deep for " & m.vtableClassNames(classIdx)
+            Return 0
+        End If
+        Dim dtorIdx As Integer
+        dtorIdx = m.vtableClassDtorFunctionIndex(curIdx)
+        If dtorIdx >= 0 And dtorIdx < m.functionCount Then
+            MIRX64Emit cg, "    mov rcx, rbx"
+            MIRX64Emit cg, "    sub rsp, 32"
+            MIRX64Emit cg, "    call " & MIRX64FunctionLabel(m.functions(dtorIdx).name)
+            MIRX64Emit cg, "    add rsp, 32"
+        End If
+        Dim baseName As String
+        baseName = UCase(Trim(m.vtableClassBaseNames(curIdx)))
+        If baseName = "" Then Exit Do
+        curIdx = -1
+        Dim bi As Integer
+        For bi = 0 To m.vtableClassCount - 1
+            If UCase(Trim(m.vtableClassNames(bi))) = baseName Then
+                curIdx = bi
+                Exit For
+            End If
+        Next bi
+        If curIdx < 0 Then
+            errText = "MIR x64 destructor base class metadata missing: " & baseName
+            Return 0
+        End If
+    Loop
+    MIRX64Emit cg, "    pop rbx"
+    MIRX64Emit cg, "    ret"
+    Return 1
+End Function
+
+Private Function MIRX64EmitOopVTables(ByRef cg As MIRX64Context, ByRef m As MIRModule, ByRef errText As String) As Integer
+    errText = ""
+    Dim ci As Integer
+    For ci = 0 To m.vtableClassCount - 1
+        If MIRX64EmitClassDestructorThunk(cg, m, ci, errText) = 0 Then Return 0
+    Next ci
+
+    For ci = 0 To m.vtableClassCount - 1
+        Dim className As String
+        className = UCase(Trim(m.vtableClassNames(ci)))
+        Dim slotCount As Integer
+        slotCount = m.vtableClassSlotCounts(ci)
+        Dim entries As String
+        Dim dtorLabel As String
+        dtorLabel = "__uxb_dtor_" & MIRX64SanitizeSymbolName(className)
+        entries = dtorLabel
+        Dim si As Integer
+        For si = 0 To slotCount - 1
+            Dim fnIdx As Integer
+            fnIdx = -1
+            Dim ei As Integer
+            For ei = m.vtableClassSlotStart(ci) To m.vtableClassSlotStart(ci) + slotCount - 1
+                If ei >= 0 And ei < m.vtableEntryCount Then
+                    If m.vtableEntrySlots(ei) = si Then
+                        fnIdx = m.vtableEntryFunctionIndex(ei)
+                        Exit For
+                    End If
+                End If
+            Next ei
+            entries &= ", "
+            If fnIdx >= 0 And fnIdx < m.functionCount Then
+                entries &= MIRX64FunctionLabel(m.functions(fnIdx).name)
+            Else
+                entries &= "0"
+            End If
+        Next si
+        MIRX64EmitData cg, "__uxb_vtbl_" & MIRX64SanitizeSymbolName(className) & ": dq " & entries
+    Next ci
+    Return 1
+End Function
+
+Private Function MIRX64EmitFunction(ByRef fn As MIRFunction, ByVal fnIdx As Integer, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    MIRX64BeginFunctionState cg, fn.name, fnIdx
+    If MIRX64CollectLocals(fn, cg, errText) = 0 Then Return 0
+    MIRX64InferLocalTypes fn, cg
+    If MIRX64RegisterParamArrays(cg, fn, errText) = 0 Then Return 0
+
+    MIRX64Emit cg, MIRX64FunctionLabel(fn.name) & ":"
+    MIRX64Emit cg, "    push rbp"
+    MIRX64Emit cg, "    mov rbp, rsp"
+    MIRX64Emit cg, "    push rbx"
+    MIRX64EmitRegisterDisciplineComment cg
+    If cg.stackBytes > 0 Then MIRX64Emit cg, "    sub rsp, " & MIRX64ToStr(cg.stackBytes)
+
+    Dim excInitOffset As Integer
+    If MIRX64FindLocalOffset(cg, "__mir_exc_active", excInitOffset) <> 0 Then
+        MIRX64Emit cg, "    mov qword " & MIRX64RbpRef(excInitOffset) & ", 0"
+    End If
+
+    If UCase(Trim(fn.name)) = "MAIN" And cg.modulePtr <> 0 Then
+        If MIRX64ModuleHasFfiCalls(*cg.modulePtr) <> 0 Then
+            MIRX64EmitExtern cg, "extern __uxb_ffi_resolve_all"
+            MIRX64Emit cg, "    sub rsp, 32"
+            MIRX64Emit cg, "    call __uxb_ffi_resolve_all"
+            MIRX64Emit cg, "    add rsp, 32"
+        End If
+        If MIRX64ModuleUsesNativeTaskShell(*cg.modulePtr) <> 0 Then
+            MIRX64EmitNativeRuntimeExterns cg
+            MIRX64EmitRuntimeCall0 cg, "uxb_rt_init"
+            MIRX64EmitNativeCheckEax cg
+        End If
+    End If
+
+    If fn.paramVarCount > 0 Then
+        Dim paramOff As Integer
+        Dim pi As Integer
+        For pi = 0 To fn.paramVarCount - 1
+            If MIRX64EnsureLocalSlot(cg, fn.paramVars(pi), paramOff) = 0 Then
+                errText = "MIR x64 emitter: parameter slot failed"
+                Return 0
+            End If
+            If pi < UBound(fn.paramByRef) + 1 AndAlso fn.paramByRef(pi) <> 0 Then
+                Dim byRefLocalIdx As Integer
+                If MIRX64FindLocalIndex(cg, fn.paramVars(pi), byRefLocalIdx) <> 0 Then
+                    cg.locals(byRefLocalIdx).isByRef = 1
+                End If
+            End If
+            If MIRX64TypedStoreParamRegister(cg, fn, pi, paramOff) = 0 Then
+                errText = "MIR x64 emitter: typed parameter store failed for " & fn.paramVars(pi)
+                Return 0
+            End If
+        Next pi
+    End If
+
+    Dim b As Integer
+    For b = 0 To fn.blockCount - 1
+        MIRX64Emit cg, MIRX64BlockLabel(fn.blocks(b).id) & ":"
+
+        Dim ii As Integer
+        For ii = 0 To fn.blocks(b).instructionCount - 1
+            If MIRX64EmitInstruction(fn.blocks(b).instructions(ii), cg, errText) = 0 Then
+                Return 0
+            End If
+        Next ii
+    Next b
+
+    MIRX64Emit cg, MIRX64CurrentEpilogueLabel(cg) & ":"
+    If UCase(Trim(fn.name)) = "MAIN" And cg.modulePtr <> 0 Then
+        If MIRX64ModuleUsesNativeTaskShell(*cg.modulePtr) <> 0 Then
+            MIRX64EmitRuntimeCall0 cg, "uxb_rt_shutdown"
+            MIRX64EmitNativeCheckEax cg
+            MIRX64Emit cg, "    xor eax, eax"
+        End If
+        If cg.memoryModeHelpersEmitted <> 0 Then
+            MIRX64Emit cg, "    cmp qword [rel __uxb_mem_error], 0"
+            MIRX64Emit cg, "    je .mir_memory_status_ok_" & LTrim(Str(cg.currentFunctionIndex))
+            MIRX64Emit cg, "    mov eax, 1"
+            MIRX64Emit cg, ".mir_memory_status_ok_" & LTrim(Str(cg.currentFunctionIndex)) & ":"
+        End If
+    End If
+    If cg.stackBytes > 0 Then MIRX64Emit cg, "    add rsp, " & MIRX64ToStr(cg.stackBytes)
+    MIRX64Emit cg, "    pop rbx"
+    MIRX64Emit cg, "    pop rbp"
+    MIRX64Emit cg, "    ret"
+
+    MIRX64Emit cg, MIRX64CurrentDivZeroLabel(cg) & ":"
+    MIRX64Emit cg, "    mov rax, 2"
+    MIRX64Emit cg, "    jmp " & MIRX64CurrentEpilogueLabel(cg)
+
+    Return 1
+End Function
+
+Function MIRX64EmitModule(ByRef m As MIRModule, ByRef outPath As String, ByRef errText As String) As Integer
+    errText = ""
+
+    If m.functionCount < 1 Then
+        errText = "MIR x64 emitter: module has no function"
+        Return 0
+    End If
+
+    Dim entryIdx As Integer
+    entryIdx = MIRX64SelectEntryFunctionIndex(m)
+    If entryIdx < 0 Or entryIdx >= m.functionCount Then
+        errText = "MIR x64 emitter: entry function index invalid"
+        Return 0
+    End If
+
+    Dim cg As MIRX64Context
+    MIRX64Init(cg)
+    cg.modulePtr = @m
+    MIRX64PrepareModuleGlobals cg
+    If MIRX64EmitOopVTables(cg, m, errText) = 0 Then Return 0
+    If MIRX64ModuleUsesNativeTaskShell(m) <> 0 Then
+        Dim taskGlobalIdx As Integer
+        MIRX64EnsureGlobalSlot cg, UXB_TASK_INPUT_NAME, taskGlobalIdx
+        cg.globals(taskGlobalIdx).typeName = "I64"
+        MIRX64EnsureGlobalSlot cg, UXB_TASK_RESULT_NAME, taskGlobalIdx
+        cg.globals(taskGlobalIdx).typeName = "I64"
+    End If
+
+    If MIRX64EmitFunction(m.functions(entryIdx), entryIdx, cg, errText) = 0 Then Return 0
+
+    Dim fnIdx As Integer
+    For fnIdx = 0 To m.functionCount - 1
+        If fnIdx <> entryIdx Then
+            If MIRX64EmitFunction(m.functions(fnIdx), fnIdx, cg, errText) = 0 Then Return 0
+        End If
+    Next fnIdx
+
+    If MIRX64ModuleUsesNativeTaskShell(m) <> 0 Then
+        If MIRX64EmitTaskCallbacks(m, cg, errText) = 0 Then Return 0
+    End If
+
+    Dim content As String
+    ' memoryModeHelperText (NATIVE/VIRTUAL PEEK/POKE/MEMCOPY/MEMFILL support
+    ' labels, S-021/S-049) must come after every real function body -- see
+    ' its comment on MIRX64Context for why appending mid-function would crash.
+    content = UXBNasmBuildModuleText(cg.externText, cg.dataText, cg.asmText & cg.memoryModeHelperText, cg.bssText)
+
+    If UXBNasmWriteFile(outPath, content, errText) = 0 Then Return 0
+    Return 1
+End Function
+
+#endif

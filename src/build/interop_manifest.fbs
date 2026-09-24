@@ -1,0 +1,984 @@
+' uXBasic Interop Manifest Yönetimi
+' Bu dosya build sırasında include/import bilgilerini yönetir
+' Include/import ve set dizileri kapasiteye göre dinamik büyütülür
+
+Type InteropIncludeEntry
+    sourceFile As String
+    includePath As String
+End Type
+
+Type InteropImportEntry
+    sourceFile As String
+    language As String
+    importPath As String
+End Type
+
+Type InteropToolchainConfig
+    cc As String
+    cxx As String
+    asmCompiler As String
+    linker As String
+    ccPath As String
+    cxxPath As String
+    asmPath As String
+    linkPath As String
+    targetArch As String
+    sourceTag As String
+End Type
+
+Type InteropManifest
+    includes(Any) As InteropIncludeEntry
+    includeCount As Integer
+    includeCapacity As Integer
+
+    imports(Any) As InteropImportEntry
+    importCount As Integer
+    importCapacity As Integer
+
+    toolchain As InteropToolchainConfig
+End Type
+
+Type InteropStringSet
+    items(Any) As String
+    count As Integer
+    capacity As Integer
+End Type
+
+Private Sub InteropSetInit(ByRef st As InteropStringSet)
+    st.capacity = 0
+    st.count = 0
+End Sub
+
+Private Sub InteropSetEnsure(ByRef st As InteropStringSet, ByVal minSize As Integer)
+    If minSize <= 0 Then Exit Sub
+    If st.capacity >= minSize Then Exit Sub
+
+    Dim newCap As Integer
+    If st.capacity <= 0 Then
+        newCap = 8
+    Else
+        newCap = st.capacity
+    End If
+
+    Do While newCap < minSize
+        newCap *= 2
+    Loop
+
+    If st.capacity <= 0 Then
+        ReDim st.items(newCap - 1)
+    Else
+        ReDim Preserve st.items(newCap - 1)
+    End If
+
+    st.capacity = newCap
+End Sub
+
+Private Function InteropSetContainsCI(ByRef st As InteropStringSet, ByRef valueText As String) As Integer
+    Dim i As Integer
+    For i = 0 To st.count - 1
+        If LCase(st.items(i)) = LCase(valueText) Then Return 1
+    Next i
+    Return 0
+End Function
+
+Private Sub InteropSetAddCI(ByRef st As InteropStringSet, ByRef valueText As String)
+    If InteropSetContainsCI(st, valueText) Then Exit Sub
+    InteropSetEnsure st, st.count + 1
+    st.items(st.count) = valueText
+    st.count += 1
+End Sub
+
+Sub InteropManifestInit(ByRef m As InteropManifest)
+    m.includeCapacity = 0
+    m.includeCount = 0
+
+    m.importCapacity = 0
+    m.importCount = 0
+
+    m.toolchain.cc = "gcc"
+    m.toolchain.cxx = "g++"
+    m.toolchain.asmCompiler = "nasm"
+    m.toolchain.linker = "gcc"
+    m.toolchain.ccPath = ""
+    m.toolchain.cxxPath = ""
+    m.toolchain.asmPath = ""
+    m.toolchain.linkPath = ""
+    m.toolchain.targetArch = "x64"
+    m.toolchain.sourceTag = "default"
+End Sub
+
+Private Function TrimQuotePair(ByRef textIn As String) As String
+    Dim outText As String
+    outText = Trim(textIn)
+    If Len(outText) >= 2 Then
+        If Left(outText, 1) = Chr(34) And Right(outText, 1) = Chr(34) Then
+            outText = Mid(outText, 2, Len(outText) - 2)
+        End If
+    End If
+    Return Trim(outText)
+End Function
+
+Private Sub ApplyToolchainKeyValue(ByRef tc As InteropToolchainConfig, ByRef keyText As String, ByRef valueText As String, ByRef sourceTag As String)
+    Dim k As String
+    Dim v As String
+    k = UCase(Trim(keyText))
+    v = TrimQuotePair(valueText)
+    If v = "" Then Exit Sub
+
+    Select Case k
+    Case "CC", "TOOLCHAIN_CC"
+        tc.cc = v
+    Case "CXX", "CPP", "TOOLCHAIN_CXX"
+        tc.cxx = v
+    Case "ASM", "ASM_COMPILER", "TOOLCHAIN_ASM"
+        tc.asmCompiler = v
+    Case "LINK", "LINKER", "LD", "TOOLCHAIN_LINK"
+        tc.linker = v
+    Case "CC_PATH", "TOOLCHAIN_CC_PATH"
+        tc.ccPath = v
+    Case "CXX_PATH", "CPP_PATH", "TOOLCHAIN_CXX_PATH"
+        tc.cxxPath = v
+    Case "ASM_PATH", "TOOLCHAIN_ASM_PATH"
+        tc.asmPath = v
+    Case "LINK_PATH", "LD_PATH", "TOOLCHAIN_LINK_PATH"
+        tc.linkPath = v
+    Case "TARGET_ARCH", "ARCH", "TOOLCHAIN_ARCH"
+        tc.targetArch = v
+    Case Else
+        Exit Sub
+    End Select
+
+    tc.sourceTag = sourceTag
+End Sub
+
+Private Sub InteropToolchainApplyEnv(ByRef tc As InteropToolchainConfig)
+    Dim keys(8) As String
+    Dim values(8) As String
+    Dim i As Integer
+
+    keys(0) = "CC"
+    keys(1) = "CXX"
+    keys(2) = "ASM"
+    keys(3) = "LINK"
+    keys(4) = "CC_PATH"
+    keys(5) = "CXX_PATH"
+    keys(6) = "ASM_PATH"
+    keys(7) = "LINK_PATH"
+    keys(8) = "TARGET_ARCH"
+
+    values(0) = Environ("UXB_CC")
+    values(1) = Environ("UXB_CXX")
+    values(2) = Environ("UXB_ASM")
+    values(3) = Environ("UXB_LINK")
+    values(4) = Environ("UXB_CC_PATH")
+    values(5) = Environ("UXB_CXX_PATH")
+    values(6) = Environ("UXB_ASM_PATH")
+    values(7) = Environ("UXB_LINK_PATH")
+    values(8) = Environ("UXB_TARGET_ARCH")
+
+    For i = 0 To 8
+        If Trim(values(i)) <> "" Then
+            ApplyToolchainKeyValue tc, keys(i), values(i), "env:UXB_*"
+        End If
+    Next i
+End Sub
+
+Private Sub InteropToolchainApplyPolicy(ByRef tc As InteropToolchainConfig, ByRef policyText As String, ByRef sourceTag As String)
+    Dim src As String
+    src = Trim(policyText)
+    If src = "" Then Exit Sub
+
+    Dim cursorPos As Integer
+    cursorPos = 1
+
+    Do While cursorPos <= Len(src)
+        Dim sepPos As Integer
+        sepPos = InStr(cursorPos, src, ";")
+
+        Dim segment As String
+        If sepPos = 0 Then
+            segment = Mid(src, cursorPos)
+            cursorPos = Len(src) + 1
+        Else
+            segment = Mid(src, cursorPos, sepPos - cursorPos)
+            cursorPos = sepPos + 1
+        End If
+
+        segment = Trim(segment)
+        If segment <> "" Then
+            Dim eqPos As Integer
+            eqPos = InStr(segment, "=")
+            If eqPos > 1 Then
+                Dim k As String
+                Dim v As String
+                k = Left(segment, eqPos - 1)
+                v = Mid(segment, eqPos + 1)
+                ApplyToolchainKeyValue tc, k, v, sourceTag
+            End If
+        End If
+    Loop
+End Sub
+
+Private Sub InteropToolchainApplyHostFallbacks(ByRef tc As InteropToolchainConfig)
+    Dim cbRoot As String
+    cbRoot = "C:\Program Files\CodeBlocks\MinGW\bin"
+
+    If Trim(tc.asmPath) = "" And UCase(Trim(tc.asmCompiler)) = "NASM" Then
+        If Dir(cbRoot & "\nasm.exe") <> "" Then
+            tc.asmPath = cbRoot
+            tc.sourceTag = "host-fallback:codeblocks"
+        End If
+    End If
+
+    If Trim(tc.ccPath) = "" And UCase(Trim(tc.cc)) = "GCC" Then
+        If Dir(cbRoot & "\gcc.exe") <> "" Then
+            tc.ccPath = cbRoot
+            tc.sourceTag = "host-fallback:codeblocks"
+        End If
+    End If
+
+    If Trim(tc.cxxPath) = "" And (UCase(Trim(tc.cxx)) = "G++" Or UCase(Trim(tc.cxx)) = "GCC") Then
+        If Dir(cbRoot & "\g++.exe") <> "" Then
+            tc.cxxPath = cbRoot
+            tc.sourceTag = "host-fallback:codeblocks"
+        End If
+    End If
+
+    If Trim(tc.linkPath) = "" And UCase(Trim(tc.linker)) = "GCC" Then
+        If Dir(cbRoot & "\gcc.exe") <> "" Then
+            tc.linkPath = cbRoot
+            tc.sourceTag = "host-fallback:codeblocks"
+        End If
+    End If
+End Sub
+
+Private Sub InteropManifestEnsureIncludes(ByRef m As InteropManifest, ByVal minSize As Integer)
+    If minSize <= 0 Then Exit Sub
+    If m.includeCapacity >= minSize Then Exit Sub
+
+    Dim newCap As Integer
+    If m.includeCapacity <= 0 Then
+        newCap = 8
+    Else
+        newCap = m.includeCapacity
+    End If
+
+    Do While newCap < minSize
+        newCap *= 2
+    Loop
+
+    If m.includeCapacity <= 0 Then
+        ReDim m.includes(newCap - 1)
+    Else
+        ReDim Preserve m.includes(newCap - 1)
+    End If
+
+    m.includeCapacity = newCap
+End Sub
+
+Private Sub InteropManifestEnsureImports(ByRef m As InteropManifest, ByVal minSize As Integer)
+    If minSize <= 0 Then Exit Sub
+    If m.importCapacity >= minSize Then Exit Sub
+
+    Dim newCap As Integer
+    If m.importCapacity <= 0 Then
+        newCap = 8
+    Else
+        newCap = m.importCapacity
+    End If
+
+    Do While newCap < minSize
+        newCap *= 2
+    Loop
+
+    If m.importCapacity <= 0 Then
+        ReDim m.imports(newCap - 1)
+    Else
+        ReDim Preserve m.imports(newCap - 1)
+    End If
+
+    m.importCapacity = newCap
+End Sub
+
+Private Sub InteropManifestAddInclude(ByRef m As InteropManifest, ByRef sourceFile As String, ByRef includePath As String)
+    InteropManifestEnsureIncludes m, m.includeCount + 1
+    m.includes(m.includeCount).sourceFile = sourceFile
+    m.includes(m.includeCount).includePath = includePath
+    m.includeCount += 1
+End Sub
+
+Private Sub InteropManifestAddImport(ByRef m As InteropManifest, ByRef sourceFile As String, ByRef language As String, ByRef importPath As String)
+    InteropManifestEnsureImports m, m.importCount + 1
+    m.imports(m.importCount).sourceFile = sourceFile
+    m.imports(m.importCount).language = language
+    m.imports(m.importCount).importPath = importPath
+    m.importCount += 1
+End Sub
+
+Private Function PathSlashToBackslash(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        If ch = "/" Then
+            outText &= "\"
+        Else
+            outText &= ch
+        End If
+    Next i
+
+    Return outText
+End Function
+
+Private Function PathIsAbsolute(ByRef pathText As String) As Integer
+    If Len(pathText) >= 2 And Mid(pathText, 2, 1) = ":" Then Return 1
+    If Left(pathText, 1) = "\" Then Return 1
+    Return 0
+End Function
+
+Private Sub PathPartsPush(parts() As String, ByRef partCount As Integer, ByRef valueText As String)
+    If partCount = 0 Then
+        ReDim parts(0)
+    Else
+        ReDim Preserve parts(partCount)
+    End If
+    parts(partCount) = valueText
+    partCount += 1
+End Sub
+
+Private Function PathNormalize(ByRef pathIn As String) As String
+    Dim p As String
+    p = PathSlashToBackslash(pathIn)
+
+    Dim prefix As String
+    Dim rest As String
+    Dim absoluteFlag As Integer
+
+    If Len(p) >= 2 And Mid(p, 2, 1) = ":" Then
+        prefix = UCase(Left(p, 2))
+        rest = Mid(p, 3)
+        If Left(rest, 1) = "\" Then
+            absoluteFlag = 1
+            rest = Mid(rest, 2)
+        End If
+    ElseIf Left(p, 1) = "\" Then
+        prefix = "\"
+        absoluteFlag = 1
+        rest = Mid(p, 2)
+    Else
+        prefix = ""
+        absoluteFlag = 0
+        rest = p
+    End If
+
+    Dim parts(Any) As String
+    Dim partCount As Integer
+    partCount = 0
+
+    Dim cursorPos As Integer
+    cursorPos = 1
+    Do While cursorPos <= Len(rest)
+        Dim nextSlash As Integer
+        nextSlash = InStr(cursorPos, rest, "\")
+
+        Dim segment As String
+        If nextSlash = 0 Then
+            segment = Mid(rest, cursorPos)
+            cursorPos = Len(rest) + 1
+        Else
+            segment = Mid(rest, cursorPos, nextSlash - cursorPos)
+            cursorPos = nextSlash + 1
+        End If
+
+        If segment = "" Or segment = "." Then
+            ' Skip empty and current-dir segments.
+        ElseIf segment = ".." Then
+            If partCount > 0 And parts(partCount - 1) <> ".." Then
+                partCount -= 1
+            ElseIf absoluteFlag = 0 Then
+                PathPartsPush parts(), partCount, segment
+            End If
+        Else
+            PathPartsPush parts(), partCount, segment
+        End If
+    Loop
+
+    Dim body As String
+    Dim i As Integer
+    For i = 0 To partCount - 1
+        If i > 0 Then body &= "\"
+        body &= parts(i)
+    Next i
+
+    If prefix = "\" Then
+        If body = "" Then Return "\"
+        Return "\" & body
+    End If
+
+    If Len(prefix) = 2 And Mid(prefix, 2, 1) = ":" Then
+        If absoluteFlag Then
+            If body = "" Then Return prefix & "\"
+            Return prefix & "\" & body
+        Else
+            If body = "" Then Return prefix
+            Return prefix & body
+        End If
+    End If
+
+    If absoluteFlag Then
+        If body = "" Then Return "\"
+        Return "\" & body
+    End If
+
+    Return body
+End Function
+
+Private Function PathDirName(ByRef pathIn As String) As String
+    Dim p As String
+    p = PathNormalize(pathIn)
+
+    Dim i As Integer
+    For i = Len(p) To 1 Step -1
+        If Mid(p, i, 1) = "\" Then
+            If i = 1 Then Return "\"
+            Return Left(p, i - 1)
+        End If
+    Next i
+
+    Return "."
+End Function
+
+Private Function PathResolveFromSource(ByRef sourceFile As String, ByRef relativePath As String) As String
+    Dim relNorm As String
+    relNorm = PathNormalize(relativePath)
+
+    If PathIsAbsolute(relNorm) Then Return relNorm
+
+    Dim baseDir As String
+    baseDir = PathDirName(sourceFile)
+
+    Return PathNormalize(baseDir & "\" & relNorm)
+End Function
+
+Private Function PathStartsWithDir(ByRef filePath As String, ByRef rootDir As String) As Integer
+    Dim fileNorm As String
+    Dim rootNorm As String
+
+    fileNorm = LCase(PathNormalize(filePath))
+    rootNorm = LCase(PathNormalize(rootDir))
+
+    If Right(rootNorm, 1) <> "\" Then rootNorm &= "\"
+
+    If fileNorm = Left(rootNorm, Len(rootNorm) - 1) Then Return 1
+    If Left(fileNorm, Len(rootNorm)) = rootNorm Then Return 1
+
+    Return 0
+End Function
+
+Private Function FileExistsPath(ByRef pathText As String) As Integer
+    Return Dir(pathText) <> ""
+End Function
+
+#include once "../common/text_encoding.fbs"
+
+Private Function ReadAllTextFile(ByRef filePath As String, ByRef textOut As String) As Integer
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Input As #f
+    If Err <> 0 Then Return 0
+
+    textOut = ""
+    Do While Not Eof(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        textOut &= lineText
+        If Not Eof(f) Then textOut &= Chr(10)
+    Loop
+
+    Close #f
+    textOut = UXBStripUtf8Bom(textOut)
+    Return 1
+End Function
+
+Private Function ResolveStmtPath(ByRef ps As ParseState, ByVal stmt As Integer, ByRef normalizedSource As String, ByRef rootDir As String, ByRef stmtName As String, ByRef pathOut As String, ByRef errText As String) As Integer
+    Dim pathNode As Integer
+    pathNode = ps.ast.nodes(stmt).firstChild
+    If pathNode = -1 Then
+        errText = "resolver: " & stmtName & " missing path node"
+        Return 0
+    End If
+
+    Dim rawPath As String
+    rawPath = ps.ast.nodes(pathNode).value
+
+    If Trim(rawPath) = "" Then
+        errText = "resolver: " & stmtName & " path is empty"
+        Return 0
+    End If
+
+    If InStr(rawPath, "..") > 0 Then
+        errText = "resolver: " & stmtName & " escapes root: " & rawPath
+        Return 0
+    End If
+
+    ' ABI10_X64_INCLUDE_RESOLVE_FIX_20260712:
+    ' INCLUDE paths may be written in two valid styles:
+    '   1) source-relative: INCLUDE "abi10_wrapper.bas"
+    '   2) project-root-relative: INCLUDE "tests/libraries/abi10/abi10_wrapper.bas"
+    ' The old resolver always appended the include path to the source directory, so
+    ' style (2) became:
+    '   tests\libraries\abi10\tests\libraries\abi10\abi10_wrapper.bas
+    ' and x64 build failed before code generation.
+    Dim relNorm As String
+    relNorm = PathNormalize(rawPath)
+
+    Dim sourceCandidate As String
+    Dim rootCandidate As String
+    Dim projectRoot As String
+    Dim foundCandidate As Integer
+
+    sourceCandidate = ""
+    rootCandidate = ""
+    projectRoot = PathNormalize(CurDir)
+    foundCandidate = 0
+
+    ' UXB_009_REALCODE_FIX_20260712:
+    ' Build scripts execute from a generated report directory.  Keep IMPORT paths
+    ' absolute so the actual C/C++/ASM compiler receives the source selected by the
+    ' uXBasic source file, not a path relative to the later build directory.
+    If PathIsAbsolute(relNorm) Then
+        pathOut = PathNormalize(relNorm)
+        If FileExistsPath(pathOut) <> 0 Then foundCandidate = 1
+    Else
+        sourceCandidate = PathResolveFromSource(normalizedSource, relNorm)
+        rootCandidate = PathNormalize(projectRoot & "\" & relNorm)
+
+        If FileExistsPath(sourceCandidate) <> 0 Then
+            pathOut = sourceCandidate
+            foundCandidate = 1
+        ElseIf FileExistsPath(rootCandidate) <> 0 Then
+            pathOut = rootCandidate
+            foundCandidate = 1
+        Else
+            pathOut = sourceCandidate
+        End If
+    End If
+
+    If foundCandidate = 0 Then
+        errText = "resolver: " & stmtName & " file not found: " & pathOut
+        If rootCandidate <> "" And rootCandidate <> pathOut Then
+            errText &= " | root-candidate: " & rootCandidate
+        End If
+        Return 0
+    End If
+
+    pathOut = PathNormalize(pathOut)
+    If PathStartsWithDir(pathOut, rootDir) = 0 And PathStartsWithDir(pathOut, projectRoot) = 0 Then
+        errText = "resolver: " & stmtName & " escapes source/project roots: " & pathOut
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function InteropInlineIsOp(ByRef tk As Token, ByRef opText As String) As Integer
+    Return (tk.kind = "OP") And (tk.lexeme = opText)
+End Function
+
+Private Function InteropInlineIsKw(ByRef tk As Token, ByRef kwText As String) As Integer
+    Return (tk.kind = "KEYWORD") And (UCase(tk.lexeme) = UCase(kwText))
+End Function
+
+Private Function InteropInlineReadHeaderArg(ByRef ps As ParseState, ByRef i As Integer, ByRef argText As String) As Integer
+    If i >= ps.lx.tokens.count Then Return 0
+
+    Dim tk As Token
+    tk = ps.lx.tokens.items(i)
+
+    Select Case UCase(tk.kind)
+    Case "STRING", "IDENT", "KEYWORD", "NUMBER"
+        argText = tk.lexeme
+        i += 1
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Sub CollectInlineToolchainHints(ByRef ps As ParseState, ByRef sourceFile As String, ByRef tc As InteropToolchainConfig)
+    Dim i As Integer
+    i = 0
+
+    Do While i < ps.lx.tokens.count
+        Dim tk As Token
+        tk = ps.lx.tokens.items(i)
+
+        If InteropInlineIsKw(tk, "INLINE") Then
+            i += 1
+            If i < ps.lx.tokens.count AndAlso InteropInlineIsOp(ps.lx.tokens.items(i), "(") Then
+                i += 1
+
+                Dim args(3) As String
+                Dim okHeader As Integer
+                okHeader = 1
+
+                Dim argIdx As Integer
+                For argIdx = 0 To 3
+                    If InteropInlineReadHeaderArg(ps, i, args(argIdx)) = 0 Then
+                        okHeader = 0
+                        Exit For
+                    End If
+
+                    If argIdx < 3 Then
+                        If i >= ps.lx.tokens.count OrElse InteropInlineIsOp(ps.lx.tokens.items(i), ",") = 0 Then
+                            okHeader = 0
+                            Exit For
+                        End If
+                        i += 1
+                    End If
+                Next argIdx
+
+                If okHeader <> 0 Then
+                    If i < ps.lx.tokens.count AndAlso InteropInlineIsOp(ps.lx.tokens.items(i), ")") Then
+                        Dim sourceTag As String
+                        sourceTag = "inline:" & sourceFile & ":" & LTrim(Str(tk.lineNo))
+                        InteropToolchainApplyPolicy tc, args(3), sourceTag
+                    End If
+                End If
+            End If
+        End If
+
+        i += 1
+    Loop
+End Sub
+
+Private Function CollectImportStmt(ByRef ps As ParseState, ByVal stmt As Integer, ByRef normalizedSource As String, ByRef rootDir As String, ByRef manifest As InteropManifest, ByRef importOnce As InteropStringSet, ByRef errText As String) As Integer
+    Dim importPath As String
+    If ResolveStmtPath(ps, stmt, normalizedSource, rootDir, "IMPORT", importPath, errText) = 0 Then Return 0
+
+    Dim lang As String
+    lang = UCase(ps.ast.nodes(stmt).op)
+
+    Dim importKey As String
+    importKey = lang & "|" & importPath
+
+    If InteropSetContainsCI(importOnce, importKey) = 0 Then
+        InteropSetAddCI importOnce, importKey
+        InteropManifestAddImport manifest, normalizedSource, lang, importPath
+    End If
+
+    Return 1
+End Function
+
+Private Function CollectInteropRecursive(ByRef sourceFile As String, ByRef rootDir As String, ByRef manifest As InteropManifest, ByRef parsedFiles As InteropStringSet, ByRef includeOnce As InteropStringSet, ByRef importOnce As InteropStringSet, ByRef errText As String) As Integer
+    Dim normalizedSource As String
+    normalizedSource = PathNormalize(sourceFile)
+
+    If InteropSetContainsCI(parsedFiles, normalizedSource) Then Return 1
+    InteropSetAddCI parsedFiles, normalizedSource
+
+    Dim sourceText As String
+    If ReadAllTextFile(normalizedSource, sourceText) = 0 Then
+        errText = "resolver: cannot read source file: " & normalizedSource
+        Return 0
+    End If
+
+    ' UXB_009_REALCODE_FIX_20260712:
+    ' Follow the canonical front-end order once.  Reinitializing the same dynamic
+    ' LexerState/ParseState after a failed raw parse corrupted recursive resolver
+    ' state and caused FreeBASIC runtime error 12 in ABI10 and INCLUDE tests.
+    Dim resolverPreprocess As PreprocessResult
+    If PreprocessRun(sourceText, normalizedSource, resolverPreprocess) = 0 Then
+        Dim preprocessError As String
+        preprocessError = LexerPreprocessGetError()
+        If Trim(preprocessError) = "" Then preprocessError = "preprocess failed"
+        errText = "resolver: preprocess failed in " & normalizedSource & " => " & preprocessError
+        Return 0
+    End If
+
+    Dim parseSourceText As String
+    parseSourceText = resolverPreprocess.expandedSource
+
+    Dim lx As LexerState
+    LexerInitFromPreprocessed lx, parseSourceText, normalizedSource
+
+    Dim ps As ParseState
+    ParserInit ps, lx
+
+    If ParseProgram(ps) = 0 Then
+        errText = "resolver: preprocessed parse failed in " & normalizedSource & " => " & ps.lastError
+        Return 0
+    End If
+
+    CollectInlineToolchainHints ps, normalizedSource, manifest.toolchain
+
+    Dim stmt As Integer
+    stmt = ps.ast.nodes(ps.rootNode).firstChild
+
+    Do While stmt <> -1
+        Dim nodeKind As String
+        nodeKind = UCase(ps.ast.nodes(stmt).kind)
+
+        If nodeKind = "INCLUDE_STMT" Then
+            Dim includePath As String
+            If ResolveStmtPath(ps, stmt, normalizedSource, rootDir, "INCLUDE", includePath, errText) = 0 Then Return 0
+
+            If InteropSetContainsCI(includeOnce, includePath) = 0 Then
+                InteropSetAddCI includeOnce, includePath
+                InteropManifestAddInclude manifest, normalizedSource, includePath
+            End If
+
+            If CollectInteropRecursive(includePath, rootDir, manifest, parsedFiles, includeOnce, importOnce, errText) = 0 Then
+                Return 0
+            End If
+        ElseIf nodeKind = "IMPORT_STMT" Then
+            If CollectImportStmt(ps, stmt, normalizedSource, rootDir, manifest, importOnce, errText) = 0 Then Return 0
+        End If
+
+        stmt = ps.ast.nodes(stmt).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Function ResolveInteropManifestForSource(ByRef sourceFile As String, ByRef manifest As InteropManifest, ByRef errText As String) As Integer
+    InteropManifestInit manifest
+    InteropToolchainApplyEnv manifest.toolchain
+    InteropToolchainApplyHostFallbacks manifest.toolchain
+
+    Dim normalizedSource As String
+    normalizedSource = PathNormalize(sourceFile)
+
+    If FileExistsPath(normalizedSource) = 0 Then
+        errText = "resolver: source file not found: " & normalizedSource
+        Return 0
+    End If
+
+    Dim rootDir As String
+    rootDir = PathDirName(normalizedSource)
+
+    Dim parsedFiles As InteropStringSet
+    Dim includeOnce As InteropStringSet
+    Dim importOnce As InteropStringSet
+
+    InteropSetInit parsedFiles
+    InteropSetInit includeOnce
+    InteropSetInit importOnce
+
+    Return CollectInteropRecursive(normalizedSource, rootDir, manifest, parsedFiles, includeOnce, importOnce, errText)
+End Function
+
+Private Function CsvEscape(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+
+    outText = Chr(34)
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        If ch = Chr(34) Then
+            outText &= Chr(34)
+            outText &= Chr(34)
+        Else
+            outText &= ch
+        End If
+    Next i
+    outText &= Chr(34)
+
+    Return outText
+End Function
+
+Private Function SafeBaseName(ByRef pathText As String) As String
+    Dim p As String
+    p = PathNormalize(pathText)
+
+    Dim baseName As String
+    baseName = p
+
+    Dim i As Integer
+    For i = Len(p) To 1 Step -1
+        If Mid(p, i, 1) = "\" Then
+            baseName = Mid(p, i + 1)
+            Exit For
+        End If
+    Next i
+
+    Dim dotPos As Integer
+    dotPos = InStrRev(baseName, ".")
+    If dotPos > 1 Then baseName = Left(baseName, dotPos - 1)
+
+    Dim outText As String
+    For i = 1 To Len(baseName)
+        Dim ch As String
+        ch = Mid(baseName, i, 1)
+        Dim c As Integer
+        c = Asc(ch)
+        If (c >= 48 And c <= 57) Or (c >= 65 And c <= 90) Or (c >= 97 And c <= 122) Or ch = "_" Then
+            outText &= ch
+        Else
+            outText &= "_"
+        End If
+    Next i
+
+    If outText = "" Then outText = "import_unit"
+    Return outText
+End Function
+
+Private Function BuildObjectPath(ByRef outputDir As String, ByVal indexNo As Integer, ByRef importPath As String) As String
+    Dim namePart As String
+    namePart = SafeBaseName(importPath)
+    Return PathNormalize(outputDir & "\import_objs\" & LCase(Hex(indexNo, 4)) & "_" & namePart & ".o")
+End Function
+
+Private Function InteropToolchainTargetArch(ByRef toolchain As InteropToolchainConfig) As String
+    Dim archText As String
+    archText = UCase(Trim(toolchain.targetArch))
+    Select Case archText
+    Case "X86", "X86_32", "I386", "WIN32", "32"
+        Return "X86"
+    End Select
+    Return "X64"
+End Function
+
+Private Function BuildCompileCommand(ByRef lang As String, ByRef importPath As String, ByRef objectPath As String, ByRef toolchain As InteropToolchainConfig) As String
+    Dim targetArch As String
+    targetArch = InteropToolchainTargetArch(toolchain)
+    Dim cArchFlag As String
+    Dim asmFormat As String
+    cArchFlag = IIf(targetArch = "X86", "-m32", "-m64")
+    asmFormat = IIf(targetArch = "X86", "win32", "win64")
+
+    Select Case UCase(lang)
+    Case "C"
+        Return Chr(34) & "%UXB_CC_CMD%" & Chr(34) & " " & cArchFlag & " -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+    Case "CPP"
+        Return Chr(34) & "%UXB_CXX_CMD%" & Chr(34) & " " & cArchFlag & " -c " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+    Case "ASM"
+        Return Chr(34) & "%UXB_ASM_CMD%" & Chr(34) & " -f " & asmFormat & " " & Chr(34) & importPath & Chr(34) & " -o " & Chr(34) & objectPath & Chr(34)
+    End Select
+
+    Return ""
+End Function
+
+Private Function BuildSlashify(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+    outText = ""
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        If Asc(ch) = 92 Then
+            outText &= "/"
+        Else
+            outText &= ch
+        End If
+    Next i
+    Return outText
+End Function
+
+Private Function BuildRspArgPath(ByRef pathIn As String) As String
+    Dim normalized As String
+    normalized = PathNormalize(pathIn)
+    normalized = BuildSlashify(normalized)
+    Return Chr(34) & normalized & Chr(34)
+End Function
+
+Private Sub EnsureOutputDirs(ByRef outputDir As String)
+    MkDir "build"
+    MkDir outputDir
+    MkDir PathNormalize(outputDir & "\import_objs")
+End Sub
+
+#include once "interop_manifest_emit_helpers.fbs"
+
+
+Function EmitInteropArtifacts(ByRef manifest As InteropManifest, ByRef outputDir As String, ByRef errText As String) As Integer
+    EnsureOutputDirs outputDir
+
+    Dim manifestPath As String
+    manifestPath = PathNormalize(outputDir & "\import_build_manifest.csv")
+
+    Dim linkRspPath As String
+    linkRspPath = PathNormalize(outputDir & "\import_link_args.rsp")
+
+    Dim linkPlanPath As String
+    linkPlanPath = PathNormalize(outputDir & "\import_link_plan_win11.txt")
+
+    Dim buildBatPath As String
+    buildBatPath = PathNormalize(outputDir & "\build_import.bat")
+
+    Dim linkBatPath As String
+    linkBatPath = PathNormalize(outputDir & "\link_command.bat")
+
+    Dim makefilePath As String
+    makefilePath = PathNormalize(outputDir & "\makefile")
+
+    Dim toolchainEnvPath As String
+    toolchainEnvPath = PathNormalize(outputDir & "\toolchain.env.bat")
+
+    Dim mf As Integer
+    Dim rf As Integer
+    Dim pf As Integer
+    Dim bf As Integer
+    Dim lf As Integer
+    Dim kf As Integer
+    Dim tf As Integer
+
+    If InteropOpenArtifacts(outputDir, manifestPath, linkRspPath, linkPlanPath, buildBatPath, linkBatPath, makefilePath, toolchainEnvPath, mf, rf, pf, bf, lf, kf, tf, errText) = 0 Then
+        Return 0
+    End If
+
+    Print #mf, "kind,language,source_file,resolved_path,object_path,compile_cmd,link_arg,toolchain_source"
+
+    Dim i As Integer
+    For i = 0 To manifest.includeCount - 1
+        Print #mf, "INCLUDE,," & CsvEscape(manifest.includes(i).sourceFile) & "," & CsvEscape(manifest.includes(i).includePath) & ",,,," & CsvEscape(manifest.toolchain.sourceTag)
+    Next i
+
+    Print #mf, "TOOLCHAIN,,,,,,," & CsvEscape(manifest.toolchain.sourceTag)
+    InteropWriteToolchainEnv tf, manifest.toolchain
+    If InteropWriteImportSteps(manifest, outputDir, mf, rf, pf, bf) = 0 Then
+        InteropCloseArtifacts mf, rf, pf, bf, lf, kf, tf
+        errText = "interop emit: failed to write import steps"
+        Return 0
+    End If
+
+    Print #lf, "@echo off"
+    Print #lf, "setlocal EnableExtensions"
+    Print #lf, "pushd ""%~dp0\..\..\.."""
+    Print #lf, "if errorlevel 1 exit /b 1"
+    Print #lf, "call ""%~dp0toolchain.env.bat"""
+    Print #lf, "if errorlevel 1 exit /b 1"
+    Print #lf, "if not exist ""%~dp0import_link_args.rsp"" ("
+    Print #lf, "  echo [interop] missing response file: %~dp0import_link_args.rsp"
+    Print #lf, "  popd"
+    Print #lf, "  exit /b 1"
+    Print #lf, ")"
+    Print #lf, Chr(34) & "%UXB_LINK_CMD%" & Chr(34) & " @""" & "%~dp0import_link_args.rsp" & """ -o ""%~dp0interop_program.exe"""
+    Print #lf, "if errorlevel 1 ("
+    Print #lf, "  popd"
+    Print #lf, "  exit /b 1"
+    Print #lf, ")"
+    Print #lf, "echo [interop] link complete: %~dp0interop_program.exe"
+    Print #lf, "popd"
+    Print #lf, "exit /b 0"
+
+    Print #kf, "all: imports link"
+    Print #kf, ""
+    Print #kf, "imports:"
+    Print #kf, Chr(9) & "cmd /c build_import.bat"
+    Print #kf, ""
+    Print #kf, "link:"
+    Print #kf, Chr(9) & "cmd /c link_command.bat"
+    Print #kf, ""
+    Print #kf, "clean:"
+    Print #kf, Chr(9) & "del /Q import_objs\*.o 2>nul"
+    Print #kf, Chr(9) & "del /Q interop_program.exe 2>nul"
+
+    InteropCloseArtifacts mf, rf, pf, bf, lf, kf, tf
+
+    Return 1
+End Function

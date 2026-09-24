@@ -1,0 +1,363 @@
+#ifndef __UXB_HOOK_TRACE_SYSTEM__
+#define __UXB_HOOK_TRACE_SYSTEM__
+
+' ============================================================================
+' uXBasiC Stage-3 Hook / Trace Runtime
+' ----------------------------------------------------------------------------
+' Purpose:
+'   Low-risk instrumentation layer for the compiler pipeline.
+'   It writes live session JSON and layer timing JSON without changing compiler
+'   semantics. Every event flushes the JSON files, so early END paths still leave
+'   useful trace evidence.
+'
+' Design notes:
+'   - No dependency on compiler internals beyond standard FreeBASIC runtime.
+'   - Fixed-size arrays to avoid allocator surprises inside diagnostics path.
+'   - All public procedure names use UxbTrace* prefix.
+'   - Disabled by default unless --hook-trace / --trace-json or explicit JSON
+'     output path is provided.
+' ============================================================================
+
+Const UXB_TRACE_MAX_EVENTS As Integer = 2048
+Const UXB_TRACE_MAX_LAYERS As Integer = 96
+
+Type UxbTraceEventRecord
+    id As Integer
+    layer As String
+    phase As String
+    status As String
+    detail As String
+    timestamp As Double
+    elapsedMs As Double
+End Type
+
+Type UxbTraceLayerState
+    layer As String
+    active As Integer
+    startTime As Double
+End Type
+
+Dim Shared __uxbTraceEnabled As Integer
+Dim Shared __uxbTraceFlushEachEvent As Integer
+Dim Shared __uxbTraceSessionPath As String
+Dim Shared __uxbTraceTimingPath As String
+Dim Shared __uxbTraceStartedAt As Double
+Dim Shared __uxbTraceSourcePath As String
+Dim Shared __uxbTraceModeText As String
+Dim Shared __uxbTraceLastStatus As String
+Dim Shared __uxbTraceEvents(0 To UXB_TRACE_MAX_EVENTS - 1) As UxbTraceEventRecord
+Dim Shared __uxbTraceEventCount As Integer
+Dim Shared __uxbTraceLayers(0 To UXB_TRACE_MAX_LAYERS - 1) As UxbTraceLayerState
+Dim Shared __uxbTraceLayerCount As Integer
+
+Private Function UxbTraceNow() As Double
+    Return CDbl(Timer)
+End Function
+
+Private Function UxbTraceMs(ByVal startValue As Double, ByVal endValue As Double) As Double
+    Dim deltaValue As Double
+    deltaValue = endValue - startValue
+    If deltaValue < 0 Then deltaValue += 86400.0
+    Return deltaValue * 1000.0
+End Function
+
+Private Function UxbTraceJsonEscape(ByRef rawText As String) As String
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        Select Case ch
+        Case Chr(34)
+            outText &= "\" & Chr(34)
+        Case "\"
+            outText &= "\\"
+        Case Chr(13)
+            outText &= "\r"
+        Case Chr(10)
+            outText &= "\n"
+        Case Chr(9)
+            outText &= "\t"
+        Case Else
+            outText &= ch
+        End Select
+    Next i
+
+    Return outText
+End Function
+
+Private Function UxbTracePathDir(ByRef filePath As String) As String
+    Dim p As Integer
+    Dim best As Integer
+    best = 0
+    For p = Len(filePath) To 1 Step -1
+        Dim ch As String
+        ch = Mid(filePath, p, 1)
+        If ch = "\" Or ch = "/" Then
+            best = p
+            Exit For
+        End If
+    Next p
+
+    If best <= 0 Then Return "."
+    Return Left(filePath, best - 1)
+End Function
+
+Private Function UxbTraceNormalizePath(ByRef rawPath As String) As String
+    Dim outPath As String
+    outPath = ""
+    Dim i As Integer
+    For i = 1 To Len(rawPath)
+        Dim ch As String
+        ch = Mid(rawPath, i, 1)
+        If ch = "/" Then
+            outPath &= "\"
+        Else
+            outPath &= ch
+        End If
+    Next i
+    Return outPath
+End Function
+
+Private Sub UxbTraceEnsureDir(ByRef dirText As String)
+    Dim norm As String
+    norm = Trim(UxbTraceNormalizePath(dirText))
+    If norm = "" Or norm = "." Then Exit Sub
+    Do While Len(norm) > 0 And Right(norm, 1) = "\"
+        norm = Left(norm, Len(norm) - 1)
+    Loop
+    If norm = "" Then Exit Sub
+    If Dir(norm, 16) <> "" Then Exit Sub
+
+    On Error GoTo _uxb_trace_mkdir_err
+    Dim cur As String
+    cur = ""
+    Dim i As Integer
+    For i = 1 To Len(norm)
+        Dim ch As String
+        ch = Mid(norm, i, 1)
+        cur &= ch
+        If ch = "\" Then
+            Dim partial As String
+            partial = Left(cur, Len(cur) - 1)
+            If Len(partial) > 0 And Right(partial, 1) <> ":" Then
+                If Dir(partial, 16) = "" Then MkDir partial
+            End If
+        End If
+    Next i
+    If Len(norm) > 0 And Right(norm, 1) <> ":" Then
+        If Dir(norm, 16) = "" Then MkDir norm
+    End If
+    On Error GoTo 0
+    Exit Sub
+
+_uxb_trace_mkdir_err:
+    On Error GoTo 0
+End Sub
+
+Private Sub UxbTraceEnsureParentDir(ByRef filePath As String)
+    Dim dirPath As String
+    dirPath = UxbTracePathDir(filePath)
+    UxbTraceEnsureDir dirPath
+End Sub
+
+Private Function UxbTraceWriteText(ByRef filePath As String, ByRef textValue As String) As Integer
+    If Trim(filePath) = "" Then Return 1
+
+    UxbTraceEnsureParentDir(filePath)
+
+    Dim f As Integer
+    f = FreeFile
+    Open filePath For Output As #f
+    If Err <> 0 Then Return 0
+    Print #f, textValue;
+    Close #f
+    Return 1
+End Function
+
+Private Sub UxbTraceAppendEvent(ByRef layerName As String, ByRef phaseName As String, ByRef statusName As String, ByRef detailText As String, ByVal elapsedMs As Double)
+    If __uxbTraceEnabled = 0 Then Exit Sub
+    If __uxbTraceEventCount >= UXB_TRACE_MAX_EVENTS Then Exit Sub
+
+    Dim idx As Integer
+    idx = __uxbTraceEventCount
+    __uxbTraceEvents(idx).id = idx + 1
+    __uxbTraceEvents(idx).layer = layerName
+    __uxbTraceEvents(idx).phase = phaseName
+    __uxbTraceEvents(idx).status = statusName
+    __uxbTraceEvents(idx).detail = detailText
+    __uxbTraceEvents(idx).timestamp = UxbTraceNow()
+    __uxbTraceEvents(idx).elapsedMs = elapsedMs
+    __uxbTraceEventCount += 1
+
+    If Trim(statusName) <> "" Then __uxbTraceLastStatus = statusName
+End Sub
+
+Private Function UxbTraceBuildSessionJson() As String
+    Dim outText As String
+    Dim nowValue As Double
+    nowValue = UxbTraceNow()
+
+    outText = "{" & Chr(13) & Chr(10)
+    outText &= "  " & Chr(34) & "trace_version" & Chr(34) & ": " & Chr(34) & "uxb-hook-trace-1" & Chr(34) & "," & Chr(13) & Chr(10)
+    outText &= "  " & Chr(34) & "enabled" & Chr(34) & ": " & IIf(__uxbTraceEnabled <> 0, "true", "false") & "," & Chr(13) & Chr(10)
+    outText &= "  " & Chr(34) & "mode" & Chr(34) & ": " & Chr(34) & UxbTraceJsonEscape(__uxbTraceModeText) & Chr(34) & "," & Chr(13) & Chr(10)
+    outText &= "  " & Chr(34) & "source" & Chr(34) & ": " & Chr(34) & UxbTraceJsonEscape(__uxbTraceSourcePath) & Chr(34) & "," & Chr(13) & Chr(10)
+    outText &= "  " & Chr(34) & "event_count" & Chr(34) & ": " & LTrim(Str(__uxbTraceEventCount)) & "," & Chr(13) & Chr(10)
+    outText &= "  " & Chr(34) & "elapsed_ms" & Chr(34) & ": " & LTrim(Str(UxbTraceMs(__uxbTraceStartedAt, nowValue))) & "," & Chr(13) & Chr(10)
+    outText &= "  " & Chr(34) & "last_status" & Chr(34) & ": " & Chr(34) & UxbTraceJsonEscape(__uxbTraceLastStatus) & Chr(34) & "," & Chr(13) & Chr(10)
+    outText &= "  " & Chr(34) & "events" & Chr(34) & ": [" & Chr(13) & Chr(10)
+
+    Dim i As Integer
+    For i = 0 To __uxbTraceEventCount - 1
+        If i > 0 Then outText &= "," & Chr(13) & Chr(10)
+        outText &= "    {"
+        outText &= Chr(34) & "id" & Chr(34) & ": " & LTrim(Str(__uxbTraceEvents(i).id)) & ", "
+        outText &= Chr(34) & "layer" & Chr(34) & ": " & Chr(34) & UxbTraceJsonEscape(__uxbTraceEvents(i).layer) & Chr(34) & ", "
+        outText &= Chr(34) & "phase" & Chr(34) & ": " & Chr(34) & UxbTraceJsonEscape(__uxbTraceEvents(i).phase) & Chr(34) & ", "
+        outText &= Chr(34) & "status" & Chr(34) & ": " & Chr(34) & UxbTraceJsonEscape(__uxbTraceEvents(i).status) & Chr(34) & ", "
+        outText &= Chr(34) & "detail" & Chr(34) & ": " & Chr(34) & UxbTraceJsonEscape(__uxbTraceEvents(i).detail) & Chr(34) & ", "
+        outText &= Chr(34) & "elapsed_ms" & Chr(34) & ": " & LTrim(Str(__uxbTraceEvents(i).elapsedMs))
+        outText &= "}"
+    Next i
+
+    outText &= Chr(13) & Chr(10) & "  ]" & Chr(13) & Chr(10)
+    outText &= "}" & Chr(13) & Chr(10)
+    Return outText
+End Function
+
+Private Function UxbTraceBuildTimingJson() As String
+    Dim outText As String
+    outText = "{" & Chr(13) & Chr(10)
+    outText &= "  " & Chr(34) & "trace_version" & Chr(34) & ": " & Chr(34) & "uxb-layer-timing-1" & Chr(34) & "," & Chr(13) & Chr(10)
+    outText &= "  " & Chr(34) & "source" & Chr(34) & ": " & Chr(34) & UxbTraceJsonEscape(__uxbTraceSourcePath) & Chr(34) & "," & Chr(13) & Chr(10)
+    outText &= "  " & Chr(34) & "layers" & Chr(34) & ": [" & Chr(13) & Chr(10)
+
+    Dim written As Integer
+    written = 0
+
+    Dim i As Integer
+    For i = 0 To __uxbTraceEventCount - 1
+        If UCase(__uxbTraceEvents(i).phase) = "END" Then
+            If written > 0 Then outText &= "," & Chr(13) & Chr(10)
+            outText &= "    {"
+            outText &= Chr(34) & "layer" & Chr(34) & ": " & Chr(34) & UxbTraceJsonEscape(__uxbTraceEvents(i).layer) & Chr(34) & ", "
+            outText &= Chr(34) & "status" & Chr(34) & ": " & Chr(34) & UxbTraceJsonEscape(__uxbTraceEvents(i).status) & Chr(34) & ", "
+            outText &= Chr(34) & "elapsed_ms" & Chr(34) & ": " & LTrim(Str(__uxbTraceEvents(i).elapsedMs)) & ", "
+            outText &= Chr(34) & "detail" & Chr(34) & ": " & Chr(34) & UxbTraceJsonEscape(__uxbTraceEvents(i).detail) & Chr(34)
+            outText &= "}"
+            written += 1
+        End If
+    Next i
+
+    outText &= Chr(13) & Chr(10) & "  ]" & Chr(13) & Chr(10)
+    outText &= "}" & Chr(13) & Chr(10)
+    Return outText
+End Function
+
+Public Sub UxbTraceFlush()
+    If __uxbTraceEnabled = 0 Then Exit Sub
+
+    Dim sessionJson As String
+    sessionJson = UxbTraceBuildSessionJson()
+    UxbTraceWriteText __uxbTraceSessionPath, sessionJson
+
+    Dim timingJson As String
+    timingJson = UxbTraceBuildTimingJson()
+    UxbTraceWriteText __uxbTraceTimingPath, timingJson
+End Sub
+
+Public Sub UxbTraceInit(ByRef sessionJsonPath As String, ByRef timingJsonPath As String, ByVal enabledFlag As Integer, ByRef modeText As String)
+    __uxbTraceEnabled = IIf(enabledFlag <> 0, 1, 0)
+    __uxbTraceFlushEachEvent = 1
+    __uxbTraceSessionPath = sessionJsonPath
+    __uxbTraceTimingPath = timingJsonPath
+    __uxbTraceStartedAt = UxbTraceNow()
+    __uxbTraceEventCount = 0
+    __uxbTraceLayerCount = 0
+    __uxbTraceSourcePath = ""
+    __uxbTraceModeText = modeText
+    __uxbTraceLastStatus = "INIT"
+
+    If __uxbTraceEnabled <> 0 Then
+        UxbTraceAppendEvent "SESSION", "BEGIN", "OK", "trace initialized", 0
+        UxbTraceFlush
+    End If
+End Sub
+
+Public Sub UxbTraceSetSource(ByRef sourcePath As String)
+    If __uxbTraceEnabled = 0 Then Exit Sub
+    __uxbTraceSourcePath = sourcePath
+    UxbTraceAppendEvent "SESSION", "META", "OK", "source=" & sourcePath, 0
+    If __uxbTraceFlushEachEvent <> 0 Then UxbTraceFlush
+End Sub
+
+Public Sub UxbTraceMark(ByRef layerName As String, ByRef eventText As String, ByRef detailText As String)
+    If __uxbTraceEnabled = 0 Then Exit Sub
+    UxbTraceAppendEvent layerName, eventText, "OK", detailText, 0
+    If __uxbTraceFlushEachEvent <> 0 Then UxbTraceFlush
+End Sub
+
+Public Sub UxbTraceBegin(ByRef layerName As String, ByRef detailText As String)
+    If __uxbTraceEnabled = 0 Then Exit Sub
+
+    Dim idx As Integer
+    If __uxbTraceLayerCount < UXB_TRACE_MAX_LAYERS Then
+        idx = __uxbTraceLayerCount
+        __uxbTraceLayers(idx).layer = layerName
+        __uxbTraceLayers(idx).active = 1
+        __uxbTraceLayers(idx).startTime = UxbTraceNow()
+        __uxbTraceLayerCount += 1
+    End If
+
+    UxbTraceAppendEvent layerName, "BEGIN", "OK", detailText, 0
+    If __uxbTraceFlushEachEvent <> 0 Then UxbTraceFlush
+End Sub
+
+Public Sub UxbTraceEnd(ByRef layerName As String, ByRef statusName As String, ByRef detailText As String)
+    If __uxbTraceEnabled = 0 Then Exit Sub
+
+    Dim startValue As Double
+    Dim found As Integer
+    Dim i As Integer
+    found = 0
+    startValue = UxbTraceNow()
+
+    For i = __uxbTraceLayerCount - 1 To 0 Step -1
+        If __uxbTraceLayers(i).active <> 0 Then
+            If UCase(__uxbTraceLayers(i).layer) = UCase(layerName) Then
+                startValue = __uxbTraceLayers(i).startTime
+                __uxbTraceLayers(i).active = 0
+                found = 1
+                Exit For
+            End If
+        End If
+    Next i
+
+    Dim nowValue As Double
+    nowValue = UxbTraceNow()
+    UxbTraceAppendEvent layerName, "END", statusName, detailText, UxbTraceMs(startValue, nowValue)
+    If __uxbTraceFlushEachEvent <> 0 Then UxbTraceFlush
+End Sub
+
+Public Sub UxbTraceMetric(ByRef layerName As String, ByRef metricName As String, ByRef metricValue As String)
+    If __uxbTraceEnabled = 0 Then Exit Sub
+    UxbTraceAppendEvent layerName, "METRIC", "OK", metricName & "=" & metricValue, 0
+    If __uxbTraceFlushEachEvent <> 0 Then UxbTraceFlush
+End Sub
+
+Public Sub UxbTraceOutput(ByRef layerName As String, ByRef outputName As String, ByRef outputPath As String)
+    If __uxbTraceEnabled = 0 Then Exit Sub
+    UxbTraceAppendEvent layerName, "OUTPUT", "OK", outputName & "=" & outputPath, 0
+    If __uxbTraceFlushEachEvent <> 0 Then UxbTraceFlush
+End Sub
+
+Public Sub UxbTraceFinish(ByVal exitCode As Integer)
+    If __uxbTraceEnabled = 0 Then Exit Sub
+    UxbTraceAppendEvent "SESSION", "END", IIf(exitCode = 0, "OK", "FAIL"), "exit_code=" & LTrim(Str(exitCode)), UxbTraceMs(__uxbTraceStartedAt, UxbTraceNow())
+    UxbTraceFlush
+End Sub
+
+#endif

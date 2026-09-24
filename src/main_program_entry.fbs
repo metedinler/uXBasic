@@ -1,0 +1,1310 @@
+' Extracted main program entry flow from main.bas
+'' ParserLog removed; parser files use ParserDiag -> UxbDebug
+
+Dim As String sourceText
+Dim As String sourcePath
+Dim As String originalCompilerSourceText
+Dim As Integer debugMode
+Dim As Integer semanticMode
+Dim As Integer execMemMode
+Dim As Integer interopMode
+Dim As Integer x64EmitMode
+Dim As Integer x86EmitMode
+Dim As Integer codegenMode
+Dim As Integer x64BuildMode
+Dim As Integer jsBackendMode
+Dim As Integer watBackendMode
+Dim As Integer wasmBackendMode
+Dim As Integer browserBackendMode
+Dim As Integer runSemanticPass
+Dim As String x64OutPath
+Dim As String x64BuildOutPath
+Dim As String x64BuildExeFileName
+Dim As String x64BuildExePath
+Dim As String inventoryJsonOutPath
+Dim As String pipelineJsonOutPath
+Dim As String mirOpcodesJsonOutPath
+Dim As String astJsonOutPath
+Dim As String astContractJsonOutPath
+Dim As String astContractMatrixOutPath
+Dim As Integer astContractCheckMode
+Dim As String mirModuleJsonOutPath
+Dim As String interpreterBackend
+Dim As String runReportJsonOutPath
+Dim As String artifactReportJsonOutPath
+Dim As String codegenSourceMode
+Dim As Integer validateAllMode
+Dim As String validateAllReportJsonOutPath
+' Stage-3 Hook / Trace outputs
+Dim As Integer hookTraceMode
+Dim As String sessionLiveJsonOutPath
+Dim As String layerTimingJsonOutPath
+Dim As String consoleMode
+Dim As String programOutputOutPath
+Dim As String programOutputJsonOutPath
+Dim As String finalScreenJsonOutPath
+Dim As Integer mirVerifyRequested
+Dim As String mirVerifyJsonOutPath
+Dim As String mirFullJsonOutPath
+Dim As Integer enableMirX64
+Dim As String x64Mode
+Dim As Integer x64BothMode
+Dim As String x64AstOutPath
+Dim As String x64MirOutPath
+Dim As String x64CodegenPolicyJsonOutPath
+Dim As UXBX64CodegenPolicy x64CodegenPolicy
+Dim As Integer mirVerifiedForPolicy
+Dim As Integer x64PolicyId
+Dim As UXBExtFpRuntimeStatus extfpRuntimeStatus
+Dim As String extfpRuntimeDirArg
+Dim As String extfpPolicyJsonOutPath
+Dim As UXBOutputContractPaths outputContractPaths
+Dim As String outputContractErr
+Dim As UXBActiveBindPlan activeBindPlan
+
+UxbInit
+
+Dim As String cliErrText
+Dim As Integer cliInitOk
+cliInitOk = UXBCliInitFromCommandLine(cliErrText)
+
+If UXBCliIsHelpRequested() <> 0 Then
+    UXBCliPrintHelp
+    End 0
+End If
+If UXBCliIsVersionRequested() <> 0 Then
+    UXBCliPrintVersion
+    End 0
+End If
+
+If cliInitOk = 0 Then
+    UxbError cliErrText
+    End 20
+End If
+
+'If UXBCliInitFromCommandLine(cliErrText) = 0 Then
+'    UxbError cliErrText
+'
+'    If UXBCliIsHelpRequested() <> 0 Then
+'        UXBCliPrintHelp
+'        End 0
+'    End If
+'    If UXBCliIsVersionRequested() <> 0 Then
+'        UXBCliPrintVersion
+'        End 0
+'    End If
+'    If UXBCliWriteStartupReports(cliErrText) = 0 Then
+'        UxbError cliErrText
+'        End 20
+'    End If
+'    End 20
+'End If
+
+debugMode = HasArg("--debug")
+Dim As String preprocessorSetArg
+preprocessorSetArg = ""
+If GetArgValue("--pp", preprocessorSetArg) = 0 Then
+    If GetArgValue("--preprocessor", preprocessorSetArg) = 0 Then preprocessorSetArg = ""
+End If
+If Trim(preprocessorSetArg) <> "" Then
+    If UXBPreprocessorSetDefault(preprocessorSetArg) = 0 Then
+        UxbError "Gecersiz preprocessor secimi: " & preprocessorSetArg & " (A veya B beklenir)"
+        End 2
+    End If
+End If
+Dim As Integer quietMode
+Dim As Integer traceMode
+Dim As Integer debugTokenDumpMode
+Dim As String logOutPath
+Dim As String debugLogOutPath
+Dim As String messageLang
+Dim As String messageLogOutPath
+Dim As String layerEventLogOutPath
+Dim As String errorLogOutPath
+Dim As String errorLanguageFilePath
+Dim As Integer errorToTerminal
+
+quietMode = IIf(HasArg("--quiet"), 1, 0)
+traceMode = IIf(HasArg("--trace"), 1, 0)
+debugTokenDumpMode = IIf(HasArg("--debug-token-dump"), 1, 0)
+
+logOutPath = ""
+debugLogOutPath = ""
+GetArgValue("--log-out", logOutPath)
+GetArgValue("--debug-log-out", debugLogOutPath)
+
+messageLang = "en"
+If GetRawCommandArgValue("--message-lang", messageLang) = 0 Then
+    If GetRawCommandArgValue("--language", messageLang) = 0 Then messageLang = "en"
+End If
+If IsTurkishMessageRequested() <> 0 Then messageLang = "tr"
+errorLogOutPath = ""
+GetArgValue("--error-log-out", errorLogOutPath)
+If Trim(errorLogOutPath) = "" Then GetArgValue("-elo", errorLogOutPath)
+errorLanguageFilePath = ""
+GetArgValue("--error-language-file", errorLanguageFilePath)
+If Trim(errorLanguageFilePath) = "" Then GetArgValue("-elf", errorLanguageFilePath)
+errorToTerminal = IIf(HasArg("--error-to-terminal") Or HasArg("-ett"), 1, 0)
+messageLogOutPath = ""
+layerEventLogOutPath = ""
+
+' Stage-3 Hook / Trace CLI
+sessionLiveJsonOutPath = ""
+layerTimingJsonOutPath = ""
+GetArgValue("--session-live-json-out", sessionLiveJsonOutPath)
+GetArgValue("--layer-timing-json-out", layerTimingJsonOutPath)
+hookTraceMode = IIf(HasArg("--hook-trace") Or HasArg("--trace-json") Or Trim(sessionLiveJsonOutPath) <> "" Or Trim(layerTimingJsonOutPath) <> "", 1, 0)
+semanticMode = HasArg("--semantic")
+execMemMode = HasArg("--execmem")
+interopMode = HasArg("--interop")
+x64EmitMode = HasArg("--emit-x64-nasm") Or HasArg("--x64gen")
+x86EmitMode = HasArg("--emit-x86") Or HasArg("--target-x86")
+codegenMode = HasArg("--codegen") Or HasArg("--x64")
+x64BuildMode = HasArg("--build-x64")
+jsBackendMode = HasArg("--emit-js") Or HasArg("--target-js") Or HasArg("--target-browser")
+x64OutPath = ""
+x64BuildOutPath = ""
+GetArgValue("--build-x64-out", x64BuildOutPath)
+If GetArgValue("--emit-x64-nasm-out", x64OutPath) = 0 Then
+    If GetArgValue("--x64gen-out", x64OutPath) = 0 Then
+        If GetArgValue("--emit-nasm", x64OutPath) = 0 Then
+            x64OutPath = ""
+        End If
+    End If
+End If
+
+inventoryJsonOutPath = ""
+If GetArgValue("--ir-json-out", inventoryJsonOutPath) = 0 Then
+    If GetArgValue("--inventory-json-out", inventoryJsonOutPath) = 0 Then
+        If GetArgValue("--hir-json-out", inventoryJsonOutPath) = 0 Then
+            inventoryJsonOutPath = ""
+        End If
+    End If
+End If
+
+pipelineJsonOutPath = ""
+If GetArgValue("--pipeline-json-out", pipelineJsonOutPath) = 0 Then
+    If GetArgValue("--mir-pipeline-json-out", pipelineJsonOutPath) = 0 Then pipelineJsonOutPath = ""
+End If
+
+mirOpcodesJsonOutPath = ""
+If GetArgValue("--mir-opcodes-json-out", mirOpcodesJsonOutPath) = 0 Then
+    If GetArgValue("--mir-surface-json-out", mirOpcodesJsonOutPath) = 0 Then mirOpcodesJsonOutPath = ""
+End If
+
+mirModuleJsonOutPath = ""
+If GetArgValue("--mir-module-json-out", mirModuleJsonOutPath) = 0 Then
+    If GetArgValue("--mir-json-out", mirModuleJsonOutPath) = 0 Then mirModuleJsonOutPath = ""
+End If
+
+astJsonOutPath = ""
+If GetArgValue("--ast-json-out", astJsonOutPath) = 0 Then astJsonOutPath = ""
+
+astContractJsonOutPath = ""
+If GetArgValue("--ast-contract-json-out", astContractJsonOutPath) = 0 Then
+    If GetArgValue("--ast-contract-report-json-out", astContractJsonOutPath) = 0 Then astContractJsonOutPath = ""
+End If
+astContractMatrixOutPath = ""
+If GetArgValue("--ast-contract-matrix-out", astContractMatrixOutPath) = 0 Then astContractMatrixOutPath = ""
+astContractCheckMode = HasArg("--ast-contract-check")
+
+runReportJsonOutPath = ""
+If GetArgValue("--run-report-json-out", runReportJsonOutPath) = 0 Then runReportJsonOutPath = ""
+artifactReportJsonOutPath = ""
+If GetArgValue("--artifact-report-json-out", artifactReportJsonOutPath) = 0 Then artifactReportJsonOutPath = ""
+
+mirVerifyRequested = 0
+mirVerifyJsonOutPath = ""
+mirFullJsonOutPath = ""
+enableMirX64 = 0
+x64Mode = ""
+x64BothMode = 0
+x64AstOutPath = "backend\x64_ast\output.asm"
+x64MirOutPath = "backend\x64_mir\output.asm"
+x64CodegenPolicyJsonOutPath = ""
+mirVerifiedForPolicy = 0
+x64PolicyId = 0
+UXBX64CodegenPolicyInit(x64CodegenPolicy)
+UXBExtFpRuntimeStatusInit(extfpRuntimeStatus)
+extfpRuntimeDirArg = ""
+extfpPolicyJsonOutPath = ""
+
+If HasArg("--mir-verify") Then mirVerifyRequested = 1
+If GetArgValue("--mir-verify-json-out", mirVerifyJsonOutPath) <> 0 Then mirVerifyRequested = 1
+If GetArgValue("--mir-full-json-out", mirFullJsonOutPath) <> 0 Then mirVerifyRequested = 1
+If HasArg("--enable-mir-x64") Then
+    enableMirX64 = 1
+    UXBLayerEventDiagnostic "CLI", "UXB_CLI_DEPRECATED_ALIAS", "--enable-mir-x64 deprecated alias; use --x64-mode=MIR"
+End If
+If GetArgValue("--x64-codegen-policy-json-out", x64CodegenPolicyJsonOutPath) = 0 Then x64CodegenPolicyJsonOutPath = ""
+
+If HasArg("--enable-extfp-runtime") Then extfpRuntimeStatus.enabled = 1
+If HasArg("--extfp-strict") Then extfpRuntimeStatus.strictMode = 1
+If HasArg("--extfp-diagnostics") Then extfpRuntimeStatus.diagnosticsEnabled = 1
+If GetArgValue("--extfp-runtime-dir", extfpRuntimeDirArg) <> 0 Then
+    extfpRuntimeStatus.runtimeDir = extfpRuntimeDirArg
+End If
+If GetArgValue("--extfp-policy-json-out", extfpPolicyJsonOutPath) = 0 Then extfpPolicyJsonOutPath = ""
+UXBExtFpRuntimeProbe extfpRuntimeStatus
+
+consoleMode = "direct"
+If GetArgValue("--console-mode", consoleMode) = 0 Then
+    consoleMode = "direct"
+End If
+consoleMode = UCase(Trim(consoleMode))
+If consoleMode <> "DIRECT" And consoleMode <> "CAPTURE" And consoleMode <> "VIRTUAL" Then
+    UxbError "Gecersiz console mode: " & consoleMode
+    End 2
+End If
+
+programOutputOutPath = ""
+If GetArgValue("--program-output-out", programOutputOutPath) = 0 Then
+    programOutputOutPath = ""
+End If
+
+programOutputJsonOutPath = ""
+If GetArgValue("--program-output-json-out", programOutputJsonOutPath) = 0 Then
+    programOutputJsonOutPath = ""
+End If
+
+finalScreenJsonOutPath = ""
+If GetArgValue("--final-screen-json-out", finalScreenJsonOutPath) = 0 Then
+    finalScreenJsonOutPath = ""
+End If
+
+If GetArgValue("--virtual", gUxbCliVirtualArg) = 0 Then
+    gUxbCliVirtualArg = ""
+End If
+
+UXBOutputContractReadCli outputContractPaths
+
+If Trim(validateAllReportJsonOutPath) = "reports\system_health_report.json" Or Trim(validateAllReportJsonOutPath) = "reports\system_health_report.json" Then
+    validateAllReportJsonOutPath = outputContractPaths.validationReportJsonOutPath
+End If
+If Trim(astJsonOutPath) = "" Then astJsonOutPath = outputContractPaths.parserAstJsonOutPath
+If Trim(runReportJsonOutPath) = "" Then runReportJsonOutPath = outputContractPaths.runManifestJsonOutPath
+If Trim(messageLogOutPath) = "" Then messageLogOutPath = outputContractPaths.buildRoot & "/logs/compiler_messages.log"
+If Trim(layerEventLogOutPath) = "" Then layerEventLogOutPath = outputContractPaths.buildRoot & "/logs/layer_events.log"
+If Trim(logOutPath) = "" Then logOutPath = outputContractPaths.buildRoot & "/logs/uxbasic.log"
+If Trim(debugLogOutPath) = "" Then debugLogOutPath = outputContractPaths.buildRoot & "/logs/uxbasic_debug.log"
+If Trim(errorLogOutPath) = "" Then errorLogOutPath = outputContractPaths.buildRoot & "/logs/uxbasic.hata.log"
+If Trim(sessionLiveJsonOutPath) = "" Then sessionLiveJsonOutPath = outputContractPaths.sessionLiveJsonOutPath
+If Trim(layerTimingJsonOutPath) = "" Then layerTimingJsonOutPath = outputContractPaths.artifactRoot & "/live/layer_timing.json"
+
+' UXB_FIX: artifact root default output paths.
+' UXB_REASON: JSON dosyalari build/<run_id>/json altinda; ASM/EXE gibi uretilen dosyalar ayni build kokunde ayri klasorlerde tutulur.
+If Trim(x64OutPath) = "" Or x64OutPath = "dist\uxb_output.asm" Or x64OutPath = "dist\uxbasic_program.nasm" Then
+    x64OutPath = outputContractPaths.asmRoot & "/x64/output.asm"
+End If
+If Trim(x64BuildOutPath) = "" Or x64BuildOutPath = "dist\x64build" Then
+    x64BuildOutPath = outputContractPaths.exeRoot & "/x64_build"
+End If
+x64BuildExeFileName = "program.exe"
+x64BuildOutPath = PathNormalize(x64BuildOutPath)
+If LCase(Right(Trim(x64BuildOutPath), 4)) = ".exe" Then
+    x64BuildExePath = x64BuildOutPath
+    x64BuildOutPath = PathDirName(x64BuildExePath)
+    x64BuildExeFileName = x64BuildExePath
+    Dim x64BuildPathPos As Integer
+    For x64BuildPathPos = Len(x64BuildExePath) To 1 Step -1
+        If Mid(x64BuildExePath, x64BuildPathPos, 1) = "\" Then
+            x64BuildExeFileName = Mid(x64BuildExePath, x64BuildPathPos + 1)
+            Exit For
+        End If
+    Next x64BuildPathPos
+Else
+    x64BuildExePath = PathNormalize(x64BuildOutPath & "\" & x64BuildExeFileName)
+End If
+x64AstOutPath = outputContractPaths.asmRoot & "/x64_ast/output.asm"
+x64MirOutPath = outputContractPaths.asmRoot & "/x64_mir/output.asm"
+
+Dim runtimeGateErrAtStart As String
+Dim runtimeRouteMx As UXBRuntimeServiceMatrix
+If UXBRuntimeServiceMatrixBuild(runtimeRouteMx) = 0 Then
+    UxbError "Runtime service matrix olusturulamadi"
+    End 24
+End If
+If UXBRuntimeWriteRouteMatrixJson(runtimeRouteMx, outputContractPaths.runtimeRouteMatrixJsonOutPath, runtimeGateErrAtStart) = 0 Then
+    UxbError "runtime_route_matrix.json yazilamadi: " & runtimeGateErrAtStart
+    End 22
+End If
+If UXBRuntimeServiceGateValidateAll(runtimeGateErrAtStart) = 0 Then
+    UXBLayerEventDiagnostic "RUNTIME", "UXB_RUNTIME_SERVICE_SIGNATURE_MISMATCH", runtimeGateErrAtStart
+    UxbError "Runtime service gate basarisiz: " & LocalizeErrorMessage(runtimeGateErrAtStart)
+    End 24
+End If
+UXBActiveBindPlanInit activeBindPlan
+watBackendMode = HasArg("--emit-wat") Or HasArg("--target-wat")
+wasmBackendMode = HasArg("--emit-wasm") Or HasArg("--target-wasm")
+browserBackendMode = HasArg("--target-browser") Or HasArg("--emit-browser")
+jsBackendMode = jsBackendMode Or watBackendMode Or wasmBackendMode Or browserBackendMode
+
+Dim outputPolicyErr As String
+If UXBValidateArtifactPathPolicy(programOutputOutPath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
+If UXBValidateArtifactPathPolicy(programOutputJsonOutPath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
+If UXBValidateArtifactPathPolicy(finalScreenJsonOutPath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
+If UXBValidateArtifactPathPolicy(x64OutPath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
+If UXBValidateArtifactPathPolicy(x64BuildOutPath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
+If UXBValidateArtifactPathPolicy(x64BuildExePath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
+If UXBValidateArtifactPathPolicy(runReportJsonOutPath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
+If UXBValidateArtifactPathPolicy(artifactReportJsonOutPath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
+If UXBValidateArtifactPathPolicy(messageLogOutPath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
+If UXBValidateArtifactPathPolicy(layerEventLogOutPath, outputPolicyErr) = 0 Then
+    UxbError LocalizeErrorMessage(outputPolicyErr)
+    End 2
+End If
+
+validateAllMode = HasArg("--validate-all")
+validateAllReportJsonOutPath = "reports\system_health_report.json"
+If GetArgValue("--validate-all-report-json-out", validateAllReportJsonOutPath) = 0 Then
+    validateAllReportJsonOutPath = "reports\system_health_report.json"
+End If
+
+codegenSourceMode = "AST"
+Dim codegenSourceArg As String
+Dim hasCodegenSourceArg As Integer
+hasCodegenSourceArg = 0
+If GetArgValue("--codegen-source", codegenSourceArg) <> 0 Then
+    codegenSourceMode = UCase(Trim(codegenSourceArg))
+    hasCodegenSourceArg = 1
+Else
+    codegenSourceMode = "AST"
+End If
+
+' Web emit canonical route: default to MIR unless user explicitly set another mode.
+If jsBackendMode <> 0 And hasCodegenSourceArg = 0 Then
+    codegenSourceMode = "MIR"
+End If
+
+If codegenSourceMode <> "AST" And codegenSourceMode <> "MIR" Then
+    UxbError "Gecersiz codegen source modu: " & codegenSourceMode
+    End 2
+End If
+
+If GetArgValue("--x64-mode", x64Mode) <> 0 Then
+    x64Mode = UCase(Trim(x64Mode))
+Else
+    x64Mode = IIf(enableMirX64 <> 0, "MIR", "AST")
+End If
+
+Select Case x64Mode
+Case "AST"
+    If x64EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0 Then
+        codegenSourceMode = "AST"
+        enableMirX64 = 0
+    End If
+Case "MIR"
+    If x64EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0 Then
+        codegenSourceMode = "MIR"
+        enableMirX64 = 1
+    End If
+Case "BOTH"
+    If x64EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0 Then
+        codegenSourceMode = "MIR"
+        enableMirX64 = 1
+        x64BothMode = 1
+    End If
+Case Else
+    UxbError "Gecersiz x64 mode: " & x64Mode & " (AST/MIR/BOTH beklenir)"
+    End 2
+End Select
+
+' UXB_FIX: web backend fail-close for AST codegen fallback.
+' UXB_REASON: JS/WAT/WASM/BROWSER emits must use verified MIR path.
+' UXB_TEST: run_adim14_backend_web_gate.ps1 / negative_js_ast_fallback
+If jsBackendMode <> 0 And codegenSourceMode <> "MIR" Then
+    UxbError "JS/WAT/WASM/BROWSER backend dogrulanmis MIR ister; AST fallback yasak"
+    End 2
+End If
+
+interpreterBackend = "AST"
+Dim backendArg As String
+If GetArgValue("--interpreter-backend", backendArg) <> 0 Then
+    interpreterBackend = UCase(Trim(backendArg))
+End If
+
+If interpreterBackend <> "AST" And interpreterBackend <> "MIR" And interpreterBackend <> "BOTH" Then
+    UxbError "Gecersiz interpreter backend: " & interpreterBackend & " (AST/MIR/BOTH beklenir)"
+    End 2
+End If
+
+' S-110: normal calismada adim siniri YOK (0 = sinirsiz); --max-steps N yalniz istege bagli
+' bir calisma butcesidir (yorumlayicilar: AST `run`, canonical-MIR). Bkz. common/step_budget.fbs.
+gUxbMaxSteps = 0
+Dim maxStepsArg As String
+If GetArgValue("--max-steps", maxStepsArg) <> 0 Then
+    Dim maxStepsText As String = Trim(maxStepsArg)
+    Dim maxStepsOk As Integer = IIf(maxStepsText <> "" And Len(maxStepsText) <= 18, 1, 0)
+    Dim maxStepsPos As Integer
+    For maxStepsPos = 1 To Len(maxStepsText)
+        If Mid(maxStepsText, maxStepsPos, 1) < "0" Or Mid(maxStepsText, maxStepsPos, 1) > "9" Then maxStepsOk = 0
+    Next maxStepsPos
+    If maxStepsOk = 0 Then
+        UxbError "--max-steps sifir veya pozitif bir tamsayi ister (0 = sinirsiz): " & maxStepsArg
+        End 2
+    End If
+    gUxbMaxSteps = ValLng(maxStepsText)
+End If
+
+If Trim(outputContractPaths.stdoutOutPath) <> "" Then
+    ' ABI10_GENERIC_EXEC_OUTPUT_FIX_20260711:
+    ' --stdout-out requests a generic CLI stdout artifact.  Do not erase an
+    ' explicit --program-output-out path; if the user did not ask for a separate
+    ' program output path, mirror stdout there for legacy capture behavior.
+    consoleMode = "CAPTURE"
+    If Trim(programOutputOutPath) = "" Then programOutputOutPath = outputContractPaths.stdoutOutPath
+End If
+If Trim(outputContractPaths.sessionLiveJsonOutPath) <> "" Then
+    sessionLiveJsonOutPath = outputContractPaths.sessionLiveJsonOutPath
+    hookTraceMode = 1
+End If
+
+UxbConsoleConfigure consoleMode, programOutputOutPath, programOutputJsonOutPath, finalScreenJsonOutPath
+
+UxbConfigure logOutPath, debugLogOutPath, quietMode, debugMode, traceMode, debugTokenDumpMode, ""
+UXBErrorSystemConfigure45 errorLogOutPath, messageLang, errorLanguageFilePath, errorToTerminal
+UXBMessageBusInit
+UXBMessageBusSetLogPath(messageLogOutPath)
+If UXBMessageLanguageSupported(messageLang) = 0 Then
+    UXBMessageBusSetLanguage("en")
+    UXBMessageEmit "I18N", "WARN", "UXB_I18N_LANG_UNSUPPORTED", "Gecersiz mesaj dili istendi; varsayilan en kullaniliyor", "Unsupported message language requested; falling back to English"
+    messageLang = "en"
+Else
+    messageLang = UXBNormalizeMessageLanguage(messageLang)
+    UXBMessageBusSetLanguage(messageLang)
+End If
+UXBLayerEventSetLogPath(layerEventLogOutPath)
+Dim startupMessage As String
+startupMessage = UXBMessageText("UXB_SESSION_STARTED", "uXBasic calistirildi", "uXBasic started")
+UxbInfo startupMessage
+UxbTraceInit sessionLiveJsonOutPath, layerTimingJsonOutPath, hookTraceMode, "main"
+UxbTraceMark "SESSION", "START", startupMessage
+
+If HasArg("--emit-surface-matrices") Or gUXBCli.route.verb = "mtx" Then
+    Dim matrixOutDir As String = "build\matrices"
+    GetArgValue("--out-dir", matrixOutDir)
+    Dim writeErr As String
+    If UXBAdim26EnsureParentDir(matrixOutDir & "\surface_backend_matrix.json") <> 0 Then
+        UXBAdim26WriteText matrixOutDir & "\surface_backend_matrix.json", UXBGenerateSurfaceBackendMatrixJson(), writeErr
+        UXBAdim26WriteText matrixOutDir & "\builtin_backend_matrix.json", UXBGenerateBuiltinBackendMatrixJson(), writeErr
+        UXBAdim26WriteText matrixOutDir & "\type_backend_matrix.json", UXBGenerateTypeBackendMatrixJson(), writeErr
+        UXBAdim26WriteText matrixOutDir & "\library_target_matrix.json", UXBGenerateLibraryTargetMatrixJson(), writeErr
+        UXBAdim26WriteText matrixOutDir & "\design_semantics_matrix.json", UXBGenerateDesignSemanticsMatrixJson(), writeErr
+    End If
+
+    If UXBValidateAllSurfaceBackendMatrices() = 0 Then
+        UxbError "surface backend matrix validation basarisiz (MISSING eleman bulundu)"
+        End 1
+    End If
+
+    UxbInfo "surface backend matrix validation PASS: 5 JSON matris dosyasi uretildi -> " & matrixOutDir
+    End 0
+End If
+
+If validateAllMode <> 0 Then
+    Dim validateAllCmd As String
+    validateAllCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File " & Chr(34) & "tools\\run_validate_all_gate.ps1" & Chr(34)
+    validateAllCmd &= " -OutJson " & Chr(34) & validateAllReportJsonOutPath & Chr(34)
+    validateAllCmd &= " -SkipBuild"
+    If HasArg("--validate-all-fail-fast") <> 0 Then validateAllCmd &= " -FailFast"
+
+    Dim validateAllExit As Integer
+    validateAllExit = Shell(validateAllCmd)
+    If validateAllExit <> 0 Then
+        UxbError "validate-all quality gate basarisiz (exit=" & LTrim(Str(validateAllExit)) & ")"
+        UxbError "Sistem saglik raporu: " & validateAllReportJsonOutPath
+        Dim validateAllEndCode As Integer
+        validateAllEndCode = IIf(validateAllExit > 0, validateAllExit, 1)
+        End validateAllEndCode
+    End If
+
+    UxbInfo "validate-all quality gate PASS"
+    UxbInfo "Sistem saglik raporu: " & validateAllReportJsonOutPath
+    End 0
+End If
+
+If execMemMode <> 0 And interopMode <> 0 Then
+    UxbError LocalizeErrorMessage("execmem and interop modes cannot be combined")
+    End 2
+End If
+
+Dim sourceArgErr As String
+If TryGetSourcePath(sourcePath, sourceArgErr) = 0 Then
+    UxbError LocalizeErrorMessage(sourceArgErr)
+    End 2
+End If
+If UXBValidateSourcePathPolicy(sourcePath, sourceArgErr) = 0 Then
+    UxbError LocalizeErrorMessage(sourceArgErr)
+    End 2
+End If
+UXBErrorSetSourcePath45 sourcePath
+UxbTraceSetSource sourcePath
+
+Dim frontendDiagnostics As UXBDiagnosticList
+UXBDiagnosticListInit frontendDiagnostics
+
+UxbTraceBegin "SOURCE_LOAD", sourcePath
+UXBLayerEventBegin "SOURCE_LOAD", sourcePath
+If LoadTextFile(sourcePath, sourceText) = 0 Then
+    UXBLayerEventDiagnostic "SOURCE_LOAD", "UXB_SOURCE_LOAD_FAILED", "Kaynak dosya okunamadi: " & sourcePath
+    UXBLayerEventEnd "SOURCE_LOAD", "fail", "Kaynak dosya okunamadi: " & sourcePath
+    UxbTraceEnd "SOURCE_LOAD", "FAIL", "Kaynak dosya okunamadi: " & sourcePath
+    Dim sourceLoadErrText As String
+    sourceLoadErrText = "Kaynak dosya okunamadi: " & sourcePath
+    UXBOutputContractPushFailureDiagnostic frontendDiagnostics, "source_load", sourceLoadErrText, sourcePath
+    If UXBOutputContractWriteDiagnosticList(outputContractPaths, frontendDiagnostics, outputContractErr) = 0 Then
+        UxbError "birlesik source-load diagnostics yazilamadi: " & outputContractErr
+    End If
+    UxbError sourceLoadErrText
+    End 2
+End If
+UxbTraceMetric "SOURCE_LOAD", "source_length", LTrim(Str(Len(sourceText)))
+UXBLayerEventEnd "SOURCE_LOAD", "ok", "source loaded"
+UxbTraceEnd "SOURCE_LOAD", "OK", "source loaded"
+
+'-- AST extraction / harness handling
+Dim extractSrcMode As Integer
+extractSrcMode = HasArg("--extract-src")
+
+Dim x64BuildSourcePath As String
+x64BuildSourcePath = sourcePath
+
+If debugMode Then UxbDebug "astJsonOut=" & astJsonOutPath
+If debugMode Then UxbDebug "astContractJsonOut=" & astContractJsonOutPath
+If debugMode Then UxbDebug "astContractCheck=" & Str(astContractCheckMode)
+If debugMode Then UxbDebug "sourcePath=" & sourcePath
+If debugMode Then UxbDebug "consoleMode=" & consoleMode
+If debugMode Then UxbDebug "programOutputOut=" & programOutputOutPath
+If debugMode Then UxbDebug "programOutputJsonOut=" & programOutputJsonOutPath
+If debugMode Then UxbDebug "finalScreenJsonOut=" & finalScreenJsonOutPath
+If debugMode Then UxbDebug "extractSrcMode=" & Str(extractSrcMode)
+If debugMode Then UxbDebug "source length=" & Str(Len(sourceText))
+
+' If input looks like a test harness, require explicit --extract-src
+If extractSrcMode = 0 Then
+    If IsHarnessSource(sourceText) <> 0 Then
+        UxbError "Girdi test harness gibi gorunuyor. --extract-src kullanarak ic kaynagi cikariniz"
+        End 2
+    End If
+Else
+    Dim extracted As String
+    UxbTraceBegin "EXTRACT_SRC", sourcePath
+    If ExtractInnerSource(sourceText, extracted) = 0 Then
+        UxbTraceEnd "EXTRACT_SRC", "FAIL", "harness icinden src bulunamadi"
+        UxbError "--extract-src: harness icinden src bulunamadi veya cikartilamadi"
+        End 2
+    End If
+    sourceText = extracted
+    UxbTraceMetric "EXTRACT_SRC", "extracted_length", LTrim(Str(Len(sourceText)))
+    UxbTraceEnd "EXTRACT_SRC", "OK", "inner source extracted"
+    If debugMode Then UxbDebug "extracted source length=" & Str(Len(sourceText))
+
+    If x64BuildMode <> 0 Then
+        Dim extractedBuildName As String
+        extractedBuildName = "__uxb_extract_" & SafeBaseName(sourcePath) & ".bas"
+        x64BuildSourcePath = PathDirName(sourcePath) & "\" & extractedBuildName
+        If SaveTextFile(x64BuildSourcePath, sourceText) = 0 Then
+            UxbError "Extracted build source yazilamadi: " & x64BuildSourcePath
+            End 2
+        End If
+    End If
+End If
+
+originalCompilerSourceText = sourceText
+
+Dim preprocessResult As PreprocessResult
+UxbTraceBegin "PREPROCESSOR", sourcePath
+UXBLayerEventBegin "PREPROCESSOR", sourcePath
+
+If PreprocessRun(sourceText, sourcePath, preprocessResult) = 0 Then
+    Dim preprocessErr As String
+    preprocessErr = LexerPreprocessGetError()
+    If Trim(preprocessErr) = "" Then preprocessErr = "preprocess failed"
+    UXBLayerEventDiagnostic "PREPROCESSOR", "UXB_PREPROCESS_FAILED", preprocessErr
+    UXBLayerEventEnd "PREPROCESSOR", "fail", preprocessErr
+    UxbTraceEnd "PREPROCESSOR", "FAIL", preprocessErr
+    UXBOutputContractPushFailureDiagnostic frontendDiagnostics, "preprocessor", preprocessErr, sourcePath
+    If UXBOutputContractWriteDiagnosticList(outputContractPaths, frontendDiagnostics, outputContractErr) = 0 Then
+        UxbError "birlesik preprocessor diagnostics yazilamadi: " & outputContractErr
+    End If
+    Dim failDiagErrPreprocessor As String
+    failDiagErrPreprocessor = ""
+    UXBOutputContractWriteFailureDiagnostics outputContractPaths, "preprocessor", preprocessErr, failDiagErrPreprocessor
+    UxbError "Preprocessor basarisiz: " & LocalizeErrorMessage(preprocessErr)
+    End 2
+End If
+
+sourceText = preprocessResult.expandedSource
+If UXBOutputContractWriteFrontendArtifacts(outputContractPaths, originalCompilerSourceText, sourceText, preprocessResult, outputContractErr) = 0 Then
+    UxbError "preprocess/source artifact yazilamadi: " & outputContractErr
+    End 22
+End If
+UxbTraceMetric "PREPROCESSOR", "expanded_length", LTrim(Str(Len(sourceText)))
+UXBLayerEventEnd "PREPROCESSOR", "ok", "expanded source ready"
+UxbTraceEnd "PREPROCESSOR", "OK", "expanded source ready"
+
+Dim As LexerState st
+UxbTraceBegin "LEXER", sourcePath
+UXBLayerEventBegin "LEXER", sourcePath
+LexerInitFromPreprocessed st, sourceText, sourcePath
+
+Dim lexerBridgeCount As Integer
+lexerBridgeCount = UXBLexerDiagnosticBridgePushAll(frontendDiagnostics, st.diagnostics)
+If lexerBridgeCount > 0 Then
+    If UXBOutputContractAfterLexer(outputContractPaths, st, outputContractErr) = 0 Then
+        UxbError outputContractErr
+        End 22
+    End If
+    If UXBOutputContractWriteDiagnosticList(outputContractPaths, frontendDiagnostics, outputContractErr) = 0 Then
+        UxbError "birlesik lexer diagnostics yazilamadi: " & outputContractErr
+        End 22
+    End If
+    UXBLayerEventDiagnostic "LEXER", "UXB_LEXER_DIAGNOSTICS", "lexer diagnostics count=" & LTrim(Str(lexerBridgeCount))
+    UxbError "Lexer diagnostic bridge hata buldu: " & LTrim(Str(lexerBridgeCount))
+    End 2
+End If
+
+Dim lexerNumericGateErr As String
+Dim lexerNumericGateCsv As String
+If UXBLexerNumericLiteralGate(st.tokens, lexerNumericGateErr, lexerNumericGateCsv) = 0 Then
+    SaveTextFile outputContractPaths.artifactRoot & "/frontend/lexer_numeric_literal_gate.csv", lexerNumericGateCsv
+    UXBLayerEventDiagnostic "LEXER", "UXB_LEXER_NUMERIC_LITERAL_GATE_FAIL", lexerNumericGateErr
+    UXBOutputContractPushFailureDiagnostic frontendDiagnostics, "lexer_numeric", lexerNumericGateErr, sourcePath
+    UXBOutputContractWriteDiagnosticList outputContractPaths, frontendDiagnostics, outputContractErr
+    UxbError lexerNumericGateErr
+    End 2
+Else
+    SaveTextFile outputContractPaths.artifactRoot & "/frontend/lexer_numeric_literal_gate.csv", lexerNumericGateCsv
+End If
+
+Dim parserSurfaceGateErr As String
+Dim parserSurfaceGateCsv As String
+If UXBParserSurfaceCoverageGate(parserSurfaceGateErr, parserSurfaceGateCsv) = 0 Then
+    SaveTextFile outputContractPaths.artifactRoot & "/frontend/parser_surface_coverage_gate.csv", parserSurfaceGateCsv
+    UXBLayerEventDiagnostic "PARSER", "UXB_SURFACE_PARSER_STATUS_MISSING", parserSurfaceGateErr
+    UXBOutputContractPushFailureDiagnostic frontendDiagnostics, "parser_surface", parserSurfaceGateErr, sourcePath
+    UXBOutputContractWriteDiagnosticList outputContractPaths, frontendDiagnostics, outputContractErr
+    UxbError parserSurfaceGateErr
+    End 2
+Else
+    SaveTextFile outputContractPaths.artifactRoot & "/frontend/parser_surface_coverage_gate.csv", parserSurfaceGateCsv
+End If
+
+If UXBOutputContractWriteParserSurfaceContract(outputContractPaths, parserSurfaceGateCsv, outputContractErr) = 0 Then
+    UxbError "parser surface contract json yazilamadi: " & outputContractErr
+    End 22
+End If
+
+If UXBOutputContractAfterLexer(outputContractPaths, st, outputContractErr) = 0 Then
+    UxbError outputContractErr
+    End 22
+End If
+UxbTraceMetric "LEXER", "token_count", LTrim(Str(st.tokens.count))
+UXBLayerEventEnd "LEXER", "ok", "tokens=" & LTrim(Str(st.tokens.count))
+UxbTraceEnd "LEXER", "OK", "tokens=" & LTrim(Str(st.tokens.count))
+
+    If debugMode Then
+        UxbDebug "Token sayisi: " & Str(st.tokens.count)
+        Dim As Integer ti
+        Dim As String tokDump
+        tokDump = ""
+        For ti = 0 To st.tokens.count - 1
+            Dim As Token tk
+            tk = st.tokens.items(ti)
+            Dim As String tokLine
+            tokLine = "[TOK] idx=" & Str(ti) & " kind=" & tk.kind & " lexeme='" & tk.lexeme & "' ln=" & Str(tk.lineNo) & " col=" & Str(tk.colNo)
+            tokDump &= tokLine & Chr(13) & Chr(10)
+        Next ti
+        If debugTokenDumpMode <> 0 Then
+            Dim tokenDumpPath As String
+            tokenDumpPath = outputContractPaths.buildRoot & "/logs/token_dump.txt"
+            If SaveTextFile(tokenDumpPath, tokDump) <> 0 Then
+                UxbInfo "Token dump yazildi: " & tokenDumpPath
+                If debugMode Then UxbDebug "Token dump yazildi (debug): " & tokenDumpPath
+            End If
+        End If
+    End If
+
+Dim As ParseState ps
+UxbTraceBegin "PARSER", sourcePath
+UXBLayerEventBegin "PARSER", sourcePath
+ParserInit ps, st
+ps.parseDebug = debugMode
+
+Dim parseOk As Integer
+parseOk = ParseProgram(ps)
+Dim parserBridgeCount As Integer
+If parseOk = 0 Then
+    parserBridgeCount = UXBParserDiagnosticBridgePushAll(frontendDiagnostics, ps, sourcePath)
+End If
+If UXBOutputContractAfterParser(outputContractPaths, ps, outputContractErr) = 0 Then
+    UxbError outputContractErr
+    End 22
+End If
+If UXBOutputContractWriteDiagnosticList(outputContractPaths, frontendDiagnostics, outputContractErr) = 0 Then
+    UxbError "birlesik parser diagnostics yazilamadi: " & outputContractErr
+    End 22
+End If
+If parseOk <> 0 Then
+    UxbTraceMetric "PARSER", "ast_node_count", LTrim(Str(ps.ast.count))
+    UXBLayerEventEnd "PARSER", "ok", "ast_nodes=" & LTrim(Str(ps.ast.count))
+    UxbTraceEnd "PARSER", "OK", "ast_nodes=" & LTrim(Str(ps.ast.count))
+End If
+If debugMode Then UxbDebug "parse ok=" & Str(parseOk)
+
+If parseOk = 0 Then
+    UXBLayerEventDiagnostic "PARSER", "UXB_PARSER_FAILED", ps.lastError
+    UXBLayerEventEnd "PARSER", "fail", ps.lastError
+    UxbTraceEnd "PARSER", "FAIL", ps.lastError
+    If ps.parseErrorCount > 0 Then
+        Dim parseReportPath As String
+        parseReportPath = outputContractPaths.buildRoot & "/logs/parse_errors.txt"
+
+        Dim parseReportText As String
+        parseReportText = BuildParseErrorReport(ps, sourcePath)
+
+        Dim parseReportMainOk As Integer
+        parseReportMainOk = SaveTextFile(parseReportPath, parseReportText)
+
+        ' YAMA 1.1: parse error raporu artik dist altina kopyalanmaz.
+        ' Tek resmi cikti: build/<run_id>/logs/parse_errors.txt.
+        If parseReportMainOk <> 0 Then
+            If debugMode Then UxbDebug "wrote parse report: " & parseReportPath
+            UxbError IIf(messageLang = "tr", "Ayristirma basarisiz: ", "Parsing failed: ") & LocalizeErrorMessage(ps.lastError)
+            UxbError IIf(messageLang = "tr", "Detayli parse hatalari yazildi: ", "Detailed parse errors written to: ") & parseReportPath
+        Else
+            UxbError IIf(messageLang = "tr", "Ayristirma basarisiz: ", "Parsing failed: ") & LocalizeErrorMessage(ps.lastError)
+            UxbError "Detayli parse raporu yazilamadi: " & parseReportPath
+        End If
+        Dim failDiagErr1 As String
+        failDiagErr1 = ""
+        UXBOutputContractWriteFailureDiagnostics outputContractPaths, "parser", ps.lastError, failDiagErr1
+        End 1
+    End If
+
+    UxbError IIf(messageLang = "tr", "Ayristirma basarisiz: ", "Parsing failed: ") & LocalizeErrorMessage(ps.lastError)
+    Dim failDiagErr2 As String
+    failDiagErr2 = ""
+    UXBOutputContractWriteFailureDiagnostics outputContractPaths, "parser", ps.lastError, failDiagErr2
+    End 1
+End If
+
+runSemanticPass = IIf(semanticMode <> 0 Or execMemMode <> 0 Or interopMode <> 0 Or x64EmitMode <> 0 Or x86EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0 Or jsBackendMode <> 0, 1, 0)
+
+If Trim(inventoryJsonOutPath) <> "" Then runSemanticPass = 1
+If Trim(mirModuleJsonOutPath) <> "" Then runSemanticPass = 1
+If (interpreterBackend = "MIR" Or interpreterBackend = "BOTH") And execMemMode <> 0 Then runSemanticPass = 1
+
+If runSemanticPass <> 0 Then
+    UxbTraceBegin "SEMANTIC", "SemanticAnalyze + HIRSemanticAnalyze"
+    UXBLayerEventBegin "SEMANTIC", sourcePath
+    Dim semanticErr As String
+    Dim semanticGateResult As UXBSemanticGateResult
+    If UXBSemanticRunAllGates(ps, semanticGateResult, activeBindPlan, semanticErr) = 0 Then
+        UXBLayerEventDiagnostic "SEMANTIC", "UXB_SEMANTIC_GATE_FAILED", semanticErr
+        UXBLayerEventEnd "SEMANTIC", "fail", semanticErr
+        UxbTraceEnd "SEMANTIC", "FAIL", semanticErr
+        UxbError "Semantic gate basarisiz: " & LocalizeErrorMessage(semanticErr)
+        UXBOutputContractPushFailureDiagnostic frontendDiagnostics, "semantic", semanticErr, sourcePath
+        If UXBOutputContractWriteDiagnosticList(outputContractPaths, frontendDiagnostics, outputContractErr) = 0 Then
+            UxbError "birlesik semantic diagnostics yazilamadi: " & outputContractErr
+        End If
+        Dim failDiagErr3 As String
+        failDiagErr3 = ""
+        UXBOutputContractWriteFailureDiagnostics outputContractPaths, "semantic", semanticErr, failDiagErr3
+        End 1
+    End If
+
+    Dim libraryExecutionTarget As String
+    If execMemMode <> 0 Then libraryExecutionTarget = interpreterBackend
+    If x64BuildMode <> 0 Or x64EmitMode <> 0 Or x86EmitMode <> 0 Or codegenMode <> 0 Or interopMode <> 0 Then libraryExecutionTarget = "NATIVE"
+    If jsBackendMode <> 0 Then libraryExecutionTarget = "JS"
+    If wasmBackendMode <> 0 Then libraryExecutionTarget = "WASM"
+    If watBackendMode <> 0 Then libraryExecutionTarget = "WAT"
+    If libraryExecutionTarget <> "" Then
+        If UXBLibraryTypeValidateExecutionTarget(libraryExecutionTarget, semanticErr) = 0 Then
+            UxbError semanticErr
+            UXBOutputContractWriteFailureDiagnostics outputContractPaths, "library_type", semanticErr, outputContractErr
+            End 1
+        End If
+    End If
+
+    If UXBActiveBindPlanWriteAll(activeBindPlan, outputContractPaths.activeBindPlanJsonOutPath, outputContractErr) = 0 Then
+        UxbError "active_bind_plan.json yazilamadi: " & outputContractErr
+        End 22
+    End If
+
+    If UXBOutputContractAfterSemantic(outputContractPaths, ps, outputContractErr) = 0 Then
+        UxbError outputContractErr
+        End 22
+    End If
+
+    If jsBackendMode <> 0 Then
+        Dim nativeGateErr As String
+        Dim nativeGateTarget As String
+        nativeGateTarget = "JS"
+        If browserBackendMode <> 0 Then
+            nativeGateTarget = "BROWSER"
+        ElseIf wasmBackendMode <> 0 Then
+            nativeGateTarget = "WASM"
+        ElseIf watBackendMode <> 0 Then
+            nativeGateTarget = "WAT"
+        End If
+
+        Dim nativeDummyMir As MIRModule
+        If UXBNativeSurfaceWebTargetGate(ps.ast, ps.rootNode, nativeDummyMir, 0, nativeGateTarget, nativeGateErr) = 0 Then
+            UXBLayerEventDiagnostic "SEMANTIC", UXBBackendNativeOnlyDiagnosticCodeForTargetAdim15(nativeGateTarget), nativeGateErr
+            UXBLayerEventEnd "SEMANTIC", "fail", nativeGateErr
+            UxbTraceEnd "SEMANTIC", "FAIL", nativeGateErr
+            UxbError nativeGateErr
+            UXBOutputContractPushFailureDiagnostic frontendDiagnostics, "native_only", nativeGateErr, sourcePath
+            If UXBOutputContractWriteDiagnosticList(outputContractPaths, frontendDiagnostics, outputContractErr) = 0 Then
+                UxbError "birlesik native-only diagnostics yazilamadi: " & outputContractErr
+            End If
+            Dim failDiagErr5 As String
+            failDiagErr5 = ""
+            UXBOutputContractWriteFailureDiagnostics outputContractPaths, "native_only", nativeGateErr, failDiagErr5
+            End 1
+        End If
+    End If
+    UXBLayerEventEnd "SEMANTIC", "ok", "semantic pass complete"
+    UxbTraceEnd "SEMANTIC", "OK", "semantic pass complete"
+End If
+
+If debugMode Then
+    UxbInfo "Ayristirma basarili. AST dugum sayisi: " & Str(ps.ast.count)
+    'ASTDump ps.ast, ps.rootNode
+End If
+
+If Trim(astJsonOutPath) <> "" Then
+    Dim astJsonErr As String
+    UxbTraceEnsureParentDir astJsonOutPath
+    Dim astWriteOk As Integer
+    astWriteOk = ASTWriteJson(ps.ast, ps.rootNode, astJsonOutPath, astJsonErr)
+    If debugMode Then UxbDebug "ASTWriteJson result=" & Str(astWriteOk)
+    If debugMode Then UxbDebug "astJsonErr=" & astJsonErr
+    If astWriteOk = 0 Then
+        UxbError "AST JSON cikti yazimi basarisiz: " & LocalizeErrorMessage(astJsonErr)
+        End 14
+    Else
+        If debugMode Then UxbInfo "AST JSON yazildi: " & astJsonOutPath
+        UxbTraceOutput "AST_JSON", "ast_json", astJsonOutPath
+    End If
+End If
+
+If Trim(astContractJsonOutPath) <> "" Or astContractCheckMode <> 0 Then
+    Dim astContractErr As String
+    If astContractCheckMode <> 0 Then
+        If UXBAstAdim04ValidateTree(ps.ast, ps.rootNode, astContractErr) = 0 Then
+            UxbError "AST sozlesme denetimi basarisiz: " & LocalizeErrorMessage(astContractErr)
+            End 17
+        End If
+        If debugMode Then UxbInfo "AST sozlesme denetimi PASS"
+    End If
+
+    If Trim(astContractJsonOutPath) <> "" Then
+        UxbTraceEnsureParentDir astContractJsonOutPath
+
+        If UXBAstWriteContractReportJson(ps.ast, ps.rootNode, astContractJsonOutPath, astContractErr) = 0 Then
+            UxbError "AST sozlesme JSON cikti yazimi basarisiz: " & LocalizeErrorMessage(astContractErr)
+            End 18
+        End If
+        If debugMode Then UxbInfo "AST sozlesme JSON yazildi: " & astContractJsonOutPath
+    End If
+    If Trim(astContractMatrixOutPath) <> "" Then
+        Dim astContractMatrixErr As String
+        If UXBAstAdim04WriteChildModelMatrixCsv(ps.ast, astContractMatrixOutPath, astContractMatrixErr) = 0 Then
+            UxbError "AST sozlesme matrix CSV yazimi basarisiz: " & LocalizeErrorMessage(astContractMatrixErr)
+            End 18
+        End If
+    End If
+End If
+
+If Trim(inventoryJsonOutPath) <> "" Then
+    Dim hirInv As HIRInventory
+    Dim jsonErr As String
+
+    HIRCollectInventory ps, hirInv
+    If HIRWriteInventoryJson(hirInv, inventoryJsonOutPath, jsonErr) = 0 Then
+        UxbError "IR/MIR/HIR envanter JSON cikti yazimi basarisiz: " & LocalizeErrorMessage(jsonErr)
+        End 8
+    End If
+
+    If debugMode Then
+        UxbInfo "IR/MIR/HIR envanter JSON yazildi: " & inventoryJsonOutPath
+    End If
+    UxbTraceOutput "HIR_JSON", "inventory_json", inventoryJsonOutPath
+End If
+
+If Trim(mirOpcodesJsonOutPath) <> "" Then
+    Dim mirOpsErr As String
+    UxbTraceBegin "MIR_SURFACE_JSON", mirOpcodesJsonOutPath
+    If MIRWriteOpcodeSurfaceJson(mirOpcodesJsonOutPath, mirOpsErr) = 0 Then
+        UxbError "MIR opcode JSON cikti yazimi basarisiz: " & LocalizeErrorMessage(mirOpsErr)
+        End 9
+    End If
+    UxbTraceOutput "MIR_SURFACE_JSON", "mir_opcodes_json", mirOpcodesJsonOutPath
+    UxbTraceEnd "MIR_SURFACE_JSON", "OK", "opcode surface json written"
+End If
+
+If Trim(pipelineJsonOutPath) <> "" Then
+    Dim pipelineErr As String
+    UxbTraceBegin "MIR_PIPELINE_JSON", pipelineJsonOutPath
+    If MIRWritePipelineFlowJson(pipelineJsonOutPath, pipelineErr) = 0 Then
+        UxbError "Pipeline JSON cikti yazimi basarisiz: " & LocalizeErrorMessage(pipelineErr)
+        End 10
+    End If
+    UxbTraceOutput "MIR_PIPELINE_JSON", "pipeline_json", pipelineJsonOutPath
+    UxbTraceEnd "MIR_PIPELINE_JSON", "OK", "pipeline json written"
+End If
+
+Dim needMirModule As Integer
+Dim mirModuleReady As Integer
+needMirModule = 0
+mirModuleReady = 0
+
+If execMemMode <> 0 And (interpreterBackend = "MIR" Or interpreterBackend = "BOTH") Then needMirModule = 1
+If codegenSourceMode = "MIR" And (x64EmitMode <> 0 Or x86EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0 Or jsBackendMode <> 0) Then needMirModule = 1
+If jsBackendMode <> 0 Or watBackendMode <> 0 Or wasmBackendMode <> 0 Or browserBackendMode <> 0 Then needMirModule = 1
+If Trim(mirModuleJsonOutPath) <> "" Then needMirModule = 1
+If mirVerifyRequested <> 0 Then needMirModule = 1
+If Trim(mirVerifyJsonOutPath) <> "" Then needMirModule = 1
+If Trim(mirFullJsonOutPath) <> "" Then needMirModule = 1
+If codegenSourceMode = "MIR" And Trim(x64CodegenPolicyJsonOutPath) <> "" Then needMirModule = 1
+
+' X64_AST_CLOSE_GATE_MIR_READY_FIX_20260711:
+' ADIM25 close-gate checks AST->MIR evidence.  The gate is also enabled for
+' x64 emit/build/codegen modes below, even when --codegen-source AST is used.
+' Therefore a pure AST-x64 build must still build semantic MIR for diagnostics
+' and coverage evidence; otherwise ADIM25 fails with "... FAIL_MIR_NOT_READY"
+' before x64 codegen is even tested.
+If x64EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0 Then needMirModule = 1
+
+Dim mirModule As MIRModule
+If needMirModule <> 0 Then
+    UxbTraceBegin "MIR_BUILD", "MIRBuildModuleFromAST + MIROptimizeModule"
+    UXBLayerEventBegin "MIR_BUILD", sourcePath
+    Dim mirBuildErr As String
+    Dim mirOptErr As String
+
+    If MIRBuildModuleFromAST(ps, mirModule, mirBuildErr) = 0 Then
+        UXBLayerEventDiagnostic "MIR_BUILD", "UXB_MIR_BUILD_FAILED", mirBuildErr
+        UXBLayerEventEnd "MIR_BUILD", "fail", mirBuildErr
+        UxbError "MIR build basarisiz: " & LocalizeErrorMessage(mirBuildErr)
+        UxbTraceEnd "MIR_BUILD", "FAIL", mirBuildErr
+        End 11
+    End If
+
+    If MIROptimizeModule(mirModule, mirOptErr) = 0 Then
+        UXBLayerEventDiagnostic "MIR_BUILD", "UXB_MIR_OPTIMIZE_FAILED", mirOptErr
+        UXBLayerEventEnd "MIR_BUILD", "fail", mirOptErr
+        UxbError "MIR optimize basarisiz: " & LocalizeErrorMessage(mirOptErr)
+        UxbTraceEnd "MIR_BUILD", "FAIL", mirOptErr
+        End 12
+    End If
+
+    mirModuleReady = 1
+
+    If Trim(outputContractPaths.semanticMirJsonOutPath) <> "" Then
+        Dim semanticMirJsonErr As String
+        If MIRWriteModuleJson(mirModule, outputContractPaths.semanticMirJsonOutPath, semanticMirJsonErr) = 0 Then
+            UxbError "semantic_mir.json yazilamadi: " & semanticMirJsonErr
+            End 16
+        End If
+        UXBActiveBindPlanAdd activeBindPlan, "MIR", "semantic_mir_json", "MIRWriteModuleJson", "PASS", outputContractPaths.semanticMirJsonOutPath
+    End If
+
+    UXBLayerEventEnd "MIR_BUILD", "ok", "mir module ready"
+    UxbTraceEnd "MIR_BUILD", "OK", "mir module ready"
+    If Trim(mirModuleJsonOutPath) <> "" Then
+        Dim mirModuleJsonErr As String
+        If MIRWriteModuleJson(mirModule, mirModuleJsonOutPath, mirModuleJsonErr) = 0 Then
+            UxbError "MIR module JSON cikti yazimi basarisiz: " & LocalizeErrorMessage(mirModuleJsonErr)
+            End 16
+        End If
+        If debugMode Then UxbInfo "MIR module JSON yazildi: " & mirModuleJsonOutPath
+    End If
+
+    ' ADIM11: MIR verifier artik zorunlu gate.
+    Dim As UXBMIRGateResult mirGateResult
+    Dim As String mirGateErr
+    If UXBMIRMandatoryGate(mirModule, mirGateResult, mirGateErr) = 0 Then
+        Dim semanticMirVerifyWriteErr As String
+        UXBMIRWriteGateJson mirGateResult, outputContractPaths.mirVerifySemanticJsonOutPath, semanticMirVerifyWriteErr
+        UxbError "MIR dogrulama basarisiz: " & mirGateErr
+        End 18
+    End If
+    mirVerifiedForPolicy = 1
+    If UXBMIRWriteGateJson(mirGateResult, outputContractPaths.mirVerifySemanticJsonOutPath, mirGateErr) = 0 Then
+        UxbError "mir_verify_semantic.json yazilamadi: " & mirGateErr
+        End 18
+    End If
+    UXBActiveBindPlanAdd activeBindPlan, "MIR", "semantic_mir_verify", "UXBMIRMandatoryGate/UXBMIRWriteGateJson", "PASS", outputContractPaths.mirVerifySemanticJsonOutPath
+
+    Dim canonicalBridge As UXBSemanticToCanonicalMIRBridgeResult
+    Dim canonicalBridgeErr As String
+    If UXBSemanticMIRToCanonicalMIR(mirModule, canonicalBridge, canonicalBridgeErr, 1) = 0 Then
+        Dim canonicalBridgeFailureText As String
+        Dim canonicalBridgeWriteErr As String
+        canonicalBridgeFailureText = Trim(canonicalBridgeErr)
+        If canonicalBridgeFailureText = "" Then canonicalBridgeFailureText = Trim(canonicalBridge.diagnosticsText)
+        If canonicalBridgeFailureText = "" Then canonicalBridgeFailureText = "canonical MIR bridge returned failure without diagnostics"
+        If UXBSemanticCanonicalMIRVerifyWriteJson(canonicalBridge, outputContractPaths.mirVerifyCanonicalJsonOutPath, canonicalBridgeWriteErr) = 0 Then
+            canonicalBridgeFailureText &= " | verify JSON write failed: " & canonicalBridgeWriteErr
+        End If
+        UxbError "Canonical MIR bridge/verify basarisiz: " & canonicalBridgeFailureText
+        End 18
+    End If
+    If UXBSemanticCanonicalMIRBridgeWriteJson(canonicalBridge, outputContractPaths.canonicalMirJsonOutPath, canonicalBridgeErr) = 0 Then
+        UxbError "canonical_mir.json yazilamadi: " & canonicalBridgeErr
+        End 18
+    End If
+    If UXBSemanticCanonicalMIRVerifyWriteJson(canonicalBridge, outputContractPaths.mirVerifyCanonicalJsonOutPath, canonicalBridgeErr) = 0 Then
+        UxbError "mir_verify_canonical.json yazilamadi: " & canonicalBridgeErr
+        End 18
+    End If
+    UXBActiveBindPlanAdd activeBindPlan, "MIR", "semantic_to_canonical_mir_bridge", "UXBSemanticMIRToCanonicalMIR", "PASS", outputContractPaths.canonicalMirJsonOutPath
+    UXBActiveBindPlanAdd activeBindPlan, "MIR", "canonical_mir_verify", "UXBSemanticCanonicalMIRVerifyWriteJson", "PASS", outputContractPaths.mirVerifyCanonicalJsonOutPath
+    UXBActiveBindPlanWriteAll activeBindPlan, outputContractPaths.activeBindPlanJsonOutPath, outputContractErr
+
+    If Trim(mirVerifyJsonOutPath) <> "" Then
+        Dim As String mirVerifyJsonErr
+        If UXBMIRWriteVerifyJson(mirModule, mirVerifyJsonOutPath, sourcePath, mirVerifyJsonErr) = 0 Then
+            UxbError "MIR verify JSON write failed: " & mirVerifyJsonErr
+            End 18
+        End If
+    End If
+
+    If Trim(mirFullJsonOutPath) <> "" Then
+        Dim As String mirFullJsonErr
+        If UXBMIRWriteFullJson(mirModule, mirFullJsonOutPath, sourcePath, mirFullJsonErr) = 0 Then
+            UxbError "MIR full JSON write failed: " & mirFullJsonErr
+            End 18
+        End If
+    End If
+
+    If codegenSourceMode = "MIR" And (x64EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0 Or Trim(x64CodegenPolicyJsonOutPath) <> "" Or enableMirX64 <> 0) Then
+        If mirVerifiedForPolicy = 0 Then
+            Dim As UXBMIRVerifyResult policyVerify
+            Dim As String policyVerifyErr
+            If UXBMIRVerifyModule(mirModule, policyVerify, policyVerifyErr) = 0 Then
+                UxbError "MIR verifier failed: " & policyVerifyErr
+                End 18
+            End If
+            If policyVerify.ok = 0 Then
+                UxbError "MIR verify errors: " & policyVerify.errorsText
+                End 18
+            End If
+            mirVerifiedForPolicy = 1
+        End If
+    End If
+    If UXBOutputContractAfterMir(outputContractPaths, mirModule, mirModuleReady, outputContractErr) = 0 Then
+        UxbError outputContractErr
+        End 22
+    End If
+End If
+
+Dim As Integer needX64Policy
+needX64Policy = IIf(x64EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0 Or Trim(x64CodegenPolicyJsonOutPath) <> "" Or enableMirX64 <> 0, 1, 0)
+
+If needX64Policy <> 0 Then
+    If codegenSourceMode = "MIR" Then
+        Dim x64RequiredGateErr As String
+        If UXBMIRX64RequiredOpcodeGateWriteJson(mirModule, outputContractPaths.mirX64RequiredOpcodeGateJsonOutPath, x64RequiredGateErr) = 0 Then
+            UXBLayerEventDiagnostic "BACKEND", "UXB_MIR_X64_OPCODE_EMITTER_MISSING", x64RequiredGateErr
+            UxbError x64RequiredGateErr
+            End 19
+        End If
+        UXBActiveBindPlanAdd activeBindPlan, "BACKEND_X64", "mir_x64_required_opcode_gate", "UXBMIRX64RequiredOpcodeGateWriteJson", "PASS", outputContractPaths.mirX64RequiredOpcodeGateJsonOutPath
+        UXBActiveBindPlanWriteAll activeBindPlan, outputContractPaths.activeBindPlanJsonOutPath, outputContractErr
+    End If
+
+    x64PolicyId = UXBX64DeterminePolicy( _
+        codegenSourceMode, _
+        mirModuleReady, _
+        mirVerifiedForPolicy, _
+        enableMirX64, _
+        x64CodegenPolicy _
+    )
+
+    If x64PolicyId = UXB_X64_POLICY_MIR Then
+        If x64CodegenPolicy.mirEmitterAvailable = 0 Then
+            UxbError x64CodegenPolicy.diagnosticText
+            End 19
+        End If
+    End If
+
+    If x64CodegenPolicy.fallbackUsed <> 0 Then
+        UxbInfo "x64 codegen policy: " & x64CodegenPolicy.policyName & " - " & x64CodegenPolicy.fallbackReason
+    End If
+
+    If Trim(x64CodegenPolicyJsonOutPath) <> "" Then
+        Dim As String policyJsonErr
+        If UXBX64WritePolicyJson(x64CodegenPolicy, x64CodegenPolicyJsonOutPath, sourcePath, policyJsonErr) = 0 Then
+            UxbError "x64 codegen policy JSON write failed: " & policyJsonErr
+            End 19
+        End If
+    End If
+End If
+
+If Trim(extfpPolicyJsonOutPath) <> "" Then
+    Dim As String extfpPolicyErr
+    If UXBExtFpWritePolicyJson(extfpRuntimeStatus, extfpPolicyJsonOutPath, extfpPolicyErr) = 0 Then
+        UxbError "extfp policy json write failed: " & extfpPolicyErr
+        End 20
+    End If
+End If
+
+If extfpRuntimeStatus.enabled <> 0 Then
+    If extfpRuntimeStatus.diagnosticsEnabled <> 0 Then
+        If Trim(extfpRuntimeStatus.messageText) <> "" Then
+            UxbInfo "extfp runtime diagnostics:" & Chr(10) & extfpRuntimeStatus.messageText
+        End If
+    End If
+
+    If extfpRuntimeStatus.strictMode <> 0 Then
+        If (x64EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0) Then
+            If extfpRuntimeStatus.fp80Available = 0 Or extfpRuntimeStatus.fp128Available = 0 Then
+                UxbError "extfp strict mode: required runtime DLL missing" & Chr(10) & extfpRuntimeStatus.messageText
+                End 21
+            End If
+        End If
+    End If
+End If
+
+Dim adim27CloseGate As UXBMainCloseGateResultAdim27
+Dim adim27WebTarget As String
+Dim adim27WebRequested As Integer
+Dim enableAdim25_26_27CloseGate As Integer
+adim27WebTarget = ""
+adim27WebRequested = 0
+enableAdim25_26_27CloseGate = IIf(HasArg("--adim25-27-close-gate") Or HasArg("--adim25-26-27-close-gate") Or validateAllMode <> 0 Or jsBackendMode <> 0 Or x64EmitMode <> 0 Or codegenMode <> 0 Or x64BuildMode <> 0, 1, 0)
+If browserBackendMode <> 0 Then
+    adim27WebTarget = "browser"
+    adim27WebRequested = 1
+ElseIf wasmBackendMode <> 0 Then
+    adim27WebTarget = "wasm"
+    adim27WebRequested = 1
+ElseIf watBackendMode <> 0 Then
+    adim27WebTarget = "wat"
+    adim27WebRequested = 1
+ElseIf jsBackendMode <> 0 Then
+    adim27WebTarget = "js"
+    adim27WebRequested = 1
+End If
+If enableAdim25_26_27CloseGate <> 0 Then
+    If UXBMainRunAstMirWebCliCloseGatesAdim27(ps, mirModule, mirModuleReady, adim27WebTarget, adim27WebRequested, adim27CloseGate, outputContractPaths.artifactRoot & "/close_gates") = 0 Then
+        UxbError "ADIM25/26/27 close gate failed: " & adim27CloseGate.errorsText
+        End 27
+    End If
+End If
+
+If adim27WebRequested <> 0 Then
+    Dim webNativeGateErr As String
+    Dim webNativeTarget As String
+    webNativeTarget = UCase(adim27WebTarget)
+    If webNativeTarget = "" Then webNativeTarget = "JS"
+    If UXBNativeSurfaceWebTargetGate(ps.ast, ps.rootNode, mirModule, mirModuleReady, webNativeTarget, webNativeGateErr) = 0 Then
+        UXBLayerEventDiagnostic "BACKEND", UXBBackendNativeOnlyDiagnosticCodeForTargetAdim15(webNativeTarget), webNativeGateErr
+        UxbError webNativeGateErr
+        Dim failDiagErrNativeBackend As String
+        failDiagErrNativeBackend = ""
+        UXBOutputContractWriteFailureDiagnostics outputContractPaths, "native_only", webNativeGateErr, failDiagErrNativeBackend
+        End 1
+    End If
+End If
+
+Dim webCli As UXBBackendWebCliArgs
+UXBBackendWebCliArgsInit webCli
+webCli.sourcePath = sourcePath
+webCli.codegenSourceMode = "MIR"
+webCli.verifyAlreadyPassed = mirVerifiedForPolicy
+' S-027: this path never executes the MIR interpreter, only the static MIR
+' verifier (tracked separately above as mirVerifiedForPolicy/verifyAlreadyPassed).
+' Claiming the interpreter "passed" here was always false; see backend_cli_args.fbs.
+webCli.mirInterpreterPassed = 0
+webCli.traceEnabled = traceMode
+webCli.jsEmitMode = IIf(HasArg("--emit-js") Or HasArg("--target-js"), 1, 0)
+webCli.watEmitMode = IIf(HasArg("--emit-wat") Or HasArg("--target-wat"), 1, 0)
+webCli.wasmEmitMode = IIf(HasArg("--emit-wasm") Or HasArg("--target-wasm"), 1, 0)
+webCli.browserEmitMode = IIf(HasArg("--target-browser") Or HasArg("--emit-browser"), 1, 0)
+If Trim(outputContractPaths.jsOutPath) <> "" Then webCli.jsOutPath = outputContractPaths.jsOutPath
+If Trim(outputContractPaths.jsRuntimeOutPath) <> "" Then webCli.jsRuntimeOutPath = outputContractPaths.jsRuntimeOutPath
+If Trim(outputContractPaths.watOutPath) <> "" Then webCli.watOutPath = outputContractPaths.watOutPath
+If Trim(outputContractPaths.wasmOutPath) <> "" Then webCli.wasmOutPath = outputContractPaths.wasmOutPath
+If Trim(outputContractPaths.htmlOutPath) <> "" Then webCli.htmlOutPath = outputContractPaths.htmlOutPath
+If Trim(outputContractPaths.manifestOutPath) <> "" Then webCli.manifestOutPath = outputContractPaths.manifestOutPath
+If webCli.browserEmitMode <> 0 Then
+    webCli.backendReportOutPath = outputContractPaths.backendMatrixJsonOutPath
+ElseIf webCli.jsEmitMode <> 0 Then
+    webCli.backendReportOutPath = outputContractPaths.jsReportJsonOutPath
+ElseIf webCli.wasmEmitMode <> 0 Or webCli.watEmitMode <> 0 Then
+    webCli.backendReportOutPath = outputContractPaths.wasmReportJsonOutPath
+ElseIf Trim(outputContractPaths.backendReportJsonOutPath) <> "" Then
+    webCli.backendReportOutPath = outputContractPaths.backendReportJsonOutPath
+End If
+If webCli.browserEmitMode <> 0 Then
+    webCli.webGateReportOutPath = outputContractPaths.artifactRoot & "/backend/browser/opcode_coverage.csv"
+ElseIf webCli.jsEmitMode <> 0 Then
+    webCli.webGateReportOutPath = outputContractPaths.artifactRoot & "/backend/js/opcode_coverage.csv"
+ElseIf webCli.wasmEmitMode <> 0 Or webCli.watEmitMode <> 0 Then
+    webCli.webGateReportOutPath = outputContractPaths.artifactRoot & "/backend/wasm/opcode_coverage.csv"
+Else
+    webCli.webGateReportOutPath = outputContractPaths.artifactRoot & "/backend/web_opcode_coverage.csv"
+End If
+Dim wat2wasmOverridePath As String
+wat2wasmOverridePath = ""
+If GetArgValue("--wat2wasm", wat2wasmOverridePath) <> 0 Then
+    webCli.wat2wasmPath = wat2wasmOverridePath
+ElseIf Trim(Environ("UXB_WAT2WASM")) <> "" Then
+    webCli.wat2wasmPath = Trim(Environ("UXB_WAT2WASM"))
+End If
+
+If UXBBackendWebCliArgsAnyRequested(webCli) <> 0 Then
+    Dim webResult As UXBBackendWebPipelineResult
+    If UXBBackendRunWebPipeline(ps.ast, ps.rootNode, mirModule, mirModuleReady, webCli, webResult) = 0 Then
+        UxbError "web backend pipeline basarisiz: " & webResult.errorsText
+        Dim failDiagErr6 As String
+        failDiagErr6 = ""
+        UXBOutputContractWriteFailureDiagnostics outputContractPaths, "backend", webResult.errorsText, failDiagErr6
+        End 23
+    End If
+    If UXBOutputContractAfterBackend(outputContractPaths, UXBBackendResultToJson(webResult.result), outputContractErr) = 0 Then
+        UxbError outputContractErr
+        End 22
+    End If
+End If
+
+If UXBOutputContractAfterRuntimeNoRun(outputContractPaths, execMemMode, outputContractErr) = 0 Then
+    UxbError outputContractErr
+    End 22
+End If
+
+#include once "main_program_entry_part2.fbs"

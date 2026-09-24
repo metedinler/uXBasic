@@ -1,0 +1,86 @@
+#ifndef UXB_PREPROCESS_LEXER_FBS
+#define UXB_PREPROCESS_LEXER_FBS
+
+' Preprocess lexer: only tokenizes %% directive lines.
+' Normal BASIC source lines are intentionally not tokenized here; they pass to
+' PreprocessResult.expandedSource and then to the real BASIC lexer.
+
+Const UXB_PRETOK_DIRECTIVE_MARK As String = "DIRECTIVE_MARK"
+Const UXB_PRETOK_COMMAND As String = "COMMAND"
+Const UXB_PRETOK_ARG_TEXT As String = "ARG_TEXT"
+Const UXB_PRETOK_EOL As String = "EOL"
+
+Type PreprocessToken
+    kind As String
+    rawText As String
+    canonicalText As String
+    lineNo As Integer
+    colNo As Integer
+    sourceFile As String
+End Type
+
+Type PreprocessTokenList
+    items(0 To 255) As PreprocessToken
+    count As Integer
+End Type
+
+Sub UXBPreTokenListInit(ByRef tokens As PreprocessTokenList)
+    tokens.count = 0
+End Sub
+
+Private Sub UXBPreTokenPush(ByRef tokens As PreprocessTokenList, ByRef kindText As String, ByRef rawText As String, ByRef canonicalText As String, ByVal lineNo As Integer, ByVal colNo As Integer, ByRef sourceFile As String)
+    If tokens.count > UBound(tokens.items) Then Exit Sub
+    With tokens.items(tokens.count)
+        .kind = kindText
+        .rawText = rawText
+        .canonicalText = canonicalText
+        .lineNo = lineNo
+        .colNo = colNo
+        .sourceFile = sourceFile
+    End With
+    tokens.count += 1
+End Sub
+
+Function UXBPreLexIsDirectiveLine(ByRef lineText As String, ByRef directiveOut As String) As Integer
+    Dim trimmed As String
+    trimmed = LTrim(lineText)
+    If Left(trimmed, 2) <> "%%" Then
+        directiveOut = ""
+        Return 0
+    End If
+    directiveOut = Trim(Mid(trimmed, 3))
+    Return 1
+End Function
+
+Function UXBPreLexTokenizeDirectiveLine(ByRef lineText As String, ByVal lineNo As Integer, ByRef sourceFile As String, ByRef tokens As PreprocessTokenList) As Integer
+    UXBPreTokenListInit tokens
+    Dim leadingSpaces As Integer
+    leadingSpaces = Len(lineText) - Len(LTrim(lineText))
+    Dim directive As String
+    If UXBPreLexIsDirectiveLine(lineText, directive) = 0 Then Return 0
+
+    Dim markCol As Integer
+    markCol = leadingSpaces + 1
+    UXBPreTokenPush tokens, UXB_PRETOK_DIRECTIVE_MARK, "%%", "%%", lineNo, markCol, sourceFile
+
+    Dim rest As String
+    rest = Trim(directive)
+    Dim sp As Integer
+    sp = InStr(rest, " ")
+    Dim head As String
+    Dim args As String
+    If sp <= 0 Then
+        head = UCase(rest)
+        args = ""
+    Else
+        head = UCase(Left(rest, sp - 1))
+        args = Trim(Mid(rest, sp + 1))
+    End If
+
+    If head <> "" Then UXBPreTokenPush tokens, UXB_PRETOK_COMMAND, head, UCase(head), lineNo, markCol + 2, sourceFile
+    If args <> "" Then UXBPreTokenPush tokens, UXB_PRETOK_ARG_TEXT, args, args, lineNo, markCol + 2 + Len(head) + 1, sourceFile
+    UXBPreTokenPush tokens, UXB_PRETOK_EOL, "", "", lineNo, Len(lineText) + 1, sourceFile
+    Return 1
+End Function
+
+#endif

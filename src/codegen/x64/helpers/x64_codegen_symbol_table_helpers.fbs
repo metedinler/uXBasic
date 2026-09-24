@@ -1,0 +1,402 @@
+﻿' Extracted from code_generator.fbs for wave-14 modular split (phase 2)
+
+Private Function X64NextLabel(ByRef cg As X64CodegenContext, ByRef prefixText As String) As String
+    gX64GlobalLabelCounter += 1
+    cg.labelSeed = gX64GlobalLabelCounter
+    Return "__uxb_" & prefixText & "_" & LTrim(Str(gX64GlobalLabelCounter))
+End Function
+
+Private Function X64MakeScopedKey(ByRef scopeText As String, ByRef symbolText As String) As String
+    Return X64Upper(Trim(scopeText)) & "::" & X64Upper(Trim(symbolText))
+End Function
+
+Private Function X64FindSymbol(ByRef cg As X64CodegenContext, ByRef keyText As String) As Integer
+    Dim i As Integer
+    For i = 0 To cg.symbolCount - 1
+        If gX64SymbolKeys(i) = keyText Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function X64FindRoutine(ByRef cg As X64CodegenContext, ByRef routineKey As String) As Integer
+    Dim i As Integer
+    For i = 0 To cg.routineCount - 1
+        If gX64RoutineKeys(i) = routineKey Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function X64FindGlobalSymbol(ByRef cg As X64CodegenContext, ByRef symbolText As String) As Integer
+    Dim keyText As String
+    keyText = X64Upper(Trim(symbolText))
+    If keyText = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To cg.globalCount - 1
+        If gX64GlobalKeys(i) = keyText Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function X64EnsureGlobalSymbol(ByRef cg As X64CodegenContext, ByRef symbolText As String, ByVal elemCount As Integer, ByVal elemBytes As Integer) As String
+    ' elemCount: number of elements; elemBytes: bytes per element (e.g., 8,10,4)
+    If elemCount < 1 Then elemCount = 1
+    If elemBytes <= 0 Then elemBytes = 8
+
+    Dim existing As Integer
+    existing = X64FindGlobalSymbol(cg, symbolText)
+    If existing <> -1 Then Return gX64GlobalLabels(existing)
+
+    Dim labelText As String
+    labelText = "__uxb_var_global_" & X64SanitizeSymbol(symbolText)
+
+    If cg.globalCount <= 4095 Then
+        gX64GlobalKeys(cg.globalCount) = X64Upper(Trim(symbolText))
+        gX64GlobalLabels(cg.globalCount) = labelText
+        gX64GlobalSlots(cg.globalCount) = elemCount
+        gX64GlobalElemBytes(cg.globalCount) = elemBytes
+        cg.globalCount += 1
+    End If
+
+    Select Case elemBytes
+    Case 10
+        If elemCount = 1 Then
+            X64EmitData cg, labelText & ": dt 0.0"
+        Else
+            X64EmitData cg, labelText & ": times " & X64ToStr(elemCount) & " dt 0.0"
+        End If
+    Case 8
+        If elemCount = 1 Then
+            X64EmitData cg, labelText & ": dq 0"
+        Else
+            X64EmitData cg, labelText & ": times " & X64ToStr(elemCount) & " dq 0"
+        End If
+    Case 4
+        If elemCount = 1 Then
+            X64EmitData cg, labelText & ": dd 0"
+        Else
+            X64EmitData cg, labelText & ": times " & X64ToStr(elemCount) & " dd 0"
+        End If
+    Case Else
+        ' Fallback: allocate total bytes as db
+        Dim totalBytes As Integer
+        totalBytes = elemCount * elemBytes
+        X64EmitData cg, labelText & ": times " & X64ToStr(totalBytes) & " db 0"
+    End Select
+
+    Return labelText
+End Function
+
+Private Function X64ExtractTypeNameFromNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As String
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return ""
+
+    Dim typeText As String
+    typeText = Trim(ps.ast.nodes(nodeIdx).value)
+    If typeText = "" Then typeText = Trim(ps.ast.nodes(nodeIdx).op)
+
+    If typeText = "" Then
+        Dim ch As Integer
+        ch = ps.ast.nodes(nodeIdx).firstChild
+        Do While ch <> -1
+            typeText = Trim(ps.ast.nodes(ch).value)
+            If typeText = "" Then typeText = Trim(ps.ast.nodes(ch).op)
+            If typeText = "" Then
+                Dim childKind As String
+                childKind = X64Upper(Trim(ps.ast.nodes(ch).kind))
+                If Left(childKind, 5) = "TYPE_" Then
+                    typeText = Mid(childKind, 6)
+                End If
+            End If
+            If typeText <> "" Then Exit Do
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    End If
+
+    If typeText = "" Then
+        Dim k As String
+        k = X64Upper(Trim(ps.ast.nodes(nodeIdx).kind))
+        If Left(k, 5) = "TYPE_" Then
+            typeText = Mid(k, 6)
+        End If
+    End If
+
+    Return X64Upper(Trim(typeText))
+End Function
+
+Private Function X64ExtractRoutineReturnType(ByRef ps As ParseState, ByVal routineNode As Integer) As String
+    If routineNode < 0 Or routineNode >= ps.ast.count Then Return ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNode).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) = "RETURN_TYPE" Then
+            Return X64ExtractTypeNameFromNode(ps, ch)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return ""
+End Function
+
+Private Function X64ExtractPropertyType(ByRef ps As ParseState, ByVal propertyNode As Integer) As String
+    If propertyNode < 0 Or propertyNode >= ps.ast.count Then Return ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(propertyNode).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) = "TYPE_REF" Then
+            Return X64ExtractTypeNameFromNode(ps, ch)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return ""
+End Function
+
+Private Function X64ExtractParamType(ByRef ps As ParseState, ByVal paramNode As Integer) As String
+    If paramNode < 0 Or paramNode >= ps.ast.count Then Return ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(paramNode).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) = "TYPE_REF" Then
+            Return X64ExtractTypeNameFromNode(ps, ch)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return ""
+End Function
+
+Private Sub X64RegisterRoutineSignatureAs(ByRef ps As ParseState, ByVal routineNode As Integer, ByRef cg As X64CodegenContext, ByRef routineName As String)
+    If routineNode < 0 Or routineNode >= ps.ast.count Then Exit Sub
+
+    routineName = Trim(routineName)
+    If routineName = "" Then Exit Sub
+
+    Dim routineKey As String
+    routineKey = X64Upper(routineName)
+
+    Dim argCount As Integer
+    argCount = 0
+    Dim paramTypes(0 To 63) As String
+    Dim clearIdx As Integer
+    For clearIdx = 0 To 63
+        paramTypes(clearIdx) = ""
+    Next clearIdx
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNode).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) <> "PARAM_DECL" Then Exit Do
+        If argCount <= 63 Then paramTypes(argCount) = X64ExtractParamType(ps, ch)
+        argCount += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Dim isFn As Integer
+    isFn = IIf(X64Upper(ps.ast.nodes(routineNode).kind) = "FUNCTION_STMT", 1, 0)
+
+    Dim i As Integer
+    i = X64FindRoutine(cg, routineKey)
+    If i <> -1 Then
+        gX64RoutineArgCounts(i) = argCount
+        gX64RoutineIsFunction(i) = isFn
+        Dim retTypeExisting As String
+        retTypeExisting = X64ExtractRoutineReturnType(ps, routineNode)
+        gX64RoutineReturnTypes(i) = retTypeExisting
+        For clearIdx = 0 To 63
+            gX64RoutineParamTypes(i, clearIdx) = ""
+        Next clearIdx
+        For clearIdx = 0 To argCount - 1
+            If clearIdx <= 63 Then gX64RoutineParamTypes(i, clearIdx) = X64Upper(Trim(paramTypes(clearIdx)))
+        Next clearIdx
+        Exit Sub
+    End If
+
+    If cg.routineCount > 1023 Then Exit Sub
+    gX64RoutineKeys(cg.routineCount) = routineKey
+    gX64RoutineArgCounts(cg.routineCount) = argCount
+    gX64RoutineIsFunction(cg.routineCount) = isFn
+    Dim retTypeNew As String
+    retTypeNew = X64ExtractRoutineReturnType(ps, routineNode)
+    gX64RoutineReturnTypes(cg.routineCount) = retTypeNew
+    For clearIdx = 0 To 63
+        gX64RoutineParamTypes(cg.routineCount, clearIdx) = ""
+    Next clearIdx
+    For clearIdx = 0 To argCount - 1
+        If clearIdx <= 63 Then gX64RoutineParamTypes(cg.routineCount, clearIdx) = X64Upper(Trim(paramTypes(clearIdx)))
+    Next clearIdx
+    cg.routineCount += 1
+End Sub
+
+Private Sub X64RegisterRoutineSignature(ByRef ps As ParseState, ByVal routineNode As Integer, ByRef cg As X64CodegenContext)
+    If routineNode < 0 Or routineNode >= ps.ast.count Then Exit Sub
+    Dim routineName As String
+    routineName = Trim(ps.ast.nodes(routineNode).value)
+    X64RegisterRoutineSignatureAs ps, routineNode, cg, routineName
+End Sub
+
+Private Function X64TryGetRoutineReturnType(ByRef cg As X64CodegenContext, ByRef routineName As String, ByRef returnTypeOut As String) As Integer
+    returnTypeOut = ""
+    Dim keyText As String
+    keyText = X64Upper(Trim(routineName))
+    If keyText = "" Then Return 0
+
+    Dim i As Integer
+    i = X64FindRoutine(cg, keyText)
+    If i = -1 Then Return 0
+
+    returnTypeOut = gX64RoutineReturnTypes(i)
+    Return 1
+End Function
+
+Private Function X64TryGetRoutineSignature(ByRef cg As X64CodegenContext, ByRef routineName As String, ByRef argCountOut As Integer, ByRef isFunctionOut As Integer) As Integer
+    argCountOut = -1
+    isFunctionOut = 0
+
+    Dim keyText As String
+    keyText = X64Upper(Trim(routineName))
+    If keyText = "" Then Return 0
+
+    Dim i As Integer
+    i = X64FindRoutine(cg, keyText)
+    If i = -1 Then Return 0
+
+    argCountOut = gX64RoutineArgCounts(i)
+    isFunctionOut = gX64RoutineIsFunction(i)
+    Return 1
+End Function
+
+Private Function X64TryGetRoutineParamType(ByRef cg As X64CodegenContext, ByRef routineName As String, ByVal paramIndex As Integer, ByRef typeNameOut As String) As Integer
+    typeNameOut = ""
+    If paramIndex < 0 Or paramIndex > 63 Then Return 0
+
+    Dim keyText As String
+    keyText = X64Upper(Trim(routineName))
+    If keyText = "" Then Return 0
+
+    Dim i As Integer
+    i = X64FindRoutine(cg, keyText)
+    If i = -1 Then Return 0
+
+    typeNameOut = X64Upper(Trim(gX64RoutineParamTypes(i, paramIndex)))
+    Return IIf(typeNameOut <> "", 1, 0)
+End Function
+
+Private Sub X64RegisterProcedureParams(ByRef ps As ParseState, ByVal routineNode As Integer, ByRef cg As X64CodegenContext)
+    cg.paramCount = 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNode).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) <> "PARAM_DECL" Then Exit Do
+
+        Dim paramName As String
+        paramName = Trim(ps.ast.nodes(ch).value)
+        If paramName <> "" Then
+            Dim pElemBytes As Integer
+            pElemBytes = 8
+            Dim pType As String
+            pType = ""
+            pType = X64ExtractParamType(ps, ch)
+            If pType <> "" Then
+                X64RegisterVarType cg, paramName, pType
+            Else
+                X64TryGetVarType cg, paramName, pType
+            End If
+            If pType <> "" Then
+                Select Case X64TypeToFloatKind(pType)
+                Case UXF_F80
+                    pElemBytes = 10
+                Case UXF_F128
+                    pElemBytes = 16
+                Case UXF_F32
+                    pElemBytes = 4
+                Case Else
+                    pElemBytes = 8
+                End Select
+            End If
+            X64EnsureLocalSlot(cg, paramName, 1, pElemBytes)
+            If cg.paramCount <= 255 Then
+                gX64ParamNames(cg.paramCount) = paramName
+                gX64ParamTypes(cg.paramCount) = X64Upper(Trim(pType))
+                cg.paramCount += 1
+            End If
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+End Sub
+
+Private Function X64EnsureSymbol(ByRef cg As X64CodegenContext, ByRef scopeText As String, ByRef symbolText As String, ByVal slotCount As Integer) As String
+    If slotCount < 1 Then slotCount = 1
+
+    Dim defaultElemBytes As Integer
+    defaultElemBytes = 8
+    Dim inferredType As String
+    inferredType = ""
+    If X64TryGetVarType(cg, symbolText, inferredType) <> 0 Then
+        Select Case X64TypeToFloatKind(inferredType)
+        Case UXF_F80
+            defaultElemBytes = 10
+        Case UXF_F128
+            defaultElemBytes = 16
+        Case UXF_F32
+            defaultElemBytes = 4
+        Case Else
+            defaultElemBytes = 8
+        End Select
+    End If
+
+    If X64Upper(Trim(scopeText)) = "GLOBAL" Then
+        Return X64EnsureGlobalSymbol(cg, symbolText, slotCount, defaultElemBytes)
+    End If
+
+    Dim keyText As String
+    keyText = X64MakeScopedKey(scopeText, symbolText)
+
+    Dim existing As Integer
+    existing = X64FindSymbol(cg, keyText)
+    If existing <> -1 Then Return gX64SymbolLabels(existing)
+
+    Dim labelText As String
+    labelText = "__uxb_var_" & X64SanitizeSymbol(scopeText) & "_" & X64SanitizeSymbol(symbolText)
+
+    gX64SymbolKeys(cg.symbolCount) = keyText
+    gX64SymbolLabels(cg.symbolCount) = labelText
+    cg.symbolCount += 1
+
+    Select Case defaultElemBytes
+    Case 4
+        X64EmitData cg, labelText & ": times " & X64ToStr(slotCount) & " dd 0"
+    Case 8
+        X64EmitData cg, labelText & ": times " & X64ToStr(slotCount) & " dq 0"
+    Case 10
+        X64EmitData cg, labelText & ": times " & X64ToStr(slotCount) & " dt 0.0"
+    Case Else
+        X64EmitData cg, labelText & ": times " & X64ToStr(slotCount * defaultElemBytes) & " db 0"
+    End Select
+    Return labelText
+End Function
+
+Private Function X64TryFindSymbolLabel(ByRef cg As X64CodegenContext, ByRef scopeText As String, ByRef symbolText As String, ByRef labelOut As String) As Integer
+    Dim keyText As String
+    keyText = X64MakeScopedKey(scopeText, symbolText)
+
+    Dim i As Integer
+    i = X64FindSymbol(cg, keyText)
+    If i <> -1 Then
+        labelOut = gX64SymbolLabels(i)
+        Return 1
+    End If
+
+    i = X64FindGlobalSymbol(cg, symbolText)
+    If i <> -1 Then
+        labelOut = gX64GlobalLabels(i)
+        Return 1
+    End If
+
+    labelOut = ""
+    Return 0
+End Function

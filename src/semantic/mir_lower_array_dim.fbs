@@ -1,0 +1,407 @@
+#ifndef UXB_MIR_LOWER_ARRAY_DIM_FBS
+#define UXB_MIR_LOWER_ARRAY_DIM_FBS
+
+' Multi-dimensional array support.
+'
+' MIR itself only ever had a single flat array kind (MIR_OP_DIM / MIR_OP_LOAD_INDEXED /
+' MIR_OP_STORE_INDEXED all take exactly one index). Rather than teaching every backend
+' (AST interpreter, MIR interpreter, x64, JS, WASM) a second, N-ary indexing scheme,
+' a multi-dimensional uXBasic array is lowered here, at the front end, into that same
+' flat array -- exactly the way a native compiler turns a(i,j) into *(base + i*ncols+j).
+' Every layer downstream of this file keeps working with a single index, unchanged.
+'
+' Scope: dimension bounds must be compile-time integer constants. This matches the
+' project's own tutorial examples (DIM tablo(10, 3) AS F64) and classic BASIC static
+' arrays. A DIM/REDIM whose multi-dimensional bounds are not constant gets a clear,
+' honest error instead of being silently mishandled or crashing deep in a backend.
+
+' Not a language limit -- real memory is the limit, not this number. This is just the
+' size of a fixed stack buffer used while computing strides; comfortably larger than
+' any array anyone will realistically declare, without resorting to dynamic arrays.
+Const UXB_MIR_ARRAY_MAX_DIMS As Integer = 255
+
+Private Function MIRArrayDeclBoundsNode(ByRef ps As ParseState, ByRef arrayName As String) As Integer
+    Dim target As String
+    target = UCase(Trim(arrayName))
+    Dim i As Integer
+    Dim foundBounds As Integer
+    foundBounds = -1
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+        If k <> "DIM_DECL" And k <> "REDIM_DECL" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> target Then Continue For
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(Trim(ps.ast.nodes(ch).kind)) = "DIM_BOUNDS" Then
+                foundBounds = ch
+                Exit Do
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+    Return foundBounds
+End Function
+
+' Public: how many dimensions was this name declared with? 1 if unknown/plain scalar
+' lookup fails, so every existing single-dim call site keeps its exact old behavior.
+Function MIRArrayDimCount(ByRef ps As ParseState, ByRef arrayName As String) As Integer
+    Dim boundsNode As Integer
+    boundsNode = MIRArrayDeclBoundsNode(ps, arrayName)
+    If boundsNode = -1 Then Return 1
+    Dim n As Integer
+    n = MIRChildCount(ps, boundsNode)
+    If n < 1 Then Return 1
+    Return n
+End Function
+
+Private Function MIRArrayDimConstBound(ByRef ps As ParseState, ByVal boundNode As Integer, ByRef lowerOut As Integer, ByRef upperOut As Integer, ByRef errText As String) As Integer
+    If boundNode = -1 Then errText = "mir: array bound missing": Return 0
+    If UCase(Trim(ps.ast.nodes(boundNode).kind)) = "RANGE_EXPR" Then
+        Dim loNode As Integer, hiNode As Integer
+        loNode = ps.ast.nodes(boundNode).left
+        hiNode = ps.ast.nodes(boundNode).right
+        If loNode = -1 Or hiNode = -1 Then errText = "mir: array range bound missing": Return 0
+        If UCase(ps.ast.nodes(loNode).kind) <> "NUMBER" Or UCase(ps.ast.nodes(hiNode).kind) <> "NUMBER" Then
+            errText = "mir: multi-dimensional array bounds must be compile-time integer constants"
+            Return 0
+        End If
+        lowerOut = ValInt(Trim(ps.ast.nodes(loNode).value))
+        upperOut = ValInt(Trim(ps.ast.nodes(hiNode).value))
+    Else
+        If UCase(ps.ast.nodes(boundNode).kind) <> "NUMBER" Then
+            errText = "mir: multi-dimensional array bounds must be compile-time integer constants"
+            Return 0
+        End If
+        lowerOut = 0
+        upperOut = ValInt(Trim(ps.ast.nodes(boundNode).value))
+    End If
+    If upperOut < lowerOut Then errText = "mir: array upper bound is smaller than lower bound": Return 0
+    Return 1
+End Function
+
+' Shared by DIM_STMT lowering (needs just the total flat element count) and by index
+' lowering (needs the per-dimension lower bound + stride too). lowerArr/strideArr are
+' fixed-size (UXB_MIR_ARRAY_MAX_DIMS) caller-owned buffers; only 0..dimCount-1 are set.
+Private Function MIRComputeArrayDimLayout(ByRef ps As ParseState, ByVal boundsNode As Integer, lowerArr() As Integer, strideArr() As Integer, ByRef dimCountOut As Integer, ByRef totalCountOut As Integer, ByRef errText As String) As Integer
+    dimCountOut = MIRChildCount(ps, boundsNode)
+    If dimCountOut < 1 Then errText = "mir: empty array bounds": Return 0
+    If dimCountOut > UXB_MIR_ARRAY_MAX_DIMS Then
+        errText = "mir: array has more than " & UXB_MIR_ARRAY_MAX_DIMS & " dimensions"
+        Return 0
+    End If
+
+    Dim extentArr(UXB_MIR_ARRAY_MAX_DIMS - 1) As Integer
+    Dim bNode As Integer
+    bNode = ps.ast.nodes(boundsNode).firstChild
+    Dim k As Integer
+    k = 0
+    Do While bNode <> -1
+        Dim lo As Integer, hi As Integer
+        If MIRArrayDimConstBound(ps, bNode, lo, hi, errText) = 0 Then Return 0
+        lowerArr(k) = lo
+        extentArr(k) = hi - lo + 1
+        If extentArr(k) <= 0 Then errText = "mir: invalid array bounds": Return 0
+        k += 1
+        bNode = ps.ast.nodes(bNode).nextSibling
+    Loop
+
+    ' stride(k) = product of extent(k+1 .. dimCount-1) -- row-major, last dimension
+    ' varies fastest, i.e. tablo(i, j) walks j contiguously for a fixed i.
+    strideArr(dimCountOut - 1) = 1
+    Dim si As Integer
+    For si = dimCountOut - 2 To 0 Step -1
+        If strideArr(si + 1) > 0 And extentArr(si + 1) > 2147483647 \ strideArr(si + 1) Then
+            errText = "mir: array size overflow"
+            Return 0
+        End If
+        strideArr(si) = strideArr(si + 1) * extentArr(si + 1)
+    Next si
+
+    If strideArr(0) > 0 And extentArr(0) > 2147483647 \ strideArr(0) Then
+        errText = "mir: array size overflow"
+        Return 0
+    End If
+    totalCountOut = strideArr(0) * extentArr(0)
+    Return 1
+End Function
+
+' ---------------------------------------------------------------------------------------------
+' S-101 (Mete decision 2026-09-20): LBOUND(array [, dimension]) / UBOUND(array [, dimension]).
+' Dimension is 1-based, default 1. Bounds known at compile time are folded to a constant here,
+' so every engine (native x64, JS, WAT) gets them with no runtime support at all; only arrays
+' whose bounds change or are computed at run time (a 1-D array with a runtime DIM bound or a
+' REDIM, an `arr AS T[]` parameter) lower to MIR_ARRAY_LBOUND / MIR_ARRAY_UBOUND (name, dimension).
+' ---------------------------------------------------------------------------------------------
+Private Function MIRArrayBoundNodeIsConst(ByRef ps As ParseState, ByVal boundNode As Integer) As Integer
+    If boundNode = -1 Then Return 0
+    If UCase(Trim(ps.ast.nodes(boundNode).kind)) = "RANGE_EXPR" Then
+        Dim loNode As Integer, hiNode As Integer
+        loNode = ps.ast.nodes(boundNode).left
+        hiNode = ps.ast.nodes(boundNode).right
+        If loNode = -1 Or hiNode = -1 Then Return 0
+        Return IIf(UCase(ps.ast.nodes(loNode).kind) = "NUMBER" And UCase(ps.ast.nodes(hiNode).kind) = "NUMBER", 1, 0)
+    End If
+    Return IIf(UCase(ps.ast.nodes(boundNode).kind) = "NUMBER", 1, 0)
+End Function
+
+' Text signature of a DIM_BOUNDS node: two declarations of one array have identical bounds
+' exactly when their signatures are equal.
+Private Function MIRArrayBoundsSignature(ByRef ps As ParseState, ByVal boundsNode As Integer) As String
+    Dim sig As String
+    sig = ""
+    Dim bNode As Integer
+    bNode = ps.ast.nodes(boundsNode).firstChild
+    Do While bNode <> -1
+        If UCase(Trim(ps.ast.nodes(bNode).kind)) = "RANGE_EXPR" Then
+            Dim loN As Integer, hiN As Integer
+            loN = ps.ast.nodes(bNode).left
+            hiN = ps.ast.nodes(bNode).right
+            sig &= "[" & IIf(loN <> -1, ps.ast.nodes(loN).kind & ":" & ps.ast.nodes(loN).value, "") & ".." & IIf(hiN <> -1, ps.ast.nodes(hiN).kind & ":" & ps.ast.nodes(hiN).value, "") & "]"
+        Else
+            sig &= "[0.." & ps.ast.nodes(bNode).kind & ":" & ps.ast.nodes(bNode).value & "]"
+        End If
+        bNode = ps.ast.nodes(bNode).nextSibling
+    Loop
+    Return sig
+End Function
+
+' Compile-time lower/upper bound of dimension `dimNo` (1-based) of a DIM_BOUNDS node.
+Private Function MIRArrayDimBoundsConstAt(ByRef ps As ParseState, ByVal boundsNode As Integer, ByVal dimNo As Integer, ByRef lowerOut As Integer, ByRef upperOut As Integer, ByRef errText As String) As Integer
+    Dim bNode As Integer
+    bNode = ps.ast.nodes(boundsNode).firstChild
+    Dim k As Integer
+    k = 1
+    Do While bNode <> -1
+        If k = dimNo Then Return MIRArrayDimConstBound(ps, bNode, lowerOut, upperOut, errText)
+        k += 1
+        bNode = ps.ast.nodes(bNode).nextSibling
+    Loop
+    errText = "mir: array dimension " & LTrim(Str(dimNo)) & " does not exist"
+    Return 0
+End Function
+
+' Public: LBOUND / UBOUND call expression -> constant or MIR_ARRAY_LBOUND / MIR_ARRAY_UBOUND.
+' handledOut = 0 when nodeIdx is not an LBOUND/UBOUND call (caller lowers it generically).
+Function MIRLowerArrayBoundsCall(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByVal blkIdx As Integer, ByRef tempSeed As Integer, ByRef valueNameOut As String, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    handledOut = 0
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
+    If UCase(Trim(ps.ast.nodes(nodeIdx).kind)) <> "CALL_EXPR" Then Return 1
+    Dim callName As String
+    callName = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+    If callName <> "LBOUND" And callName <> "UBOUND" Then Return 1
+    handledOut = 1
+    Dim wantUpper As Integer
+    wantUpper = IIf(callName = "UBOUND", 1, 0)
+
+    Dim argCount As Integer
+    argCount = MIRChildCount(ps, nodeIdx)
+    If argCount < 1 Or argCount > 2 Then
+        errText = "mir: " & callName & " expects (array [, dimension])"
+        Return 0
+    End If
+    Dim arrayNode As Integer
+    arrayNode = MIRChildAt(ps, nodeIdx, 0)
+    Dim arrayKind As String
+    arrayKind = UCase(Trim(ps.ast.nodes(arrayNode).kind))
+    If arrayKind <> "IDENT" And arrayKind <> "IDENTIFIER" And arrayKind <> "KEYWORD_REF" Then
+        errText = "mir: " & callName & " needs an array variable as its first argument"
+        Return 0
+    End If
+    Dim arrayName As String
+    arrayName = Trim(ps.ast.nodes(arrayNode).value)
+    Dim arrayKey As String
+    arrayKey = UCase(arrayName)
+
+    Dim dimNo As Integer
+    dimNo = 1
+    If argCount = 2 Then
+        Dim dimNode As Integer
+        dimNode = MIRChildAt(ps, nodeIdx, 1)
+        If UCase(Trim(ps.ast.nodes(dimNode).kind)) <> "NUMBER" Then
+            errText = "mir: " & callName & " dimension must be an integer literal"
+            Return 0
+        End If
+        dimNo = ValInt(Trim(ps.ast.nodes(dimNode).value))
+    End If
+    If dimNo < 1 Then
+        errText = "mir: " & callName & " dimension must be 1 or greater (dimensions are counted from 1)"
+        Return 0
+    End If
+
+    ' 1) an `arr AS T[]` parameter of the routine being lowered: bounds are the caller's array's
+    '    real bounds, known only at run time (one dimension).
+    Dim runtimeForm As Integer
+    runtimeForm = 0
+    If fnIdx >= 0 And fnIdx < module.functionCount Then
+        Dim pi As Integer
+        For pi = 0 To module.functions(fnIdx).paramVarCount - 1
+            If UCase(Trim(module.functions(fnIdx).paramVars(pi))) = arrayKey And Right(UCase(Trim(module.functions(fnIdx).paramVarTypes(pi))), 2) = "[]" Then
+                runtimeForm = 1
+                Exit For
+            End If
+        Next pi
+    End If
+
+    Dim foldLower As Integer, foldUpper As Integer
+    If runtimeForm <> 0 Then
+        If dimNo <> 1 Then
+            errText = "mir: " & callName & " dimension " & LTrim(Str(dimNo)) & " is out of range: array parameter " & arrayName & " has 1 dimension"
+            Return 0
+        End If
+    Else
+        ' 2) a DIM/REDIM-declared array: scan all of its declarations
+        Dim declCount As Integer, allConst As Integer, sameBounds As Integer
+        Dim firstBounds As Integer
+        Dim firstSig As String
+        declCount = 0: allConst = 1: sameBounds = 1: firstBounds = -1: firstSig = ""
+        Dim i As Integer
+        For i = 0 To ps.ast.count - 1
+            Dim k As String
+            k = UCase(Trim(ps.ast.nodes(i).kind))
+            If k <> "DIM_DECL" And k <> "REDIM_DECL" Then Continue For
+            If UCase(Trim(ps.ast.nodes(i).value)) <> arrayKey Then Continue For
+            Dim boundsNode As Integer
+            boundsNode = MIRFindChildByKind(ps, i, "DIM_BOUNDS")
+            If boundsNode = -1 Then Continue For
+            declCount += 1
+            Dim sigText As String
+            sigText = MIRArrayBoundsSignature(ps, boundsNode)
+            If declCount = 1 Then
+                firstBounds = boundsNode
+                firstSig = sigText
+            ElseIf sigText <> firstSig Then
+                sameBounds = 0
+            End If
+            Dim bChild As Integer
+            bChild = ps.ast.nodes(boundsNode).firstChild
+            Do While bChild <> -1
+                If MIRArrayBoundNodeIsConst(ps, bChild) = 0 Then allConst = 0
+                bChild = ps.ast.nodes(bChild).nextSibling
+            Loop
+        Next i
+        If declCount = 0 Then
+            errText = "mir: " & callName & ": " & arrayName & " is not a declared array"
+            Return 0
+        End If
+        Dim dimCount As Integer
+        dimCount = MIRChildCount(ps, firstBounds)
+        If dimNo > dimCount Then
+            errText = "mir: " & callName & " dimension " & LTrim(Str(dimNo)) & " is out of range: array " & arrayName & " has " & LTrim(Str(dimCount)) & " dimension(s)"
+            Return 0
+        End If
+        If dimCount = 1 Then
+            ' one dimension: constant only while it is declared once with literal bounds
+            If declCount = 1 And allConst <> 0 Then
+                If MIRArrayDimBoundsConstAt(ps, firstBounds, 1, foldLower, foldUpper, errText) = 0 Then Return 0
+            Else
+                runtimeForm = 1
+            End If
+        Else
+            ' several dimensions are flattened at lowering from ONE compile-time layout
+            If allConst = 0 Or sameBounds = 0 Then
+                errText = "mir: " & callName & " of multi-dimensional array " & arrayName & " needs one declaration with compile-time integer bounds"
+                Return 0
+            End If
+            If MIRArrayDimBoundsConstAt(ps, firstBounds, dimNo, foldLower, foldUpper, errText) = 0 Then Return 0
+        End If
+    End If
+
+    valueNameOut = MIRNextTemp(tempSeed)
+    MIRSetCurrentSourceFromAstNode ps, nodeIdx
+    If runtimeForm <> 0 Then
+        MIRAppendInstruction module, fnIdx, blkIdx, IIf(wantUpper <> 0, "MIR_ARRAY_UBOUND", "MIR_ARRAY_LBOUND"), valueNameOut, 2, arrayName, LTrim(Str(dimNo))
+    Else
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, valueNameOut, 1, LTrim(Str(IIf(wantUpper <> 0, foldUpper, foldLower)))
+    End If
+    MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "I64"
+    Return 1
+End Function
+
+' Public: total flat element count for a (possibly multi-dimensional) DIM_BOUNDS node.
+' Used by DIM_STMT lowering to size the underlying flat MIR array.
+Function MIRArrayFlatElementCount(ByRef ps As ParseState, ByVal boundsNode As Integer, ByRef totalCountOut As Integer, ByRef errText As String) As Integer
+    Dim lowerArr(UXB_MIR_ARRAY_MAX_DIMS - 1) As Integer
+    Dim strideArr(UXB_MIR_ARRAY_MAX_DIMS - 1) As Integer
+    Dim dimCount As Integer
+    Return MIRComputeArrayDimLayout(ps, boundsNode, lowerArr(), strideArr(), dimCount, totalCountOut, errText)
+End Function
+
+' Public: lowers an N-index array access callNode's children into ONE flat MIR index
+' value. For a plain 1-D array (n=1) this is byte-identical to lowering the single
+' index directly -- no behavior change for existing single-dimension code.
+Function MIRLowerFlatArrayIndex(ByRef ps As ParseState, ByVal callNode As Integer, ByRef arrayName As String, ByRef module As MIRModule, ByVal fnIdx As Integer, ByVal blkIdx As Integer, ByRef tempSeed As Integer, ByRef flatIndexOut As String, ByRef errText As String) As Integer
+    Dim n As Integer
+    n = MIRChildCount(ps, callNode)
+    If n = 1 Then
+        Return MIRLowerExprNode(ps, MIRChildAt(ps, callNode, 0), module, fnIdx, blkIdx, tempSeed, flatIndexOut, errText)
+    End If
+
+    Dim boundsNode As Integer
+    boundsNode = MIRArrayDeclBoundsNode(ps, arrayName)
+    If boundsNode = -1 Then
+        errText = "mir: " & LTrim(Str(n)) & "-dimensional index used on an array with no matching DIM declaration: " & arrayName
+        Return 0
+    End If
+
+    Dim lowerArr(UXB_MIR_ARRAY_MAX_DIMS - 1) As Integer
+    Dim strideArr(UXB_MIR_ARRAY_MAX_DIMS - 1) As Integer
+    Dim dimCount As Integer
+    Dim totalCount As Integer
+    If MIRComputeArrayDimLayout(ps, boundsNode, lowerArr(), strideArr(), dimCount, totalCount, errText) = 0 Then Return 0
+
+    If dimCount <> n Then
+        errText = "mir: " & arrayName & " was declared with " & LTrim(Str(dimCount)) & " dimension(s) but indexed with " & LTrim(Str(n))
+        Return 0
+    End If
+
+    Dim flatTmp As String
+    flatTmp = ""
+    Dim idx As Integer
+    Dim idxNode As Integer
+    idxNode = ps.ast.nodes(callNode).firstChild
+    idx = 0
+    Do While idxNode <> -1
+        Dim idxName As String
+        If MIRLowerExprNode(ps, idxNode, module, fnIdx, blkIdx, tempSeed, idxName, errText) = 0 Then Return 0
+
+        Dim relTmp As String
+        relTmp = idxName
+        If lowerArr(idx) <> 0 Then
+            Dim lowerConstTmp As String
+            lowerConstTmp = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, lowerConstTmp, 1, LTrim(Str(lowerArr(idx)))
+            relTmp = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_SUB, relTmp, 2, idxName, lowerConstTmp
+        End If
+
+        Dim termTmp As String
+        If strideArr(idx) = 1 Then
+            termTmp = relTmp
+        Else
+            Dim strideConstTmp As String
+            strideConstTmp = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, strideConstTmp, 1, LTrim(Str(strideArr(idx)))
+            termTmp = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_MUL, termTmp, 2, relTmp, strideConstTmp
+        End If
+
+        If flatTmp = "" Then
+            flatTmp = termTmp
+        Else
+            Dim sumTmp As String
+            sumTmp = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_ADD, sumTmp, 2, flatTmp, termTmp
+            flatTmp = sumTmp
+        End If
+
+        idx += 1
+        idxNode = ps.ast.nodes(idxNode).nextSibling
+    Loop
+
+    flatIndexOut = flatTmp
+    Return 1
+End Function
+
+#endif

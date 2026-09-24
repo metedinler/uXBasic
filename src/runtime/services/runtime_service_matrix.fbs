@@ -1,0 +1,207 @@
+#ifndef UXB_RUNTIME_SERVICE_MATRIX_FBS
+#define UXB_RUNTIME_SERVICE_MATRIX_FBS
+
+#include once "runtime_service_ids.fbs"
+#include once "runtime_service_record.fbs"
+#include once "runtime_service_signature.fbs"
+
+Function UXBRuntimeServiceFamily(ByVal serviceId As String) As String
+    Dim s As String = UCase(Trim(serviceId))
+    If Left(s, 6) = "RT_STR" Then Return "STRING"
+    If Left(s, 7) = "RT_MATH" Or s = RT_RANDOMIZE Or s = RT_RND Or s = RT_TIMER Then Return "MATH"
+    If Left(s, 6) = "RT_MEM" Or s = RT_PEEK Or s = RT_POKE Then Return "MEMORY"
+    If Left(s, 7) = "RT_FILE" Then Return "FILE"
+    If InStr(s, "DLL") > 0 Or InStr(s, "API") > 0 Or InStr(s, "INLINE") > 0 Then Return "FFI"
+    If s = RT_HOST_CALL Then Return "HOST"
+    If InStr(s, "BROWSER") > 0 Or InStr(s, "WEBGPU") > 0 Then Return "BROWSER"
+    If InStr(s, "WASM") > 0 Then Return "WASM_BRIDGE"
+    ' uXBasic service gate fix:
+    ' RT_LIBRARY_CALL and extended library calls must belong to LIBRARY family.
+    ' Otherwise the catalog sees a known service with an empty handler name and
+    ' fails before AST/SEM/INT tests with RUNTIME_HANDLER_MISSING.
+    Select Case s
+    Case RT_LIBRARY_CALL, RT_JSON_CALL, RT_REGEX_CALL, RT_HTTP_CALL, RT_OS_CALL, RT_LLAMA_CALL, RT_LUA_CALL, RT_PROLOG_CALL, RT_SQLITE_CALL, RT_ARCHIVE_CALL, RT_AUDIO_CALL, RT_CRYPTO_CALL, RT_CURL_CALL, RT_GRAPHICS_CALL, RT_IMAGE_CALL, RT_ONNX_CALL, RT_SERVER_CALL, RT_STRINGX_CALL
+        Return "LIBRARY"
+    End Select
+    If s = RT_PRINT Or s = RT_INPUT Or s = RT_CLS Or s = RT_COLOR Or s = RT_LOCATE Or s = RT_GETKEY Or s = RT_INKEY Then Return "CONSOLE"
+    If s = RT_EXTFP_CALL Then Return "EXTFP"
+    Return "DIAGNOSTIC"
+End Function
+
+Function UXBRuntimeServiceKnown(ByVal serviceId As String) As Integer
+    Select Case UCase(Trim(serviceId))
+    Case RT_PRINT, RT_INPUT, RT_CLS, RT_COLOR, RT_LOCATE, RT_GETKEY, RT_INKEY
+        Return 1
+    Case RT_STR_LEN, RT_STR_CONCAT, RT_STR_LEFT, RT_STR_RIGHT, RT_STR_MID, RT_STR_COMPARE, RT_STR_TO_UPPER, RT_STR_TO_LOWER, RT_STR_TRIM, RT_STR_LTRIM, RT_STR_RTRIM, RT_STR_SPACE, RT_STR_ASC, RT_STR_CHR, RT_STR_VAL, RT_STR_STR
+        Return 1
+    Case RT_MATH_ABS, RT_MATH_SQRT, RT_MATH_SIN, RT_MATH_COS, RT_MATH_TAN, RT_MATH_ATN, RT_MATH_LOG, RT_MATH_EXP, RT_MATH_SGN, RT_MATH_FIX, RT_MATH_INT, RT_RANDOMIZE, RT_RND, RT_TIMER
+        Return 1
+    Case RT_MEM_LOAD, RT_MEM_STORE, RT_MEM_COPY, RT_MEM_FILL, RT_MEM_READ_SEQUENCE, RT_MEM_WRITE_SEQUENCE, RT_PEEK, RT_POKE
+        Return 1
+    Case RT_FILE_OPEN, RT_FILE_CLOSE, RT_FILE_READ, RT_FILE_WRITE, RT_FILE_SEEK, RT_FILE_DELETE, RT_FILE_EOF, RT_FILE_LOF
+        Return 1
+    Case RT_DLL_LOAD, RT_DLL_CALL, RT_API_CALL, RT_INLINE_NATIVE
+        Return 1
+    Case RT_LIBRARY_CALL, RT_JSON_CALL, RT_REGEX_CALL, RT_HTTP_CALL, RT_OS_CALL, RT_LLAMA_CALL, RT_LUA_CALL, RT_PROLOG_CALL, RT_SQLITE_CALL
+        Return 1
+    Case RT_ARCHIVE_CALL, RT_AUDIO_CALL, RT_CRYPTO_CALL, RT_CURL_CALL, RT_GRAPHICS_CALL, RT_IMAGE_CALL, RT_ONNX_CALL, RT_SERVER_CALL, RT_STRINGX_CALL
+        Return 1
+    Case RT_BROWSER_CANVAS, RT_BROWSER_AUDIO, RT_BROWSER_INPUT, RT_BROWSER_FILE, RT_BROWSER_FETCH, RT_WEBGPU_CALL, RT_WASM_IMPORT_CALL, RT_WASM_EXPORT_CALL, RT_HOST_CALL, RT_EXTFP_CALL
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Function UXBRuntimeServiceTargetStatus(ByVal serviceId As String, ByVal targetName As String) As String
+    Dim fam As String = UXBRuntimeServiceFamily(serviceId)
+    Dim t As String = UCase(Trim(targetName))
+    Select Case fam
+    Case "FFI"
+        If t = "X64" Or t = "NATIVE" Or t = "X86" Then Return "NATIVE_ONLY"
+        Return "NATIVE_ONLY"
+    Case "BROWSER"
+        If t = "BROWSER" Or t = "JS" Then Return "BROWSER_ONLY"
+        Return "BROWSER_ONLY"
+    Case "WASM_BRIDGE"
+        If t = "WASM" Or t = "BROWSER" Then Return "RUNTIME_CALL"
+        Return "WASM_UNSUPPORTED"
+    Case Else
+        Return "IMPLEMENTED"
+    End Select
+End Function
+
+#include once "runtime_service_catalog.fbs"
+
+Type UXBRuntimeServiceMatrixRow
+    serviceId As String
+    familyName As String
+    handlerName As String
+    signatureText As String
+    returnType As String
+    argCount As Integer
+    argTypesText As String
+    supportedTargets As String
+    x64Status As String
+    jsStatus As String
+    wasmStatus As String
+    browserStatus As String
+    gateStatus As String
+End Type
+
+Type UXBRuntimeServiceMatrix
+    rows(Any) As UXBRuntimeServiceMatrixRow
+    count As Integer
+End Type
+
+Private Function UXBRuntimeSignatureArgsText(ByRef sig As UXBRuntimeServiceSignature) As String
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    For i = 0 To sig.argCount - 1
+        If i > 0 Then outText &= ","
+        outText &= sig.argTypes(i)
+    Next i
+    If sig.variadic <> 0 Then
+        If outText <> "" Then outText &= ","
+        outText &= "..."
+    End If
+    Return outText
+End Function
+
+Private Function UXBRuntimeParseContractSignature(ByVal signatureText As String, ByRef sig As UXBRuntimeServiceSignature) As Integer
+    UXBRuntimeServiceSignatureClear sig
+    Dim raw As String
+    raw = Trim(signatureText)
+    If raw = "" Then Return 0
+
+    Dim lp As Integer
+    Dim rp As Integer
+    lp = InStr(raw, "(")
+    rp = 0
+    Dim i As Integer
+    For i = Len(raw) To 1 Step -1
+        If Mid(raw, i, 1) = ")" Then
+            rp = i
+            Exit For
+        End If
+    Next i
+
+    If lp <= 1 Or rp <= lp Then Return 0
+
+    Dim retText As String
+    Dim argsText As String
+    retText = Trim(Left(raw, lp - 1))
+    argsText = Mid(raw, lp + 1, rp - lp - 1)
+    sig = UXBRuntimeSignatureMake(retText, argsText)
+    Return 1
+End Function
+
+Sub UXBRuntimeServiceMatrixInit(ByRef mx As UXBRuntimeServiceMatrix)
+    mx.count = 0
+    Erase mx.rows
+End Sub
+
+Private Sub UXBRuntimeServiceMatrixEnsure(ByRef mx As UXBRuntimeServiceMatrix, ByVal needCount As Integer)
+    If mx.count = 0 Then ReDim mx.rows(15)
+    If UBound(mx.rows) + 1 >= needCount Then Exit Sub
+    Dim cap As Integer
+    cap = UBound(mx.rows) + 1
+    If cap < 16 Then cap = 16
+    Do While cap < needCount
+        cap *= 2
+    Loop
+    ReDim Preserve mx.rows(cap - 1)
+End Sub
+
+Function UXBRuntimeServiceMatrixBuild(ByRef mx As UXBRuntimeServiceMatrix) As Integer
+    UXBRuntimeServiceMatrixInit mx
+
+    Dim cat As UXBRuntimeServiceCatalog
+    UXBRuntimeBuildCanonicalCatalog cat
+
+    Dim i As Integer
+    For i = 0 To cat.count - 1
+        UXBRuntimeServiceMatrixEnsure mx, mx.count + 1
+        Dim ByRef c As UXBRuntimeServiceContract = cat.records(i)
+        Dim sig As UXBRuntimeServiceSignature
+        Dim sigOk As Integer
+        sigOk = UXBRuntimeParseContractSignature(c.signatureText, sig)
+
+        With mx.rows(mx.count)
+            .serviceId = c.serviceId
+            .familyName = c.familyName
+            .handlerName = c.handlerName
+            .signatureText = c.signatureText
+            If sigOk <> 0 Then
+                .returnType = sig.returnType
+                .argCount = sig.argCount
+                .argTypesText = UXBRuntimeSignatureArgsText(sig)
+            Else
+                .returnType = ""
+                .argCount = -1
+                .argTypesText = ""
+            End If
+            .supportedTargets = c.supportedTargets
+            .x64Status = UXBRuntimeServiceTargetStatus(c.serviceId, "X64")
+            .jsStatus = UXBRuntimeServiceTargetStatus(c.serviceId, "JS")
+            .wasmStatus = UXBRuntimeServiceTargetStatus(c.serviceId, "WASM")
+            .browserStatus = UXBRuntimeServiceTargetStatus(c.serviceId, "BROWSER")
+            If UXBRuntimeServiceKnown(c.serviceId) = 0 Then
+                .gateStatus = "UXB_RUNTIME_SERVICE_UNKNOWN"
+            ElseIf Trim(c.handlerName) = "" Then
+                .gateStatus = "UXB_RUNTIME_SERVICE_HANDLER_MISSING"
+            ElseIf sigOk = 0 Then
+                .gateStatus = "UXB_RUNTIME_SERVICE_SIGNATURE_MISMATCH"
+            ElseIf Trim(c.supportedTargets) = "" Then
+                .gateStatus = "UXB_RUNTIME_SERVICE_TARGET_MISSING"
+            Else
+                .gateStatus = "PASS"
+            End If
+        End With
+        mx.count += 1
+    Next i
+
+    Return 1
+End Function
+
+#endif

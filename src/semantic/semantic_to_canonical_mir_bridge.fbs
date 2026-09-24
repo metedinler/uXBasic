@@ -1,0 +1,726 @@
+#ifndef UXB_SEMANTIC_TO_CANONICAL_MIR_BRIDGE_FBS
+#define UXB_SEMANTIC_TO_CANONICAL_MIR_BRIDGE_FBS
+
+#include once "mir_model.fbs"
+#include once "../mir/mir_module.fbs"
+#include once "../mir/mir_function.fbs"
+#include once "../mir/mir_basic_block.fbs"
+#include once "../mir/mir_instruction.fbs"
+#include once "../mir/verify/mir_verify.fbs"
+#include once "mir_opcode_signature.fbs"
+#include once "library_type_contract.fbs"
+#include once "../mir/json/mir_json_writer.fbs"
+#include once "../common/report_writer.fbs"
+
+Type UXBSemanticToCanonicalMIRBridgeResult
+    moduleRecord As UXBMIRModuleRecord
+    functions(Any) As UXBMIRFunctionRecord
+    functionCount As Integer
+    blocks(Any) As UXBMIRBasicBlockRecord
+    blockCount As Integer
+    instructions(Any) As UXBMIRInstructionRecord
+    instructionCount As Integer
+    invalidInstructionCount As Integer
+    missingSourceLocationCount As Integer
+    missingAstNodeCount As Integer
+    operandTypeInferredCount As Integer
+    verifyStatus As String
+    diagnosticsText As String
+End Type
+
+Private Sub UXBSemanticToCanonicalMIRBridgeInit(ByRef r As UXBSemanticToCanonicalMIRBridgeResult)
+    r.moduleRecord.name = ""
+    r.moduleRecord.functionCount = 0
+    r.moduleRecord.globalCount = 0
+    r.moduleRecord.importCount = 0
+    r.moduleRecord.verifyStatus = "PENDING"
+    r.functionCount = 0
+    r.blockCount = 0
+    r.instructionCount = 0
+    r.invalidInstructionCount = 0
+    r.missingSourceLocationCount = 0
+    r.missingAstNodeCount = 0
+    r.operandTypeInferredCount = 0
+    r.verifyStatus = "PENDING"
+    r.diagnosticsText = ""
+    ReDim r.functions(0)
+    ReDim r.blocks(0)
+    ReDim r.instructions(0)
+End Sub
+
+Private Sub UXBSemanticToCanonicalMIRAddFunction(ByRef r As UXBSemanticToCanonicalMIRBridgeResult, ByRef fn As MIRFunction)
+    Dim idx As Integer
+    idx = r.functionCount
+    If idx = 0 Then
+        ReDim r.functions(0)
+    Else
+        ReDim Preserve r.functions(idx)
+    End If
+    r.functions(idx).name = fn.name
+    r.functions(idx).returnType = "TYPE_INFERRED"
+    r.functions(idx).blockCount = fn.blockCount
+    r.functions(idx).paramCount = fn.paramVarCount
+    r.functions(idx).localCount = fn.localVarCount
+    r.functionCount = idx + 1
+End Sub
+
+Private Sub UXBSemanticToCanonicalMIRAddBlock(ByRef r As UXBSemanticToCanonicalMIRBridgeResult, ByRef blk As MIRBasicBlock)
+    Dim idx As Integer
+    idx = r.blockCount
+    If idx = 0 Then
+        ReDim r.blocks(0)
+    Else
+        ReDim Preserve r.blocks(idx)
+    End If
+    r.blocks(idx).id = blk.id
+    r.blocks(idx).name = "B" & LTrim(Str(blk.id))
+    r.blocks(idx).instructionCount = blk.instructionCount
+    r.blocks(idx).isEntry = blk.isEntry
+    r.blocks(idx).isExit = blk.isExit
+    r.blockCount = idx + 1
+End Sub
+
+
+Private Function UXBSemanticMIROperandTypeGuess(ByRef operandText As String) As String
+    Dim t As String
+    t = Trim(operandText)
+    If t = "" Then Return UXB_MIR_TYPE_VOID
+    If Len(t) >= 2 And Left(t, 1) = Chr(34) And Right(t, 1) = Chr(34) Then Return UXB_MIR_TYPE_STRING
+
+    Dim i As Integer
+    Dim numericOk As Integer
+    numericOk = 1
+    For i = 1 To Len(t)
+        Dim c As String
+        c = Mid(t, i, 1)
+        If i = 1 And (c = "+" Or c = "-") Then Continue For
+        If c < "0" Or c > "9" Then
+            numericOk = 0
+            Exit For
+        End If
+    Next i
+    If numericOk <> 0 Then Return UXB_MIR_TYPE_I64
+    Return UXB_MIR_TYPE_INFERRED
+End Function
+
+Private Function UXBSemanticMIRInstructionMetaOk(ByRef inst As MIRIRInstruction) As Integer
+    If Trim(inst.opcode) = "" Then Return 0
+    If inst.operandCount < 0 Or inst.operandCount > 16 Then Return 0
+    Return 1
+End Function
+
+Private Function UXBSemanticMIRParameterizedExecutionType(ByVal typeText As String) As String
+    Dim t As String = UCase(Trim(typeText))
+    Dim openPos As Integer = InStr(t, "(")
+    If openPos <= 1 Or Right(t, 1) <> ")" Then Return ""
+
+    Dim precisionText As String = Trim(Mid(t, openPos + 1, Len(t) - openPos - 1))
+    If precisionText = "" Then Return ""
+    Dim i As Integer
+    For i = 1 To Len(precisionText)
+        Dim ch As String = Mid(precisionText, i, 1)
+        If ch < "0" Or ch > "9" Then Return ""
+    Next i
+    If ValInt(precisionText) <= 0 Then Return ""
+
+    Dim baseType As String = UXBMIRStep4CanonicalTypeName(Left(t, openPos - 1))
+    Select Case baseType
+    Case UXB_MIR_TYPE_BIGINT, UXB_MIR_TYPE_BIGF, UXB_MIR_TYPE_BIGD, UXB_MIR_TYPE_BALL
+        Return baseType
+    End Select
+    Return ""
+End Function
+
+Private Function UXBSemanticMIRIsIdentifierType(ByVal typeText As String) As Integer
+    Dim t As String = Trim(typeText)
+    If t = "" Then Return 0
+    Dim i As Integer
+    For i = 1 To Len(t)
+        Dim ch As String = UCase(Mid(t, i, 1))
+        If (ch < "A" Or ch > "Z") And (ch < "0" Or ch > "9") And ch <> "_" And ch <> "." Then Return 0
+        If i = 1 And ch >= "0" And ch <= "9" Then Return 0
+    Next i
+    Return 1
+End Function
+
+Private Function UXBSemanticMIRModuleDeclaresNamedType(ByRef src As MIRModule, ByVal typeText As String) As Integer
+    Dim key As String = UCase(Trim(typeText))
+    If UXBSemanticMIRIsIdentifierType(key) = 0 Then Return 0
+
+    Dim i As Integer
+    For i = 0 To src.globalVarCount - 1
+        If UCase(Trim(src.globalVarTypes(i))) = key Then Return 1
+    Next i
+
+    Dim fi As Integer
+    For fi = 0 To src.functionCount - 1
+        For i = 0 To src.functions(fi).localVarCount - 1
+            If UCase(Trim(src.functions(fi).localVarTypes(i))) = key Then Return 1
+        Next i
+        For i = 0 To src.functions(fi).paramVarCount - 1
+            If UCase(Trim(src.functions(fi).paramVarTypes(i))) = key Then Return 1
+        Next i
+        If UCase(Trim(src.functions(fi).returnType)) = key Then Return 1
+    Next fi
+    Return 0
+End Function
+
+Private Function UXBSemanticMIRExecutionType(ByRef src As MIRModule, ByVal typeText As String) As String
+    Dim canonicalType As String = UXBMIRStep4CanonicalTypeName(typeText)
+    If UXBMIRStep4TypeIsKnown(canonicalType) <> 0 Then Return canonicalType
+
+    Dim parameterizedType As String = UXBSemanticMIRParameterizedExecutionType(typeText)
+    If parameterizedType <> "" Then Return parameterizedType
+
+    Dim libraryTypeErr As String
+    If gUXBLibraryTypeCount = 0 Then UXBLibraryTypeEnsureReferenceSet libraryTypeErr
+    If UXBLibraryTypeRegistryFind(typeText) >= 0 Then Return canonicalType
+
+    If UXBSemanticMIRModuleDeclaresNamedType(src, typeText) <> 0 Then Return UXB_MIR_TYPE_OBJECT
+    Return canonicalType
+End Function
+
+Private Function UXBSemanticCanonicalMIRTryParseNonNegativeInt(ByRef textValue As String, ByRef valueOut As Integer) As Integer
+    Dim t As String
+    t = Trim(textValue)
+    If t = "" Then Return 0
+    Dim i As Integer
+    For i = 1 To Len(t)
+        Dim ch As String
+        ch = Mid(t, i, 1)
+        If ch < "0" Or ch > "9" Then Return 0
+    Next i
+    valueOut = Val(t)
+    If valueOut < 0 Then Return 0
+    Return 1
+End Function
+
+Private Function UXBSemanticCanonicalMIRObjectContractOk(ByRef outInst As UXBMIRInstructionRecord, ByRef errText As String) As Integer
+    Dim op As String
+    op = UXBMIRStep4CanonicalOpcode(outInst.opcode)
+    Select Case op
+    Case "MIR_OBJECT_NEW"
+        If outInst.operandCount < 2 Or Trim(outInst.operands(0)) = "" Then
+            errText = "canonical OOP MIR: MIR_OBJECT_NEW requires class name and class size"
+            Return 0
+        End If
+        Dim classSize As Integer
+        If UXBSemanticCanonicalMIRTryParseNonNegativeInt(outInst.operands(1), classSize) = 0 Or classSize < 8 Then
+            errText = "canonical OOP MIR: MIR_OBJECT_NEW class size is invalid"
+            Return 0
+        End If
+    Case "MIR_FIELD_LOAD"
+        If outInst.operandCount <> 3 Or Trim(outInst.operands(0)) = "" Or Trim(outInst.operands(1)) = "" Then
+            errText = "canonical OOP MIR: MIR_FIELD_LOAD requires receiver, field and offset"
+            Return 0
+        End If
+        Dim loadOffset As Integer
+        If UXBSemanticCanonicalMIRTryParseNonNegativeInt(outInst.operands(2), loadOffset) = 0 Then
+            errText = "canonical OOP MIR: MIR_FIELD_LOAD offset is invalid"
+            Return 0
+        End If
+    Case "MIR_FIELD_STORE"
+        If outInst.operandCount <> 4 Or Trim(outInst.operands(0)) = "" Or Trim(outInst.operands(1)) = "" Then
+            errText = "canonical OOP MIR: MIR_FIELD_STORE requires receiver, field, value and offset"
+            Return 0
+        End If
+        Dim storeOffset As Integer
+        If UXBSemanticCanonicalMIRTryParseNonNegativeInt(outInst.operands(3), storeOffset) = 0 Then
+            errText = "canonical OOP MIR: MIR_FIELD_STORE offset is invalid"
+            Return 0
+        End If
+    Case "MIR_DELETE_OBJECT"
+        If outInst.operandCount <> 1 Or Trim(outInst.operands(0)) = "" Then
+            errText = "canonical OOP MIR: MIR_DELETE_OBJECT requires an object receiver"
+            Return 0
+        End If
+    Case "MIR_METHOD_CALL"
+        If outInst.operandCount < 4 Then
+            errText = "canonical OOP MIR: MIR_METHOD_CALL requires target, receiver, method and receiver type"
+            Return 0
+        End If
+        If Trim(outInst.operands(0)) = "" Or Left(UCase(Trim(outInst.operands(0))), Len("__VT_SLOT__:")) = "__VT_SLOT__:" Or Left(UCase(Trim(outInst.operands(0))), Len("__METHOD_CALL__:")) = "__METHOD_CALL__:" Then
+            errText = "canonical OOP MIR: MIR_METHOD_CALL must contain a resolved direct target"
+            Return 0
+        End If
+        If Trim(outInst.operands(2)) = "" Or Trim(outInst.operands(3)) = "" Then
+            errText = "canonical OOP MIR: MIR_METHOD_CALL method/receiver type is missing"
+            Return 0
+        End If
+        ' An empty receiver is the canonical representation of a STATIC
+        ' method/property accessor. Instance calls must carry a receiver.
+        If Trim(outInst.operands(1)) = "" And InStrRev(UCase(Trim(outInst.operands(0))), "_") <= 1 Then
+            errText = "canonical OOP MIR: static method target is malformed"
+            Return 0
+        End If
+    Case "MIR_VIRTUAL_CALL"
+        If outInst.operandCount < 4 Then
+            errText = "canonical OOP MIR: MIR_VIRTUAL_CALL requires vtable target, receiver, method and receiver type"
+            Return 0
+        End If
+        Dim vtTarget As String
+        vtTarget = UCase(Trim(outInst.operands(0)))
+        If Left(vtTarget, 12) <> "__VT_SLOT__:" Then
+            errText = "canonical OOP MIR: MIR_VIRTUAL_CALL target must be __VT_SLOT__:class:slot"
+            Return 0
+        End If
+        Dim vtSep As Integer
+        vtSep = InStrRev(vtTarget, ":")
+        If vtSep <= 12 Then
+            errText = "canonical OOP MIR: MIR_VIRTUAL_CALL vtable slot target is malformed"
+            Return 0
+        End If
+        Dim vtSlot As Integer
+        If UXBSemanticCanonicalMIRTryParseNonNegativeInt(Mid(vtTarget, vtSep + 1), vtSlot) = 0 Then
+            errText = "canonical OOP MIR: MIR_VIRTUAL_CALL vtable slot is invalid"
+            Return 0
+        End If
+        If Trim(outInst.operands(1)) = "" Or Trim(outInst.operands(2)) = "" Then
+            errText = "canonical OOP MIR: MIR_VIRTUAL_CALL receiver/method is missing"
+            Return 0
+        End If
+    End Select
+    Return 1
+End Function
+
+Private Function UXBSemanticMIRInstructionToCanonical(ByRef src As MIRModule, ByRef inst As MIRIRInstruction, ByRef outInst As UXBMIRInstructionRecord, ByRef errText As String) As Integer
+    errText = ""
+    Dim op As String
+    op = UXBMIRStep4CanonicalOpcode(inst.opcode)
+    If op = "" Then op = UCase(Trim(inst.opcode))
+    If op = "METHOD_CALL" Or op = "MIR_METHOD_CALL" Then
+        If inst.operandCount >= 1 And Left(UCase(Trim(inst.operands(0))), 12) = "__VT_SLOT__:" Then
+            op = "MIR_VIRTUAL_CALL"
+        End If
+    End If
+
+    Dim canonicalResultType As String
+    canonicalResultType = Trim(inst.resultType)
+    If canonicalResultType = "" Then canonicalResultType = UXBMIRStep4OpcodeResultType(op)
+    canonicalResultType = UXBSemanticMIRExecutionType(src, canonicalResultType)
+    outInst = UXBMIRInstructionMake(op, inst.result, canonicalResultType, inst.operandCount)
+    Dim i As Integer
+    For i = 0 To inst.operandCount - 1
+        If i >= 0 And i <= 15 Then
+            outInst.operands(i) = inst.operands(i)
+            outInst.operandTypes(i) = UXBSemanticMIROperandTypeGuess(inst.operands(i))
+        End If
+    Next i
+    outInst.blockId = inst.blockId
+    outInst.sourceFile = inst.srcLoc.filePath
+    outInst.sourceLine = inst.srcLoc.lineNo
+    outInst.sourceColumn = inst.srcLoc.colNo
+    outInst.sourceOffset = inst.srcLoc.offset
+    outInst.sourceLength = inst.srcLoc.length
+    outInst.sourceAstNode = inst.flags
+    If outInst.sourceAstNode <= 0 Then outInst.sourceAstNode = -1
+    outInst.sourceAstKind = inst.comment
+
+    If UXBSemanticMIRInstructionMetaOk(inst) = 0 Then
+        errText = "semantic MIR instruction metadata is invalid before canonical bridge"
+        Return 0
+    End If
+    If UXBMIRStep4VerifyInstructionRecord(outInst, errText) = 0 Then Return 0
+    Dim oopSig As MIROpcodeSignature
+    If MIROpcodeGetSignature(outInst.opcode, oopSig) = 0 Then
+        errText = "canonical MIR opcode signature missing: " & outInst.opcode
+        Return 0
+    End If
+    If UXBSemanticCanonicalMIRObjectContractOk(outInst, errText) = 0 Then Return 0
+    Return 1
+End Function
+
+Private Sub UXBSemanticToCanonicalMIRAddInstruction(ByRef r As UXBSemanticToCanonicalMIRBridgeResult, ByRef inst As UXBMIRInstructionRecord)
+    Dim idx As Integer
+    idx = r.instructionCount
+    If idx = 0 Then
+        ReDim r.instructions(0)
+    Else
+        ReDim Preserve r.instructions(idx)
+    End If
+    r.instructions(idx) = inst
+    r.instructionCount = idx + 1
+End Sub
+
+
+Private Function UXBSemanticCanonicalMIRBlockExists(ByRef r As UXBSemanticToCanonicalMIRBridgeResult, ByVal blockId As Integer) As Integer
+    Dim i As Integer
+    For i = 0 To r.blockCount - 1
+        If r.blocks(i).id = blockId Then Return 1
+    Next i
+    Return 0
+End Function
+
+
+Private Function UXBSemanticCanonicalMIRBlockLabelName(ByVal functionIndex As Integer, ByVal blockId As Integer) As String
+    ' ABI10_MIR_BLOCK_LABEL_FIX_20260706: semantic MIR branch operands are block ids;
+    ' canonical MIR interpreter branches to labels.  Use function-scoped block labels so
+    ' local block id 0/1/... values from different functions do not collide in the flat list.
+    Return "__UXB_BLK_F" & LTrim(Str(functionIndex)) & "_B" & LTrim(Str(blockId))
+End Function
+
+Private Function UXBSemanticMIRFunctionBlockExists(ByRef fn As MIRFunction, ByVal blockId As Integer) As Integer
+    Dim i As Integer
+    For i = 0 To fn.blockCount - 1
+        If fn.blocks(i).id = blockId Then Return 1
+    Next i
+    Return 0
+End Function
+
+Private Function UXBSemanticCanonicalMIRNormLabel(ByVal labelText As String) As String
+    Return UCase(Trim(labelText))
+End Function
+
+Private Function UXBSemanticCanonicalMIRInstructionLabelName(ByRef inst As UXBMIRInstructionRecord) As String
+    If Trim(inst.resultName) <> "" Then Return inst.resultName
+    If inst.operandCount > 0 Then Return inst.operands(0)
+    Return ""
+End Function
+
+Private Function UXBSemanticCanonicalMIRLabelExists(ByRef r As UXBSemanticToCanonicalMIRBridgeResult, ByVal labelText As String) As Integer
+    Dim key As String
+    key = UXBSemanticCanonicalMIRNormLabel(labelText)
+    If key = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To r.instructionCount - 1
+        Dim op As String
+        op = UXBMIRStep4CanonicalOpcode(r.instructions(i).opcode)
+        If op = "MIR_LABEL" Or op = "MIR_LOOP_BEGIN" Or op = "MIR_SELECT_BEGIN" Then
+            If UXBSemanticCanonicalMIRNormLabel(UXBSemanticCanonicalMIRInstructionLabelName(r.instructions(i))) = key Then Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+Private Function UXBSemanticCanonicalMIRTryParseInt(ByRef textValue As String, ByRef valueOut As Integer) As Integer
+    Dim t As String
+    t = Trim(textValue)
+    If t = "" Then Return 0
+    Dim startPos As Integer
+    startPos = 1
+    If Left(t, 1) = "+" Or Left(t, 1) = "-" Then startPos = 2
+    If startPos > Len(t) Then Return 0
+    Dim i As Integer
+    For i = startPos To Len(t)
+        Dim ch As String
+        ch = Mid(t, i, 1)
+        If ch < "0" Or ch > "9" Then Return 0
+    Next i
+    valueOut = ValInt(t)
+    Return 1
+End Function
+
+Private Sub UXBSemanticCanonicalMIRRewriteBlockBranchTargets(ByRef canonical As UXBMIRInstructionRecord, ByRef fn As MIRFunction, ByVal functionIndex As Integer)
+    ' ABI10_MIR_BLOCK_LABEL_FIX_20260706: semantic lowerers emit numeric local block ids
+    ' in JMP/JZ/JNZ operands.  The canonical MIR interpreter does not know block arrays;
+    ' it follows labels in one flat instruction stream.  Rewrite only control-flow
+    ' block-id operands and leave user GOTO/GOSUB labels untouched.
+    Dim op As String
+    op = UXBMIRStep4CanonicalOpcode(canonical.opcode)
+
+    Dim targetId As Integer
+    If op = "MIR_JMP" Then
+        If canonical.operandCount >= 1 Then
+            If UXBSemanticCanonicalMIRTryParseInt(canonical.operands(0), targetId) <> 0 Then
+                If UXBSemanticMIRFunctionBlockExists(fn, targetId) <> 0 Then
+                    canonical.operands(0) = UXBSemanticCanonicalMIRBlockLabelName(functionIndex, targetId)
+                    canonical.operandTypes(0) = UXB_MIR_TYPE_STRING
+                End If
+            End If
+        End If
+    ElseIf op = "MIR_JMP_IF_FALSE" Or op = "MIR_JMP_IF_TRUE" Then
+        If canonical.operandCount >= 2 Then
+            If UXBSemanticCanonicalMIRTryParseInt(canonical.operands(1), targetId) <> 0 Then
+                If UXBSemanticMIRFunctionBlockExists(fn, targetId) <> 0 Then
+                    canonical.operands(1) = UXBSemanticCanonicalMIRBlockLabelName(functionIndex, targetId)
+                    canonical.operandTypes(1) = UXB_MIR_TYPE_STRING
+                End If
+            End If
+        End If
+    ElseIf op = "MIR_UNTIL_CHECK" Then
+        If canonical.operandCount >= 1 Then
+            If UXBSemanticCanonicalMIRTryParseInt(canonical.operands(0), targetId) <> 0 Then
+                If UXBSemanticMIRFunctionBlockExists(fn, targetId) <> 0 Then
+                    canonical.operands(0) = UXBSemanticCanonicalMIRBlockLabelName(functionIndex, targetId)
+                    canonical.operandTypes(0) = UXB_MIR_TYPE_STRING
+                End If
+            End If
+        End If
+        If UXBSemanticCanonicalMIRTryParseInt(canonical.resultName, targetId) <> 0 Then
+            If UXBSemanticMIRFunctionBlockExists(fn, targetId) <> 0 Then canonical.resultName = UXBSemanticCanonicalMIRBlockLabelName(functionIndex, targetId)
+        End If
+    End If
+End Sub
+
+
+Private Function UXBSemanticCanonicalMIRBranchTargetOk(ByRef r As UXBSemanticToCanonicalMIRBridgeResult, ByVal targetText As String) As Integer
+    Dim t As String
+    t = Trim(targetText)
+    If t = "" Then Return 0
+
+    Dim targetId As Integer
+    If UXBSemanticCanonicalMIRTryParseInt(t, targetId) <> 0 Then
+        If UXBSemanticCanonicalMIRBlockExists(r, targetId) <> 0 Then Return 1
+    End If
+
+    Return UXBSemanticCanonicalMIRLabelExists(r, t)
+End Function
+
+Private Function UXBSemanticCanonicalMIRStructuralVerify(ByRef r As UXBSemanticToCanonicalMIRBridgeResult, ByRef errText As String) As Integer
+    errText = ""
+    Dim i As Integer
+    For i = 0 To r.instructionCount - 1
+        Dim op As String
+        op = UXBMIRStep4CanonicalOpcode(r.instructions(i).opcode)
+        If op = "" Then op = UXBMIRStep4NormalizeOpcode(r.instructions(i).opcode)
+        If UXBMIRStep4OpcodeKnown(op) = 0 Then
+            errText = "MIR_ROUTE_MISSING: unknown canonical opcode " & op
+            Return 0
+        End If
+        Select Case op
+        Case "MIR_JMP"
+            If r.instructions(i).operandCount < 1 Or UXBSemanticCanonicalMIRBranchTargetOk(r, r.instructions(i).operands(0)) = 0 Then
+                errText = "MIR branch target missing/not found: " & op & " target=" & r.instructions(i).operands(0)
+                Return 0
+            End If
+        Case "MIR_GOTO", "MIR_GOSUB"
+            If r.instructions(i).operandCount < 1 Or UXBSemanticCanonicalMIRBranchTargetOk(r, r.instructions(i).operands(0)) = 0 Then
+                errText = "MIR user label target missing/not found: " & op & " target=" & r.instructions(i).operands(0)
+                Return 0
+            End If
+        Case "MIR_JMP_IF_FALSE", "MIR_JMP_IF_TRUE"
+            If r.instructions(i).operandCount < 2 Or UXBSemanticCanonicalMIRBranchTargetOk(r, r.instructions(i).operands(1)) = 0 Then
+                errText = "MIR branch target missing/not found: " & op & " target=" & r.instructions(i).operands(1)
+                Return 0
+            End If
+        Case "MIR_CALL", "MIR_CALL_RUNTIME", "MIR_CALL_BUILTIN", "MIR_CALL_EXTERNAL", "MIR_CALL_DLL", "MIR_CALL_API", "MIR_HOST_CALL", "MIR_LIBRARY_CALL"
+            If r.instructions(i).operandCount < 1 Or Trim(r.instructions(i).operands(0)) = "" Then
+                errText = "MIR call target missing: " & op
+                Return 0
+            End If
+        Case "MIR_METHOD_CALL"
+            If r.instructions(i).operandCount < 4 Or Trim(r.instructions(i).operands(0)) = "" Or Trim(r.instructions(i).operands(2)) = "" Or Trim(r.instructions(i).operands(3)) = "" Then
+                errText = "MIR direct OOP call requires target, method and receiver type"
+                Return 0
+            End If
+        Case "MIR_VIRTUAL_CALL"
+            If r.instructions(i).operandCount < 4 Or Trim(r.instructions(i).operands(0)) = "" Or Trim(r.instructions(i).operands(1)) = "" Or Trim(r.instructions(i).operands(2)) = "" Then
+                errText = "MIR virtual OOP call requires target, receiver and method"
+                Return 0
+            End If
+        End Select
+    Next i
+    Return 1
+End Function
+
+Function UXBSemanticMIRToCanonicalMIR(ByRef src As MIRModule, ByRef r As UXBSemanticToCanonicalMIRBridgeResult, ByRef errText As String, ByVal strictVerify As Integer = 1) As Integer
+    UXBSemanticToCanonicalMIRBridgeInit r
+    errText = ""
+    r.moduleRecord.name = "semantic_mir_bridge"
+    r.moduleRecord.functionCount = src.functionCount
+    r.moduleRecord.globalCount = src.globalVarCount
+
+    Dim fi As Integer
+    For fi = 0 To src.functionCount - 1
+        UXBSemanticToCanonicalMIRAddFunction r, src.functions(fi)
+
+        ' YAMA-5 POSTFIX: MIR interpreter tarafinda TASK_TRIGGER ile
+        ' __SLOTLANE_* gorev fonksiyonlarina donulebilmesi icin her
+        ' fonksiyon basina kanonik label eklenir. MAIN label'i normal
+        ' calisma akisini bozmaz; RET gorulunce interpreter cikar.
+        Dim fnLabel As UXBMIRInstructionRecord
+        ' ABI10_MIR_BLOCK_LABEL_FIX_20260706: labels are executable control targets;
+        ' carry the visible label in operand(0) as well as resultName for verifier/interpreter symmetry.
+        Dim fnLabelOperandCount As Integer
+        fnLabelOperandCount = 1 + src.functions(fi).paramVarCount
+        If fnLabelOperandCount > 16 Then fnLabelOperandCount = 16
+        fnLabel = UXBMIRInstructionMake("LABEL", src.functions(fi).name, "TYPE_VOID", fnLabelOperandCount, src.functions(fi).name)
+        fnLabel.operandTypes(0) = UXB_MIR_TYPE_STRING
+        Dim fnParamLabelIdx As Integer
+        For fnParamLabelIdx = 0 To src.functions(fi).paramVarCount - 1
+            If fnParamLabelIdx + 1 > 15 Then Exit For
+            Dim fnParamIsByRef As Integer
+            fnParamIsByRef = 0
+            If fnParamLabelIdx < UBound(src.functions(fi).paramByRef) + 1 Then fnParamIsByRef = src.functions(fi).paramByRef(fnParamLabelIdx)
+            ' MIR_FUNCTION_LABEL operands are plain name strings with no room
+            ' for a separate BYREF flag field, so a BYREF parameter's name is
+            ' prefixed here; the MIR interpreter (UXBMIRInterpInvokeLabel in
+            ' mir_interp.fbs) strips this prefix and writes the parameter's
+            ' final value back into the caller's argument variable.
+            If fnParamIsByRef <> 0 Then
+                fnLabel.operands(fnParamLabelIdx + 1) = UXB_MIR_CANONICAL_BYREF_PARAM_PREFIX & src.functions(fi).paramVars(fnParamLabelIdx)
+            Else
+                fnLabel.operands(fnParamLabelIdx + 1) = src.functions(fi).paramVars(fnParamLabelIdx)
+            End If
+            fnLabel.operandTypes(fnParamLabelIdx + 1) = UXB_MIR_TYPE_STRING
+        Next fnParamLabelIdx
+        fnLabel.sourceAstKind = "MIR_FUNCTION_LABEL"
+        fnLabel.sourceAstNode = -1
+        fnLabel.blockId = IIf(src.functions(fi).blockCount > 0, src.functions(fi).blocks(0).id, 0)
+        fnLabel.mirInstructionId = -1
+        UXBSemanticToCanonicalMIRAddInstruction r, fnLabel
+
+        ' The function label's operands are plain name strings, so a parameter's
+        ' DECLARED type has no place to travel and would be lost here: the caller
+        ' binds arguments by name only (UXBMIRInterpInvokeLabel), leaving
+        ' "value AS I8" holding 255 where the AST interpreter yields -1.
+        '
+        ' Emit one MIR_PARAM_DECL per parameter immediately after the label.  Its
+        ' interpreter handler re-reads the just-bound parameter and applies
+        ' UXBInterpApplyDeclaredType, which is the same narrowing the AST
+        ' interpreter performs, so both backends agree on the value.
+        '
+        ' BYREF parameters are skipped: they alias the caller's own storage and
+        ' reshaping them on entry would corrupt the write-back.
+        Dim fnParamDeclIdx As Integer
+        For fnParamDeclIdx = 0 To src.functions(fi).paramVarCount - 1
+            If fnParamDeclIdx + 1 > 15 Then Exit For
+
+            Dim paramDeclIsByRef As Integer
+            paramDeclIsByRef = 0
+            If fnParamDeclIdx < UBound(src.functions(fi).paramByRef) + 1 Then paramDeclIsByRef = src.functions(fi).paramByRef(fnParamDeclIdx)
+            If paramDeclIsByRef <> 0 Then Continue For
+
+            Dim paramDeclName As String
+            paramDeclName = Trim(src.functions(fi).paramVars(fnParamDeclIdx))
+            If paramDeclName = "" Then Continue For
+
+            Dim paramDeclType As String
+            paramDeclType = ""
+            If fnParamDeclIdx < UBound(src.functions(fi).paramVarTypes) + 1 Then paramDeclType = Trim(src.functions(fi).paramVarTypes(fnParamDeclIdx))
+            If paramDeclType = "" Then Continue For
+
+            Dim paramDecl As UXBMIRInstructionRecord
+            paramDecl = UXBMIRInstructionMake("MIR_PARAM_DECL", paramDeclName, paramDeclType, 1, paramDeclName)
+            paramDecl.operandTypes(0) = UXB_MIR_TYPE_STRING
+            paramDecl.sourceAstKind = "MIR_PARAM_DECL"
+            paramDecl.sourceAstNode = -1
+            paramDecl.blockId = fnLabel.blockId
+            paramDecl.mirInstructionId = -1
+            UXBSemanticToCanonicalMIRAddInstruction r, paramDecl
+        Next fnParamDeclIdx
+
+        Dim bi As Integer
+        For bi = 0 To src.functions(fi).blockCount - 1
+            UXBSemanticToCanonicalMIRAddBlock r, src.functions(fi).blocks(bi)
+
+            Dim blockLabelText As String
+            blockLabelText = UXBSemanticCanonicalMIRBlockLabelName(fi, src.functions(fi).blocks(bi).id)
+            Dim blockLabel As UXBMIRInstructionRecord
+            blockLabel = UXBMIRInstructionMake("LABEL", blockLabelText, "TYPE_VOID", 1, blockLabelText)
+            blockLabel.operandTypes(0) = UXB_MIR_TYPE_STRING
+            blockLabel.sourceAstKind = "MIR_BLOCK_LABEL"
+            blockLabel.sourceAstNode = -1
+            blockLabel.blockId = src.functions(fi).blocks(bi).id
+            blockLabel.mirInstructionId = -1
+            UXBSemanticToCanonicalMIRAddInstruction r, blockLabel
+
+            Dim ii As Integer
+            For ii = 0 To src.functions(fi).blocks(bi).instructionCount - 1
+                Dim canonical As UXBMIRInstructionRecord
+                Dim instErr As String
+                canonical.mirInstructionId = ii
+                If UXBSemanticMIRInstructionToCanonical(src, src.functions(fi).blocks(bi).instructions(ii), canonical, instErr) = 0 Then
+                    r.invalidInstructionCount += 1
+                    r.diagnosticsText &= "fn=" & src.functions(fi).name & " block=" & LTrim(Str(src.functions(fi).blocks(bi).id)) & " inst=" & LTrim(Str(ii)) & ": " & instErr & Chr(10)
+                    If strictVerify <> 0 Then
+                        r.verifyStatus = "FAIL"
+                        r.moduleRecord.verifyStatus = "FAIL"
+                        errText = r.diagnosticsText
+                        Return 0
+                    End If
+                End If
+                canonical.mirInstructionId = ii
+                UXBSemanticCanonicalMIRRewriteBlockBranchTargets canonical, src.functions(fi), fi
+                If Trim(canonical.sourceFile) = "" And canonical.sourceLine <= 0 Then r.missingSourceLocationCount += 1
+                If canonical.sourceAstNode < 0 Then r.missingAstNodeCount += 1
+                Dim oti As Integer
+                For oti = 0 To canonical.operandCount - 1
+                    If canonical.operandTypes(oti) = UXB_MIR_TYPE_INFERRED Then r.operandTypeInferredCount += 1
+                Next oti
+                UXBSemanticToCanonicalMIRAddInstruction r, canonical
+            Next ii
+        Next bi
+    Next fi
+
+    Dim structuralErr As String
+    If UXBSemanticCanonicalMIRStructuralVerify(r, structuralErr) = 0 Then
+        r.invalidInstructionCount += 1
+        If Trim(r.diagnosticsText) <> "" Then r.diagnosticsText &= Chr(10)
+        r.diagnosticsText &= structuralErr
+        If strictVerify <> 0 Then
+            r.verifyStatus = "FAIL"
+            r.moduleRecord.verifyStatus = "FAIL"
+            errText = r.diagnosticsText
+            Return 0
+        End If
+    End If
+
+    If r.invalidInstructionCount = 0 Then
+        r.verifyStatus = "PASS"
+        r.moduleRecord.verifyStatus = "PASS"
+    Else
+        r.verifyStatus = "WARN"
+        r.moduleRecord.verifyStatus = "WARN"
+    End If
+    Return 1
+End Function
+
+
+Function UXBSemanticCanonicalMIRBridgeToJson(ByRef r As UXBSemanticToCanonicalMIRBridgeResult) As String
+    Dim q As String
+    q = Chr(34)
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  " & q & "schema" & q & ": " & q & "uxb.canonical_mir.bridge.v1" & q & "," & Chr(10)
+    j &= "  " & q & "module" & q & ": " & q & UXBMIRStep4JsonEscape(r.moduleRecord.name) & q & "," & Chr(10)
+    j &= "  " & q & "verify_status" & q & ": " & q & UXBMIRStep4JsonEscape(r.verifyStatus) & q & "," & Chr(10)
+    j &= "  " & q & "function_count" & q & ": " & LTrim(Str(r.functionCount)) & "," & Chr(10)
+    j &= "  " & q & "block_count" & q & ": " & LTrim(Str(r.blockCount)) & "," & Chr(10)
+    j &= "  " & q & "instruction_count" & q & ": " & LTrim(Str(r.instructionCount)) & "," & Chr(10)
+    j &= "  " & q & "invalid_instruction_count" & q & ": " & LTrim(Str(r.invalidInstructionCount)) & "," & Chr(10)
+    j &= "  " & q & "missing_source_location_count" & q & ": " & LTrim(Str(r.missingSourceLocationCount)) & "," & Chr(10)
+    j &= "  " & q & "missing_ast_node_count" & q & ": " & LTrim(Str(r.missingAstNodeCount)) & "," & Chr(10)
+    j &= "  " & q & "operand_type_inferred_count" & q & ": " & LTrim(Str(r.operandTypeInferredCount)) & "," & Chr(10)
+    j &= "  " & q & "diagnostics" & q & ": " & q & UXBMIRStep4JsonEscape(r.diagnosticsText) & q & "," & Chr(10)
+    j &= "  " & q & "instructions" & q & ": [" & Chr(10)
+    Dim i As Integer
+    For i = 0 To r.instructionCount - 1
+        j &= "    " & UXBMIRStep4InstructionToJson(r.instructions(i))
+        If i < r.instructionCount - 1 Then j &= ","
+        j &= Chr(10)
+    Next i
+    j &= "  ]" & Chr(10)
+    j &= "}" & Chr(10)
+    Return j
+End Function
+
+Function UXBSemanticCanonicalMIRBridgeWriteJson(ByRef r As UXBSemanticToCanonicalMIRBridgeResult, ByRef outPath As String, ByRef errText As String) As Integer
+    errText = ""
+    If Trim(outPath) = "" Then Return 1
+    Dim j As String
+    j = UXBSemanticCanonicalMIRBridgeToJson(r)
+    Return UXBReportWriteText(outPath, j, errText)
+End Function
+
+Function UXBSemanticCanonicalMIRVerifyWriteJson(ByRef r As UXBSemanticToCanonicalMIRBridgeResult, ByRef outPath As String, ByRef errText As String) As Integer
+    errText = ""
+    If Trim(outPath) = "" Then Return 1
+    Dim q As String
+    q = Chr(34)
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  " & q & "schema" & q & ": " & q & "uxb.canonical_mir.verify.v1" & q & "," & Chr(10)
+    j &= "  " & q & "ok" & q & ": " & IIf(r.verifyStatus = "PASS", "true", "false") & "," & Chr(10)
+    j &= "  " & q & "verify_status" & q & ": " & q & UXBMIRStep4JsonEscape(r.verifyStatus) & q & "," & Chr(10)
+    j &= "  " & q & "invalid_instruction_count" & q & ": " & LTrim(Str(r.invalidInstructionCount)) & "," & Chr(10)
+    j &= "  " & q & "missing_source_location_count" & q & ": " & LTrim(Str(r.missingSourceLocationCount)) & "," & Chr(10)
+    j &= "  " & q & "missing_ast_node_count" & q & ": " & LTrim(Str(r.missingAstNodeCount)) & "," & Chr(10)
+    j &= "  " & q & "operand_type_inferred_count" & q & ": " & LTrim(Str(r.operandTypeInferredCount)) & "," & Chr(10)
+    j &= "  " & q & "diagnostics" & q & ": " & q & UXBMIRStep4JsonEscape(r.diagnosticsText) & q & Chr(10)
+    j &= "}" & Chr(10)
+    Return UXBReportWriteText(outPath, j, errText)
+End Function
+
+#endif

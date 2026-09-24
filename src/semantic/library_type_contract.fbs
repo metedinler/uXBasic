@@ -1,0 +1,693 @@
+#ifndef UXB_LIBRARY_TYPE_CONTRACT_FBS
+#define UXB_LIBRARY_TYPE_CONTRACT_FBS
+
+' First-class library type contract.
+' This layer describes types supplied by libraries without turning every such
+' type into a compiler primitive.
+
+Type UXBLibraryTypeContract
+    typeName As String
+    packageName As String
+    layoutKind As String
+    sizeBytes As Integer
+    alignBytes As Integer
+    fieldsCsv As String
+    operatorsCsv As String
+    magicCsv As String
+    conversionsCsv As String
+    lifecycleCsv As String
+    storageModel As String
+    copyModel As String
+    cloneModel As String
+    dropModel As String
+    abiPolicy As String
+    mirPolicy As String
+    mirProvider As String
+    jsPolicy As String
+    jsProvider As String
+    wasmPolicy As String
+    wasmProvider As String
+    nativePolicy As String
+    nativeProvider As String
+    status As String
+End Type
+
+Dim Shared gUXBLibraryTypes() As UXBLibraryTypeContract
+Dim Shared gUXBLibraryTypeCount As Integer
+
+Declare Function UXBLibraryTypeRegistryFind(ByVal typeName As String) As Integer
+Declare Function UXBLibraryTypeEnsureReferenceSet(ByRef errText As String) As Integer
+
+Private Function UXBLibraryTypeNorm(ByVal textValue As String) As String
+    Return UCase(Trim(textValue))
+End Function
+
+Private Function UXBLibraryTypeJsonEscape(ByVal rawText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim c As String
+        c = Mid(rawText, i, 1)
+        Select Case c
+        Case Chr(34)
+            outText &= "\" & Chr(34)
+        Case "\"
+            outText &= "\\"
+        Case Chr(10)
+            outText &= "\n"
+        Case Chr(13)
+            outText &= "\r"
+        Case Chr(9)
+            outText &= "\t"
+        Case Else
+            outText &= c
+        End Select
+    Next i
+    Return outText
+End Function
+
+Private Function UXBLibraryTypeRemoveSpaces(ByVal rawText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim c As String
+        c = Mid(rawText, i, 1)
+        If c <> " " And c <> Chr(9) Then outText &= c
+    Next i
+    Return outText
+End Function
+
+Private Function UXBLibraryTypeJsonSkipWs(ByRef jsonText As String, ByVal posValue As Integer) As Integer
+    Dim p As Integer
+    p = posValue
+    Do While p <= Len(jsonText)
+        Dim c As String
+        c = Mid(jsonText, p, 1)
+        If c <> " " And c <> Chr(9) And c <> Chr(10) And c <> Chr(13) Then Exit Do
+        p += 1
+    Loop
+    Return p
+End Function
+
+Private Function UXBLibraryTypeJsonFindValueStart(ByRef jsonText As String, ByVal keyName As String) As Integer
+    Dim q As String
+    q = Chr(34)
+    Dim keyPattern As String
+    keyPattern = q & keyName & q
+
+    Dim keyPos As Integer
+    keyPos = InStr(jsonText, keyPattern)
+    If keyPos <= 0 Then Return 0
+
+    Dim colonPos As Integer
+    colonPos = InStr(keyPos + Len(keyPattern), jsonText, ":")
+    If colonPos <= 0 Then Return 0
+
+    Return UXBLibraryTypeJsonSkipWs(jsonText, colonPos + 1)
+End Function
+
+Private Function UXBLibraryTypeJsonGetString(ByRef jsonText As String, ByVal keyName As String, ByRef valueOut As String) As Integer
+    valueOut = ""
+    Dim p As Integer
+    p = UXBLibraryTypeJsonFindValueStart(jsonText, keyName)
+    If p <= 0 Or p > Len(jsonText) Then Return 0
+    If Mid(jsonText, p, 1) <> Chr(34) Then Return 0
+    p += 1
+
+    Do While p <= Len(jsonText)
+        Dim c As String
+        c = Mid(jsonText, p, 1)
+        If c = Chr(34) Then Return 1
+        If c = "\" And p < Len(jsonText) Then
+            p += 1
+            Dim e As String
+            e = Mid(jsonText, p, 1)
+            Select Case e
+            Case Chr(34)
+                valueOut &= Chr(34)
+            Case "\"
+                valueOut &= "\"
+            Case "n"
+                valueOut &= Chr(10)
+            Case "r"
+                valueOut &= Chr(13)
+            Case "t"
+                valueOut &= Chr(9)
+            Case Else
+                valueOut &= e
+            End Select
+        Else
+            valueOut &= c
+        End If
+        p += 1
+    Loop
+
+    Return 0
+End Function
+
+Private Function UXBLibraryTypeJsonGetInteger(ByRef jsonText As String, ByVal keyName As String, ByRef valueOut As Integer) As Integer
+    valueOut = 0
+    Dim p As Integer
+    p = UXBLibraryTypeJsonFindValueStart(jsonText, keyName)
+    If p <= 0 Or p > Len(jsonText) Then Return 0
+
+    Dim raw As String
+    Do While p <= Len(jsonText)
+        Dim c As String
+        c = Mid(jsonText, p, 1)
+        If (c >= "0" And c <= "9") Or (c = "-" And raw = "") Then
+            raw &= c
+        Else
+            Exit Do
+        End If
+        p += 1
+    Loop
+
+    If raw = "" Or raw = "-" Then Return 0
+    valueOut = ValInt(raw)
+    Return 1
+End Function
+
+Private Function UXBLibraryTypeReadAllText(ByVal filePath As String, ByRef textOut As String, ByRef errText As String) As Integer
+    textOut = ""
+    errText = ""
+    If Trim(filePath) = "" Then errText = "library type manifest: empty path": Return 0
+    If Dir(filePath) = "" Then errText = "library type manifest not found: " & filePath: Return 0
+
+    Dim f As Integer
+    f = FreeFile
+    If Open(filePath For Input As #f) <> 0 Then
+        errText = "library type manifest open failed: " & filePath
+        Return 0
+    End If
+
+    Dim lineText As String
+    Do Until Eof(f)
+        Line Input #f, lineText
+        textOut &= lineText & Chr(10)
+    Loop
+    Close #f
+    Return 1
+End Function
+
+Sub UXBLibraryTypeContractInit(ByRef c As UXBLibraryTypeContract)
+    c.typeName = ""
+    c.packageName = ""
+    c.layoutKind = "opaque"
+    c.sizeBytes = 0
+    c.alignBytes = 1
+    c.fieldsCsv = ""
+    c.operatorsCsv = ""
+    c.magicCsv = ""
+    c.conversionsCsv = ""
+    c.lifecycleCsv = ""
+    c.storageModel = "unspecified"
+    c.copyModel = "unspecified"
+    c.cloneModel = "unspecified"
+    c.dropModel = "unspecified"
+    c.abiPolicy = "fail_closed"
+    c.mirPolicy = "fail_closed"
+    c.mirProvider = ""
+    c.jsPolicy = "fail_closed"
+    c.jsProvider = ""
+    c.wasmPolicy = "fail_closed"
+    c.wasmProvider = ""
+    c.nativePolicy = "fail_closed"
+    c.nativeProvider = ""
+    c.status = "draft"
+End Sub
+
+Function UXBLibraryTypePolicyName(ByVal policyText As String) As String
+    Dim p As String
+    p = LCase(Trim(policyText))
+    Select Case p
+    Case "pure_mir", "call_lowering", "type_op_lowering", "js_provider", "wasm_linear_memory", "wasm_handle", "native_x64", "c_abi", "fail_closed", "unsupported"
+        Return p
+    Case "js"
+        Return "js_provider"
+    Case "wasm"
+        Return "wasm_handle"
+    Case "native"
+        Return "native_x64"
+    Case "mir"
+        Return "pure_mir"
+    Case Else
+        Return "unknown"
+    End Select
+End Function
+
+Function UXBLibraryTypeHasToken(ByVal csvText As String, ByVal tokenText As String) As Integer
+    Dim hay As String
+    Dim needle As String
+    hay = "," & UXBLibraryTypeNorm(csvText) & ","
+    hay = UXBLibraryTypeRemoveSpaces(hay)
+    needle = "," & UXBLibraryTypeNorm(tokenText) & ","
+    Return IIf(InStr(hay, needle) > 0, 1, 0)
+End Function
+
+Function UXBLibraryTypeOperatorNameFromToken(ByVal opText As String) As String
+    Select Case UCase(Trim(opText))
+    Case "+", "ADD": Return "ADD"
+    Case "-", "SUB": Return "SUB"
+    Case "*", "MUL": Return "MUL"
+    Case "/", "DIV": Return "DIV"
+    Case "=", "==", "EQ": Return "EQ"
+    Case "<>", "!=", "NE": Return "NE"
+    Case "<", "LT": Return "LT"
+    Case "<=", "LE": Return "LE"
+    Case ">", "GT": Return "GT"
+    Case ">=", "GE": Return "GE"
+    End Select
+    Return ""
+End Function
+
+Private Function UXBLibraryTypeResultTypeForOperator(ByVal typeName As String, ByVal opName As String) As String
+    Select Case UXBLibraryTypeNorm(opName)
+    Case "EQ", "NE", "LT", "LE", "GT", "GE"
+        Return "BOOLEAN"
+    Case Else
+        Return UXBLibraryTypeNorm(typeName)
+    End Select
+End Function
+
+Function UXBLibraryTypeSplitCallName(ByVal callNameRaw As String, ByRef typeNameOut As String, ByRef memberNameOut As String) As Integer
+    typeNameOut = ""
+    memberNameOut = ""
+
+    Dim callName As String
+    callName = UXBLibraryTypeNorm(callNameRaw)
+    Dim dotPos As Integer
+    dotPos = InStr(callName, ".")
+    If dotPos <= 1 Or dotPos >= Len(callName) Then Return 0
+
+    typeNameOut = Left(callName, dotPos - 1)
+    memberNameOut = Mid(callName, dotPos + 1)
+    Return IIf(typeNameOut <> "" And memberNameOut <> "", 1, 0)
+End Function
+
+Function UXBLibraryTypeFindCallOwner(ByVal callNameRaw As String, ByRef contractIdxOut As Integer, ByRef typeNameOut As String, ByRef memberNameOut As String) As Integer
+    contractIdxOut = -1
+    If UXBLibraryTypeSplitCallName(callNameRaw, typeNameOut, memberNameOut) = 0 Then Return 0
+
+    If gUXBLibraryTypeCount = 0 Then
+        Dim initErr As String
+        UXBLibraryTypeEnsureReferenceSet initErr
+    End If
+
+    contractIdxOut = UXBLibraryTypeRegistryFind(typeNameOut)
+    If contractIdxOut = -1 Then Return 0
+    Return 1
+End Function
+
+Function UXBLibraryTypeResolveCallName(ByVal callNameRaw As String, ByRef contractIdxOut As Integer, ByRef typeNameOut As String, ByRef memberNameOut As String, ByRef resultTypeOut As String) As Integer
+    resultTypeOut = ""
+    If UXBLibraryTypeFindCallOwner(callNameRaw, contractIdxOut, typeNameOut, memberNameOut) = 0 Then Return 0
+
+    If UXBLibraryTypeHasToken(gUXBLibraryTypes(contractIdxOut).operatorsCsv, memberNameOut) <> 0 Then
+        resultTypeOut = UXBLibraryTypeResultTypeForOperator(gUXBLibraryTypes(contractIdxOut).typeName, memberNameOut)
+        Return 1
+    End If
+
+    If UXBLibraryTypeHasToken(gUXBLibraryTypes(contractIdxOut).magicCsv, memberNameOut) <> 0 Then
+        Select Case UXBLibraryTypeNorm(memberNameOut)
+        Case "TOSTRING"
+            resultTypeOut = "STRING"
+        Case "HASH"
+            resultTypeOut = "I64"
+        Case Else
+            resultTypeOut = gUXBLibraryTypes(contractIdxOut).typeName
+        End Select
+        Return 1
+    End If
+
+    If UXBLibraryTypeHasToken(gUXBLibraryTypes(contractIdxOut).lifecycleCsv, memberNameOut) <> 0 Then
+        Select Case memberNameOut
+        Case "DROP"
+            resultTypeOut = "VOID"
+        Case "CONSTRUCT", "NORMALIZE", "COPY", "MOVE", "CLONE", "RETAIN"
+            resultTypeOut = gUXBLibraryTypes(contractIdxOut).typeName
+        Case Else
+            Return 0
+        End Select
+        Return 1
+    End If
+
+    Return 0
+End Function
+
+Function UXBLibraryTypeResolveBinaryOperator(ByVal leftType As String, ByVal opText As String, ByVal rightType As String, ByRef resultTypeOut As String, ByRef callNameOut As String) As Integer
+    resultTypeOut = ""
+    callNameOut = ""
+
+    Dim l As String
+    Dim r As String
+    l = UXBLibraryTypeNorm(leftType)
+    r = UXBLibraryTypeNorm(rightType)
+    If l = "" Or r = "" Or l <> r Then Return 0
+
+    If gUXBLibraryTypeCount = 0 Then
+        Dim initErr As String
+        UXBLibraryTypeEnsureReferenceSet initErr
+    End If
+
+    Dim opName As String
+    opName = UXBLibraryTypeOperatorNameFromToken(opText)
+    If opName = "" Then Return 0
+
+    Dim idx As Integer
+    idx = UXBLibraryTypeRegistryFind(l)
+    If idx = -1 Then Return 0
+    If UXBLibraryTypeHasToken(gUXBLibraryTypes(idx).operatorsCsv, opName) = 0 Then Return 0
+
+    resultTypeOut = UXBLibraryTypeResultTypeForOperator(gUXBLibraryTypes(idx).typeName, opName)
+    callNameOut = gUXBLibraryTypes(idx).typeName & "." & opName
+    Return 1
+End Function
+
+Function UXBLibraryTypeLayoutInfo(ByVal typeName As String, ByRef sizeOut As Integer, ByRef alignOut As Integer) As Integer
+    sizeOut = 0
+    alignOut = 1
+    If gUXBLibraryTypeCount = 0 Then
+        Dim initErr As String
+        UXBLibraryTypeEnsureReferenceSet initErr
+    End If
+
+    Dim idx As Integer
+    idx = UXBLibraryTypeRegistryFind(typeName)
+    If idx = -1 Then Return 0
+    sizeOut = gUXBLibraryTypes(idx).sizeBytes
+    alignOut = gUXBLibraryTypes(idx).alignBytes
+    If alignOut < 1 Then alignOut = 1
+    Return 1
+End Function
+
+Private Function UXBLibraryTypeConversionName(ByVal fromType As String) As String
+    Dim f As String
+    f = UXBLibraryTypeNorm(fromType)
+    If Left(f, 5) = "TYPE_" Then f = Mid(f, 6)
+    Select Case f
+    Case "BOOL", "BOOLEAN", "I8", "BYTE", "SBYTE", "U8", "UBYTE", _
+         "I16", "SHORT", "U16", "USHORT", "I32", "INTEGER", "INT", "LONG", _
+         "U32", "UINTEGER", "UINT", "ULONG", "I64", "LONGINT", "U64", "ULONGINT"
+        Return "FROM_I64"
+    Case "STRING", "ZSTRING"
+        Return "FROM_STRING"
+    Case "F32", "SINGLE", "F64", "DOUBLE", "F80", "EXTENDED", "EXT"
+        Return "FROM_F64"
+    End Select
+    Return ""
+End Function
+
+Function UXBLibraryTypeCanConvertTo(ByVal fromType As String, ByVal toType As String, ByVal implicitOnly As Integer) As Integer
+    If gUXBLibraryTypeCount = 0 Then
+        Dim initErr As String
+        UXBLibraryTypeEnsureReferenceSet initErr
+    End If
+
+    Dim idx As Integer
+    idx = UXBLibraryTypeRegistryFind(toType)
+    If idx = -1 Then Return 0
+
+    If UXBLibraryTypeNorm(fromType) = UXBLibraryTypeNorm(gUXBLibraryTypes(idx).typeName) Then Return 1
+
+    Dim convName As String
+    convName = UXBLibraryTypeConversionName(fromType)
+    If convName = "" Then Return 0
+    If implicitOnly <> 0 Then
+        Select Case convName
+        Case "FROM_I64"
+        Case Else
+            Return 0
+        End Select
+    End If
+    Return UXBLibraryTypeHasToken(gUXBLibraryTypes(idx).conversionsCsv, convName)
+End Function
+
+Function UXBLibraryTypeValidateLifecycle(ByRef c As UXBLibraryTypeContract, ByRef errText As String) As Integer
+    errText = ""
+    Dim storage As String = UXBLibraryTypeNorm(c.storageModel)
+    Dim copyMode As String = UXBLibraryTypeNorm(c.copyModel)
+    Dim cloneMode As String = UXBLibraryTypeNorm(c.cloneModel)
+    Dim dropMode As String = UXBLibraryTypeNorm(c.dropModel)
+
+    ' Legacy v1 metadata is readable, but does not establish ownership semantics.
+    If storage = "UNSPECIFIED" And copyMode = "UNSPECIFIED" And cloneMode = "UNSPECIFIED" And dropMode = "UNSPECIFIED" Then Return 1
+    Select Case storage
+    Case "VALUE", "REFERENCE"
+    Case Else: errText = "library type: invalid storage_model " & c.storageModel: Return 0
+    End Select
+    Select Case copyMode
+    Case "BITCOPY", "CLONE", "RETAIN", "FORBIDDEN"
+    Case Else: errText = "library type: invalid copy_model " & c.copyModel: Return 0
+    End Select
+    Select Case cloneMode
+    Case "BITCOPY", "PROVIDER", "UNSUPPORTED"
+    Case Else: errText = "library type: invalid clone_model " & c.cloneModel: Return 0
+    End Select
+    Select Case dropMode
+    Case "NONE", "PROVIDER"
+    Case Else: errText = "library type: invalid drop_model " & c.dropModel: Return 0
+    End Select
+    If copyMode = "BITCOPY" And (storage <> "VALUE" Or dropMode <> "NONE") Then
+        errText = "library type: BITCOPY requires VALUE storage and NONE drop": Return 0
+    End If
+    If cloneMode = "BITCOPY" And (storage <> "VALUE" Or dropMode <> "NONE") Then
+        errText = "library type: BITCOPY clone requires VALUE storage and NONE drop": Return 0
+    End If
+    If copyMode = "CLONE" And cloneMode <> "PROVIDER" Then
+        errText = "library type: CLONE copy requires PROVIDER clone": Return 0
+    End If
+    If cloneMode = "PROVIDER" Then
+        If UXBLibraryTypeHasToken(c.lifecycleCsv, "CLONE") = 0 And UXBLibraryTypeHasToken(c.magicCsv, "CLONE") = 0 Then
+            errText = "library type: CLONE hook not declared": Return 0
+        End If
+    End If
+    If copyMode = "RETAIN" Then
+        If storage <> "REFERENCE" Or dropMode <> "PROVIDER" Then
+            errText = "library type: RETAIN requires REFERENCE storage and PROVIDER drop": Return 0
+        End If
+        If UXBLibraryTypeHasToken(c.lifecycleCsv, "RETAIN") = 0 Then
+            errText = "library type: RETAIN hook not declared": Return 0
+        End If
+    End If
+    If dropMode = "PROVIDER" And UXBLibraryTypeHasToken(c.lifecycleCsv, "DROP") = 0 Then
+        errText = "library type: DROP hook not declared": Return 0
+    End If
+    Return 1
+End Function
+
+Function UXBLibraryTypeRequireValueTransfer(ByRef c As UXBLibraryTypeContract, ByRef errText As String) As Integer
+    If UXBLibraryTypeValidateLifecycle(c, errText) = 0 Then Return 0
+    If UXBLibraryTypeNorm(c.storageModel) = "VALUE" And UXBLibraryTypeNorm(c.copyModel) = "BITCOPY" And UXBLibraryTypeNorm(c.dropModel) = "NONE" Then Return 1
+    If UXBLibraryTypeNorm(c.mirProvider) = "OWNED_TEXT_REFERENCE" Then
+        If UXBLibraryTypeHasToken(c.lifecycleCsv, "COPY") = 0 Then
+            errText = "library type: COPY hook not declared": Return 0
+        End If
+        If UXBLibraryTypeNorm(c.copyModel) = "CLONE" Or UXBLibraryTypeNorm(c.copyModel) = "RETAIN" Then Return 1
+    End If
+    errText = "library type lifecycle lowering unavailable: " & c.typeName & _
+        " storage_model=" & c.storageModel & " copy_model=" & c.copyModel & " drop_model=" & c.dropModel
+    Return 0
+End Function
+
+Function UXBLibraryTypeNeedsManagedCopy(ByVal typeName As String) As Integer
+    Dim idx As Integer = UXBLibraryTypeRegistryFind(typeName)
+    If idx < 0 Then Return 0
+    Return IIf(LCase(Trim(gUXBLibraryTypes(idx).copyModel)) = "clone" Or LCase(Trim(gUXBLibraryTypes(idx).copyModel)) = "retain", 1, 0)
+End Function
+
+Function UXBLibraryTypeValidateExecutionTarget(ByVal targetName As String, ByRef errText As String) As Integer
+    errText = ""
+    If targetName = "MIR" Then Return 1
+    For i As Integer = 0 To gUXBLibraryTypeCount - 1
+        If UXBLibraryTypeNeedsManagedCopy(gUXBLibraryTypes(i).typeName) <> 0 Then
+            errText = "library type lifecycle provider unavailable for " & targetName & ": " & gUXBLibraryTypes(i).typeName
+            Return 0
+        End If
+    Next i
+    Return 1
+End Function
+
+Function UXBLibraryTypeValidate(ByRef c As UXBLibraryTypeContract, ByRef errText As String) As Integer
+    errText = ""
+    If UXBLibraryTypeNorm(c.typeName) = "" Then errText = "library type: empty type name": Return 0
+    If UXBLibraryTypeNorm(c.packageName) = "" Then errText = "library type: empty package name": Return 0
+    If c.sizeBytes < 0 Then errText = "library type: negative size": Return 0
+    If c.alignBytes <= 0 Then errText = "library type: invalid alignment": Return 0
+    If UXBLibraryTypePolicyName(c.abiPolicy) = "unknown" Then errText = "library type: unknown ABI policy " & c.abiPolicy: Return 0
+    If UXBLibraryTypePolicyName(c.mirPolicy) = "unknown" Then errText = "library type: unknown MIR policy " & c.mirPolicy: Return 0
+    If UXBLibraryTypePolicyName(c.jsPolicy) = "unknown" Then errText = "library type: unknown JS policy " & c.jsPolicy: Return 0
+    If UXBLibraryTypePolicyName(c.wasmPolicy) = "unknown" Then errText = "library type: unknown WASM policy " & c.wasmPolicy: Return 0
+    If UXBLibraryTypePolicyName(c.nativePolicy) = "unknown" Then errText = "library type: unknown native policy " & c.nativePolicy: Return 0
+    Return UXBLibraryTypeValidateLifecycle(c, errText)
+End Function
+
+Sub UXBLibraryTypeRegistryInit()
+    gUXBLibraryTypeCount = 0
+End Sub
+
+Function UXBLibraryTypeRegistryFind(ByVal typeName As String) As Integer
+    Dim key As String
+    key = UXBLibraryTypeNorm(typeName)
+    Dim i As Integer
+    For i = 0 To gUXBLibraryTypeCount - 1
+        If UXBLibraryTypeNorm(gUXBLibraryTypes(i).typeName) = key Then Return i
+    Next i
+    Return -1
+End Function
+
+Function UXBLibraryTypeRegistryRegister(ByRef c As UXBLibraryTypeContract, ByRef errText As String) As Integer
+    If UXBLibraryTypeValidate(c, errText) = 0 Then Return -1
+
+    Dim existing As Integer
+    existing = UXBLibraryTypeRegistryFind(c.typeName)
+    If existing <> -1 Then
+        gUXBLibraryTypes(existing) = c
+        Return existing
+    End If
+
+    If gUXBLibraryTypeCount = 0 Then
+        ReDim gUXBLibraryTypes(0)
+    Else
+        ReDim Preserve gUXBLibraryTypes(gUXBLibraryTypeCount)
+    End If
+    gUXBLibraryTypes(gUXBLibraryTypeCount) = c
+    gUXBLibraryTypeCount += 1
+    Return gUXBLibraryTypeCount - 1
+End Function
+
+Function UXBLibraryTypeContractFromJson(ByRef jsonText As String, ByRef c As UXBLibraryTypeContract, ByRef errText As String) As Integer
+    errText = ""
+    UXBLibraryTypeContractInit c
+
+    Dim schemaName As String
+    If UXBLibraryTypeJsonGetString(jsonText, "schema", schemaName) = 0 Then
+        errText = "library type manifest: schema missing"
+        Return 0
+    End If
+    If schemaName <> "uxb.library_type.contract.v1" Then
+        errText = "library type manifest: unsupported schema " & schemaName
+        Return 0
+    End If
+
+    If UXBLibraryTypeJsonGetString(jsonText, "type", c.typeName) = 0 Then errText = "library type manifest: type missing": Return 0
+    If UXBLibraryTypeJsonGetString(jsonText, "package", c.packageName) = 0 Then errText = "library type manifest: package missing": Return 0
+    If UXBLibraryTypeJsonGetString(jsonText, "layout", c.layoutKind) = 0 Then c.layoutKind = "opaque"
+    If UXBLibraryTypeJsonGetInteger(jsonText, "size_bytes", c.sizeBytes) = 0 Then c.sizeBytes = 0
+    If UXBLibraryTypeJsonGetInteger(jsonText, "align_bytes", c.alignBytes) = 0 Then c.alignBytes = 1
+
+    UXBLibraryTypeJsonGetString jsonText, "fields", c.fieldsCsv
+    UXBLibraryTypeJsonGetString jsonText, "operators", c.operatorsCsv
+    UXBLibraryTypeJsonGetString jsonText, "magic", c.magicCsv
+    UXBLibraryTypeJsonGetString jsonText, "conversions", c.conversionsCsv
+    UXBLibraryTypeJsonGetString jsonText, "lifecycle", c.lifecycleCsv
+
+    ' Optional only as a complete legacy omission; malformed fields must not default.
+    If UXBLibraryTypeJsonFindValueStart(jsonText, "storage_model") > 0 Then
+        If UXBLibraryTypeJsonGetString(jsonText, "storage_model", c.storageModel) = 0 Then errText = "library type manifest: storage_model must be a string": Return 0
+    End If
+    If UXBLibraryTypeJsonFindValueStart(jsonText, "copy_model") > 0 Then
+        If UXBLibraryTypeJsonGetString(jsonText, "copy_model", c.copyModel) = 0 Then errText = "library type manifest: copy_model must be a string": Return 0
+    End If
+    If UXBLibraryTypeJsonFindValueStart(jsonText, "clone_model") > 0 Then
+        If UXBLibraryTypeJsonGetString(jsonText, "clone_model", c.cloneModel) = 0 Then errText = "library type manifest: clone_model must be a string": Return 0
+    End If
+    If UXBLibraryTypeJsonFindValueStart(jsonText, "drop_model") > 0 Then
+        If UXBLibraryTypeJsonGetString(jsonText, "drop_model", c.dropModel) = 0 Then errText = "library type manifest: drop_model must be a string": Return 0
+    End If
+
+    If UXBLibraryTypeJsonGetString(jsonText, "abi_policy", c.abiPolicy) = 0 Then c.abiPolicy = "fail_closed"
+    If UXBLibraryTypeJsonGetString(jsonText, "mir_policy", c.mirPolicy) = 0 Then c.mirPolicy = "fail_closed"
+    UXBLibraryTypeJsonGetString jsonText, "mir_provider", c.mirProvider
+    If UXBLibraryTypeJsonGetString(jsonText, "js_policy", c.jsPolicy) = 0 Then c.jsPolicy = "fail_closed"
+    UXBLibraryTypeJsonGetString jsonText, "js_provider", c.jsProvider
+    If UXBLibraryTypeJsonGetString(jsonText, "wasm_policy", c.wasmPolicy) = 0 Then c.wasmPolicy = "fail_closed"
+    UXBLibraryTypeJsonGetString jsonText, "wasm_provider", c.wasmProvider
+    If UXBLibraryTypeJsonGetString(jsonText, "native_policy", c.nativePolicy) = 0 Then c.nativePolicy = "fail_closed"
+    UXBLibraryTypeJsonGetString jsonText, "native_provider", c.nativeProvider
+    If UXBLibraryTypeJsonGetString(jsonText, "status", c.status) = 0 Then c.status = "external_manifest"
+
+    Return UXBLibraryTypeValidate(c, errText)
+End Function
+
+Function UXBLibraryTypeRegistryRegisterJsonText(ByRef jsonText As String, ByRef errText As String) As Integer
+    Dim c As UXBLibraryTypeContract
+    If UXBLibraryTypeContractFromJson(jsonText, c, errText) = 0 Then Return -1
+    Return UXBLibraryTypeRegistryRegister(c, errText)
+End Function
+
+Function UXBLibraryTypeRegistryLoadManifestFile(ByVal filePath As String, ByRef errText As String) As Integer
+    Dim jsonText As String
+    If UXBLibraryTypeReadAllText(filePath, jsonText, errText) = 0 Then Return -1
+    Return UXBLibraryTypeRegistryRegisterJsonText(jsonText, errText)
+End Function
+
+Sub UXBLibraryTypeMakeRationalReference(ByRef c As UXBLibraryTypeContract)
+    UXBLibraryTypeContractInit c
+    c.typeName = "RATIONAL"
+    c.packageName = "uxmath"
+    c.layoutKind = "record"
+    c.sizeBytes = 16
+    c.alignBytes = 8
+    c.fieldsCsv = "NUM:I64,DEN:I64"
+    c.operatorsCsv = "ADD,SUB,MUL,DIV,EQ,NE,LT,LE,GT,GE,CMP"
+    c.magicCsv = "TOSTRING,CLONE,HASH"
+    c.conversionsCsv = "FROM_I64,TOSTRING"
+    c.lifecycleCsv = "CONSTRUCT,NORMALIZE,COPY,CLONE"
+    c.storageModel = "value"
+    c.copyModel = "bitcopy"
+    c.cloneModel = "bitcopy"
+    c.dropModel = "none"
+    c.abiPolicy = "c_abi"
+    c.mirPolicy = "call_lowering"
+    c.mirProvider = "RATIONAL_REFERENCE"
+    c.jsPolicy = "pure_mir"
+    c.jsProvider = "RATIONAL_REFERENCE"
+    c.wasmPolicy = "wasm_linear_memory"
+    c.wasmProvider = "RATIONAL_LINEAR_MEMORY_REFERENCE"
+    c.nativePolicy = "native_x64"
+    c.nativeProvider = "RATIONAL_X64_REFERENCE"
+    c.status = "reference_manifest"
+End Sub
+
+Function UXBLibraryTypeEnsureReferenceSet(ByRef errText As String) As Integer
+    Dim rational As UXBLibraryTypeContract
+    UXBLibraryTypeMakeRationalReference rational
+    Return UXBLibraryTypeRegistryRegister(rational, errText)
+End Function
+
+Function UXBLibraryTypeContractToJson(ByRef c As UXBLibraryTypeContract) As String
+    Dim q As String
+    q = Chr(34)
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  " & q & "schema" & q & ": " & q & "uxb.library_type.contract.v1" & q & "," & Chr(10)
+    j &= "  " & q & "type" & q & ": " & q & UXBLibraryTypeJsonEscape(c.typeName) & q & "," & Chr(10)
+    j &= "  " & q & "package" & q & ": " & q & UXBLibraryTypeJsonEscape(c.packageName) & q & "," & Chr(10)
+    j &= "  " & q & "layout" & q & ": " & q & UXBLibraryTypeJsonEscape(c.layoutKind) & q & "," & Chr(10)
+    j &= "  " & q & "size_bytes" & q & ": " & LTrim(Str(c.sizeBytes)) & "," & Chr(10)
+    j &= "  " & q & "align_bytes" & q & ": " & LTrim(Str(c.alignBytes)) & "," & Chr(10)
+    j &= "  " & q & "fields" & q & ": " & q & UXBLibraryTypeJsonEscape(c.fieldsCsv) & q & "," & Chr(10)
+    j &= "  " & q & "operators" & q & ": " & q & UXBLibraryTypeJsonEscape(c.operatorsCsv) & q & "," & Chr(10)
+    j &= "  " & q & "magic" & q & ": " & q & UXBLibraryTypeJsonEscape(c.magicCsv) & q & "," & Chr(10)
+    j &= "  " & q & "conversions" & q & ": " & q & UXBLibraryTypeJsonEscape(c.conversionsCsv) & q & "," & Chr(10)
+    j &= "  " & q & "lifecycle" & q & ": " & q & UXBLibraryTypeJsonEscape(c.lifecycleCsv) & q & "," & Chr(10)
+    j &= "  " & q & "storage_model" & q & ": " & q & UXBLibraryTypeJsonEscape(c.storageModel) & q & "," & Chr(10)
+    j &= "  " & q & "copy_model" & q & ": " & q & UXBLibraryTypeJsonEscape(c.copyModel) & q & "," & Chr(10)
+    j &= "  " & q & "clone_model" & q & ": " & q & UXBLibraryTypeJsonEscape(c.cloneModel) & q & "," & Chr(10)
+    j &= "  " & q & "drop_model" & q & ": " & q & UXBLibraryTypeJsonEscape(c.dropModel) & q & "," & Chr(10)
+    j &= "  " & q & "abi_policy" & q & ": " & q & UXBLibraryTypeJsonEscape(c.abiPolicy) & q & "," & Chr(10)
+    j &= "  " & q & "mir_policy" & q & ": " & q & UXBLibraryTypeJsonEscape(c.mirPolicy) & q & "," & Chr(10)
+    j &= "  " & q & "mir_provider" & q & ": " & q & UXBLibraryTypeJsonEscape(c.mirProvider) & q & "," & Chr(10)
+    j &= "  " & q & "js_policy" & q & ": " & q & UXBLibraryTypeJsonEscape(c.jsPolicy) & q & "," & Chr(10)
+    j &= "  " & q & "js_provider" & q & ": " & q & UXBLibraryTypeJsonEscape(c.jsProvider) & q & "," & Chr(10)
+    j &= "  " & q & "wasm_policy" & q & ": " & q & UXBLibraryTypeJsonEscape(c.wasmPolicy) & q & "," & Chr(10)
+    j &= "  " & q & "wasm_provider" & q & ": " & q & UXBLibraryTypeJsonEscape(c.wasmProvider) & q & "," & Chr(10)
+    j &= "  " & q & "native_policy" & q & ": " & q & UXBLibraryTypeJsonEscape(c.nativePolicy) & q & "," & Chr(10)
+    j &= "  " & q & "native_provider" & q & ": " & q & UXBLibraryTypeJsonEscape(c.nativeProvider) & q & "," & Chr(10)
+    j &= "  " & q & "status" & q & ": " & q & UXBLibraryTypeJsonEscape(c.status) & q & Chr(10)
+    j &= "}"
+    Return j
+End Function
+
+#endif

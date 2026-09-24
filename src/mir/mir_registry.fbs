@@ -1,0 +1,408 @@
+#ifndef UXB_MIR_REGISTRY_FBS
+#define UXB_MIR_REGISTRY_FBS
+
+#include once "mir_types.fbs"
+#include once "mir_opcode.fbs"
+#include once "mir_surface_closure.fbs"
+
+Function UXBMIRStep4NormalizeOpcode(ByRef opcodeText As String) As String
+    Return UCase(Trim(opcodeText))
+End Function
+
+Private Function UXBMIRStep4InSet(ByVal op As String, ByVal csvText As String) As Integer
+    Return IIf(InStr("," & UCase(csvText) & ",", "," & UCase(Trim(op)) & ",") > 0, 1, 0)
+End Function
+
+Function UXBMIRStep4BuiltinOpcodeSet() As String
+    Dim s As String
+    s = "MIR_ASC,MIR_CHR,MIR_VAL,MIR_STR,MIR_CINT,MIR_CLNG,MIR_CSNG,MIR_CDBL,MIR_FIX,MIR_INT,MIR_SGN,"
+    s &= "MIR_ABS,MIR_SQR,MIR_SQRT,MIR_SIN,MIR_COS,MIR_TAN,MIR_ATN,MIR_LOG,MIR_EXP,MIR_RND,"
+    s &= "MIR_LEN,MIR_LCASE,MIR_UCASE,MIR_LTRIM,MIR_RTRIM,MIR_TRIM,MIR_SPACE,MIR_CODEPTR,MIR_LPTR,MIR_ADDR_OF,MIR_INSTR,MIR_HEX,MIR_OCT,MIR_BIN,MIR_BIGINIT"
+    Return s
+End Function
+
+' The membership test below rebuilds a ~5 KB opcode list, upper-cases it and scans
+' it, and UXBSurfaceKnown is a several-thousand-arm string SELECT -- about half a
+' millisecond per call, and every interpreter step calls it several times (a
+' 2000-iteration FOR loop took ~50 s). The answer only depends on the opcode text,
+' so it is memoized (string_memo.fbs).
+Dim Shared gUxbMemoOpKnown As UXBStringMemo
+Dim Shared gUxbMemoCanonOpcode As UXBStringMemo
+Dim Shared gUxbMemoOpGroup As UXBStringMemo
+
+Private Function UXBMIRStep4OpcodeKnownUncached(ByVal op As String) As Integer
+    If op = "" Then Return 0
+    If UXBSurfaceKnown(op) <> 0 Then Return 1
+    Dim allOps As String
+    allOps = "MIR_NOP,MIR_CONST,MIR_LOAD_CONST,MIR_LOCAL_DECL,MIR_GLOBAL_DECL,MIR_PARAM_DECL,MIR_LOAD,MIR_STORE,MIR_LOAD_LOCAL,MIR_STORE_LOCAL,MIR_LOAD_GLOBAL,MIR_STORE_GLOBAL,"
+    allOps &= "MIR_ADD,MIR_SUB,MIR_MUL,MIR_DIV,MIR_IDIV,MIR_MOD,MIR_NEG,MIR_INC,MIR_DEC,MIR_FADD,MIR_FSUB,MIR_FMUL,MIR_FDIV,MIR_FNEG,MIR_FCMP,"
+    allOps &= "MIR_EQ,MIR_NE,MIR_LT,MIR_LE,MIR_GT,MIR_GE,MIR_AND,MIR_OR,MIR_XOR,MIR_NAND,MIR_NOR,MIR_XNOR,MIR_IMP,MIR_CIMP,MIR_NIMP,MIR_NCIMP,MIR_IDA,MIR_IDB,MIR_NOTA,MIR_NOTB,MIR_NOT,MIR_SHL,MIR_SHR,MIR_USHR,MIR_UIDIV,MIR_UMOD,MIR_ULT,MIR_ULE,MIR_UGT,MIR_UGE,MIR_ROL,MIR_ROR,MIR_POW,MIR_BAND,MIR_BOR,MIR_BXOR,MIR_BNOT,MIR_ADD_ASSIGN,MIR_SUB_ASSIGN,MIR_MUL_ASSIGN,MIR_DIV_ASSIGN,MIR_IDIV_ASSIGN,MIR_MOD_ASSIGN,MIR_SHL_ASSIGN,MIR_SHR_ASSIGN,MIR_AND_ASSIGN,MIR_OR_ASSIGN,MIR_XOR_ASSIGN,MIR_POW_ASSIGN,MIR_CAST,MIR_COERCE,MIR_TYPEOF,MIR_SIZEOF,MIR_OFFSETOF,"
+    allOps &= "MIR_LABEL,MIR_JMP,MIR_JMP_IF_TRUE,MIR_JMP_IF_FALSE,MIR_SELECT_BEGIN,MIR_CASE,MIR_CASE_ELSE,MIR_SELECT_END,MIR_LOOP_BEGIN,MIR_LOOP_END,MIR_FOR_EACH_BEGIN,MIR_FOR_EACH_NEXT,MIR_UNTIL_CHECK,MIR_GOTO,MIR_GOSUB,MIR_BREAK,MIR_CONTINUE,"
+    allOps &= "MIR_FUNCTION_BEGIN,MIR_FUNCTION_END,MIR_SUB_BEGIN,MIR_SUB_END,MIR_CALL,MIR_METHOD_CALL,MIR_VIRTUAL_CALL,MIR_CALL_BUILTIN,MIR_CALL_RUNTIME,MIR_CALL_EXTERNAL,MIR_CALL_DLL,MIR_CALL_API,MIR_RETURN,"
+    allOps &= "MIR_STR_NEW,MIR_STR_ASSIGN,MIR_STR_CONCAT,MIR_STR_LEN,MIR_STR_MID,MIR_STR_LEFT,MIR_STR_RIGHT,MIR_STR_COMPARE,"
+    allOps &= "MIR_ARRAY_NEW,MIR_ARRAY_REDIM,MIR_ARRAY_LOAD,MIR_ARRAY_STORE,MIR_ARRAY_FIELD_LOAD,MIR_ARRAY_FIELD_STORE,MIR_VIRTUAL_INIT,MIR_MEMORY_LOAD,MIR_MEMORY_STORE,MIR_MEMORY_COPY,MIR_MEMORY_FILL,MIR_MEMORY_READ_SEQUENCE,MIR_MEMORY_WRITE_SEQUENCE,MIR_MEMORY_REF,MIR_ARRAY_SIZEOF,MIR_ARRAY_LBOUND,MIR_ARRAY_UBOUND,MIR_VARPTR,MIR_OBJECT_NEW,MIR_FIELD_LOAD,MIR_FIELD_STORE,MIR_TYPE_DECL,MIR_CLASS_DECL,MIR_METHOD_DECL,MIR_INTERFACE_DECL,MIR_PROPERTY_DECL,MIR_OPERATOR_DECL,MIR_CONSTRUCTOR_DECL,MIR_DESTRUCTOR_DECL,MIR_IMPLEMENTS_DECL,MIR_DELETE_OBJECT,"
+    allOps &= "MIR_MEM_LOAD,MIR_MEM_STORE,MIR_MEM_COPY,MIR_MEM_FILL,MIR_PEEK,MIR_POKE,MIR_SETNEWOFFSET,"
+    allOps &= "MIR_FILE_OPEN,MIR_FILE_CLOSE,MIR_FILE_READ,MIR_FILE_WRITE,MIR_FILE_SEEK,MIR_FILE_DELETE,MIR_FILE_EOF,MIR_FILE_LOF,"
+    allOps &= "MIR_PRINT,MIR_INPUT,MIR_CLS,MIR_COLOR,MIR_LOCATE,MIR_RANDOMIZE,MIR_TIMER,MIR_RUNTIME_CALL,"
+    allOps &= "MIR_TRY_BEGIN,MIR_CATCH_BEGIN,MIR_FINALLY_BEGIN,MIR_TRY_END,MIR_THROW,MIR_ASSERT,"
+    allOps &= "MIR_JS_CALL,MIR_BROWSER_CALL,MIR_WASM_IMPORT,MIR_WASM_EXPORT,MIR_HOST_CALL,MIR_LIBRARY_CALL,MIR_EXTFP_CALL,MIR_INLINE,MIR_NATIVE_ONLY,MIR_WASM_UNSUPPORTED,MIR_DIAGNOSTIC_ONLY,MIR_RESERVED_NODE,MIR_BROKEN_NODE,MIR_METADATA_ONLY,MIR_DECORATOR,MIR_MAGIC,MIR_MIXIN,MIR_OVERRIDE,MIR_VIRTUAL,MIR_PARALEL_HINT,"
+    allOps &= UXBMIRStep4BuiltinOpcodeSet() & ","
+    allOps &= "ADD,SUB,MUL,DIV,IDIV,MOD,POW,NEG,INC,DEC,FADD,FSUB,FMUL,FDIV,FNEG,EQ,NE,LT,LE,GT,GE,AND,OR,XOR,NAND,NOR,XNOR,IMP,CIMP,NIMP,NCIMP,IDA,IDB,NOTA,NOTB,NOT,BNOT,SHL,SHR,USHR,UIDIV,UMOD,ULT,ULE,UGT,UGE,ROL,ROR,"
+    allOps &= "LOAD_CONST,LOAD_VAR,STORE_VAR,LOAD_FIELD,STORE_FIELD,LOAD_INDEXED,STORE_INDEXED,DIM,CONST,DEF_TYPE,REDIM,NEW,CALL,METHOD_CALL,VIRTUAL_CALL,CALL_USER,CALL_DLL,CALL_API,INLINE,IMPORT,RET,RETURN,LABEL,JMP,JZ,JNZ,"
+    allOps &= "OPEN,CLOSE,GET,PUT,SEEK,DELETE,EOF,LOF,PRINT,INPUT,CLS,COLOR,LOCATE,PEEK,PEEKS,PEEKB,PEEKW,PEEKD,PEEKQ,POKE,POKEB,POKEW,POKED,POKEQ,POKES,MEMCOPY,MEMCOPYB,MEMCOPYW,MEMCOPYD,MEMCOPYQ,MEMFILL,MEMFILLB,MEMFILLW,MEMFILLD,MEMFILLQ,SETSTRINGSIZE,SETNEWOFFSET,"
+    allOps &= "ABS,SQR,SQRT,SIN,COS,TAN,ATN,LOG,EXP,RND,RANDOMIZE,TIMER,ASC,CHR,VAL,STR,CINT,CLNG,CSNG,CDBL,FIX,INT,SGN,LEN,LCASE,UCASE,LTRIM,RTRIM,SPACE,MID,LEFT,RIGHT,TRIM,INSTR,HEX,OCT,BIN,CODEPTR,LPTR,OFFSETOF,SIZEOF,TYPEOF,BIGINIT,DECORATOR,MAGIC,MIXIN,OVERRIDE,VIRTUAL,MAGIC,PARALEL,PARALEL,THREAD,EACH,UNTIL,GOSUB,GOTO,CATCH,FINALLY,DELETE,DESTRUCTOR,IMPLEMENTS,INTERFACE,METHOD,OPERATOR,PROPERTY,BALL,BIGD,BIGF,BIGINT,F32,F64,F80,F128,I8,I16,I32,I64,U8,U16,U32,U64,BYTE,BOOLEAN,OBJECT,PTR,STRING,ANY,VARIANT,VOID,%,%=,*=,++,--,/=,<<,<<=,>>,>>=,@,\=,^,^=,|,|="
+    Return UXBMIRStep4InSet(op, allOps)
+End Function
+
+Function UXBMIRStep4OpcodeKnown(ByRef opcodeText As String) As Integer
+    Dim cached As String
+    If UXBStringMemoGet(gUxbMemoOpKnown, opcodeText, cached) <> 0 Then Return IIf(cached = "1", 1, 0)
+    Dim known As Integer = UXBMIRStep4OpcodeKnownUncached(UXBMIRStep4NormalizeOpcode(opcodeText))
+    UXBStringMemoPut gUxbMemoOpKnown, opcodeText, IIf(known <> 0, "1", "0")
+    Return known
+End Function
+
+Function UXBMIRStep4OpcodeIsCanonical(ByRef opcodeText As String) As Integer
+    Dim op As String = UXBMIRStep4NormalizeOpcode(opcodeText)
+    Return IIf(Left(op, 4) = "MIR_" And UXBMIRStep4OpcodeKnown(op) <> 0, 1, 0)
+End Function
+
+Function UXBMIRStep4OpcodeIsLegacy(ByRef opcodeText As String) As Integer
+    Dim op As String = UXBMIRStep4NormalizeOpcode(opcodeText)
+    If op = "" Or Left(op, 4) = "MIR_" Then Return 0
+    Return UXBMIRStep4OpcodeKnown(op)
+End Function
+
+Function UXBMIRStep4LegacyOpcodeToCanonical(ByRef opcodeText As String) As String
+    Dim op As String = UXBMIRStep4NormalizeOpcode(opcodeText)
+    If UXBMIRStep4OpcodeIsCanonical(op) <> 0 Then Return op
+    Select Case op
+    Case "ADD": Return "MIR_ADD"
+    Case "SUB": Return "MIR_SUB"
+    Case "MUL": Return "MIR_MUL"
+    Case "DIV": Return "MIR_DIV"
+    Case "IDIV": Return "MIR_IDIV"
+    Case "MOD": Return "MIR_MOD"
+    Case "POW": Return "MIR_POW"
+    Case "NEG": Return "MIR_NEG"
+    Case "INC": Return "MIR_INC"
+    Case "DEC": Return "MIR_DEC"
+    Case "FADD": Return "MIR_FADD"
+    Case "FSUB": Return "MIR_FSUB"
+    Case "FMUL": Return "MIR_FMUL"
+    Case "FDIV": Return "MIR_FDIV"
+    Case "FNEG": Return "MIR_FNEG"
+    Case "EQ": Return "MIR_EQ"
+    Case "NE": Return "MIR_NE"
+    Case "LT": Return "MIR_LT"
+    Case "LE": Return "MIR_LE"
+    Case "GT": Return "MIR_GT"
+    Case "GE": Return "MIR_GE"
+    Case "AND": Return "MIR_AND"
+    Case "OR": Return "MIR_OR"
+    Case "XOR": Return "MIR_XOR"
+    Case "NAND": Return "MIR_NAND"
+    Case "NOR": Return "MIR_NOR"
+    Case "XNOR", "NXOR", "EQV", "EQA", "IFF": Return "MIR_XNOR"
+    Case "IMP": Return "MIR_IMP"
+    Case "CIMP": Return "MIR_CIMP"
+    Case "NIMP": Return "MIR_NIMP"
+    Case "NCIMP": Return "MIR_NCIMP"
+    Case "IDA": Return "MIR_IDA"
+    Case "IDB": Return "MIR_IDB"
+    Case "NOTA": Return "MIR_NOTA"
+    Case "NOTB": Return "MIR_NOTB"
+    Case "NOT": Return "MIR_NOT"
+    Case "BNOT": Return "MIR_BNOT"
+    Case "SHL": Return "MIR_SHL"
+    Case "SHR": Return "MIR_SHR"
+    Case "USHR": Return "MIR_USHR"
+    Case "UIDIV": Return "MIR_UIDIV"
+    Case "UMOD": Return "MIR_UMOD"
+    Case "ULT": Return "MIR_ULT"
+    Case "ULE": Return "MIR_ULE"
+    Case "UGT": Return "MIR_UGT"
+    Case "UGE": Return "MIR_UGE"
+    Case "ROL": Return "MIR_ROL"
+    Case "ROR": Return "MIR_ROR"
+    Case "LOAD_CONST": Return "MIR_LOAD_CONST"
+    Case "LOAD_VAR": Return "MIR_LOAD_LOCAL"
+    Case "STORE_VAR": Return "MIR_STORE_LOCAL"
+    Case "LOAD_FIELD": Return "MIR_FIELD_LOAD"
+    Case "STORE_FIELD": Return "MIR_FIELD_STORE"
+    Case "LOAD_INDEXED": Return "MIR_ARRAY_LOAD"
+    Case "STORE_INDEXED": Return "MIR_ARRAY_STORE"
+    Case "DIM": Return "MIR_LOCAL_DECL"
+    Case "CONST": Return "MIR_CONST"
+    ' S-035: REDIM used to collide with MIR_ARRAY_NEW (a brand-new anonymous
+    ' array literal) -- REDIM resizes an EXISTING named array variable's own
+    ' storage in place, a completely different operation with a different
+    ' operand shape (name,lower,upper,preserve vs. a plain element count).
+    ' The interpreter treated every REDIM as "allocate a fresh, orphaned
+    ' array and discard the result" (ins.result is "" for REDIM, so nothing
+    ' ever received the bogus new handle) -- REDIM was a silent no-op.
+    Case "REDIM": Return "MIR_ARRAY_REDIM"
+    Case "DEF_TYPE": Return "MIR_TYPE_DECL"
+    Case "NEW": Return "MIR_OBJECT_NEW"
+    Case "CALL": Return "MIR_CALL"
+    Case "METHOD_CALL": Return "MIR_METHOD_CALL"
+    Case "VIRTUAL_CALL": Return "MIR_VIRTUAL_CALL"
+    Case "CALL_USER": Return "MIR_CALL"
+    Case "CALL_DLL": Return "MIR_CALL_DLL"
+    Case "CALL_API": Return "MIR_CALL_API"
+    Case "INLINE": Return "MIR_INLINE"
+    Case "RET", "RETURN": Return "MIR_RETURN"
+    Case "LABEL": Return "MIR_LABEL"
+    Case "JMP": Return "MIR_JMP"
+    Case "JZ": Return "MIR_JMP_IF_FALSE"
+    Case "JNZ": Return "MIR_JMP_IF_TRUE"
+    Case "OPEN": Return "MIR_FILE_OPEN"
+    Case "CLOSE": Return "MIR_FILE_CLOSE"
+    Case "GET": Return "MIR_FILE_READ"
+    Case "PUT": Return "MIR_FILE_WRITE"
+    Case "SEEK": Return "MIR_FILE_SEEK"
+    Case "DELETE": Return "MIR_FILE_DELETE"
+    Case "EOF": Return "MIR_FILE_EOF"
+    Case "LOF": Return "MIR_FILE_LOF"
+    Case "PRINT": Return "MIR_PRINT"
+    Case "INPUT": Return "MIR_INPUT"
+    Case "CLS": Return "MIR_CLS"
+    Case "COLOR": Return "MIR_COLOR"
+    Case "LOCATE": Return "MIR_LOCATE"
+    Case "RANDOMIZE": Return "MIR_RANDOMIZE"
+    Case "TIMER": Return "MIR_TIMER"
+    Case "PEEKS": Return "MIR_MEMORY_READ_SEQUENCE"
+    Case "PEEK", "PEEKB", "PEEKW", "PEEKD", "PEEKQ": Return "MIR_MEMORY_LOAD"
+    Case "POKES": Return "MIR_MEMORY_WRITE_SEQUENCE"
+    Case "POKE", "POKEB", "POKEW", "POKED", "POKEQ": Return "MIR_MEMORY_STORE"
+    Case "MEMCOPY", "MEMCOPYB", "MEMCOPYW", "MEMCOPYD", "MEMCOPYQ": Return "MIR_MEMORY_COPY"
+    Case "MEMFILL", "MEMFILLB", "MEMFILLW", "MEMFILLD", "MEMFILLQ": Return "MIR_MEMORY_FILL"
+    Case "SETSTRINGSIZE": Return "MIR_STR_ASSIGN"
+    Case "SETNEWOFFSET": Return "MIR_SETNEWOFFSET"
+    Case "ASC": Return "MIR_ASC"
+    Case "CHR": Return "MIR_CHR"
+    Case "VAL": Return "MIR_VAL"
+    Case "STR": Return "MIR_STR"
+    Case "CINT": Return "MIR_CINT"
+    Case "CLNG": Return "MIR_CLNG"
+    Case "CSNG": Return "MIR_CSNG"
+    Case "CDBL": Return "MIR_CDBL"
+    Case "FIX": Return "MIR_FIX"
+    Case "INT": Return "MIR_INT"
+    Case "SGN": Return "MIR_SGN"
+    Case "ABS": Return "MIR_ABS"
+    Case "SQR", "SQRT": Return "MIR_SQRT"
+    Case "SIN": Return "MIR_SIN"
+    Case "COS": Return "MIR_COS"
+    Case "TAN": Return "MIR_TAN"
+    Case "ATN": Return "MIR_ATN"
+    Case "LOG": Return "MIR_LOG"
+    Case "EXP": Return "MIR_EXP"
+    Case "RND": Return "MIR_RND"
+    Case "LEN": Return "MIR_LEN"
+    Case "LCASE": Return "MIR_LCASE"
+    Case "UCASE": Return "MIR_UCASE"
+    Case "LTRIM": Return "MIR_LTRIM"
+    Case "RTRIM": Return "MIR_RTRIM"
+    Case "SPACE": Return "MIR_SPACE"
+    Case "MID": Return "MIR_STR_MID"
+    Case "LEFT": Return "MIR_STR_LEFT"
+    Case "RIGHT": Return "MIR_STR_RIGHT"
+    Case "TRIM": Return "MIR_TRIM"
+    Case "INSTR": Return "MIR_INSTR"
+    Case "HEX": Return "MIR_HEX"
+    Case "OCT": Return "MIR_OCT"
+    Case "BIN": Return "MIR_BIN"
+    Case "CODEPTR": Return "MIR_CODEPTR"
+    Case "LPTR": Return "MIR_LPTR"
+    Case "OFFSETOF": Return "MIR_OFFSETOF"
+    Case "SIZEOF": Return "MIR_SIZEOF"
+    Case "TYPEOF": Return "MIR_TYPEOF"
+    Case "CAST": Return "MIR_CAST"
+    Case "COERCE": Return "MIR_COERCE"
+    Case "BIGINIT": Return "MIR_BIGINIT"
+    Case "%": Return "MIR_MOD"
+    Case "%=": Return "MIR_MOD_ASSIGN"
+    Case "*=": Return "MIR_MUL_ASSIGN"
+    Case "/=": Return "MIR_DIV_ASSIGN"
+    Case "\=": Return "MIR_IDIV_ASSIGN"
+    Case "++": Return "MIR_INC"
+    Case "--": Return "MIR_DEC"
+    Case "<<": Return "MIR_SHL"
+    Case ">>": Return "MIR_SHR"
+    Case "<<=": Return "MIR_SHL_ASSIGN"
+    Case ">>=": Return "MIR_SHR_ASSIGN"
+    Case "^": Return "MIR_XOR"
+    Case "^=": Return "MIR_XOR_ASSIGN"
+    Case "|": Return "MIR_BOR"
+    Case "|=": Return "MIR_OR_ASSIGN"
+    Case "@": Return "MIR_ADDR_OF"
+    Case "DECORATOR": Return "MIR_DECORATOR"
+    Case "MAGIC", "MAGIC": Return "MIR_MAGIC"
+    Case "MIXIN": Return "MIR_MIXIN"
+    Case "OVERRIDE": Return "MIR_OVERRIDE"
+    Case "VIRTUAL": Return "MIR_VIRTUAL"
+    Case "PARALEL", "PARALEL", "THREAD": Return "MIR_PARALEL_HINT"
+    Case "EACH": Return "MIR_FOR_EACH_BEGIN"
+    Case "UNTIL": Return "MIR_UNTIL_CHECK"
+    Case "GOTO": Return "MIR_GOTO"
+    Case "GOSUB": Return "MIR_GOSUB"
+    Case "CATCH": Return "MIR_CATCH_BEGIN"
+    Case "FINALLY": Return "MIR_FINALLY_BEGIN"
+    Case "DELETE": Return "MIR_DELETE_OBJECT"
+    Case "DESTRUCTOR": Return "MIR_DESTRUCTOR_DECL"
+    Case "IMPLEMENTS": Return "MIR_IMPLEMENTS_DECL"
+    Case "INTERFACE": Return "MIR_INTERFACE_DECL"
+    Case "METHOD": Return "MIR_METHOD_DECL"
+    Case "OPERATOR": Return "MIR_OPERATOR_DECL"
+    Case "PROPERTY": Return "MIR_PROPERTY_DECL"
+    Case "BALL", "BIGD", "BIGF", "BIGINT", "F32", "F64", "F80", "F128", "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "BYTE", "BOOLEAN", "OBJECT", "PTR", "STRING", "ANY", "VARIANT", "VOID"
+        Return "MIR_TYPE_DECL"
+    End Select
+    If UXBSurfaceKnown(op) <> 0 Then Return UXBSurfaceMirOpcode(op)
+    If UXBMIRStep4OpcodeIsLegacy(op) <> 0 Then Return "MIR_" & op
+    Return ""
+End Function
+
+Declare Function UXBMIRStep4CanonicalOpcodeUncached(ByRef opcodeText As String) As String
+Declare Function UXBMIRStep4OpcodeGroupUncached(ByRef opcodeText As String) As String
+
+' Pure functions of the opcode text; memoized (see string_memo.fbs).
+Function UXBMIRStep4CanonicalOpcode(ByRef opcodeText As String) As String
+    Dim cached As String
+    If UXBStringMemoGet(gUxbMemoCanonOpcode, opcodeText, cached) <> 0 Then Return cached
+    Dim result As String = UXBMIRStep4CanonicalOpcodeUncached(opcodeText)
+    UXBStringMemoPut gUxbMemoCanonOpcode, opcodeText, result
+    Return result
+End Function
+
+Function UXBMIRStep4OpcodeGroup(ByRef opcodeText As String) As String
+    Dim cached As String
+    If UXBStringMemoGet(gUxbMemoOpGroup, opcodeText, cached) <> 0 Then Return cached
+    Dim result As String = UXBMIRStep4OpcodeGroupUncached(opcodeText)
+    UXBStringMemoPut gUxbMemoOpGroup, opcodeText, result
+    Return result
+End Function
+
+Function UXBMIRStep4CanonicalOpcodeUncached(ByRef opcodeText As String) As String
+    Dim op As String = UXBMIRStep4NormalizeOpcode(opcodeText)
+    If UXBMIRStep4OpcodeIsCanonical(op) <> 0 Then Return op
+    Dim c As String = UXBMIRStep4LegacyOpcodeToCanonical(op)
+    If c <> "" Then Return c
+    Return op
+End Function
+
+Function UXBMIRStep4OpcodeGroupUncached(ByRef opcodeText As String) As String
+    Dim op As String = UXBMIRStep4CanonicalOpcode(opcodeText)
+    Select Case op
+    Case "MIR_NOP": Return "MIR_META"
+    Case "MIR_CONST", "MIR_LOAD_CONST", "MIR_LOCAL_DECL", "MIR_GLOBAL_DECL", "MIR_PARAM_DECL", "MIR_LOAD", "MIR_STORE", "MIR_LOAD_LOCAL", "MIR_STORE_LOCAL", "MIR_LOAD_GLOBAL", "MIR_STORE_GLOBAL": Return "MIR_STORAGE"
+    Case "MIR_ADD", "MIR_SUB", "MIR_MUL", "MIR_DIV", "MIR_IDIV", "MIR_MOD", "MIR_NEG", "MIR_INC", "MIR_DEC", "MIR_FADD", "MIR_FSUB", "MIR_FMUL", "MIR_FDIV", "MIR_FNEG", "MIR_FCMP", "MIR_SHL", "MIR_SHR", "MIR_USHR", "MIR_UIDIV", "MIR_UMOD", "MIR_ROL", "MIR_ROR", "MIR_POW", "MIR_NAND", "MIR_NOR", "MIR_XNOR", "MIR_IMP", "MIR_CIMP", "MIR_NIMP", "MIR_NCIMP", "MIR_IDA", "MIR_IDB", "MIR_NOTA", "MIR_NOTB", "MIR_BAND", "MIR_BOR", "MIR_BXOR", "MIR_BNOT", "MIR_ADD_ASSIGN", "MIR_SUB_ASSIGN", "MIR_MUL_ASSIGN", "MIR_DIV_ASSIGN", "MIR_IDIV_ASSIGN", "MIR_MOD_ASSIGN", "MIR_SHL_ASSIGN", "MIR_SHR_ASSIGN", "MIR_AND_ASSIGN", "MIR_OR_ASSIGN", "MIR_XOR_ASSIGN", "MIR_POW_ASSIGN": Return "MIR_ARITH"
+    Case "MIR_EQ", "MIR_NE", "MIR_LT", "MIR_LE", "MIR_GT", "MIR_GE", "MIR_ULT", "MIR_ULE", "MIR_UGT", "MIR_UGE", "MIR_AND", "MIR_OR", "MIR_XOR", "MIR_NOT", "MIR_CAST", "MIR_COERCE", "MIR_TYPEOF", "MIR_SIZEOF", "MIR_OFFSETOF", "MIR_CODEPTR", "MIR_LPTR", "MIR_ADDR_OF": Return "MIR_EXPR"
+    Case "MIR_ASC", "MIR_CHR", "MIR_VAL", "MIR_STR", "MIR_CINT", "MIR_CLNG", "MIR_CSNG", "MIR_CDBL", "MIR_FIX", "MIR_INT", "MIR_SGN", "MIR_ABS", "MIR_SQR", "MIR_SQRT", "MIR_SIN", "MIR_COS", "MIR_TAN", "MIR_ATN", "MIR_LOG", "MIR_EXP", "MIR_RND", "MIR_LEN", "MIR_LCASE", "MIR_UCASE", "MIR_LTRIM", "MIR_RTRIM", "MIR_TRIM", "MIR_SPACE", "MIR_INSTR", "MIR_HEX", "MIR_OCT", "MIR_BIN", "MIR_BIGINIT": Return "MIR_BUILTIN"
+    Case "MIR_LABEL", "MIR_JMP", "MIR_JMP_IF_TRUE", "MIR_JMP_IF_FALSE", "MIR_SELECT_BEGIN", "MIR_CASE", "MIR_CASE_ELSE", "MIR_SELECT_END", "MIR_LOOP_BEGIN", "MIR_LOOP_END", "MIR_FOR_EACH_BEGIN", "MIR_FOR_EACH_NEXT", "MIR_UNTIL_CHECK", "MIR_GOTO", "MIR_GOSUB", "MIR_BREAK", "MIR_CONTINUE", "MIR_RETURN": Return "MIR_CONTROL"
+    Case "MIR_FUNCTION_BEGIN", "MIR_FUNCTION_END", "MIR_SUB_BEGIN", "MIR_SUB_END", "MIR_CALL", "MIR_METHOD_CALL", "MIR_VIRTUAL_CALL", "MIR_CALL_BUILTIN", "MIR_CALL_RUNTIME", "MIR_CALL_EXTERNAL", "MIR_CALL_DLL", "MIR_CALL_API": Return "MIR_CALL"
+    Case "MIR_STR_NEW", "MIR_STR_ASSIGN", "MIR_STR_CONCAT", "MIR_STR_LEN", "MIR_STR_MID", "MIR_STR_LEFT", "MIR_STR_RIGHT", "MIR_STR_COMPARE": Return "MIR_STRING"
+    Case "MIR_ARRAY_NEW", "MIR_ARRAY_REDIM", "MIR_ARRAY_LOAD", "MIR_ARRAY_STORE", "MIR_ARRAY_FIELD_LOAD", "MIR_ARRAY_FIELD_STORE", "MIR_OBJECT_NEW", "MIR_FIELD_LOAD", "MIR_FIELD_STORE", "MIR_TYPE_DECL", "MIR_CLASS_DECL", "MIR_METHOD_DECL", "MIR_INTERFACE_DECL", "MIR_PROPERTY_DECL", "MIR_OPERATOR_DECL", "MIR_CONSTRUCTOR_DECL", "MIR_DESTRUCTOR_DECL", "MIR_IMPLEMENTS_DECL", "MIR_DELETE_OBJECT": Return "MIR_OBJECT"
+    Case "MIR_MEM_LOAD", "MIR_MEM_STORE", "MIR_MEM_COPY", "MIR_MEM_FILL", "MIR_VIRTUAL_INIT", "MIR_MEMORY_LOAD", "MIR_MEMORY_STORE", "MIR_MEMORY_COPY", "MIR_MEMORY_FILL", "MIR_MEMORY_READ_SEQUENCE", "MIR_MEMORY_WRITE_SEQUENCE", "MIR_MEMORY_REF", "MIR_ARRAY_SIZEOF", "MIR_ARRAY_LBOUND", "MIR_ARRAY_UBOUND", "MIR_VARPTR", "MIR_PEEK", "MIR_POKE", "MIR_SETNEWOFFSET": Return "MIR_MEMORY"
+    Case "MIR_FILE_OPEN", "MIR_FILE_CLOSE", "MIR_FILE_READ", "MIR_FILE_WRITE", "MIR_FILE_SEEK", "MIR_FILE_DELETE", "MIR_FILE_EOF", "MIR_FILE_LOF": Return "MIR_FILE"
+    Case "MIR_PRINT", "MIR_INPUT", "MIR_CLS", "MIR_COLOR", "MIR_LOCATE", "MIR_RANDOMIZE", "MIR_TIMER", "MIR_RUNTIME_CALL": Return "MIR_RUNTIME"
+    Case "MIR_TRY_BEGIN", "MIR_CATCH_BEGIN", "MIR_FINALLY_BEGIN", "MIR_TRY_END", "MIR_THROW", "MIR_ASSERT": Return "MIR_EXCEPTION"
+    Case "MIR_JS_CALL", "MIR_BROWSER_CALL", "MIR_WASM_IMPORT", "MIR_WASM_EXPORT", "MIR_HOST_CALL", "MIR_LIBRARY_CALL", "MIR_EXTFP_CALL", "MIR_INLINE": Return "MIR_TARGET"
+    Case "MIR_NATIVE_ONLY", "MIR_WASM_UNSUPPORTED", "MIR_DIAGNOSTIC_ONLY", "MIR_RESERVED_NODE", "MIR_BROKEN_NODE": Return "MIR_FAIL_CLOSED"
+    Case "MIR_DECORATOR", "MIR_MAGIC", "MIR_MIXIN", "MIR_OVERRIDE", "MIR_VIRTUAL", "MIR_PARALEL_HINT", "MIR_METADATA_ONLY": Return "MIR_META"
+    End Select
+    Return "MIR_INVALID"
+End Function
+
+Function UXBMIRStep4VerifyRuleForOpcode(ByRef opcodeText As String) As String
+    Select Case UXBMIRStep4OpcodeGroup(opcodeText)
+    Case "MIR_META": Return "verify_meta"
+    Case "MIR_STORAGE": Return "verify_storage"
+    Case "MIR_ARITH": Return "verify_arith"
+    Case "MIR_EXPR": Return "verify_expr"
+    Case "MIR_BUILTIN": Return "verify_builtin"
+    Case "MIR_CONTROL": Return "verify_control"
+    Case "MIR_CALL": Return "verify_call"
+    Case "MIR_STRING": Return "verify_string"
+    Case "MIR_OBJECT": Return "verify_object"
+    Case "MIR_MEMORY": Return "verify_memory"
+    Case "MIR_FILE": Return "verify_file"
+    Case "MIR_RUNTIME": Return "verify_runtime"
+    Case "MIR_EXCEPTION": Return "verify_exception"
+    Case "MIR_TARGET": Return "verify_target"
+    Case "MIR_FAIL_CLOSED": Return "verify_fail_closed"
+    End Select
+    Return ""
+End Function
+
+Function UXBMIRStep4HasVerifyRule(ByRef opcodeText As String) As Integer
+    Return IIf(UXBMIRStep4VerifyRuleForOpcode(opcodeText) <> "", 1, 0)
+End Function
+
+Function UXBMIRStep4OpcodeResultType(ByRef opcodeText As String) As String
+    Dim op As String = UXBMIRStep4CanonicalOpcode(opcodeText)
+    Select Case op
+    Case "MIR_EQ", "MIR_NE", "MIR_LT", "MIR_LE", "MIR_GT", "MIR_GE", "MIR_AND", "MIR_OR", "MIR_XOR", "MIR_NOT", "MIR_FILE_EOF": Return "TYPE_BOOL"
+    Case "MIR_ASC", "MIR_CINT", "MIR_CLNG", "MIR_FIX", "MIR_INT", "MIR_SGN", "MIR_LEN", "MIR_STR_LEN", "MIR_FILE_LOF", "MIR_INSTR", "MIR_SIZEOF", "MIR_ARRAY_SIZEOF", "MIR_ARRAY_LBOUND", "MIR_ARRAY_UBOUND", "MIR_OFFSETOF", "MIR_CODEPTR", "MIR_LPTR", "MIR_ADDR_OF": Return "TYPE_I64"
+    Case "MIR_CSNG": Return "TYPE_F32"
+    Case "MIR_CDBL", "MIR_ABS", "MIR_SQR", "MIR_SQRT", "MIR_SIN", "MIR_COS", "MIR_TAN", "MIR_ATN", "MIR_LOG", "MIR_EXP", "MIR_RND": Return "TYPE_F64"
+    Case "MIR_CHR", "MIR_STR", "MIR_LCASE", "MIR_UCASE", "MIR_LTRIM", "MIR_RTRIM", "MIR_TRIM", "MIR_SPACE", "MIR_HEX", "MIR_OCT", "MIR_BIN": Return "TYPE_STRING"
+    End Select
+    Select Case UXBMIRStep4OpcodeGroup(opcodeText)
+    Case "MIR_ARITH": Return "TYPE_INFERRED_NUMERIC"
+    Case "MIR_EXPR": Return "TYPE_BOOL"
+    Case "MIR_STRING": Return "TYPE_STRING"
+    Case "MIR_METHOD_CALL", "MIR_VIRTUAL_CALL": Return "TYPE_RUNTIME"
+    Case "MIR_MEMORY": Return "TYPE_PTR"
+    Case "MIR_OBJECT": Return "TYPE_OBJECT"
+    Case "MIR_FILE": Return "TYPE_FILE_HANDLE"
+    Case "MIR_MEMORY": Return "TYPE_PTR"
+    Case "MIR_CALL", "MIR_RUNTIME", "MIR_TARGET", "MIR_BUILTIN": Return "TYPE_RUNTIME"
+    Case "MIR_CONTROL", "MIR_META", "MIR_STORAGE", "MIR_EXCEPTION", "MIR_FAIL_CLOSED": Return "TYPE_VOID"
+    End Select
+    Return UXB_MIR_TYPE_ERROR
+End Function
+
+Function UXBMIRStep4OpcodeHasSideEffect(ByRef opcodeText As String) As Integer
+    Select Case UXBMIRStep4OpcodeGroup(opcodeText)
+    Case "MIR_STORAGE", "MIR_CONTROL", "MIR_CALL", "MIR_MEMORY", "MIR_FILE", "MIR_RUNTIME", "MIR_EXCEPTION", "MIR_TARGET", "MIR_FAIL_CLOSED": Return 1
+    End Select
+    Return 0
+End Function
+
+Function UXBMIRStep4OpcodeRequiresRuntime(ByRef opcodeText As String) As Integer
+    Select Case UXBMIRStep4OpcodeGroup(opcodeText)
+    Case "MIR_CALL", "MIR_FILE", "MIR_RUNTIME", "MIR_TARGET": Return 1
+    End Select
+    Return 0
+End Function
+
+Function UXBMIRStep4OpcodeRequiresExternal(ByRef opcodeText As String) As Integer
+    Dim op As String = UXBMIRStep4CanonicalOpcode(opcodeText)
+    Select Case op
+    Case "MIR_CALL_DLL", "MIR_CALL_API", "MIR_CALL_EXTERNAL", "MIR_INLINE", "MIR_NATIVE_ONLY": Return 1
+    End Select
+    Return 0
+End Function
+
+Function UXBMIRStep4OpcodeRequiresLayout(ByRef opcodeText As String) As Integer
+    Select Case UXBMIRStep4OpcodeGroup(opcodeText)
+    Case "MIR_OBJECT", "MIR_MEMORY": Return 1
+    End Select
+    Return 0
+End Function
+
+Function UXBMIRStep4OpcodeIsFailClosed(ByRef opcodeText As String) As Integer
+    Dim op As String = UXBMIRStep4CanonicalOpcode(opcodeText)
+    Select Case op
+    Case "MIR_NATIVE_ONLY", "MIR_WASM_UNSUPPORTED", "MIR_DIAGNOSTIC_ONLY", "MIR_RESERVED_NODE", "MIR_BROKEN_NODE", "__MIR_BLOCKED__": Return 1
+    End Select
+    Return 0
+End Function
+
+Function UXBMIRStep4OpcodeJsonSupported(ByRef opcodeText As String) As Integer
+    Return UXBMIRStep4OpcodeKnown(opcodeText)
+End Function
+
+#endif

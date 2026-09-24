@@ -1,0 +1,220 @@
+#ifndef UXB_RUNTIME_SERVICE_GATE_FBS
+#define UXB_RUNTIME_SERVICE_GATE_FBS
+
+#include once "runtime_service_matrix.fbs"
+
+Type UXBRuntimeServiceGateResult
+    ok As Integer
+    checkedCount As Integer
+    missingServiceCount As Integer
+    missingHandlerCount As Integer
+    undeclaredHandlerCount As Integer
+    missingSignatureCount As Integer
+    missingTestCount As Integer
+    missingTargetCount As Integer
+    signatureParseFailCount As Integer
+    targetStatusFailCount As Integer
+    missingFamilyCount As Integer
+    errorsText As String
+    warningsText As String
+End Type
+
+Sub UXBRuntimeServiceGateInit(ByRef r As UXBRuntimeServiceGateResult)
+    r.ok = 0
+    r.checkedCount = 0
+    r.missingServiceCount = 0
+    r.missingHandlerCount = 0
+    r.undeclaredHandlerCount = 0
+    r.missingSignatureCount = 0
+    r.missingTestCount = 0
+    r.missingTargetCount = 0
+    r.signatureParseFailCount = 0
+    r.targetStatusFailCount = 0
+    r.missingFamilyCount = 0
+    r.errorsText = ""
+    r.warningsText = ""
+End Sub
+
+Private Sub UXBRuntimeServiceGateError(ByRef r As UXBRuntimeServiceGateResult, ByVal msg As String)
+    If Len(r.errorsText) > 0 Then r.errorsText &= Chr(10)
+    r.errorsText &= msg
+End Sub
+
+Private Function UXBTargetInList(ByVal targetsText As String, ByVal targetValue As String) As Integer
+    Dim listText As String = "," & UCase(Trim(targetsText)) & ","
+    Dim targetText As String = "," & UCase(Trim(targetValue)) & ","
+    Return IIf(InStr(listText, targetText) > 0, 1, 0)
+End Function
+
+Private Function UXBRuntimeContractHasAnyTarget(ByRef c As UXBRuntimeServiceContract) As Integer
+    If UXBTargetInList(c.supportedTargets, "X64") <> 0 Then Return 1
+    If UXBTargetInList(c.supportedTargets, "JS") <> 0 Then Return 1
+    If UXBTargetInList(c.supportedTargets, "WASM") <> 0 Then Return 1
+    If UXBTargetInList(c.supportedTargets, "BROWSER") <> 0 Then Return 1
+    Return 0
+End Function
+
+Private Function UXBRuntimeServiceGateHandlerDeclaredKnown(ByVal handlerName As String) As Integer
+    Select Case UCase(Trim(handlerName))
+    Case "UXBRUNTIMECONSOLEDISPATCH", "UXBRUNTIMESTRINGDISPATCH", "UXBRUNTIMEMATHDISPATCH", "UXBRUNTIMEMEMORYDISPATCH", "UXBRUNTIMEFILEDISPATCH", "UXBRUNTIMEFFIDISPATCH", "UXBRUNTIMELIBRARYDISPATCH", "UXBRUNTIMEBROWSERDISPATCH"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function UXBRuntimeServiceGateParseSignature(ByVal signatureText As String, ByRef sig As UXBRuntimeServiceSignature) As Integer
+    UXBRuntimeServiceSignatureClear sig
+    Dim raw As String
+    raw = Trim(signatureText)
+    If raw = "" Then Return 0
+
+    Dim lp As Integer
+    Dim rp As Integer
+    lp = InStr(raw, "(")
+    rp = 0
+    Dim i As Integer
+    For i = Len(raw) To 1 Step -1
+        If Mid(raw, i, 1) = ")" Then
+            rp = i
+            Exit For
+        End If
+    Next i
+    If lp <= 1 Or rp <= lp Then Return 0
+
+    Dim retText As String
+    Dim argsText As String
+    retText = Trim(Left(raw, lp - 1))
+    argsText = Mid(raw, lp + 1, rp - lp - 1)
+    sig = UXBRuntimeSignatureMake(retText, argsText)
+    If Trim(sig.returnType) = "" Then Return 0
+    Return 1
+End Function
+
+Private Function UXBRuntimeServiceGateTargetStatusesOk(ByRef c As UXBRuntimeServiceContract) As Integer
+    If Trim(UXBRuntimeServiceTargetStatus(c.serviceId, "X64")) = "" Then Return 0
+    If Trim(UXBRuntimeServiceTargetStatus(c.serviceId, "JS")) = "" Then Return 0
+    If Trim(UXBRuntimeServiceTargetStatus(c.serviceId, "WASM")) = "" Then Return 0
+    If Trim(UXBRuntimeServiceTargetStatus(c.serviceId, "BROWSER")) = "" Then Return 0
+    Return 1
+End Function
+
+Function UXBRuntimeServiceGateCheckCatalog(ByRef cat As UXBRuntimeServiceCatalog, ByRef r As UXBRuntimeServiceGateResult) As Integer
+    UXBRuntimeServiceGateInit r
+
+    Dim seenConsole As Integer
+    Dim seenString As Integer
+    Dim seenMemory As Integer
+    Dim seenFile As Integer
+    Dim seenBrowser As Integer
+    seenConsole = 0
+    seenString = 0
+    seenMemory = 0
+    seenFile = 0
+    seenBrowser = 0
+
+    Dim i As Integer
+    For i = 0 To cat.count - 1
+        Dim ByRef c As UXBRuntimeServiceContract = cat.records(i)
+        r.checkedCount += 1
+
+        Select Case UCase(Trim(c.familyName))
+        Case "CONSOLE"
+            seenConsole = 1
+        Case "STRING"
+            seenString = 1
+        Case "MEMORY"
+            seenMemory = 1
+        Case "FILE"
+            seenFile = 1
+        Case "BROWSER"
+            seenBrowser = 1
+        End Select
+
+        If UXBRuntimeServiceKnown(c.serviceId) = 0 Then
+            r.missingServiceCount += 1
+            UXBRuntimeServiceGateError r, "RUNTIME_SERVICE_MISSING: " & c.serviceId
+        End If
+
+        If Trim(c.handlerName) = "" Then
+            r.missingHandlerCount += 1
+            UXBRuntimeServiceGateError r, "RUNTIME_HANDLER_MISSING: " & c.serviceId
+        ElseIf UXBRuntimeServiceGateHandlerDeclaredKnown(c.handlerName) = 0 Then
+            r.undeclaredHandlerCount += 1
+            UXBRuntimeServiceGateError r, "RUNTIME_HANDLER_UNDECLARED: " & c.serviceId & " handler=" & c.handlerName
+        End If
+
+        If Trim(c.signatureText) = "" Then
+            r.missingSignatureCount += 1
+            UXBRuntimeServiceGateError r, "RUNTIME_SIGNATURE_MISSING: " & c.serviceId
+        Else
+            Dim parsedSig As UXBRuntimeServiceSignature
+            If UXBRuntimeServiceGateParseSignature(c.signatureText, parsedSig) = 0 Then
+                r.signatureParseFailCount += 1
+                UXBRuntimeServiceGateError r, "RUNTIME_SIGNATURE_PARSE_FAIL: " & c.serviceId & " signature=" & c.signatureText
+            End If
+        End If
+
+        If UXBRuntimeServiceGateTargetStatusesOk(c) = 0 Then
+            r.targetStatusFailCount += 1
+            UXBRuntimeServiceGateError r, "RUNTIME_TARGET_STATUS_MISSING: " & c.serviceId
+        End If
+
+        If Trim(c.positiveTest) = "" Or Trim(c.negativeTest) = "" Then
+            r.missingTestCount += 1
+            UXBRuntimeServiceGateError r, "RUNTIME_TEST_MISSING: " & c.serviceId
+        End If
+
+        If UXBRuntimeContractHasAnyTarget(c) = 0 Then
+            r.missingTargetCount += 1
+            UXBRuntimeServiceGateError r, "RUNTIME_TARGET_MISSING: " & c.serviceId
+        End If
+    Next i
+
+    If seenConsole = 0 Then
+        r.missingFamilyCount += 1
+        UXBRuntimeServiceGateError r, "RUNTIME_FAMILY_MISSING: CONSOLE"
+    End If
+    If seenString = 0 Then
+        r.missingFamilyCount += 1
+        UXBRuntimeServiceGateError r, "RUNTIME_FAMILY_MISSING: STRING"
+    End If
+    If seenMemory = 0 Then
+        r.missingFamilyCount += 1
+        UXBRuntimeServiceGateError r, "RUNTIME_FAMILY_MISSING: MEMORY"
+    End If
+    If seenFile = 0 Then
+        r.missingFamilyCount += 1
+        UXBRuntimeServiceGateError r, "RUNTIME_FAMILY_MISSING: FILE"
+    End If
+    If seenBrowser = 0 Then
+        r.missingFamilyCount += 1
+        UXBRuntimeServiceGateError r, "RUNTIME_FAMILY_MISSING: BROWSER"
+    End If
+
+    If r.missingServiceCount = 0 And r.missingHandlerCount = 0 And r.undeclaredHandlerCount = 0 And r.missingSignatureCount = 0 And r.signatureParseFailCount = 0 And r.missingTestCount = 0 And r.missingTargetCount = 0 And r.targetStatusFailCount = 0 And r.missingFamilyCount = 0 Then
+        r.ok = 1
+        Return 1
+    End If
+
+    r.ok = 0
+    Return 0
+End Function
+
+Function UXBRuntimeServiceGateRun(ByRef r As UXBRuntimeServiceGateResult) As Integer
+    Dim cat As UXBRuntimeServiceCatalog
+    UXBRuntimeBuildCanonicalCatalog cat
+    Return UXBRuntimeServiceGateCheckCatalog(cat, r)
+End Function
+
+
+Function UXBRuntimeServiceGateValidateAll(ByRef errText As String) As Integer
+    Dim gateResult As UXBRuntimeServiceGateResult
+    If UXBRuntimeServiceGateRun(gateResult) = 0 Then
+        errText = "UXB_RUNTIME_SERVICE_SIGNATURE_MISMATCH: " & gateResult.errorsText
+        Return 0
+    End If
+    errText = ""
+    Return 1
+End Function
+
+#endif

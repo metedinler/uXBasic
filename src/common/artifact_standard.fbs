@@ -1,0 +1,154 @@
+#ifndef UXB_COMMON_ARTIFACT_STANDARD_FBS
+#define UXB_COMMON_ARTIFACT_STANDARD_FBS
+
+#include once "json_builder.fbs"
+#include once "report_writer.fbs"
+
+Const UXB_ARTIFACT_SCHEMA_VERSION As String = "uxb-artifact-standard-1"
+Const UXB_ARTIFACT_TOOL_VERSION As String = "uXBasic"
+
+Function UXBArtifactSafeToken(ByRef rawText As String) As String
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        If (ch >= "0" And ch <= "9") Or (ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Then
+            outText &= ch
+        Else
+            outText &= "_"
+        End If
+    Next i
+    If outText = "" Then outText = "run"
+    Return outText
+End Function
+
+Function UXBArtifactDefaultRunId() As String
+    Return UXBArtifactSafeToken(Date$ & "_" & Time$)
+End Function
+
+Function UXBArtifactDefaultBuildRoot() As String
+    Return "build"
+End Function
+
+Function UXBArtifactTrimRoot(ByRef baseRoot As String) As String
+    Dim b As String
+    b = Trim(baseRoot)
+    If b = "" Then b = UXBArtifactDefaultBuildRoot()
+
+    Do While Len(b) > 0 And (Right(b, 1) = "/" Or Right(b, 1) = Chr(92))
+        b = Left(b, Len(b) - 1)
+    Loop
+
+    If b = "" Then b = UXBArtifactDefaultBuildRoot()
+    Return b
+End Function
+
+Function UXBArtifactBuildRootForBaseAndRun(ByRef baseRoot As String, ByRef runId As String) As String
+    Dim b As String
+    Dim r As String
+    b = UXBArtifactTrimRoot(baseRoot)
+    r = UXBArtifactSafeToken(runId)
+    Return b & "/" & r
+End Function
+
+Function UXBArtifactJsonRootForBuildAndRun(ByRef buildRoot As String, ByRef runId As String) As String
+    Return UXBArtifactBuildRootForBaseAndRun(buildRoot, runId) & "/json"
+End Function
+
+Function UXBArtifactRootForRun(ByRef runId As String) As String
+    Return UXBArtifactJsonRootForBuildAndRun(UXBArtifactDefaultBuildRoot(), runId)
+End Function
+
+Function UXBArtifactRootForBaseAndRun(ByRef baseRoot As String, ByRef runId As String) As String
+    Return UXBArtifactJsonRootForBuildAndRun(baseRoot, runId)
+End Function
+
+Function UXBArtifactSubRootForBaseAndRun(ByRef baseRoot As String, ByRef subDir As String, ByRef runId As String) As String
+    Dim s As String
+    s = UXBArtifactSafeToken(subDir)
+    Return UXBArtifactBuildRootForBaseAndRun(baseRoot, runId) & "/" & s
+End Function
+
+Function UXBArtifactHashText32(ByRef textValue As String) As String
+    Dim h As UInteger
+    h = &h811C9DC5
+    Dim i As Integer
+    For i = 1 To Len(textValue)
+        h = h Xor CUInt(Asc(Mid(textValue, i, 1)))
+        h = h * CUInt(&h01000193)
+    Next i
+    Return Hex(h, 8)
+End Function
+
+Function UXBArtifactStandardHeaderJson(ByRef runId As String, ByRef sourceText As String, ByRef layerName As String, ByRef statusText As String, ByVal diagnosticsCount As Integer, ByRef startedAtText As String, ByRef endedAtText As String) As String
+    Dim q As String
+    q = Chr(34)
+    Dim j As String
+    j = ""
+    j &= q & "schema_version" & q & ":" & q & UXBJsonEscape(UXB_ARTIFACT_SCHEMA_VERSION) & q & ","
+    j &= q & "run_id" & q & ":" & q & UXBJsonEscape(UXBArtifactSafeToken(runId)) & q & ","
+    j &= q & "source_hash" & q & ":" & q & UXBArtifactHashText32(sourceText) & q & ","
+    j &= q & "tool_version" & q & ":" & q & UXBJsonEscape(UXB_ARTIFACT_TOOL_VERSION) & q & ","
+    j &= q & "layer_name" & q & ":" & q & UXBJsonEscape(layerName) & q & ","
+    j &= q & "status" & q & ":" & q & UXBJsonEscape(statusText) & q & ","
+    j &= q & "diagnostics_count" & q & ":" & LTrim(Str(diagnosticsCount)) & ","
+    j &= q & "started_at" & q & ":" & q & UXBJsonEscape(startedAtText) & q & ","
+    j &= q & "ended_at" & q & ":" & q & UXBJsonEscape(endedAtText) & q
+    Return j
+End Function
+
+Function UXBArtifactWriteStandardJson(ByRef outPath As String, ByRef runId As String, ByRef sourceText As String, ByRef layerName As String, ByRef statusText As String, ByVal diagnosticsCount As Integer, ByRef payloadJson As String, ByRef errText As String) As Integer
+    Dim stamp As String
+    stamp = Date$ & " " & Time$
+    Dim j As String
+    j = "{"
+    j &= UXBArtifactStandardHeaderJson(runId, sourceText, layerName, statusText, diagnosticsCount, stamp, stamp)
+    If Trim(payloadJson) <> "" Then j &= "," & payloadJson
+    j &= "}"
+    Return UXBReportWriteText(outPath, j, errText)
+End Function
+
+Function UXBArtifactWriteStandardEnvelopeJson(ByRef outPath As String, ByRef runId As String, ByRef sourceText As String, ByRef layerName As String, ByRef statusText As String, ByVal diagnosticsCount As Integer, ByRef payloadJson As String, ByRef errText As String) As Integer
+    Return UXBArtifactWriteStandardJson(outPath, runId, sourceText, layerName, statusText, diagnosticsCount, payloadJson, errText)
+End Function
+
+Private Function UXBArtifactReadTextFile(ByRef inPath As String, ByRef textOut As String, ByRef errText As String) As Integer
+    textOut = ""
+    errText = ""
+    If Trim(inPath) = "" Then
+        errText = "artifact read path is empty"
+        Return 0
+    End If
+    If Dir(inPath) = "" Then
+        errText = "artifact json file not found: " & inPath
+        Return 0
+    End If
+    Dim f As Integer
+    f = FreeFile
+    On Error GoTo _readErr
+    Open inPath For Input As #f
+    Do While Not Eof(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        textOut &= lineText & Chr(10)
+    Loop
+    Close #f
+    On Error GoTo 0
+    Return 1
+_readErr:
+    errText = "artifact json file read failed: " & inPath
+    On Error GoTo 0
+    Return 0
+End Function
+
+Function UXBArtifactWrapExistingJsonFile(ByRef filePath As String, ByRef runId As String, ByRef sourceText As String, ByRef layerName As String, ByRef statusText As String, ByVal diagnosticsCount As Integer, ByRef errText As String) As Integer
+    Dim payloadText As String
+    If UXBArtifactReadTextFile(filePath, payloadText, errText) = 0 Then Return 0
+    Dim payloadJson As String
+    payloadJson = Chr(34) & "payload" & Chr(34) & ":" & Trim(payloadText)
+    Return UXBArtifactWriteStandardEnvelopeJson(filePath, runId, sourceText, layerName, statusText, diagnosticsCount, payloadJson, errText)
+End Function
+
+#endif

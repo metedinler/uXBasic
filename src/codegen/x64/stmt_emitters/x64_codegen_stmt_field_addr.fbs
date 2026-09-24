@@ -1,0 +1,717 @@
+' Extracted from code_generator.fbs for wave-14 modular split
+' Scope: field path/address/load/store emitters
+
+Private Function X64BuildFieldPath(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef rootNameOut As String, ByRef pathOut As String, ByRef rootNodeOut As Integer) As Integer
+    rootNameOut = ""
+    pathOut = ""
+    rootNodeOut = -1
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+    Dim k As String
+    k = X64Upper(n.kind)
+
+    If k = "IDENT" Or k = "KEYWORD_REF" Then
+        rootNameOut = X64Upper(Trim(n.value))
+        rootNodeOut = nodeIdx
+        Return IIf(rootNameOut <> "", 1, 0)
+    End If
+
+    If k = "CALL_EXPR" Then
+        Dim idxName As String
+        Dim idxExpr As Integer
+        If X64TryExtractIndexedTarget(ps, nodeIdx, idxName, idxExpr) = 0 Then Return 0
+
+        rootNameOut = X64Upper(Trim(idxName))
+        rootNodeOut = nodeIdx
+        Return IIf(rootNameOut <> "", 1, 0)
+    End If
+
+    If k <> "FIELD_EXPR" Then Return 0
+
+    Dim parentRoot As String
+    Dim parentPath As String
+    Dim parentRootNode As Integer
+    If X64BuildFieldPath(ps, n.left, parentRoot, parentPath, parentRootNode) = 0 Then Return 0
+
+    rootNameOut = parentRoot
+    rootNodeOut = parentRootNode
+    If parentPath = "" Then
+        pathOut = X64Upper(Trim(n.value))
+    Else
+        pathOut = parentPath & "." & X64Upper(Trim(n.value))
+    End If
+
+    Return IIf(rootNameOut <> "" And pathOut <> "", 1, 0)
+End Function
+
+Private Function X64ResolveFieldInfo(ByRef ps As ParseState, ByVal fieldNode As Integer, ByRef cg As X64CodegenContext, ByRef rootNameOut As String, ByRef pathTextOut As String, ByRef rootNodeOut As Integer, ByRef rootTypeOut As String, ByRef fieldOffsetOut As Integer, ByRef fieldTypeOut As String, ByRef fieldSizeOut As Integer, ByRef errText As String) As Integer
+    rootNameOut = ""
+    pathTextOut = ""
+    rootNodeOut = -1
+    rootTypeOut = ""
+    fieldOffsetOut = 0
+    fieldTypeOut = ""
+    fieldSizeOut = 0
+
+    Dim fieldKind As String
+    fieldKind = ""
+    If fieldNode >= 0 And fieldNode < ps.ast.count Then fieldKind = X64Upper(ps.ast.nodes(fieldNode).kind)
+
+    If fieldKind = "CALL_EXPR" Then
+        Dim callName As String
+        callName = Trim(ps.ast.nodes(fieldNode).value)
+        Dim dotPos As Integer
+        dotPos = InStr(callName, ".")
+        If dotPos > 1 Then
+            Dim idxNode As Integer
+            idxNode = X64ChildAt(ps, fieldNode, 0)
+            If idxNode = -1 Or X64ChildAt(ps, fieldNode, 1) <> -1 Then
+                errText = "x64-codegen: field index expression is invalid"
+                Return 0
+            End If
+
+            Dim idxText As String
+            idxText = Trim(ps.ast.nodes(idxNode).value)
+            If idxText = "" Then
+                errText = "x64-codegen: dynamic field index is not supported in x64 backend yet"
+                Return 0
+            End If
+
+            Dim idxPos As Integer
+            idxPos = 1
+            If Left(idxText, 1) = "+" Or Left(idxText, 1) = "-" Then
+                idxPos = 2
+            End If
+
+            If idxPos > Len(idxText) Then
+                errText = "x64-codegen: dynamic field index is not supported in x64 backend yet"
+                Return 0
+            End If
+
+            Dim idxOk As Integer
+            idxOk = 1
+            Dim idxI As Integer
+            For idxI = idxPos To Len(idxText)
+                Dim idxCh As String
+                idxCh = Mid(idxText, idxI, 1)
+                If idxCh < "0" Or idxCh > "9" Then
+                    idxOk = 0
+                    Exit For
+                End If
+            Next idxI
+
+            If idxOk = 0 Then
+                errText = "x64-codegen: dynamic field index is not supported in x64 backend yet"
+                Return 0
+            End If
+
+            rootNameOut = X64Upper(Trim(Left(callName, dotPos - 1)))
+            pathTextOut = X64Upper(Trim(Mid(callName, dotPos + 1))) & "(" & idxText & ")"
+            rootNodeOut = -1
+        End If
+    End If
+
+    If rootNameOut = "" Or pathTextOut = "" Then
+        If X64BuildFieldPath(ps, fieldNode, rootNameOut, pathTextOut, rootNodeOut) = 0 Then
+            errText = "x64-codegen: invalid field expression"
+            Return 0
+        End If
+    End If
+
+    If X64FindDeclaredTypeName(ps, rootNameOut, rootTypeOut) = 0 Then
+        If X64TryGetVarType(cg, rootNameOut, rootTypeOut) = 0 Then
+            If rootNameOut = "THIS" Or rootNameOut = "ME" Or rootNameOut = "SUPER" Then
+                If X64ResolveCurrentReceiverClass(ps, cg, rootTypeOut) = 0 Then
+                    errText = "x64-codegen: field root type missing for " & rootNameOut
+                    Return 0
+                End If
+            Else
+                errText = "x64-codegen: field root type missing for " & rootNameOut
+                Return 0
+            End If
+        End If
+    End If
+
+    rootTypeOut = X64Upper(Trim(rootTypeOut))
+
+    Dim layoutErr As String
+    If TypeLayoutResolvePath(ps, rootTypeOut, pathTextOut, fieldOffsetOut, fieldTypeOut, fieldSizeOut, layoutErr) = 0 Then
+        errText = "x64-codegen: field resolve failed " & layoutErr
+        Return 0
+    End If
+
+    fieldTypeOut = X64Upper(Trim(fieldTypeOut))
+    Return 1
+End Function
+
+Private Function X64FieldPathReadIdent(ByRef pathText As String, ByRef cursor As Integer, ByRef identOut As String) As Integer
+    identOut = ""
+    If cursor < 1 Or cursor > Len(pathText) Then Return 0
+
+    Do While cursor <= Len(pathText)
+        Dim ws As String
+        ws = Mid(pathText, cursor, 1)
+        If ws <> " " And ws <> Chr(9) Then Exit Do
+        cursor += 1
+    Loop
+    If cursor > Len(pathText) Then Return 0
+
+    Dim ch As String
+    ch = Mid(pathText, cursor, 1)
+    If Not ((ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Or ch = "_") Then Return 0
+
+    Dim startPos As Integer
+    startPos = cursor
+    cursor += 1
+    Do While cursor <= Len(pathText)
+        ch = Mid(pathText, cursor, 1)
+        If ((ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Or (ch >= "0" And ch <= "9") Or ch = "_") = 0 Then Exit Do
+        cursor += 1
+    Loop
+
+    identOut = X64Upper(Mid(pathText, startPos, cursor - startPos))
+    Return IIf(identOut <> "", 1, 0)
+End Function
+
+Private Function X64FieldPathSkipIndexes(ByRef pathText As String, ByRef cursor As Integer) As Integer
+    Do While cursor <= Len(pathText)
+        Dim ws As String
+        ws = Mid(pathText, cursor, 1)
+        If ws <> " " And ws <> Chr(9) Then Exit Do
+        cursor += 1
+    Loop
+
+    If cursor > Len(pathText) Then Return 1
+    If Mid(pathText, cursor, 1) <> "(" Then Return 1
+
+    Dim depth As Integer
+    depth = 0
+    Do While cursor <= Len(pathText)
+        Dim ch As String
+        ch = Mid(pathText, cursor, 1)
+        If ch = "(" Then
+            depth += 1
+        ElseIf ch = ")" Then
+            depth -= 1
+            If depth = 0 Then
+                cursor += 1
+                Exit Do
+            End If
+        End If
+        cursor += 1
+    Loop
+
+    Return IIf(depth = 0, 1, 0)
+End Function
+
+Private Function X64FindClassMemberNode(ByRef ps As ParseState, ByVal classNode As Integer, ByRef memberNameRaw As String, ByRef memberNodeOut As Integer) As Integer
+    memberNodeOut = -1
+    If classNode < 0 Or classNode >= ps.ast.count Then Return 0
+
+    Dim wantName As String
+    wantName = X64Upper(Trim(memberNameRaw))
+    If wantName = "" Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        Dim ck As String
+        ck = X64Upper(ps.ast.nodes(ch).kind)
+        If ck = "CLASS_FIELD" Or ck = "CLASS_PROPERTY_DECL" Then
+            If X64Upper(Trim(ps.ast.nodes(ch).value)) = wantName Then
+                memberNodeOut = ch
+                Return 1
+            End If
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function X64FieldNodeTypeName(ByRef ps As ParseState, ByVal fieldNode As Integer, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If fieldNode < 0 Or fieldNode >= ps.ast.count Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(fieldNode).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) = "TYPE_REF" Then
+            typeOut = X64Upper(Trim(ps.ast.nodes(ch).value))
+            Return IIf(typeOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 0
+End Function
+
+Private Function X64FindPropertyAccessorBody(ByRef ps As ParseState, ByVal propertyNode As Integer, ByRef accessorRaw As String, ByRef bodyNodeOut As Integer) As Integer
+    bodyNodeOut = -1
+    If propertyNode < 0 Or propertyNode >= ps.ast.count Then Return 0
+    If X64Upper(ps.ast.nodes(propertyNode).kind) <> "CLASS_PROPERTY_DECL" Then Return 0
+
+    Dim targetKind As String
+    targetKind = ""
+    If X64Upper(Trim(accessorRaw)) = "GET" Then
+        targetKind = "CLASS_PROPERTY_GET_STMT"
+    ElseIf X64Upper(Trim(accessorRaw)) = "SET" Then
+        targetKind = "CLASS_PROPERTY_SET_STMT"
+    Else
+        Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(propertyNode).firstChild
+    Do While ch <> -1
+        If X64Upper(ps.ast.nodes(ch).kind) = targetKind Then
+            bodyNodeOut = ch
+            Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function X64ResolvePropertyAccessorRoutine(ByRef ps As ParseState, ByRef rootTypeRaw As String, ByRef pathText As String, ByRef accessorRaw As String, ByRef routineNameOut As String, ByRef propertyTypeOut As String) As Integer
+    routineNameOut = ""
+    propertyTypeOut = ""
+
+    Dim currentType As String
+    currentType = X64Upper(Trim(rootTypeRaw))
+    If currentType = "" Then Return 0
+
+    Dim cursor As Integer
+    cursor = 1
+
+    Do
+        Dim memberName As String
+        If X64FieldPathReadIdent(pathText, cursor, memberName) = 0 Then Return 0
+
+        Dim classNode As Integer
+        classNode = X64FindClassDeclNode(ps, currentType)
+        If classNode = -1 Then Return 0
+
+        Dim memberNode As Integer
+        If X64FindClassMemberNode(ps, classNode, memberName, memberNode) = 0 Then Return 0
+
+        If X64FieldPathSkipIndexes(pathText, cursor) = 0 Then Return 0
+
+        Do While cursor <= Len(pathText)
+            Dim ws As String
+            ws = Mid(pathText, cursor, 1)
+            If ws <> " " And ws <> Chr(9) Then Exit Do
+            cursor += 1
+        Loop
+
+        Dim pathDone As Integer
+        pathDone = IIf(cursor > Len(pathText), 1, 0)
+
+        If pathDone <> 0 Then
+            If X64Upper(ps.ast.nodes(memberNode).kind) <> "CLASS_PROPERTY_DECL" Then Return 0
+
+            Dim bodyNode As Integer
+            If X64FindPropertyAccessorBody(ps, memberNode, accessorRaw, bodyNode) = 0 Then Return 0
+
+            If X64FieldNodeTypeName(ps, memberNode, propertyTypeOut) = 0 Then propertyTypeOut = "I32"
+            routineNameOut = currentType & "_PROP" & X64Upper(Trim(accessorRaw)) & "_" & memberName
+            Return IIf(routineNameOut <> "", 1, 0)
+        End If
+
+        If Mid(pathText, cursor, 1) <> "." Then Return 0
+        cursor += 1
+
+        Dim memberType As String
+        If X64FieldNodeTypeName(ps, memberNode, memberType) = 0 Then Return 0
+        currentType = X64Upper(Trim(memberType))
+        If currentType = "" Then Return 0
+    Loop
+
+    Return 0
+End Function
+
+' S-108: rax holds a class variable's object pointer. NULL is a clean runtime error (printf + exit 1),
+' not an access through address 0. rsp may be misaligned here (pending pushes), so it is aligned
+' first; the path never returns.
+Private Sub X64EmitNullObjectCheck(ByRef cg As X64CodegenContext, ByRef rootName As String)
+    Dim okLbl As String
+    Dim msgLbl As String
+    okLbl = X64NextLabel(cg, "obj_ok")
+    msgLbl = X64NextLabel(cg, "obj_null_msg")
+    X64EmitData cg, msgLbl & ": db ""uXBasic runtime error: field access on a null object reference: " & X64Upper(Trim(rootName)) & """, 10, 0"
+    X64EmitText cg, "    test rax, rax"
+    X64EmitText cg, "    jnz " & okLbl
+    X64EmitText cg, "    lea rcx, [rel " & msgLbl & "]"
+    X64EmitText cg, "    mov r12, rsp"
+    X64EmitText cg, "    and rsp, -16"
+    X64EmitText cg, "    sub rsp, 32"
+    X64EmitText cg, "    call printf"
+    X64EmitText cg, "    mov ecx, 1"
+    X64EmitText cg, "    call exit"
+    X64EmitLabel cg, okLbl
+End Sub
+
+Private Function X64EmitFieldRootAddress(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef rootName As String, ByVal rootNode As Integer, ByRef rootType As String, ByRef errText As String) As Integer
+    Dim indexedRootName As String
+    Dim indexedRootExpr As Integer
+    Dim isIndexedRoot As Integer
+    isIndexedRoot = X64TryExtractIndexedTarget(ps, rootNode, indexedRootName, indexedRootExpr)
+
+    If isIndexedRoot <> 0 Then
+        Dim elemSize As Integer
+        Dim elemSlots As Integer
+        Dim strideBytes As Integer
+        Dim elemLayoutErr As String
+
+        If TypeLayoutSizeOf(ps, rootType, elemSize, elemLayoutErr) = 0 Then
+            errText = "x64-codegen: indexed field element layout missing " & elemLayoutErr
+            Return 0
+        End If
+
+        elemSlots = (elemSize + 7) \ 8
+        If elemSlots < 1 Then elemSlots = 1
+        strideBytes = elemSlots * 8
+
+        If cg.currentRoutineLabel <> "" Then
+            If X64EmitAddrOfIndexedLocal(ps, cg, indexedRootName, indexedRootExpr, strideBytes, errText) <> 0 Then
+            ElseIf X64EmitAddrOfIndexedGlobal(ps, cg, indexedRootName, indexedRootExpr, strideBytes, errText) = 0 Then
+                errText = "x64-codegen: indexed field root currently supports DIM arrays"
+                Return 0
+            End If
+        Else
+            If X64EmitAddrOfIndexedGlobal(ps, cg, indexedRootName, indexedRootExpr, strideBytes, errText) = 0 Then
+                errText = "x64-codegen: indexed field root currently supports DIM arrays"
+                Return 0
+            End If
+        End If
+    Else
+        If rootType = "OBJECT" Or X64FindClassDeclNode(ps, rootType) <> -1 Then
+            X64EmitLoadVar cg, rootName
+            X64EmitNullObjectCheck cg, rootName
+        Else
+            If X64EmitAddrOfVar(cg, rootName, errText) = 0 Then Return 0
+        End If
+    End If
+
+    Return 1
+End Function
+
+Private Function X64TryEmitPropertyAccessorLoad(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef fieldTypeOut As String, ByRef errText As String) As Integer
+    fieldTypeOut = ""
+
+    Dim rootName As String
+    Dim pathText As String
+    Dim rootNode As Integer
+    Dim rootType As String
+    Dim fieldOffset As Integer
+    Dim fieldType As String
+    Dim fieldSize As Integer
+    Dim resolveErr As String
+    If X64ResolveFieldInfo(ps, nodeIdx, cg, rootName, pathText, rootNode, rootType, fieldOffset, fieldType, fieldSize, resolveErr) = 0 Then Return -1
+
+    Dim routineName As String
+    Dim propertyType As String
+    If X64ResolvePropertyAccessorRoutine(ps, rootType, pathText, "GET", routineName, propertyType) = 0 Then Return -1
+
+    Dim exactRoutineName As String
+    If X64FindRoutineSymbolName(ps, routineName, exactRoutineName) <> 0 Then
+        routineName = exactRoutineName
+    Else
+        routineName = LCase(routineName)
+    End If
+
+    If X64EmitFieldRootAddress(ps, cg, rootName, rootNode, rootType, errText) = 0 Then Return 0
+    X64EmitText cg, "    mov rcx, rax"
+    X64EmitText cg, "    sub rsp, 32"
+    X64EmitText cg, "    call " & routineName
+    X64EmitText cg, "    add rsp, 32"
+    fieldTypeOut = X64Upper(Trim(propertyType))
+    Return 1
+End Function
+
+Private Function X64TryEmitPropertyAccessorStoreFromValue(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByVal valueInRax As Integer, ByVal valueInXmm0 As Integer, ByRef errText As String) As Integer
+    Dim rootName As String
+    Dim pathText As String
+    Dim rootNode As Integer
+    Dim rootType As String
+    Dim fieldOffset As Integer
+    Dim fieldType As String
+    Dim fieldSize As Integer
+    Dim resolveErr As String
+    If X64ResolveFieldInfo(ps, nodeIdx, cg, rootName, pathText, rootNode, rootType, fieldOffset, fieldType, fieldSize, resolveErr) = 0 Then Return -1
+
+    Dim routineName As String
+    Dim propertyType As String
+    If X64ResolvePropertyAccessorRoutine(ps, rootType, pathText, "SET", routineName, propertyType) = 0 Then Return -1
+
+    Dim exactRoutineName As String
+    If X64FindRoutineSymbolName(ps, routineName, exactRoutineName) <> 0 Then
+        routineName = exactRoutineName
+    Else
+        routineName = LCase(routineName)
+    End If
+
+    If X64EmitFieldRootAddress(ps, cg, rootName, rootNode, rootType, errText) = 0 Then Return 0
+    X64EmitText cg, "    mov rcx, rax"
+
+    Dim fk As Integer
+    fk = X64TypeToFloatKind(propertyType)
+    If valueInXmm0 <> 0 And (fk = UXF_F32 Or fk = UXF_F64) Then
+        X64EmitText cg, "    movq rdx, xmm0"
+    ElseIf valueInRax <> 0 Then
+        X64EmitText cg, "    mov rdx, rax"
+    Else
+        X64EmitText cg, "    xor rdx, rdx"
+    End If
+
+    X64EmitText cg, "    sub rsp, 32"
+    X64EmitText cg, "    call " & routineName
+    X64EmitText cg, "    add rsp, 32"
+    Return 1
+End Function
+
+Private Function X64EmitAddrOfFieldExpr(ByRef ps As ParseState, ByVal fieldNode As Integer, ByRef cg As X64CodegenContext, ByRef fieldTypeOut As String, ByRef fieldSizeOut As Integer, ByRef errText As String) As Integer
+    Dim rootName As String
+    Dim pathText As String
+    Dim rootNode As Integer
+    Dim rootType As String
+    Dim fieldOffset As Integer
+
+    If X64ResolveFieldInfo(ps, fieldNode, cg, rootName, pathText, rootNode, rootType, fieldOffset, fieldTypeOut, fieldSizeOut, errText) = 0 Then
+        Return 0
+    End If
+
+    Dim indexedRootName As String
+    Dim indexedRootExpr As Integer
+    Dim isIndexedRoot As Integer
+    isIndexedRoot = X64TryExtractIndexedTarget(ps, rootNode, indexedRootName, indexedRootExpr)
+
+    If isIndexedRoot <> 0 Then
+        Dim elemSize As Integer
+        Dim elemSlots As Integer
+        Dim strideBytes As Integer
+        Dim elemLayoutErr As String
+
+        If TypeLayoutSizeOf(ps, rootType, elemSize, elemLayoutErr) = 0 Then
+            errText = "x64-codegen: indexed field element layout missing " & elemLayoutErr
+            Return 0
+        End If
+
+        elemSlots = (elemSize + 7) \ 8
+        If elemSlots < 1 Then elemSlots = 1
+        strideBytes = elemSlots * 8
+
+        If cg.currentRoutineLabel <> "" Then
+            If X64EmitAddrOfIndexedLocal(ps, cg, indexedRootName, indexedRootExpr, strideBytes, errText) <> 0 Then
+                ' RAX hazir.
+            ElseIf X64EmitAddrOfIndexedGlobal(ps, cg, indexedRootName, indexedRootExpr, strideBytes, errText) = 0 Then
+                errText = "x64-codegen: indexed field root currently supports DIM arrays"
+                Return 0
+            End If
+        Else
+            If X64EmitAddrOfIndexedGlobal(ps, cg, indexedRootName, indexedRootExpr, strideBytes, errText) = 0 Then
+                errText = "x64-codegen: indexed field root currently supports DIM arrays"
+                Return 0
+            End If
+        End If
+    Else
+        If rootType = "OBJECT" Or X64FindClassDeclNode(ps, rootType) <> -1 Then
+            X64EmitLoadVar cg, rootName
+            X64EmitNullObjectCheck cg, rootName
+        Else
+            If X64EmitAddrOfVar(cg, rootName, errText) = 0 Then Return 0
+        End If
+    End If
+
+    If fieldOffset <> 0 Then
+        X64EmitText cg, "    add rax, " & X64ToStr(fieldOffset)
+    End If
+
+    Return 1
+End Function
+
+Private Function X64EmitStoreIntegerFieldExpr(ByRef ps As ParseState, ByVal fieldNode As Integer, ByRef cg As X64CodegenContext, ByVal fieldSize As Integer, ByRef errText As String) As Integer
+    If fieldSize = 1 Then
+        X64EmitText cg, "    mov byte [rax], dl"
+    ElseIf fieldSize = 2 Then
+        X64EmitText cg, "    mov word [rax], dx"
+    ElseIf fieldSize = 4 Then
+        X64EmitText cg, "    mov dword [rax], edx"
+    ElseIf fieldSize = 8 Then
+        X64EmitText cg, "    mov [rax], rdx"
+    Else
+        errText = "x64-codegen: unsupported field store size " & X64ToStr(fieldSize)
+        Return 0
+    End If
+
+    X64EmitText cg, "    mov rax, rdx"
+    Return 1
+End Function
+
+Private Function X64EmitStoreFieldFromXmm0(ByRef ps As ParseState, ByVal fieldNode As Integer, ByRef cg As X64CodegenContext, ByVal kind As Integer, ByRef errText As String) As Integer
+    Dim propStoreRv As Integer
+    propStoreRv = X64TryEmitPropertyAccessorStoreFromValue(ps, fieldNode, cg, 0, 1, errText)
+    If propStoreRv = 0 Then Return 0
+    If propStoreRv > 0 Then Return 1
+
+    Dim fieldType As String
+    Dim fieldSize As Integer
+    If X64EmitAddrOfFieldExpr(ps, fieldNode, cg, fieldType, fieldSize, errText) = 0 Then Return 0
+
+    If kind = UXF_F32 Then
+        X64EmitText cg, "    movss [rax], xmm0"
+        X64EmitText cg, "    cvttss2si rax, xmm0"
+        Return 1
+    End If
+
+    If kind = UXF_F64 Then
+        X64EmitText cg, "    movsd [rax], xmm0"
+        X64EmitText cg, "    cvttsd2si rax, xmm0"
+        Return 1
+    End If
+
+    errText = "x64-codegen: invalid float store kind for field"
+    Return 0
+End Function
+
+Private Function X64EmitStoreFieldFromRhs(ByRef ps As ParseState, ByVal fieldNode As Integer, ByVal rhsNode As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim rootName As String
+    Dim pathText As String
+    Dim rootNode As Integer
+    Dim rootType As String
+    Dim fieldOffset As Integer
+    Dim fieldType As String
+    Dim fieldSize As Integer
+
+    If X64ResolveFieldInfo(ps, fieldNode, cg, rootName, pathText, rootNode, rootType, fieldOffset, fieldType, fieldSize, errText) = 0 Then
+        Return 0
+    End If
+
+    Dim fk As Integer
+    fk = X64TypeToFloatKind(fieldType)
+
+    If fk = UXF_F32 Or fk = UXF_F64 Then
+        If X64EmitExprToXmm0As(ps, rhsNode, cg, fk, errText) = 0 Then Return 0
+
+        Dim propStoreFloatRv As Integer
+        propStoreFloatRv = X64TryEmitPropertyAccessorStoreFromValue(ps, fieldNode, cg, 0, 1, errText)
+        If propStoreFloatRv = 0 Then Return 0
+        If propStoreFloatRv > 0 Then Return 1
+
+        Dim addrFieldType As String
+        Dim addrFieldSize As Integer
+        If X64EmitAddrOfFieldExpr(ps, fieldNode, cg, addrFieldType, addrFieldSize, errText) = 0 Then Return 0
+
+        If fk = UXF_F32 Then
+            X64EmitText cg, "    movss [rax], xmm0"
+        Else
+            X64EmitText cg, "    movsd [rax], xmm0"
+        End If
+        Return 1
+    ElseIf fk = UXF_F80 Or fk = UXF_F128 Then
+        Return X64EmitExtFpAssignStmtCore(ps, fieldNode, rhsNode, cg, fk, errText)
+    End If
+
+    If X64EmitExprToRax(ps, rhsNode, cg, errText) = 0 Then Return 0
+
+    Dim propStoreIntRv As Integer
+    propStoreIntRv = X64TryEmitPropertyAccessorStoreFromValue(ps, fieldNode, cg, 1, 0, errText)
+    If propStoreIntRv = 0 Then Return 0
+    If propStoreIntRv > 0 Then Return 1
+
+    X64EmitText cg, "    mov rdx, rax"
+
+    Dim addrType As String
+    Dim addrSize As Integer
+    If X64EmitAddrOfFieldExpr(ps, fieldNode, cg, addrType, addrSize, errText) = 0 Then Return 0
+
+    Return X64EmitStoreIntegerFieldExpr(ps, fieldNode, cg, fieldSize, errText)
+End Function
+
+Private Function X64EmitLoadFieldExpr(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim fieldType As String
+    Dim fieldSize As Integer
+
+    Dim propLoadRv As Integer
+    propLoadRv = X64TryEmitPropertyAccessorLoad(ps, nodeIdx, cg, fieldType, errText)
+    If propLoadRv = 0 Then Return 0
+    If propLoadRv > 0 Then Return 1
+
+    If X64EmitAddrOfFieldExpr(ps, nodeIdx, cg, fieldType, fieldSize, errText) = 0 Then
+        Return 0
+    End If
+
+    Dim fk As Integer
+    fk = X64TypeToFloatKind(fieldType)
+    If fk = UXF_F32 Then
+        X64EmitText cg, "    movss xmm0, [rax]"
+        Return 1
+    ElseIf fk = UXF_F64 Then
+        X64EmitText cg, "    movsd xmm0, [rax]"
+        Return 1
+    ElseIf fk = UXF_F80 Or fk = UXF_F128 Then
+        errText = "x64-codegen: external FP field load must use address-based runtime call path; native/x87 field load is forbidden"
+        Return 0
+    End If
+
+    ' an UNSIGNED field zero-extends (a U32 4000000000 read back as -294967296 through movsxd)
+    Dim fieldUnsigned As Integer
+    fieldUnsigned = X64TypeNameIsUnsignedInteger(fieldType)
+    If fieldSize = 1 Then
+        X64EmitText cg, IIf(fieldUnsigned <> 0, "    movzx eax, byte [rax]", "    movsx rax, byte [rax]")
+    ElseIf fieldSize = 2 Then
+        X64EmitText cg, IIf(fieldUnsigned <> 0, "    movzx eax, word [rax]", "    movsx rax, word [rax]")
+    ElseIf fieldSize = 4 Then
+        X64EmitText cg, IIf(fieldUnsigned <> 0, "    mov eax, dword [rax]", "    movsxd rax, dword [rax]")
+    ElseIf fieldSize = 8 Then
+        X64EmitText cg, "    mov rax, [rax]"
+    Else
+        errText = "x64-codegen: unsupported field load size " & X64ToStr(fieldSize)
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function X64EmitStoreFieldExpr(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim fieldType As String
+    Dim fieldSize As Integer
+
+    Dim propStoreCompoundRv As Integer
+    propStoreCompoundRv = X64TryEmitPropertyAccessorStoreFromValue(ps, nodeIdx, cg, 1, 0, errText)
+    If propStoreCompoundRv = 0 Then Return 0
+    If propStoreCompoundRv > 0 Then Return 1
+
+    X64EmitText cg, "    mov rdx, rax"
+
+    If X64EmitAddrOfFieldExpr(ps, nodeIdx, cg, fieldType, fieldSize, errText) = 0 Then
+        Return 0
+    End If
+
+    Dim fk As Integer
+    fk = X64TypeToFloatKind(fieldType)
+    If fk = UXF_F32 Then
+        X64EmitText cg, "    cvtsi2ss xmm0, rdx"
+        X64EmitText cg, "    movss [rax], xmm0"
+        X64EmitText cg, "    mov rax, rdx"
+        Return 1
+    ElseIf fk = UXF_F64 Then
+        X64EmitText cg, "    cvtsi2sd xmm0, rdx"
+        X64EmitText cg, "    movsd [rax], xmm0"
+        X64EmitText cg, "    mov rax, rdx"
+        Return 1
+    ElseIf fk = UXF_F80 Then
+        X64EmitText cg, "    mov r8, rax"
+        X64EmitText cg, "    sub rsp, 16"
+        X64EmitText cg, "    mov [rsp], rdx"
+        X64EmitText cg, "    fild qword [rsp]"
+        X64EmitText cg, "    fstp tword [r8]"
+        X64EmitText cg, "    add rsp, 16"
+        X64EmitText cg, "    mov rax, rdx"
+        Return 1
+    End If
+
+    Return X64EmitStoreIntegerFieldExpr(ps, nodeIdx, cg, fieldSize, errText)
+End Function

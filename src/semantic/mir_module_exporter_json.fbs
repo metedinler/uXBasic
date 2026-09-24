@@ -1,0 +1,312 @@
+' uXBasic MIR Module JSON Exporter
+' Stage-1 patch: gerçek MIRModule / Function / BasicBlock / Instruction dökümü üretir.
+' Yer: uxb/src/semantic/mir_module_exporter_json.fbs
+
+Private Function MIRJsonEscape(ByRef s As String) As String
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(s)
+        Dim ch As String
+        Dim code As Integer
+        ch = Mid$(s, i, 1)
+        code = Asc(ch)
+
+        Select Case ch
+        Case Chr$(34)
+            outText &= "\" & Chr$(34)
+        Case "\"
+            outText &= "\\"
+        Case Chr$(8)
+            outText &= "\b"
+        Case Chr$(9)
+            outText &= "\t"
+        Case Chr$(10)
+            outText &= "\n"
+        Case Chr$(12)
+            outText &= "\f"
+        Case Chr$(13)
+            outText &= "\r"
+        Case Else
+            If code < 32 Then
+                outText &= " "
+            Else
+                outText &= ch
+            End If
+        End Select
+    Next i
+
+    Return outText
+End Function
+
+Private Sub MIRWriteJsonString(ByVal f As Integer, ByRef s As String)
+    Print #f, Chr$(34) & MIRJsonEscape(s) & Chr$(34);
+End Sub
+
+Private Sub MIRWriteJsonStringArray(ByVal f As Integer, arr() As String, ByVal itemCount As Integer)
+    Print #f, "[";
+    Dim i As Integer
+    For i = 0 To itemCount - 1
+        If i > 0 Then Print #f, ", ";
+        MIRWriteJsonString f, arr(i)
+    Next i
+    Print #f, "]";
+End Sub
+
+
+
+' YAMA: MIR JSON yazmadan once parent klasorleri sessiz/recursive olusturur.
+' Not: FreeBASIC uyumu icin Replace() ve On Error Resume Next kullanilmaz.
+Private Function MIRJsonNormalizePath(ByRef pathText As String) As String
+    Dim rawText As String
+    rawText = Trim(pathText)
+
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        If ch = "/" Then
+            outText &= "\"
+        Else
+            outText &= ch
+        End If
+    Next i
+
+    Return outText
+End Function
+
+Private Function MIRJsonEnsureDirPath(ByRef dirText As String) As Integer
+    Dim norm As String
+    norm = MIRJsonNormalizePath(dirText)
+    norm = Trim(norm)
+    If norm = "" Or norm = "." Then Return 1
+
+    Do While Len(norm) > 0 And Right(norm, 1) = "\"
+        If Len(norm) <= 3 Then Exit Do
+        norm = Left(norm, Len(norm) - 1)
+    Loop
+
+    If norm = "" Then Return 1
+    If Dir(norm, 16) <> "" Then Return 1
+
+    On Error GoTo _mir_json_mkdir_err
+
+    Dim currentPath As String
+    currentPath = ""
+
+    Dim i As Integer
+    For i = 1 To Len(norm)
+        Dim ch As String
+        ch = Mid(norm, i, 1)
+        currentPath &= ch
+
+        If ch = "\" Then
+            Dim partialPath As String
+            partialPath = Left(currentPath, Len(currentPath) - 1)
+            If Len(partialPath) > 0 And Right(partialPath, 1) <> ":" Then
+                If Dir(partialPath, 16) = "" Then MkDir partialPath
+            End If
+        End If
+    Next i
+
+    If Len(norm) > 0 And Right(norm, 1) <> ":" Then
+        If Dir(norm, 16) = "" Then MkDir norm
+    End If
+
+    On Error GoTo 0
+    Return 1
+
+_mir_json_mkdir_err:
+    On Error GoTo 0
+    If Dir(norm, 16) <> "" Then Return 1
+    Return 0
+End Function
+
+Private Function MIRJsonDirName(ByRef filePath As String) As String
+    Dim norm As String
+    norm = MIRJsonNormalizePath(filePath)
+
+    Dim cutAt As Integer
+    cutAt = 0
+
+    Dim i As Integer
+    For i = Len(norm) To 1 Step -1
+        Dim ch As String
+        ch = Mid(norm, i, 1)
+        If ch = "\" Then
+            cutAt = i
+            Exit For
+        End If
+    Next i
+
+    If cutAt <= 1 Then Return ""
+    Return Left(norm, cutAt - 1)
+End Function
+
+Private Function MIRJsonEnsureParentDir(ByRef filePath As String) As Integer
+    Dim parentDir As String
+    parentDir = MIRJsonDirName(filePath)
+    If Trim(parentDir) = "" Then Return 1
+    Return MIRJsonEnsureDirPath(parentDir)
+End Function
+
+Function MIRWriteModuleJson(ByRef module As MIRModule, ByRef outPath As String, ByRef errText As String) As Integer
+    errText = ""
+
+    Dim safeOutPath As String
+    safeOutPath = MIRJsonNormalizePath(outPath)
+    If Trim(safeOutPath) = "" Then
+        errText = "MIR module json output path is empty"
+        Return 0
+    End If
+
+    If MIRJsonEnsureParentDir(safeOutPath) = 0 Then
+        errText = "MIR module json parent dir create failed: " & safeOutPath
+        Return 0
+    End If
+
+    Dim f As Integer
+    f = FreeFile
+
+    On Error GoTo _mir_json_open_err
+    Open safeOutPath For Output As #f
+    On Error GoTo 0
+
+    Print #f, "{" 
+    Print #f, "  " & Chr$(34) & "ir_version" & Chr$(34) & ": " & Chr$(34) & "uxb-mir-module-1" & Chr$(34) & ","
+    Print #f, "  " & Chr$(34) & "function_count" & Chr$(34) & ": " & LTrim$(Str$(module.functionCount)) & ","
+    Print #f, "  " & Chr$(34) & "global_count" & Chr$(34) & ": " & LTrim$(Str$(module.globalVarCount)) & ","
+
+    Print #f, "  " & Chr$(34) & "globals" & Chr$(34) & ": ";
+    If module.globalVarCount > 0 Then
+        MIRWriteJsonStringArray f, module.globalVars(), module.globalVarCount
+    Else
+        Print #f, "[]";
+    End If
+    Print #f, ","
+
+    Print #f, "  " & Chr$(34) & "global_types" & Chr$(34) & ": ";
+    If module.globalVarCount > 0 Then
+        MIRWriteJsonStringArray f, module.globalVarTypes(), module.globalVarCount
+    Else
+        Print #f, "[]";
+    End If
+    Print #f, ","
+
+    Print #f, "  " & Chr$(34) & "functions" & Chr$(34) & ": ["
+
+    Dim fi As Integer
+    For fi = 0 To module.functionCount - 1
+        Dim fn As MIRFunction Ptr
+        fn = @module.functions(fi)
+
+        If fi > 0 Then Print #f, ","
+        Print #f, "    {"
+        Print #f, "      " & Chr$(34) & "name" & Chr$(34) & ": ";
+        MIRWriteJsonString f, fn->name
+        Print #f, ","
+        Print #f, "      " & Chr$(34) & "entry_block" & Chr$(34) & ": " & LTrim$(Str$(fn->entryBlock)) & ","
+        Print #f, "      " & Chr$(34) & "block_count" & Chr$(34) & ": " & LTrim$(Str$(fn->blockCount)) & ","
+        Print #f, "      " & Chr$(34) & "return_type" & Chr$(34) & ": ";
+        MIRWriteJsonString f, fn->returnType
+        Print #f, ","
+
+        Print #f, "      " & Chr$(34) & "params" & Chr$(34) & ": ";
+        If fn->paramVarCount > 0 Then
+            MIRWriteJsonStringArray f, fn->paramVars(), fn->paramVarCount
+        Else
+            Print #f, "[]";
+        End If
+        Print #f, ","
+
+        Print #f, "      " & Chr$(34) & "param_types" & Chr$(34) & ": ";
+        If fn->paramVarCount > 0 Then
+            MIRWriteJsonStringArray f, fn->paramVarTypes(), fn->paramVarCount
+        Else
+            Print #f, "[]";
+        End If
+        Print #f, ","
+
+        Print #f, "      " & Chr$(34) & "locals" & Chr$(34) & ": ";
+        If fn->localVarCount > 0 Then
+            MIRWriteJsonStringArray f, fn->localVars(), fn->localVarCount
+        Else
+            Print #f, "[]";
+        End If
+        Print #f, ","
+
+        Print #f, "      " & Chr$(34) & "local_types" & Chr$(34) & ": ";
+        If fn->localVarCount > 0 Then
+            MIRWriteJsonStringArray f, fn->localVarTypes(), fn->localVarCount
+        Else
+            Print #f, "[]";
+        End If
+        Print #f, ","
+
+        Print #f, "      " & Chr$(34) & "blocks" & Chr$(34) & ": ["
+
+        Dim bi As Integer
+        For bi = 0 To fn->blockCount - 1
+            Dim blk As MIRBasicBlock Ptr
+            blk = @fn->blocks(bi)
+
+            If bi > 0 Then Print #f, ","
+            Print #f, "        {"
+            Print #f, "          " & Chr$(34) & "id" & Chr$(34) & ": " & LTrim$(Str$(blk->id)) & ","
+            Print #f, "          " & Chr$(34) & "is_entry" & Chr$(34) & ": " & IIf(blk->isEntry <> 0, "true", "false") & ","
+            Print #f, "          " & Chr$(34) & "is_exit" & Chr$(34) & ": " & IIf(blk->isExit <> 0, "true", "false") & ","
+            Print #f, "          " & Chr$(34) & "instruction_count" & Chr$(34) & ": " & LTrim$(Str$(blk->instructionCount)) & ","
+            Print #f, "          " & Chr$(34) & "instructions" & Chr$(34) & ": ["
+
+            Dim ii As Integer
+            For ii = 0 To blk->instructionCount - 1
+                Dim inst As MIRIRInstruction Ptr
+                inst = @blk->instructions(ii)
+
+                If ii > 0 Then Print #f, ","
+                Print #f, "            {"
+                Print #f, "              " & Chr$(34) & "index" & Chr$(34) & ": " & LTrim$(Str$(ii)) & ","
+                Print #f, "              " & Chr$(34) & "opcode" & Chr$(34) & ": ";
+                MIRWriteJsonString f, inst->opcode
+                Print #f, ","
+                Print #f, "              " & Chr$(34) & "result" & Chr$(34) & ": ";
+                MIRWriteJsonString f, inst->result
+                Print #f, ","
+                Print #f, "              " & Chr$(34) & "block_id" & Chr$(34) & ": " & LTrim$(Str$(inst->blockId)) & ","
+                Print #f, "              " & Chr$(34) & "operands" & Chr$(34) & ": [";
+
+                Dim oi As Integer
+                For oi = 0 To inst->operandCount - 1
+                    If oi > 0 Then Print #f, ", ";
+                    MIRWriteJsonString f, inst->operands(oi)
+                Next oi
+                Print #f, "]"
+                Print #f, "            }";
+            Next ii
+
+            Print #f, ""
+            Print #f, "          ]"
+            Print #f, "        }";
+        Next bi
+
+        Print #f, ""
+        Print #f, "      ]"
+        Print #f, "    }";
+    Next fi
+
+    Print #f, ""
+    Print #f, "  ]"
+    Print #f, "}"
+
+    Close #f
+    Return 1
+
+_mir_json_open_err:
+    On Error GoTo 0
+    errText = "MIR module json open/write failed: " & safeOutPath
+    Return 0
+End Function

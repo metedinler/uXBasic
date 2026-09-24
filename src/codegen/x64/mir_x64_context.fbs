@@ -1,0 +1,999 @@
+#ifndef UXB_MIR_X64_CONTEXT_FBS
+#define UXB_MIR_X64_CONTEXT_FBS
+
+Type MIRX64LocalSlot
+    nameText As String
+    offset As Integer
+    sizeBytes As Integer
+    typeName As String
+    isByRef As Integer  ' 1 = this slot holds a POINTER (a BYREF parameter); every
+                         ' load/store of it must go through one extra indirection
+End Type
+
+Type MIRX64StringLiteral
+    rawText As String
+    labelText As String
+End Type
+
+Type MIRX64ArraySlot
+    nameText As String
+    labelText As String
+    lowerBound As Integer
+    upperBound As Integer
+    elementCount As Integer
+    elementBytes As Integer
+    elementType As String
+    byteLength As LongInt
+    ' S-068: an ARRAY PARAMETER (`arr AS I32[]`) is not backed by a .bss label of its
+    ' own. Its incoming argument is the ADDRESS of the caller array's descriptor
+    ' (qword ptr, qword lower, qword upper), kept in the local slot descLocalName.
+    isParam As Integer
+    descLocalName As String
+End Type
+
+Type MIRX64GlobalSlot
+    nameText As String
+    labelText As String
+    sizeBytes As Integer
+    typeName As String
+End Type
+
+Type MIRX64Context
+    asmText As String
+    dataText As String
+    bssText As String
+    externText As String
+    errorText As String
+    warningText As String
+    ' S-021/S-049: hand-written NATIVE/VIRTUAL memory-mode helper labels
+    ' (__uxb_mem_resolve_mode etc.) accumulate here instead of asmText, so
+    ' they can be appended once AFTER every real function body -- emitting
+    ' them into asmText mid-statement (as MIRX64Emit would) inserts them
+    ' inline in whichever function happened to trigger them, and the CPU
+    ' falls through into their bodies with no call/ret to protect it.
+    memoryModeHelperText As String
+
+    labelCounter As Integer
+    localCount As Integer
+    locals(Any) As MIRX64LocalSlot
+    stackBytes As Integer
+
+    stringCount As Integer
+    stringLiterals(Any) As MIRX64StringLiteral
+
+    arrayCount As Integer
+    arrays(Any) As MIRX64ArraySlot
+
+    globalCount As Integer
+    globals(Any) As MIRX64GlobalSlot
+
+    modulePtr As MIRModule Ptr
+    currentFunctionName As String
+    currentFunctionIndex As Integer
+    currentEpilogueLabel As String
+    currentDivZeroLabel As String
+    gosubTargets(Any) As String
+    gosubTargetCount As Integer
+    inGosubRegion As Integer
+
+    supportedInstructionCount As Integer
+    unsupportedInstructionCount As Integer
+    inlineSharedMemoryEmitted As Integer
+    memoryModeHelpersEmitted As Integer
+    ' S-077: emit the in-program unsigned-decimal print helper at most once.
+    printU64HelperEmitted As Integer
+
+    shellNowait As Integer
+    shellTimeoutOperand As String
+    shellRunPathOperand As String
+    shellOutPathOperand As String
+    shellErrPathOperand As String
+    shellOutVar As String
+    shellErrVar As String
+    shellCodeVar As String
+End Type
+
+Sub MIRX64Init(ByRef cg As MIRX64Context)
+    cg.asmText = ""
+    cg.dataText = ""
+    cg.bssText = ""
+    cg.externText = ""
+    cg.errorText = ""
+    cg.warningText = ""
+    cg.labelCounter = 0
+    cg.localCount = 0
+    ReDim cg.locals(0)
+    cg.stackBytes = 0
+    cg.stringCount = 0
+    ReDim cg.stringLiterals(0)
+    cg.arrayCount = 0
+    ReDim cg.arrays(0)
+    cg.globalCount = 0
+    ReDim cg.globals(0)
+    cg.modulePtr = 0
+    cg.currentFunctionName = ""
+    cg.currentFunctionIndex = -1
+    cg.currentEpilogueLabel = ""
+    cg.currentDivZeroLabel = ""
+    cg.gosubTargetCount = 0
+    ReDim cg.gosubTargets(0)
+    cg.inGosubRegion = 0
+    cg.supportedInstructionCount = 0
+    cg.unsupportedInstructionCount = 0
+    cg.inlineSharedMemoryEmitted = 0
+    cg.memoryModeHelpersEmitted = 0
+    cg.printU64HelperEmitted = 0
+    cg.shellNowait = 0
+    cg.shellTimeoutOperand = ""
+    cg.shellRunPathOperand = ""
+    cg.shellOutPathOperand = ""
+    cg.shellErrPathOperand = ""
+    cg.shellOutVar = ""
+    cg.shellErrVar = ""
+    cg.shellCodeVar = ""
+End Sub
+
+Sub MIRX64Emit(ByRef cg As MIRX64Context, ByRef lineText As String)
+    cg.asmText &= lineText & Chr(10)
+End Sub
+
+Sub MIRX64EmitData(ByRef cg As MIRX64Context, ByRef lineText As String)
+    cg.dataText &= lineText & Chr(10)
+End Sub
+
+Sub MIRX64EmitBss(ByRef cg As MIRX64Context, ByRef lineText As String)
+    cg.bssText &= lineText & Chr(10)
+End Sub
+
+' See memoryModeHelperText's comment on MIRX64Context: appended once after
+' every real function body, never inline via MIRX64Emit/asmText.
+Sub MIRX64EmitHelperLine(ByRef cg As MIRX64Context, ByRef lineText As String)
+    cg.memoryModeHelperText &= lineText & Chr(10)
+End Sub
+
+Sub MIRX64EmitExtern(ByRef cg As MIRX64Context, ByRef lineText As String)
+    If Trim(lineText) = "" Then Exit Sub
+    If InStr(Chr(10) & cg.externText, Chr(10) & lineText & Chr(10)) = 0 Then
+        cg.externText &= lineText & Chr(10)
+    End If
+End Sub
+
+Sub MIRX64AddError(ByRef cg As MIRX64Context, ByRef msg As String)
+    If Len(cg.errorText) > 0 Then cg.errorText &= Chr(10)
+    cg.errorText &= msg
+End Sub
+
+Sub MIRX64AddWarning(ByRef cg As MIRX64Context, ByRef msg As String)
+    If Len(cg.warningText) > 0 Then cg.warningText &= Chr(10)
+    cg.warningText &= msg
+End Sub
+
+Function MIRX64Align16(ByVal n As Integer) As Integer
+    If n Mod 16 = 0 Then Return n
+    Return n + (16 - (n Mod 16))
+End Function
+
+Function MIRX64ToStr(ByVal n As Integer) As String
+    Return LTrim(Str(n))
+End Function
+
+Function MIRX64SanitizeSymbolName(ByRef nameText As String) As String
+    Dim t As String
+    t = UCase(Trim(nameText))
+    Dim outText As String
+    Dim i As Integer
+    outText = ""
+    For i = 1 To Len(t)
+        Dim ch As String
+        ch = Mid(t, i, 1)
+        If (ch >= "A" And ch <= "Z") Or (ch >= "0" And ch <= "9") Or ch = "_" Then
+            outText &= ch
+        Else
+            outText &= "_"
+        End If
+    Next i
+    If outText = "" Then outText = "ANON"
+    Return outText
+End Function
+
+Function MIRX64NextLabel(ByRef cg As MIRX64Context, ByRef stem As String) As String
+    cg.labelCounter += 1
+    Return ".Lmir_" & MIRX64SanitizeSymbolName(stem) & "_" & MIRX64ToStr(cg.labelCounter)
+End Function
+
+Function MIRX64FunctionLabel(ByRef functionName As String) As String
+    Dim t As String
+    t = MIRX64SanitizeSymbolName(functionName)
+    If UCase(Trim(functionName)) = "MAIN" Then Return "main"
+    Return "uxb_fn_" & t
+End Function
+
+Function MIRX64GlobalLabel(ByRef globalName As String) As String
+    Return "uxb_g_" & MIRX64SanitizeSymbolName(globalName)
+End Function
+
+Function MIRX64FindGlobalSlot(ByRef cg As MIRX64Context, ByRef nameText As String, ByRef idxOut As Integer) As Integer
+    Dim target As String
+    target = UCase(Trim(nameText))
+    Dim i As Integer
+    For i = 0 To cg.globalCount - 1
+        If UCase(Trim(cg.globals(i).nameText)) = target Then
+            idxOut = i
+            Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+Function MIRX64EnsureGlobalSlot(ByRef cg As MIRX64Context, ByRef nameText As String, ByRef idxOut As Integer) As Integer
+    Dim n As String
+    n = UCase(Trim(nameText))
+    If n = "" Then Return 0
+    If MIRX64FindGlobalSlot(cg, n, idxOut) <> 0 Then Return 1
+
+    idxOut = cg.globalCount
+    If cg.globalCount = 0 Then
+        ReDim cg.globals(0)
+    Else
+        ReDim Preserve cg.globals(cg.globalCount)
+    End If
+    cg.globalCount += 1
+    cg.globals(idxOut).nameText = n
+    cg.globals(idxOut).labelText = MIRX64GlobalLabel(n)
+    cg.globals(idxOut).sizeBytes = 8
+    cg.globals(idxOut).typeName = "I64"
+    MIRX64EmitData cg, cg.globals(idxOut).labelText & ": dq 0"
+    Return 1
+End Function
+
+Sub MIRX64PrepareModuleGlobals(ByRef cg As MIRX64Context)
+    If cg.modulePtr = 0 Then Exit Sub
+    Dim i As Integer
+    Dim idx As Integer
+    For i = 0 To cg.modulePtr->globalVarCount - 1
+        If Trim(cg.modulePtr->globalVars(i)) <> "" Then
+            MIRX64EnsureGlobalSlot cg, cg.modulePtr->globalVars(i), idx
+            If i <= UBound(cg.modulePtr->globalVarTypes) Then
+                If Trim(cg.modulePtr->globalVarTypes(i)) <> "" Then cg.globals(idx).typeName = UCase(Trim(cg.modulePtr->globalVarTypes(i)))
+            End If
+        End If
+    Next i
+End Sub
+
+Sub MIRX64BeginFunctionState(ByRef cg As MIRX64Context, ByRef functionName As String, ByVal functionIndex As Integer)
+    cg.currentFunctionName = Trim(functionName)
+    cg.currentFunctionIndex = functionIndex
+    cg.currentEpilogueLabel = ".Lmir_epilogue_" & MIRX64SanitizeSymbolName(functionName) & "_" & MIRX64ToStr(functionIndex)
+    cg.currentDivZeroLabel = ".Lmir_divzero_" & MIRX64SanitizeSymbolName(functionName) & "_" & MIRX64ToStr(functionIndex)
+    cg.localCount = 0
+    ReDim cg.locals(0)
+    cg.stackBytes = 0
+    ' S-068: array-PARAMETER entries are per-function (unlike DIM'd arrays, below):
+    ' drop the previous function's before this one registers its own.
+    Dim keepArrays As Integer
+    Dim scanArrays As Integer
+    keepArrays = 0
+    For scanArrays = 0 To cg.arrayCount - 1
+        If cg.arrays(scanArrays).isParam = 0 Then
+            If keepArrays <> scanArrays Then cg.arrays(keepArrays) = cg.arrays(scanArrays)
+            keepArrays += 1
+        End If
+    Next scanArrays
+    cg.arrayCount = keepArrays
+    ' S-054: cg.arrays/arrayCount must NOT reset here. Unlike locals (which
+    ' really are per-function), an array DIM'd in one function (including
+    ' module-level globals, lowered into MIR function 0 = MAIN) has to stay
+    ' resolvable by MIRX64FindArrayIndex while every OTHER function is later
+    ' emitted in the same MIRX64EmitModule call -- exactly like cg.globals,
+    ' which is intentionally initialized once in MIRX64Init and never touched
+    ' here. Resetting it per-function silently erased every array the moment
+    ' the next function's emission began, so any array touched from a
+    ' function other than the one that DIM'd it failed with "array not
+    ' declared" (STORE_INDEXED/LOAD_INDEXED), regardless of DIM/SUB order.
+    cg.gosubTargetCount = 0
+    ReDim cg.gosubTargets(0)
+    cg.inGosubRegion = 0
+    cg.shellNowait = 0
+    cg.shellTimeoutOperand = ""
+    cg.shellRunPathOperand = ""
+    cg.shellOutPathOperand = ""
+    cg.shellErrPathOperand = ""
+    cg.shellOutVar = ""
+    cg.shellErrVar = ""
+    cg.shellCodeVar = ""
+End Sub
+
+Sub MIRX64AddGosubTarget(ByRef cg As MIRX64Context, ByRef labelName As String)
+    Dim key As String
+    key = MIRX64SanitizeSymbolName(labelName)
+    Dim i As Integer
+    For i = 0 To cg.gosubTargetCount - 1
+        If cg.gosubTargets(i) = key Then Exit Sub
+    Next i
+    If cg.gosubTargetCount = 0 Then
+        ReDim cg.gosubTargets(0)
+    Else
+        ReDim Preserve cg.gosubTargets(cg.gosubTargetCount)
+    End If
+    cg.gosubTargets(cg.gosubTargetCount) = key
+    cg.gosubTargetCount += 1
+End Sub
+
+Function MIRX64IsGosubTarget(ByRef cg As MIRX64Context, ByRef labelName As String) As Integer
+    Dim key As String
+    key = MIRX64SanitizeSymbolName(labelName)
+    Dim i As Integer
+    For i = 0 To cg.gosubTargetCount - 1
+        If cg.gosubTargets(i) = key Then Return 1
+    Next i
+    Return 0
+End Function
+
+Function MIRX64CurrentEpilogueLabel(ByRef cg As MIRX64Context) As String
+    If Trim(cg.currentEpilogueLabel) = "" Then cg.currentEpilogueLabel = MIRX64NextLabel(cg, "epilogue")
+    Return cg.currentEpilogueLabel
+End Function
+
+Function MIRX64CurrentDivZeroLabel(ByRef cg As MIRX64Context) As String
+    If Trim(cg.currentDivZeroLabel) = "" Then cg.currentDivZeroLabel = MIRX64NextLabel(cg, "divzero")
+    Return cg.currentDivZeroLabel
+End Function
+
+Sub MIRX64EnsureInlineSharedMemory(ByRef cg As MIRX64Context)
+    If cg.inlineSharedMemoryEmitted <> 0 Then Exit Sub
+    MIRX64EmitData cg, "global __uxb_inline_shared64k"
+    MIRX64EmitData cg, "__uxb_inline_shared64k: times 65536 db 0"
+    MIRX64EmitData cg, "global __uxb_inline_shared64k_size"
+    MIRX64EmitData cg, "__uxb_inline_shared64k_size: dq 65536"
+    cg.inlineSharedMemoryEmitted = 1
+End Sub
+
+' S-021/S-049: MIRX64EmitCanonicalMemoryLoad/Store/Copy/Fill (and
+' PEEKS/POKES-mode) call __uxb_mem_*_mode runtime helpers, but nothing in the
+' MIR-x64 pipeline ever emitted their label definitions -- they only existed
+' in the legacy AST-direct x64 backend's own builtin-support block
+' (x64_codegen_builtin_support_helpers.fbs), a completely separate generated
+' .asm with its own X64CodegenContext. NASM linking then failed with
+' "symbol not defined" the first time the width-operand fix (also S-021)
+' let a call actually reach these labels. Ported verbatim (same NATIVE/
+' VIRTUAL semantics, same 1MiB VIRTUAL region) so MIR-x64 has its own copy.
+' S-077: PRINT of an unsigned 64-bit value. The native runtime DLL only exports
+' __uxb_rt_print_i64 (signed); adding an export would make every already-built
+' program depend on a matching DLL revision, so the unsigned form is a tiny
+' in-program helper built on the signed one. Input: rax = value.
+'   value < 2^63 : identical to the signed print
+'   value >= 2^63: print (value \ 10) -- it fits a signed 64-bit -- then the last digit
+Sub MIRX64EnsurePrintU64Helper(ByRef cg As MIRX64Context)
+    If cg.printU64HelperEmitted <> 0 Then Exit Sub
+    cg.printU64HelperEmitted = 1
+    MIRX64EmitExtern cg, "extern __uxb_rt_print_i64"
+    MIRX64EmitHelperLine cg, "__uxb_print_u64:"
+    MIRX64EmitHelperLine cg, "    sub rsp, 40"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    js .print_u64_big"
+    MIRX64EmitHelperLine cg, "    mov rcx, rax"
+    MIRX64EmitHelperLine cg, "    call __uxb_rt_print_i64"
+    MIRX64EmitHelperLine cg, "    add rsp, 40"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".print_u64_big:"
+    MIRX64EmitHelperLine cg, "    mov rcx, 10"
+    MIRX64EmitHelperLine cg, "    xor edx, edx"
+    MIRX64EmitHelperLine cg, "    div rcx"
+    MIRX64EmitHelperLine cg, "    mov qword [rsp+32], rdx"
+    MIRX64EmitHelperLine cg, "    mov rcx, rax"
+    MIRX64EmitHelperLine cg, "    call __uxb_rt_print_i64"
+    MIRX64EmitHelperLine cg, "    mov rcx, qword [rsp+32]"
+    MIRX64EmitHelperLine cg, "    call __uxb_rt_print_i64"
+    MIRX64EmitHelperLine cg, "    add rsp, 40"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ""
+End Sub
+
+Sub MIRX64EnsureMemoryModeHelpers(ByRef cg As MIRX64Context)
+    If cg.memoryModeHelpersEmitted <> 0 Then Exit Sub
+    cg.memoryModeHelpersEmitted = 1
+
+    MIRX64EmitExtern cg, "extern memmove"
+    MIRX64EmitExtern cg, "extern CreateFileMappingA"
+    MIRX64EmitExtern cg, "extern MapViewOfFile"
+    MIRX64EmitExtern cg, "extern UnmapViewOfFile"
+    MIRX64EmitExtern cg, "extern CloseHandle"
+    MIRX64EmitData cg, "__uxb_mem_space: times 1048576 db 0"
+    MIRX64EmitData cg, "__uxb_memory_seq_buf: times 65536 db 0"
+    MIRX64EmitData cg, "__uxb_empty_text: db 0"
+    MIRX64EmitData cg, "__uxb_mem_virtual_base: dq 0"
+    MIRX64EmitData cg, "__uxb_mem_virtual_map: dq 0"
+    MIRX64EmitData cg, "__uxb_mem_virtual_size: dq 1048576"
+    MIRX64EmitData cg, "__uxb_mem_error: dq 0"
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_fail:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_mem_error], 1"
+    MIRX64EmitHelperLine cg, "    xor eax, eax"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_virtual_init:"
+    MIRX64EmitHelperLine cg, "    push r12"
+    MIRX64EmitHelperLine cg, "    push r13"
+    ' Win64 ABI requires RSP to be 16-byte aligned at every CALL. On entry
+    ' here (right after this function's own CALL instruction), RSP is
+    ' 8-mod-16; the two pushes above (16 bytes, an even multiple of 8) leave
+    ' that same 8-mod-16 residue, so every "sub rsp,32/48" + CALL below
+    ' (CreateFileMappingA/MapViewOfFile/UnmapViewOfFile/CloseHandle) was
+    ' actually being issued misaligned. CreateFileMappingA/MapViewOfFile
+    ' happened not to fault on it the first time VIRTUAL ran, but
+    ' UnmapViewOfFile/CloseHandle (only reached on a SECOND VIRTUAL
+    ' statement, when an old mapping needs releasing first) reliably crashed
+    ' with a real access violation -- reproduced empirically. This one extra
+    ' 8-byte adjustment restores 16-byte alignment for every call in this
+    ' function; it is undone (add rsp,8) immediately before every return.
+    MIRX64EmitHelperLine cg, "    sub rsp, 8"
+    MIRX64EmitHelperLine cg, "    mov r12, rcx"
+    MIRX64EmitHelperLine cg, "    add r12, rdx"
+    MIRX64EmitHelperLine cg, "    jc .mem_virtual_init_fail"
+    MIRX64EmitHelperLine cg, "    test r12, r12"
+    MIRX64EmitHelperLine cg, "    jz .mem_virtual_init_fail"
+    MIRX64EmitHelperLine cg, "    mov r13, [rel __uxb_mem_virtual_map]"
+    MIRX64EmitHelperLine cg, "    test r13, r13"
+    MIRX64EmitHelperLine cg, "    jz .mem_virtual_init_no_old"
+    MIRX64EmitHelperLine cg, "    mov rcx, [rel __uxb_mem_virtual_base]"
+    MIRX64EmitHelperLine cg, "    test rcx, rcx"
+    MIRX64EmitHelperLine cg, "    jz .mem_virtual_init_skip_unmap"
+    MIRX64EmitHelperLine cg, "    sub rsp, 32"
+    MIRX64EmitHelperLine cg, "    call UnmapViewOfFile"
+    MIRX64EmitHelperLine cg, "    add rsp, 32"
+    MIRX64EmitHelperLine cg, ".mem_virtual_init_skip_unmap:"
+    MIRX64EmitHelperLine cg, "    mov rcx, r13"
+    MIRX64EmitHelperLine cg, "    sub rsp, 32"
+    MIRX64EmitHelperLine cg, "    call CloseHandle"
+    MIRX64EmitHelperLine cg, "    add rsp, 32"
+    MIRX64EmitHelperLine cg, ".mem_virtual_init_no_old:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_mem_virtual_base], 0"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_mem_virtual_map], 0"
+    MIRX64EmitHelperLine cg, "    mov rax, -1"
+    MIRX64EmitHelperLine cg, "    mov rcx, rax"
+    MIRX64EmitHelperLine cg, "    xor rdx, rdx"
+    MIRX64EmitHelperLine cg, "    mov r8d, 4"
+    MIRX64EmitHelperLine cg, "    mov r9, r12"
+    MIRX64EmitHelperLine cg, "    shr r9, 32"
+    MIRX64EmitHelperLine cg, "    sub rsp, 48"
+    MIRX64EmitHelperLine cg, "    mov qword [rsp+32], r12"
+    MIRX64EmitHelperLine cg, "    mov qword [rsp+40], 0"
+    MIRX64EmitHelperLine cg, "    call CreateFileMappingA"
+    MIRX64EmitHelperLine cg, "    add rsp, 48"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_virtual_init_fail"
+    MIRX64EmitHelperLine cg, "    mov r13, rax"
+    MIRX64EmitHelperLine cg, "    mov rcx, r13"
+    MIRX64EmitHelperLine cg, "    mov edx, 983071"
+    MIRX64EmitHelperLine cg, "    xor r8d, r8d"
+    MIRX64EmitHelperLine cg, "    xor r9d, r9d"
+    MIRX64EmitHelperLine cg, "    sub rsp, 48"
+    MIRX64EmitHelperLine cg, "    mov qword [rsp+32], r12"
+    MIRX64EmitHelperLine cg, "    call MapViewOfFile"
+    MIRX64EmitHelperLine cg, "    add rsp, 48"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_virtual_init_map_fail"
+    MIRX64EmitHelperLine cg, "    mov [rel __uxb_mem_virtual_base], rax"
+    MIRX64EmitHelperLine cg, "    mov [rel __uxb_mem_virtual_map], r13"
+    MIRX64EmitHelperLine cg, "    mov [rel __uxb_mem_virtual_size], r12"
+    MIRX64EmitHelperLine cg, "    mov eax, 1"
+    MIRX64EmitHelperLine cg, "    add rsp, 8"
+    MIRX64EmitHelperLine cg, "    pop r13"
+    MIRX64EmitHelperLine cg, "    pop r12"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_virtual_init_map_fail:"
+    MIRX64EmitHelperLine cg, "    mov rcx, r13"
+    MIRX64EmitHelperLine cg, "    sub rsp, 32"
+    MIRX64EmitHelperLine cg, "    call CloseHandle"
+    MIRX64EmitHelperLine cg, "    add rsp, 32"
+    MIRX64EmitHelperLine cg, ".mem_virtual_init_fail:"
+    MIRX64EmitHelperLine cg, "    add rsp, 8"
+    MIRX64EmitHelperLine cg, "    pop r13"
+    MIRX64EmitHelperLine cg, "    pop r12"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    ' ---- S-056 MemoryRef region registry (native x64) ----------------------------
+    ' Table of up to 256 regions, 24 bytes each: [+0] base, [+8] length,
+    ' [+16] state (0 free, 1 live, 2 released/tombstone). Same rules as
+    ' src/common/memory_ref.fbs: the end address belongs to a live region, a
+    ' released region refuses access, a new allocation retires overlapping tombstones,
+    ' addresses outside every region are EXTERNAL and unchecked here.
+    MIRX64EmitBss cg, "__uxb_memref_tab: resb 6144"
+    MIRX64EmitData cg, "__uxb_memref_count: dq 0"
+    MIRX64EmitData cg, "__uxb_memref_width: dq 1"
+
+    ' rcx = base, rdx = length. Clobbers rax, r8-r11 (callers are compiled code, not helpers).
+    MIRX64EmitHelperLine cg, "__uxb_memref_register:"
+    MIRX64EmitHelperLine cg, "    lea r8, [rel __uxb_memref_tab]"
+    MIRX64EmitHelperLine cg, "    mov r9, [rel __uxb_memref_count]"
+    MIRX64EmitHelperLine cg, "    xor r10, r10"
+    MIRX64EmitHelperLine cg, "    mov r11, -1"
+    MIRX64EmitHelperLine cg, ".memref_reg_scan:"
+    MIRX64EmitHelperLine cg, "    cmp r10, r9"
+    MIRX64EmitHelperLine cg, "    jae .memref_reg_place"
+    MIRX64EmitHelperLine cg, "    mov rax, r10"
+    MIRX64EmitHelperLine cg, "    imul rax, 24"
+    MIRX64EmitHelperLine cg, "    cmp qword [r8+rax+16], 2"
+    MIRX64EmitHelperLine cg, "    jne .memref_reg_free_check"
+    MIRX64EmitHelperLine cg, "    push rsi"
+    MIRX64EmitHelperLine cg, "    mov rsi, [r8+rax]"
+    MIRX64EmitHelperLine cg, "    add rsi, [r8+rax+8]"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rsi"
+    MIRX64EmitHelperLine cg, "    jae .memref_reg_no_overlap"
+    MIRX64EmitHelperLine cg, "    mov rsi, rcx"
+    MIRX64EmitHelperLine cg, "    add rsi, rdx"
+    MIRX64EmitHelperLine cg, "    cmp rsi, [r8+rax]"
+    MIRX64EmitHelperLine cg, "    jbe .memref_reg_no_overlap"
+    MIRX64EmitHelperLine cg, "    mov qword [r8+rax+16], 0"
+    MIRX64EmitHelperLine cg, ".memref_reg_no_overlap:"
+    MIRX64EmitHelperLine cg, "    pop rsi"
+    MIRX64EmitHelperLine cg, ".memref_reg_free_check:"
+    MIRX64EmitHelperLine cg, "    cmp r11, -1"
+    MIRX64EmitHelperLine cg, "    jne .memref_reg_next"
+    MIRX64EmitHelperLine cg, "    cmp qword [r8+rax+16], 0"
+    MIRX64EmitHelperLine cg, "    jne .memref_reg_next"
+    MIRX64EmitHelperLine cg, "    mov r11, r10"
+    MIRX64EmitHelperLine cg, ".memref_reg_next:"
+    MIRX64EmitHelperLine cg, "    inc r10"
+    MIRX64EmitHelperLine cg, "    jmp .memref_reg_scan"
+    MIRX64EmitHelperLine cg, ".memref_reg_place:"
+    MIRX64EmitHelperLine cg, "    cmp r11, -1"
+    MIRX64EmitHelperLine cg, "    jne .memref_reg_store"
+    MIRX64EmitHelperLine cg, "    cmp r9, 256"
+    MIRX64EmitHelperLine cg, "    jae .memref_reg_done"
+    MIRX64EmitHelperLine cg, "    mov r11, r9"
+    MIRX64EmitHelperLine cg, "    inc r9"
+    MIRX64EmitHelperLine cg, "    mov [rel __uxb_memref_count], r9"
+    MIRX64EmitHelperLine cg, ".memref_reg_store:"
+    MIRX64EmitHelperLine cg, "    mov rax, r11"
+    MIRX64EmitHelperLine cg, "    imul rax, 24"
+    MIRX64EmitHelperLine cg, "    mov [r8+rax], rcx"
+    MIRX64EmitHelperLine cg, "    mov [r8+rax+8], rdx"
+    MIRX64EmitHelperLine cg, "    mov qword [r8+rax+16], 1"
+    MIRX64EmitHelperLine cg, ".memref_reg_done:"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ""
+
+    ' rcx = base of a buffer that is about to be freed: mark its region released.
+    MIRX64EmitHelperLine cg, "__uxb_memref_release:"
+    MIRX64EmitHelperLine cg, "    lea r8, [rel __uxb_memref_tab]"
+    MIRX64EmitHelperLine cg, "    mov r9, [rel __uxb_memref_count]"
+    MIRX64EmitHelperLine cg, "    xor r10, r10"
+    MIRX64EmitHelperLine cg, ".memref_rel_scan:"
+    MIRX64EmitHelperLine cg, "    cmp r10, r9"
+    MIRX64EmitHelperLine cg, "    jae .memref_rel_done"
+    MIRX64EmitHelperLine cg, "    mov rax, r10"
+    MIRX64EmitHelperLine cg, "    imul rax, 24"
+    MIRX64EmitHelperLine cg, "    cmp qword [r8+rax+16], 1"
+    MIRX64EmitHelperLine cg, "    jne .memref_rel_next"
+    MIRX64EmitHelperLine cg, "    cmp [r8+rax], rcx"
+    MIRX64EmitHelperLine cg, "    jne .memref_rel_next"
+    MIRX64EmitHelperLine cg, "    mov qword [r8+rax+16], 2"
+    MIRX64EmitHelperLine cg, "    jmp .memref_rel_done"
+    MIRX64EmitHelperLine cg, ".memref_rel_next:"
+    MIRX64EmitHelperLine cg, "    inc r10"
+    MIRX64EmitHelperLine cg, "    jmp .memref_rel_scan"
+    MIRX64EmitHelperLine cg, ".memref_rel_done:"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ""
+
+    ' rcx = address, [__uxb_memref_width] = access bytes. eax = 1 proceed / 0 refuse.
+    ' Preserves every register except rax (the helpers keep live values in r8-r11).
+    MIRX64EmitHelperLine cg, "__uxb_memref_check:"
+    MIRX64EmitHelperLine cg, "    push rsi"
+    MIRX64EmitHelperLine cg, "    push rdi"
+    MIRX64EmitHelperLine cg, "    push r8"
+    MIRX64EmitHelperLine cg, "    push r10"
+    MIRX64EmitHelperLine cg, "    push r11"
+    MIRX64EmitHelperLine cg, "    lea r8, [rel __uxb_memref_tab]"
+    MIRX64EmitHelperLine cg, "    mov r10, [rel __uxb_memref_count]"
+    MIRX64EmitHelperLine cg, "    xor r11, r11"
+    MIRX64EmitHelperLine cg, "    xor edi, edi"
+    MIRX64EmitHelperLine cg, ".memref_chk_scan:"
+    MIRX64EmitHelperLine cg, "    cmp r11, r10"
+    MIRX64EmitHelperLine cg, "    jae .memref_chk_end"
+    MIRX64EmitHelperLine cg, "    mov rax, r11"
+    MIRX64EmitHelperLine cg, "    imul rax, 24"
+    MIRX64EmitHelperLine cg, "    mov rsi, [r8+rax+16]"
+    MIRX64EmitHelperLine cg, "    cmp rsi, 1"
+    MIRX64EmitHelperLine cg, "    je .memref_chk_live"
+    MIRX64EmitHelperLine cg, "    cmp rsi, 2"
+    MIRX64EmitHelperLine cg, "    jne .memref_chk_next"
+    MIRX64EmitHelperLine cg, "    mov rsi, [r8+rax]"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rsi"
+    MIRX64EmitHelperLine cg, "    jb .memref_chk_next"
+    MIRX64EmitHelperLine cg, "    add rsi, [r8+rax+8]"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rsi"
+    MIRX64EmitHelperLine cg, "    jae .memref_chk_next"
+    MIRX64EmitHelperLine cg, "    mov edi, 1"
+    MIRX64EmitHelperLine cg, "    jmp .memref_chk_next"
+    MIRX64EmitHelperLine cg, ".memref_chk_live:"
+    MIRX64EmitHelperLine cg, "    mov rsi, [r8+rax]"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rsi"
+    MIRX64EmitHelperLine cg, "    jb .memref_chk_next"
+    MIRX64EmitHelperLine cg, "    add rsi, [r8+rax+8]"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rsi"
+    MIRX64EmitHelperLine cg, "    ja .memref_chk_next"
+    MIRX64EmitHelperLine cg, "    mov rax, rcx"
+    MIRX64EmitHelperLine cg, "    add rax, [rel __uxb_memref_width]"
+    MIRX64EmitHelperLine cg, "    cmp rax, rsi"
+    MIRX64EmitHelperLine cg, "    ja .memref_chk_fail"
+    MIRX64EmitHelperLine cg, "    jmp .memref_chk_ok"
+    MIRX64EmitHelperLine cg, ".memref_chk_next:"
+    MIRX64EmitHelperLine cg, "    inc r11"
+    MIRX64EmitHelperLine cg, "    jmp .memref_chk_scan"
+    MIRX64EmitHelperLine cg, ".memref_chk_end:"
+    MIRX64EmitHelperLine cg, "    test edi, edi"
+    MIRX64EmitHelperLine cg, "    jnz .memref_chk_fail"
+    MIRX64EmitHelperLine cg, ".memref_chk_ok:"
+    MIRX64EmitHelperLine cg, "    mov eax, 1"
+    MIRX64EmitHelperLine cg, "    jmp .memref_chk_ret"
+    MIRX64EmitHelperLine cg, ".memref_chk_fail:"
+    MIRX64EmitHelperLine cg, "    xor eax, eax"
+    MIRX64EmitHelperLine cg, ".memref_chk_ret:"
+    MIRX64EmitHelperLine cg, "    pop r11"
+    MIRX64EmitHelperLine cg, "    pop r10"
+    MIRX64EmitHelperLine cg, "    pop r8"
+    MIRX64EmitHelperLine cg, "    pop rdi"
+    MIRX64EmitHelperLine cg, "    pop rsi"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_resolve_mode:"
+    MIRX64EmitHelperLine cg, "    cmp rdx, 1"
+    MIRX64EmitHelperLine cg, "    je .mem_resolve_virtual"
+    MIRX64EmitHelperLine cg, "    cmp rdx, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_resolve_native"
+    ' S-066: AUTO (mode=0, the "jmp" fallback here) used to jump to a
+    ' standalone __uxb_mem_resolve that always used the static
+    ' __uxb_mem_space buffer, ignoring __uxb_mem_virtual_base/_map -- so once
+    ' a VIRTUAL statement mapped real OS memory, AUTO-mode PEEK/POKE silently
+    ' read/wrote a DIFFERENT backing store than explicit VIRTUAL-mode
+    ' PEEK/POKE at the same address. Per the design (UXBRuntimeMemoryMode:
+    ' 0=AUTO, 1=VIRTUAL -- both mean "the VIRTUAL sandbox"), AUTO must
+    ' resolve exactly like VIRTUAL, which is what canonical-MIR/AST already
+    ' do. Falling through to .mem_resolve_virtual below fixes this.
+    MIRX64EmitHelperLine cg, ".mem_resolve_virtual:"
+    MIRX64EmitHelperLine cg, "    cmp rcx, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    jae .mem_resolve_fail"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_base]"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jnz .mem_resolve_virtual_base"
+    MIRX64EmitHelperLine cg, "    lea rax, [rel __uxb_mem_space]"
+    MIRX64EmitHelperLine cg, ".mem_resolve_virtual_base:"
+    MIRX64EmitHelperLine cg, "    add rax, rcx"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_resolve_native:"
+    ' S-056 MemoryRef: uXBasic-owned buffers (array backing stores) are bounds- and
+    ' lifetime-checked before the raw address is handed out; every helper stores its
+    ' access width in __uxb_memref_width first.
+    MIRX64EmitHelperLine cg, "    call __uxb_memref_check"
+    MIRX64EmitHelperLine cg, "    test eax, eax"
+    MIRX64EmitHelperLine cg, "    jz .mem_resolve_fail"
+    MIRX64EmitHelperLine cg, "    mov rax, rcx"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_resolve_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_loadb_mode:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], 1"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_loadb_fail"
+    MIRX64EmitHelperLine cg, "    movzx eax, byte [rax]"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_loadb_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_loadw_mode:"
+    MIRX64EmitHelperLine cg, "    cmp rdx, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_loadw_resolve"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    sub rax, 2"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_loadw_fail"
+    MIRX64EmitHelperLine cg, ".mem_loadw_resolve:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], 2"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_loadw_fail"
+    MIRX64EmitHelperLine cg, "    movzx eax, word [rax]"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_loadw_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_loadd_mode:"
+    MIRX64EmitHelperLine cg, "    cmp rdx, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_loadd_resolve"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    sub rax, 4"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_loadd_fail"
+    MIRX64EmitHelperLine cg, ".mem_loadd_resolve:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], 4"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_loadd_fail"
+    MIRX64EmitHelperLine cg, "    mov eax, dword [rax]"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_loadd_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_loadq_mode:"
+    MIRX64EmitHelperLine cg, "    cmp rdx, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_loadq_resolve"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    sub rax, 8"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_loadq_fail"
+    MIRX64EmitHelperLine cg, ".mem_loadq_resolve:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], 8"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_loadq_fail"
+    MIRX64EmitHelperLine cg, "    mov rax, qword [rax]"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_loadq_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_storeb_mode:"
+    MIRX64EmitHelperLine cg, "    mov r10, rdx"
+    MIRX64EmitHelperLine cg, "    mov rdx, r8"
+    MIRX64EmitHelperLine cg, "    cmp rdx, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_storeb_resolve"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    sub rax, 1"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_storeb_fail"
+    MIRX64EmitHelperLine cg, ".mem_storeb_resolve:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], 1"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_storeb_fail"
+    MIRX64EmitHelperLine cg, "    mov byte [rax], r10b"
+    MIRX64EmitHelperLine cg, "    mov eax, 1"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_storeb_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_storew_mode:"
+    MIRX64EmitHelperLine cg, "    mov r10, rdx"
+    MIRX64EmitHelperLine cg, "    mov rdx, r8"
+    MIRX64EmitHelperLine cg, "    cmp rdx, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_storew_resolve"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    sub rax, 2"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_storew_fail"
+    MIRX64EmitHelperLine cg, ".mem_storew_resolve:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], 2"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_storew_fail"
+    MIRX64EmitHelperLine cg, "    mov word [rax], r10w"
+    MIRX64EmitHelperLine cg, "    mov eax, 1"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_storew_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_stored_mode:"
+    MIRX64EmitHelperLine cg, "    mov r10, rdx"
+    MIRX64EmitHelperLine cg, "    mov rdx, r8"
+    MIRX64EmitHelperLine cg, "    cmp rdx, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_stored_resolve"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    sub rax, 4"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_stored_fail"
+    MIRX64EmitHelperLine cg, ".mem_stored_resolve:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], 4"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_stored_fail"
+    MIRX64EmitHelperLine cg, "    mov dword [rax], r10d"
+    MIRX64EmitHelperLine cg, "    mov eax, 1"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_stored_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_storeq_mode:"
+    MIRX64EmitHelperLine cg, "    mov r10, rdx"
+    MIRX64EmitHelperLine cg, "    mov rdx, r8"
+    MIRX64EmitHelperLine cg, "    cmp rdx, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_storeq_resolve"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    sub rax, 8"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_storeq_fail"
+    MIRX64EmitHelperLine cg, ".mem_storeq_resolve:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], 8"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_storeq_fail"
+    MIRX64EmitHelperLine cg, "    mov qword [rax], r10"
+    MIRX64EmitHelperLine cg, "    mov eax, 1"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_storeq_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_copy_mode:"
+    MIRX64EmitHelperLine cg, "    test r8, r8"
+    MIRX64EmitHelperLine cg, "    jz .mem_copy_mode_done"
+    MIRX64EmitHelperLine cg, "    mov r10, rcx"
+    MIRX64EmitHelperLine cg, "    mov r11, rdx"
+    MIRX64EmitHelperLine cg, "    cmp r9, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_copy_mode_native_or_auto"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    sub rax, r8"
+    MIRX64EmitHelperLine cg, "    cmp r10, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_copy_mode_fail"
+    MIRX64EmitHelperLine cg, "    cmp r11, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_copy_mode_fail"
+    MIRX64EmitHelperLine cg, ".mem_copy_mode_native_or_auto:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], r8"
+    MIRX64EmitHelperLine cg, "    mov rcx, r10"
+    MIRX64EmitHelperLine cg, "    mov rdx, r9"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_copy_mode_fail"
+    MIRX64EmitHelperLine cg, "    mov r10, rax"
+    MIRX64EmitHelperLine cg, "    mov rcx, r11"
+    MIRX64EmitHelperLine cg, "    mov rdx, r9"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_copy_mode_fail"
+    MIRX64EmitHelperLine cg, "    mov rcx, rax"
+    MIRX64EmitHelperLine cg, "    mov rdx, r10"
+    MIRX64EmitHelperLine cg, "    sub rsp, 32"
+    MIRX64EmitHelperLine cg, "    call memmove"
+    MIRX64EmitHelperLine cg, "    add rsp, 32"
+    MIRX64EmitHelperLine cg, ".mem_copy_mode_done:"
+    MIRX64EmitHelperLine cg, "    mov eax, 1"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_copy_mode_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_fill_mode:"
+    MIRX64EmitHelperLine cg, "    test r8, r8"
+    MIRX64EmitHelperLine cg, "    jz .mem_fill_mode_done"
+    MIRX64EmitHelperLine cg, "    mov r11, r10"
+    MIRX64EmitHelperLine cg, "    imul r11, r8"
+    MIRX64EmitHelperLine cg, "    jo .mem_fill_mode_fail"
+    MIRX64EmitHelperLine cg, "    cmp r9, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_fill_mode_resolve"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    sub rax, r11"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_fill_mode_fail"
+    MIRX64EmitHelperLine cg, ".mem_fill_mode_resolve:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], r11"
+    MIRX64EmitHelperLine cg, "    push r12"
+    MIRX64EmitHelperLine cg, "    mov r12, r10"
+    MIRX64EmitHelperLine cg, "    mov r11, rdx"
+    MIRX64EmitHelperLine cg, "    mov rdx, r9"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_fill_mode_fail_pop"
+    MIRX64EmitHelperLine cg, "    mov r10, rax"
+    MIRX64EmitHelperLine cg, "    xor rax, rax"
+    MIRX64EmitHelperLine cg, ".mem_fill_mode_loop:"
+    MIRX64EmitHelperLine cg, "    cmp rax, r8"
+    MIRX64EmitHelperLine cg, "    jae .mem_fill_mode_done_pop"
+    MIRX64EmitHelperLine cg, "    cmp r12, 1"
+    MIRX64EmitHelperLine cg, "    je .mem_fill_mode_b"
+    MIRX64EmitHelperLine cg, "    cmp r12, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_fill_mode_w"
+    MIRX64EmitHelperLine cg, "    cmp r12, 8"
+    MIRX64EmitHelperLine cg, "    je .mem_fill_mode_q"
+    MIRX64EmitHelperLine cg, "    mov dword [r10 + rax * 4], r11d"
+    MIRX64EmitHelperLine cg, "    jmp .mem_fill_mode_next"
+    MIRX64EmitHelperLine cg, ".mem_fill_mode_b:"
+    MIRX64EmitHelperLine cg, "    mov byte [r10 + rax], r11b"
+    MIRX64EmitHelperLine cg, "    jmp .mem_fill_mode_next"
+    MIRX64EmitHelperLine cg, ".mem_fill_mode_w:"
+    MIRX64EmitHelperLine cg, "    mov word [r10 + rax * 2], r11w"
+    MIRX64EmitHelperLine cg, "    jmp .mem_fill_mode_next"
+    MIRX64EmitHelperLine cg, ".mem_fill_mode_q:"
+    MIRX64EmitHelperLine cg, "    mov qword [r10 + rax * 8], r11"
+    MIRX64EmitHelperLine cg, ".mem_fill_mode_next:"
+    MIRX64EmitHelperLine cg, "    inc rax"
+    MIRX64EmitHelperLine cg, "    jmp .mem_fill_mode_loop"
+    MIRX64EmitHelperLine cg, ".mem_fill_mode_done_pop:"
+    MIRX64EmitHelperLine cg, "    pop r12"
+    MIRX64EmitHelperLine cg, ".mem_fill_mode_done:"
+    MIRX64EmitHelperLine cg, "    mov eax, 1"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_fill_mode_fail_pop:"
+    MIRX64EmitHelperLine cg, "    pop r12"
+    MIRX64EmitHelperLine cg, ".mem_fill_mode_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_peeks_mode:"
+    MIRX64EmitHelperLine cg, "    cmp rdx, 65535"
+    MIRX64EmitHelperLine cg, "    ja .mem_peeks_fail"
+    MIRX64EmitHelperLine cg, "    test rdx, rdx"
+    MIRX64EmitHelperLine cg, "    jz .mem_peeks_empty"
+    MIRX64EmitHelperLine cg, "    cmp r8, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_peeks_resolve"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    sub rax, rdx"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_peeks_fail"
+    MIRX64EmitHelperLine cg, ".mem_peeks_resolve:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], rdx"
+    MIRX64EmitHelperLine cg, "    mov r10, rcx"
+    MIRX64EmitHelperLine cg, "    mov r11, rdx"
+    MIRX64EmitHelperLine cg, "    mov rdx, r8"
+    MIRX64EmitHelperLine cg, "    mov rcx, r10"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_peeks_fail"
+    MIRX64EmitHelperLine cg, "    mov r10, rax"
+    MIRX64EmitHelperLine cg, "    lea rax, [rel __uxb_memory_seq_buf]"
+    MIRX64EmitHelperLine cg, "    xor r8, r8"
+    MIRX64EmitHelperLine cg, ".mem_peeks_loop:"
+    MIRX64EmitHelperLine cg, "    cmp r8, r11"
+    MIRX64EmitHelperLine cg, "    jae .mem_peeks_done"
+    MIRX64EmitHelperLine cg, "    mov dl, [r10 + r8]"
+    MIRX64EmitHelperLine cg, "    mov [rax + r8], dl"
+    MIRX64EmitHelperLine cg, "    inc r8"
+    MIRX64EmitHelperLine cg, "    jmp .mem_peeks_loop"
+    MIRX64EmitHelperLine cg, ".mem_peeks_done:"
+    MIRX64EmitHelperLine cg, "    mov byte [rax + r11], 0"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_peeks_empty:"
+    MIRX64EmitHelperLine cg, "    lea rax, [rel __uxb_empty_text]"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_peeks_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+
+    MIRX64EmitHelperLine cg, "__uxb_mem_pokes_mode:"
+    MIRX64EmitHelperLine cg, "    test r8, r8"
+    MIRX64EmitHelperLine cg, "    jz .mem_pokes_mode_done"
+    MIRX64EmitHelperLine cg, "    cmp r9, 2"
+    MIRX64EmitHelperLine cg, "    je .mem_pokes_mode_resolve"
+    MIRX64EmitHelperLine cg, "    mov rax, [rel __uxb_mem_virtual_size]"
+    MIRX64EmitHelperLine cg, "    sub rax, r8"
+    MIRX64EmitHelperLine cg, "    cmp rcx, rax"
+    MIRX64EmitHelperLine cg, "    ja .mem_pokes_mode_fail"
+    MIRX64EmitHelperLine cg, ".mem_pokes_mode_resolve:"
+    MIRX64EmitHelperLine cg, "    mov qword [rel __uxb_memref_width], r8"
+    MIRX64EmitHelperLine cg, "    mov r10, rcx"
+    MIRX64EmitHelperLine cg, "    mov r11, rdx"
+    MIRX64EmitHelperLine cg, "    mov rdx, r9"
+    MIRX64EmitHelperLine cg, "    mov rcx, r10"
+    MIRX64EmitHelperLine cg, "    call __uxb_mem_resolve_mode"
+    MIRX64EmitHelperLine cg, "    test rax, rax"
+    MIRX64EmitHelperLine cg, "    jz .mem_pokes_mode_fail"
+    MIRX64EmitHelperLine cg, "    mov r10, rax"
+    MIRX64EmitHelperLine cg, "    xor rax, rax"
+    MIRX64EmitHelperLine cg, ".mem_pokes_mode_loop:"
+    MIRX64EmitHelperLine cg, "    cmp rax, r8"
+    MIRX64EmitHelperLine cg, "    jae .mem_pokes_mode_done"
+    MIRX64EmitHelperLine cg, "    mov dl, [r11 + rax]"
+    MIRX64EmitHelperLine cg, "    mov [r10 + rax], dl"
+    MIRX64EmitHelperLine cg, "    inc rax"
+    MIRX64EmitHelperLine cg, "    jmp .mem_pokes_mode_loop"
+    MIRX64EmitHelperLine cg, ".mem_pokes_mode_done:"
+    MIRX64EmitHelperLine cg, "    mov eax, 1"
+    MIRX64EmitHelperLine cg, "    ret"
+    MIRX64EmitHelperLine cg, ".mem_pokes_mode_fail:"
+    MIRX64EmitHelperLine cg, "    jmp __uxb_mem_fail"
+    MIRX64EmitHelperLine cg, ""
+End Sub
+
+#endif

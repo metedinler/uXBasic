@@ -1,0 +1,361 @@
+#ifndef UXB_JS_EMITTER_FBS
+#define UXB_JS_EMITTER_FBS
+
+#include once "js_source_emit.fbs"
+Private Const UXB_JS_FB_DIRECTORY_ATTR As Integer = 16
+
+Private Function UXBJsEnsureDir(ByRef dirPath As String) As Integer
+    Dim cleaned As String
+    Dim part As String
+    Dim current As String
+    Dim i As Integer
+    Dim ch As String
+
+    cleaned = Trim(dirPath)
+    If cleaned = "" Then Return 1
+
+    current = ""
+    part = ""
+    For i = 1 To Len(cleaned)
+        ch = Mid(cleaned, i, 1)
+        If ch = "\" Or ch = "/" Then
+            If part <> "" Then
+                If current <> "" Then current &= "\"
+                current &= part
+                If Dir(current, UXB_JS_FB_DIRECTORY_ATTR) = "" Then MkDir current
+                part = ""
+            End If
+        Else
+            part &= ch
+        End If
+    Next i
+
+    If part <> "" Then
+        If current <> "" Then current &= "\"
+        current &= part
+        If Dir(current, UXB_JS_FB_DIRECTORY_ATTR) = "" Then MkDir current
+    End If
+
+    Return 1
+End Function
+
+Private Function UXBJsDirOf(ByRef filePath As String) As String
+    Dim i As Integer
+    For i = Len(filePath) To 1 Step -1
+        If Mid(filePath, i, 1) = "\" Or Mid(filePath, i, 1) = "/" Then Return Left(filePath, i - 1)
+    Next i
+    Return ""
+End Function
+
+Private Function UXBJsWriteText(ByRef filePath As String, ByRef textValue As String, ByRef errText As String) As Integer
+    Dim ff As Integer
+    UXBJsEnsureDir UXBJsDirOf(filePath)
+    ff = FreeFile
+    Open filePath For Output As #ff
+    If Err <> 0 Then
+        errText = "JS output file cannot be opened: " & filePath
+        Return 0
+    End If
+    Print #ff, textValue;
+    Close #ff
+    Return 1
+End Function
+
+Private Function UXBJsCopyFileSafe(ByRef srcPath As String, ByRef dstPath As String) As Integer
+    If Dir(srcPath) = "" Then Return 0
+    UXBJsEnsureDir UXBJsDirOf(dstPath)
+    If Dir(dstPath) <> "" Then Kill dstPath
+    Dim fi As Integer, fo As Integer
+    Dim dataText As String
+    Dim dataLen As LongInt
+    fi = FreeFile
+    Open srcPath For Binary Access Read As #fi
+    If Err <> 0 Then Return 0
+    dataLen = LOF(fi)
+    If dataLen > 0 Then
+        dataText = Space(dataLen)
+        Get #fi, 1, dataText
+    Else
+        dataText = ""
+    End If
+    Close #fi
+    fo = FreeFile
+    Open dstPath For Binary Access Write As #fo
+    If Err <> 0 Then Return 0
+    If dataLen > 0 Then Put #fo, 1, dataText
+    Close #fo
+    Return 1
+End Function
+
+Private Function UXBJsSelectEntryFunctionIndex(ByRef module As MIRModule) As Integer
+    Dim i As Integer
+    If module.functionCount <= 0 Then Return -1
+    For i = 0 To module.functionCount - 1
+        If LCase(Trim(module.functions(i).name)) = "main" Then Return i
+    Next i
+    Return 0
+End Function
+
+Private Function UXBJsFunctionHasOwnBinding(ByRef fn As MIRFunction, ByRef nameText As String) As Integer
+    Dim key As String
+    key = UCase(Trim(nameText))
+    Dim i As Integer
+    For i = 0 To fn.paramVarCount - 1
+        If UCase(Trim(fn.paramVars(i))) = key Then Return 1
+    Next i
+    For i = 0 To fn.localVarCount - 1
+        If UCase(Trim(fn.localVars(i))) = key Then Return 1
+    Next i
+    Return 0
+End Function
+
+Private Function UXBJsEmitFunction(ByRef module As MIRModule, ByRef fn As MIRFunction, ByRef outText As String, ByRef errText As String) As Integer
+    Dim b As Integer
+    Dim j As Integer
+    Dim blk As MIRBasicBlock
+    Dim nextLabel As String
+    Dim fnName As String
+    Dim paramList As String
+    Dim p As Integer
+
+    fnName = UXBJsSafeIdentifier(Trim(fn.name))
+    If fnName = "" Then fnName = "main"
+
+    paramList = ""
+    For p = 0 To fn.paramVarCount - 1
+        If p > 0 Then paramList &= ", "
+        paramList &= UXBJsSafeIdentifier(fn.paramVars(p))
+    Next p
+
+    outText &= "async function " & fnName & "(" & paramList & ") {" & Chr(10)
+    outText &= "  const vars = Object.create(null);" & Chr(10)
+    For p = 0 To module.globalVarCount - 1
+        If UXBJsFunctionHasOwnBinding(fn, module.globalVars(p)) = 0 Then
+            Dim globalKey As String
+            globalKey = UXBJsVarKey(module.globalVars(p))
+            outText &= "  Object.defineProperty(vars, " & globalKey & ", { enumerable: true, get: () => __uxbGlobals[" & globalKey & "], set: value => { __uxbGlobals[" & globalKey & "] = value; } });" & Chr(10)
+        End If
+    Next p
+    For p = 0 To fn.paramVarCount - 1
+        Dim paramIsByRef As Integer
+        paramIsByRef = 0
+        If p <= UBound(fn.paramByRef) Then paramIsByRef = fn.paramByRef(p)
+        Dim paramKey As String
+        paramKey = UXBJsVarKey(fn.paramVars(p))
+        Dim paramJsName As String
+        paramJsName = UXBJsSafeIdentifier(fn.paramVars(p))
+        If paramIsByRef <> 0 Then
+            ' S-051: the caller (UXBJsBuildCallArgsWithByRef, js_stmt_emit.fbs)
+            ' passes a { get value(), set value() } accessor box for this
+            ' argument instead of a plain value. Forward the parameter's own
+            ' vars[] slot through that box (same Object.defineProperty pattern
+            ' as the global-variable forwarding right below) so every read and
+            ' write of the parameter inside this function reaches the
+            ' caller's actual variable in real time, not a local copy.
+            outText &= "  Object.defineProperty(vars, " & paramKey & ", { enumerable: true, get: () => " & paramJsName & ".value, set: value => { " & paramJsName & ".value = value; } });" & Chr(10)
+        Else
+            outText &= "  vars[" & paramKey & "] = " & paramJsName & ";" & Chr(10)
+        End If
+    Next p
+
+    If fn.blockCount <= 0 Then
+        outText &= "}" & Chr(10) & Chr(10)
+        Return 1
+    End If
+
+    outText &= "  let pc = " & UXBJsQuote(UXBJsBlockLabel(fn.entryBlock)) & ";" & Chr(10)
+    outText &= "  while (pc !== null) {" & Chr(10)
+    outText &= "    switch (pc) {" & Chr(10)
+
+    For b = 0 To fn.blockCount - 1
+        blk = fn.blocks(b)
+        outText &= "    case " & UXBJsQuote(UXBJsBlockLabel(blk.id)) & ":" & Chr(10)
+        outText &= UXBJsBlockSourceComment(blk)
+        For j = 0 To blk.instructionCount - 1
+            If UXBJsEmitInstruction(blk.instructions(j), outText, errText) = 0 Then Return 0
+        Next j
+
+        If b < fn.blockCount - 1 Then
+            nextLabel = UXBJsBlockLabel(fn.blocks(b + 1).id)
+            outText &= "      pc = " & UXBJsQuote(nextLabel) & "; break;" & Chr(10)
+        Else
+            outText &= "      pc = null; break;" & Chr(10)
+        End If
+    Next b
+
+    outText &= "    default:" & Chr(10)
+    outText &= "      pc = null; break;" & Chr(10)
+    outText &= "    }" & Chr(10)
+    outText &= "  }" & Chr(10)
+    outText &= "}" & Chr(10) & Chr(10)
+    Return 1
+End Function
+
+Public Function UXBJsEmitFromMIR( _
+    ByRef module As MIRModule, _
+    ByRef sourcePath As String, _
+    ByRef jsOutPath As String, _
+    ByRef wasmManifestPath As String, _
+    ByRef errText As String _
+) As Integer
+    Dim outText As String
+    Dim entryIndex As Integer
+    Dim wasmPath As String
+    Dim i As Integer
+    Dim entryName As String
+    Dim fnName As String
+
+    errText = ""
+    wasmPath = ""
+    If Trim(wasmManifestPath) <> "" Then wasmPath = "./program.wasm"
+
+    outText = UXBJsEmitPreamble(wasmPath)
+    outText &= "// Generated by uXBasic JS backend." & Chr(10)
+    outText &= "// Source: " & UXBJsEscape(sourcePath) & Chr(10) & Chr(10)
+    outText &= "const __uxbUser = Object.create(null);" & Chr(10)
+    outText &= "const __uxbGlobals = Object.create(null);" & Chr(10)
+    For i = 0 To module.globalVarCount - 1
+        outText &= "__uxbGlobals[" & UXBJsVarKey(module.globalVars(i)) & "] = 0;" & Chr(10)
+    Next i
+    outText &= Chr(10)
+
+    If Trim(wasmPath) <> "" Then
+        outText &= "let __uxb_wasm = null;" & Chr(10)
+        outText &= "async function __uxb_load_wasm() {" & Chr(10)
+        outText &= "  if (__uxb_wasm) return __uxb_wasm;" & Chr(10)
+        outText &= UXBJsEmitWasmLoadSnippet(wasmPath)
+        outText &= "  __uxb_wasm = ux.wasm;" & Chr(10)
+        outText &= "  return __uxb_wasm;" & Chr(10)
+        outText &= "}" & Chr(10) & Chr(10)
+    End If
+
+    If module.functionCount <= 0 Then
+        outText &= "async function main() { ux.println('No MIR function found.'); }" & Chr(10)
+        outText &= UXBJsEmitMainFooter()
+        Return UXBJsWriteText(jsOutPath, outText, errText)
+    End If
+
+    ' S-051: let UXBJsEmitCall (js_stmt_emit.fbs) look up a callee's
+    ' paramByRef signature by name without threading `module` through every
+    ' JS statement/expression emit function.
+    UXBJsSetCurrentModule module
+
+    For i = 0 To module.functionCount - 1
+        If UXBJsEmitFunction(module, module.functions(i), outText, errText) = 0 Then Return 0
+    Next i
+
+    For i = 0 To module.functionCount - 1
+        fnName = UXBJsSafeIdentifier(module.functions(i).name)
+        If fnName = "" Then fnName = "main"
+        outText &= "__uxbUser[" & UXBJsQuote(UCase(Trim(module.functions(i).name))) & "] = " & fnName & ";" & Chr(10)
+    Next i
+    outText &= Chr(10)
+    outText &= "if (globalThis.uxb) globalThis.uxb.exports = __uxbUser;" & Chr(10)
+
+    ' Canonical MIR OOP vtable registration. The runtime stores the
+    ' resolved function names per class; virtual METHOD_CALL selects by slot.
+    Dim ci As Integer
+    Dim si As Integer
+    ' entryIndex already declared above (function-scoped, per FreeBASIC's classic-BASIC
+    ' Dim hoisting) -- this was a genuine duplicate declaration (found 2026-09-06,
+    ' blocking a from-scratch build).
+    Dim slotStart As Integer
+    Dim slotCount As Integer
+    Dim className As String
+    Dim slotText As String
+    For ci = 0 To module.vtableClassCount - 1
+        className = UCase(Trim(module.vtableClassNames(ci)))
+        slotStart = module.vtableClassSlotStart(ci)
+        slotCount = module.vtableClassSlotCounts(ci)
+        slotText = "["
+        For si = 0 To slotCount - 1
+            If si > 0 Then slotText &= ", "
+            entryIndex = -1
+            Dim ei As Integer
+            For ei = 0 To module.vtableEntryCount - 1
+                If module.vtableEntryClassIndex(ei) = ci And module.vtableEntrySlots(ei) = si Then
+                    entryIndex = ei
+                    Exit For
+                End If
+            Next ei
+            If entryIndex >= 0 Then
+                Dim fi As Integer
+                fi = module.vtableEntryFunctionIndex(entryIndex)
+                If fi >= 0 And fi < module.functionCount Then
+                    slotText &= UXBJsQuote(UCase(Trim(module.functions(fi).name)))
+                Else
+                    slotText &= "null"
+                End If
+            Else
+                slotText &= "null"
+            End If
+        Next si
+        slotText &= "]"
+        Dim ctorText As String
+        Dim dtorText As String
+        Dim ctorParamCount As Integer
+        ctorText = ""
+        dtorText = ""
+        ctorParamCount = module.vtableClassCtorParamCount(ci)
+        Dim ctorIdx As Integer
+        Dim dtorIdx As Integer
+        ctorIdx = module.vtableClassCtorFunctionIndex(ci)
+        dtorIdx = module.vtableClassDtorFunctionIndex(ci)
+        If ctorIdx >= 0 And ctorIdx < module.functionCount Then ctorText = UCase(Trim(module.functions(ctorIdx).name))
+        If dtorIdx >= 0 And dtorIdx < module.functionCount Then dtorText = UCase(Trim(module.functions(dtorIdx).name))
+        outText &= "ux.registerClass(" & UXBJsQuote(className) & ", " & slotText & ", " & UXBJsQuote(ctorText) & ", " & UXBJsQuote(dtorText) & ", " & UXBJsQuote(module.vtableClassBaseNames(ci)) & ", " & LTrim(Str(ctorParamCount)) & ");" & Chr(10)
+    Next ci
+
+    entryIndex = UXBJsSelectEntryFunctionIndex(module)
+    entryName = UXBJsSafeIdentifier(module.functions(entryIndex).name)
+    If entryName = "" Then entryName = "main"
+
+    outText &= "globalThis.uxbMain = " & entryName & ";" & Chr(10)
+    outText &= "if (!globalThis.uxb || globalThis.uxb.autoRun !== false) { " & entryName & "().catch(err => { const message = 'uXBasic runtime error: ' + (err && err.message ? err.message : String(err)); if (globalThis.uxb && globalThis.uxb.console) globalThis.uxb.console.println(message); else if (typeof console !== 'undefined' && console.error) console.error(err); if (typeof process !== 'undefined' && process) process.exitCode = 1; else throw err; }); }" & Chr(10)
+
+    Return UXBJsWriteText(jsOutPath, outText, errText)
+End Function
+
+Public Function UXBJsEmitBrowserHybridBundle( _
+    ByRef module As MIRModule, _
+    ByRef sourcePath As String, _
+    ByRef browserOutDir As String, _
+    ByRef browserRuntimeDir As String, _
+    ByRef wasmWatPath As String, _
+    ByRef wasmBinaryPath As String, _
+    ByRef wasmManifestPath As String, _
+    ByRef errText As String _
+) As Integer
+    Dim jsOut As String
+    Dim indexText As String
+
+    UXBJsEnsureDir browserOutDir
+    jsOut = browserOutDir & "\game.js"
+
+    If UXBJsEmitFromMIR(module, sourcePath, jsOut, wasmManifestPath, errText) = 0 Then Return 0
+
+    UXBJsCopyFileSafe browserRuntimeDir & "\ux_runtime.js", browserOutDir & "\ux_runtime.js"
+    UXBJsCopyFileSafe browserRuntimeDir & "\ux_canvas2d.js", browserOutDir & "\ux_canvas2d.js"
+    UXBJsCopyFileSafe browserRuntimeDir & "\ux_input.js", browserOutDir & "\ux_input.js"
+    UXBJsCopyFileSafe browserRuntimeDir & "\ux_audio.js", browserOutDir & "\ux_audio.js"
+    UXBJsCopyFileSafe browserRuntimeDir & "\ux_ai_bridge.js", browserOutDir & "\ux_ai_bridge.js"
+    UXBJsCopyFileSafe browserRuntimeDir & "\ux_wasm_bridge.js", browserOutDir & "\ux_wasm_bridge.js"
+    UXBJsCopyFileSafe browserRuntimeDir & "\ux_loader.js", browserOutDir & "\ux_loader.js"
+
+    If Trim(wasmBinaryPath) <> "" Then UXBJsCopyFileSafe wasmBinaryPath, browserOutDir & "\program.wasm"
+    If Trim(wasmWatPath) <> "" Then UXBJsCopyFileSafe wasmWatPath, browserOutDir & "\program.wat"
+    If Trim(wasmManifestPath) <> "" Then UXBJsCopyFileSafe wasmManifestPath, browserOutDir & "\wasm_manifest.json"
+
+    indexText = "<!doctype html>" & Chr(10) & _
+        "<html lang=" & Chr(34) & "tr" & Chr(34) & ">" & Chr(10) & _
+        "<head><meta charset=" & Chr(34) & "utf-8" & Chr(34) & "><title>uXBasic Browser Hybrid</title></head>" & Chr(10) & _
+        "<body>" & Chr(10) & _
+        "  <pre id=" & Chr(34) & "ux-output" & Chr(34) & "></pre>" & Chr(10) & _
+        "  <canvas id=" & Chr(34) & "ux-canvas" & Chr(34) & " width=" & Chr(34) & "800" & Chr(34) & " height=" & Chr(34) & "600" & Chr(34) & "></canvas>" & Chr(10) & _
+        "  <script type=" & Chr(34) & "module" & Chr(34) & " src=" & Chr(34) & "./game.js" & Chr(34) & "></script>" & Chr(10) & _
+        "</body></html>" & Chr(10)
+
+    Return UXBJsWriteText(browserOutDir & "\index.html", indexText, errText)
+End Function
+
+#endif

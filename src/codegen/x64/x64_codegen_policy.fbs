@@ -1,0 +1,180 @@
+#ifndef UXB_X64_CODEGEN_POLICY_FBS
+#define UXB_X64_CODEGEN_POLICY_FBS
+
+Const UXB_X64_POLICY_AST = 1
+Const UXB_X64_POLICY_AST_MIR_VERIFIED = 2
+Const UXB_X64_POLICY_MIR = 3
+
+Type UXBX64CodegenPolicy
+    requestedSource As String
+    actualEmitter As String
+    policyName As String
+    mirRequested As Integer
+    mirBuilt As Integer
+    mirVerified As Integer
+    mirEmitterAvailable As Integer
+    mirEmitterRequested As Integer
+    fallbackUsed As Integer
+    fallbackReason As String
+    diagnosticText As String
+End Type
+
+Sub UXBX64CodegenPolicyInit(ByRef p As UXBX64CodegenPolicy)
+    p.requestedSource = ""
+    p.actualEmitter = ""
+    p.policyName = ""
+    p.mirRequested = 0
+    p.mirBuilt = 0
+    p.mirVerified = 0
+    p.mirEmitterAvailable = 0
+    p.mirEmitterRequested = 0
+    p.fallbackUsed = 0
+    p.fallbackReason = ""
+    p.diagnosticText = ""
+End Sub
+
+Function UXBX64PolicyName(ByVal policyId As Integer) As String
+    Select Case policyId
+    Case UXB_X64_POLICY_AST
+        Return "AST_X64"
+    Case UXB_X64_POLICY_AST_MIR_VERIFIED
+        Return "AST_X64_MIR_VERIFIED"
+    Case UXB_X64_POLICY_MIR
+        Return "MIR_X64"
+    Case Else
+        Return "UNKNOWN"
+    End Select
+End Function
+
+Function UXBX64DeterminePolicy( _
+    ByRef requestedSource As String, _
+    ByVal mirModuleReady As Integer, _
+    ByVal mirVerified As Integer, _
+    ByVal mirEmitterRequested As Integer, _
+    ByRef p As UXBX64CodegenPolicy _
+) As Integer
+
+    UXBX64CodegenPolicyInit(p)
+
+    p.requestedSource = UCase(Trim(requestedSource))
+    If p.requestedSource = "" Then p.requestedSource = "AST"
+
+    p.mirRequested = 0
+    If p.requestedSource = "MIR" Then p.mirRequested = 1
+
+    p.mirBuilt = mirModuleReady
+    p.mirVerified = mirVerified
+    p.mirEmitterRequested = mirEmitterRequested
+
+    p.mirEmitterAvailable = MIRX64EmitterAvailable()
+
+    If p.requestedSource = "AST" Then
+        p.policyName = UXBX64PolicyName(UXB_X64_POLICY_AST)
+        p.actualEmitter = "AST_X64"
+        p.fallbackUsed = 0
+        Return UXB_X64_POLICY_AST
+    End If
+
+    If p.requestedSource = "MIR" Then
+        If mirEmitterRequested <> 0 Then
+            If p.mirEmitterAvailable <> 0 Then
+                p.policyName = UXBX64PolicyName(UXB_X64_POLICY_MIR)
+                p.actualEmitter = "MIR_X64"
+                p.fallbackUsed = 0
+                p.fallbackReason = ""
+                p.diagnosticText = ""
+                Return UXB_X64_POLICY_MIR
+            Else
+                p.policyName = UXBX64PolicyName(UXB_X64_POLICY_MIR)
+                p.actualEmitter = "NONE"
+                p.fallbackUsed = 0
+                p.fallbackReason = ""
+                p.diagnosticText = "MIR x64 emitter requested but emitter is unavailable."
+                Return UXB_X64_POLICY_MIR
+            End If
+        End If
+
+        p.policyName = UXBX64PolicyName(UXB_X64_POLICY_AST_MIR_VERIFIED)
+        p.actualEmitter = "AST_X64"
+        p.fallbackUsed = 1
+        p.fallbackReason = "MIR requested and verified, but native MIR x64 emitter is not enabled; AST x64 emitter used."
+        Return UXB_X64_POLICY_AST_MIR_VERIFIED
+    End If
+
+    p.policyName = UXBX64PolicyName(UXB_X64_POLICY_AST)
+    p.actualEmitter = "AST_X64"
+    p.fallbackUsed = 1
+    p.fallbackReason = "Unknown codegen source; AST x64 emitter used."
+    Return UXB_X64_POLICY_AST
+End Function
+
+Function UXBX64JsonEscape(ByRef s As String) As String
+    Dim As String outText = ""
+    For i As Integer = 1 To Len(s)
+        Dim As Integer c = Asc(Mid(s, i, 1))
+        Select Case c
+        Case 34
+            outText &= "\" & Chr(34)
+        Case 92
+            outText &= "\\"
+        Case 10
+            outText &= "\n"
+        Case 13
+            outText &= "\r"
+        Case 9
+            outText &= "\t"
+        Case Else
+            If c < 32 Then
+                outText &= " "
+            Else
+                outText &= Chr(c)
+            End If
+        End Select
+    Next
+    Return outText
+End Function
+
+Function UXBX64CodegenPolicyToJson(ByRef p As UXBX64CodegenPolicy) As String
+    Dim As String j = ""
+    j &= "{"
+    j &= Chr(34) & "requested_source" & Chr(34) & ":" & Chr(34) & UXBX64JsonEscape(p.requestedSource) & Chr(34) & ","
+    j &= Chr(34) & "actual_emitter" & Chr(34) & ":" & Chr(34) & UXBX64JsonEscape(p.actualEmitter) & Chr(34) & ","
+    j &= Chr(34) & "policy" & Chr(34) & ":" & Chr(34) & UXBX64JsonEscape(p.policyName) & Chr(34) & ","
+    j &= Chr(34) & "mir_requested" & Chr(34) & ":" & IIf(p.mirRequested <> 0, "true", "false") & ","
+    j &= Chr(34) & "mir_built" & Chr(34) & ":" & IIf(p.mirBuilt <> 0, "true", "false") & ","
+    j &= Chr(34) & "mir_verified" & Chr(34) & ":" & IIf(p.mirVerified <> 0, "true", "false") & ","
+    j &= Chr(34) & "mir_emitter_available" & Chr(34) & ":" & IIf(p.mirEmitterAvailable <> 0, "true", "false") & ","
+    j &= Chr(34) & "mir_emitter_requested" & Chr(34) & ":" & IIf(p.mirEmitterRequested <> 0, "true", "false") & ","
+    j &= Chr(34) & "fallback_used" & Chr(34) & ":" & IIf(p.fallbackUsed <> 0, "true", "false") & ","
+    j &= Chr(34) & "fallback_reason" & Chr(34) & ":" & Chr(34) & UXBX64JsonEscape(p.fallbackReason) & Chr(34) & ","
+    j &= Chr(34) & "diagnostic_text" & Chr(34) & ":" & Chr(34) & UXBX64JsonEscape(p.diagnosticText) & Chr(34)
+    j &= "}"
+    Return j
+End Function
+
+Function UXBX64WritePolicyJson(ByRef p As UXBX64CodegenPolicy, ByRef outPath As String, ByRef sourceFile As String, ByRef errText As String) As Integer
+    errText = ""
+
+    Dim As String j = ""
+    j &= "{"
+    j &= Chr(34) & "schema_version" & Chr(34) & ":" & Chr(34) & "uxb-x64-codegen-policy-json-1" & Chr(34) & ","
+    j &= Chr(34) & "producer" & Chr(34) & ":" & Chr(34) & "uXBasiC" & Chr(34) & ","
+    j &= Chr(34) & "kind" & Chr(34) & ":" & Chr(34) & "x64_codegen_policy" & Chr(34) & ","
+    j &= Chr(34) & "source_file" & Chr(34) & ":" & Chr(34) & UXBX64JsonEscape(sourceFile) & Chr(34) & ","
+    j &= Chr(34) & "status" & Chr(34) & ":" & Chr(34) & "ok" & Chr(34) & ","
+    j &= Chr(34) & "codegen_policy" & Chr(34) & ":" & UXBX64CodegenPolicyToJson(p)
+    j &= "}"
+
+    Dim As Integer ff = FreeFile
+    If Open(outPath For Output As #ff) <> 0 Then
+        errText = "cannot open x64 policy json output: " & outPath
+        Return 0
+    End If
+
+    Print #ff, j;
+    Close #ff
+    Return 1
+End Function
+
+#endif
+

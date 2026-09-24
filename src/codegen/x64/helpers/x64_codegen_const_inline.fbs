@@ -1,0 +1,404 @@
+#ifndef UXB_X64_CODEGEN_CONST_INLINE_FBS
+#define UXB_X64_CODEGEN_CONST_INLINE_FBS
+
+' S-140 (legacy AST-x64): compile-time constants are inlined into their use sites before code generation.
+'
+' The legacy backend used to know a CONST only when it was an INTEGER constant declared directly under the
+' program root (X64TryResolveConstInt). Every other constant -- a STRING or F64 constant, a NAMESPACE/MODULE
+' constant, a constant declared inside a routine -- was never emitted at all, so a use read an uninitialised
+' stack/global slot: garbage text pointers, denormal noise as a float, and `FOR i = 1 TO K` with a namespace
+' constant looped forever (the bound was garbage). A constant is a compile-time value, so the honest
+' implementation is the language rule itself: replace every use by (a copy of) the constant's initializer,
+' resolved in the scope where the constant was declared.
+'
+' Scope rules (same as the AST/MIR engines): a routine-local constant is visible in its routine; a NAMESPACE/
+' MODULE constant is visible in that container (and containers nested in it), also qualified as `ns.K`; a
+' root constant is visible everywhere. A parameter, local variable, loop variable or class field of the same
+' name in the using routine shadows the constant.
+
+Type X64ConstEntry
+    nameUpper As String
+    nsPath As String        ' "" (root/MAIN) or the upper-case container path, e.g. "NSK" or "OUTER.INNER"
+    routineNode As Integer  ' -1, or the SUB/FUNCTION/method node a routine-local constant belongs to
+    declNode As Integer
+    busy As Integer         ' cycle guard while the initializer is being resolved
+End Type
+
+Dim Shared gX64ConstTable() As X64ConstEntry
+Dim Shared gX64ConstCount As Integer
+
+Private Function X64ConstIsRoutineKind(ByRef kindUpper As String) As Integer
+    Select Case kindUpper
+    Case "SUB_STMT", "FUNCTION_STMT", "CLASS_METHOD_DECL", "CLASS_CONSTRUCTOR_DECL", "CLASS_DESTRUCTOR_DECL", "CLASS_OPERATOR_DECL", "CLASS_PROPERTY_GET_STMT", "CLASS_PROPERTY_SET_STMT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function X64ConstIsIdentUseKind(ByRef kindUpper As String) As Integer
+    Select Case kindUpper
+    Case "IDENT", "IDENTIFIER", "VAR_REF", "KEYWORD_REF"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function X64ConstChildNsPath(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef nsPath As String) As String
+    Dim kindUpper As String
+    kindUpper = X64Upper(ps.ast.nodes(nodeIdx).kind)
+    If kindUpper <> "NAMESPACE_STMT" And kindUpper <> "MODULE_STMT" Then Return nsPath
+    Dim nameUpper As String
+    nameUpper = X64Upper(Trim(ps.ast.nodes(nodeIdx).value))
+    If nameUpper = "" Then Return nsPath
+    If nsPath = "" Then Return nameUpper
+    Return nsPath & "." & nameUpper
+End Function
+
+Private Sub X64ConstCollect(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal nsPath As String, ByVal routineNode As Integer, ByVal depth As Integer)
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Or depth > 400 Then Exit Sub
+
+    Dim kindUpper As String
+    kindUpper = X64Upper(ps.ast.nodes(nodeIdx).kind)
+    Dim childNs As String
+    childNs = X64ConstChildNsPath(ps, nodeIdx, nsPath)
+    Dim childRoutine As Integer
+    childRoutine = routineNode
+    If X64ConstIsRoutineKind(kindUpper) <> 0 Then childRoutine = nodeIdx
+
+    If kindUpper = "CONST_DECL" Then
+        Dim constName As String
+        constName = X64Upper(Trim(ps.ast.nodes(nodeIdx).value))
+        If constName <> "" Then
+            ReDim Preserve gX64ConstTable(gX64ConstCount)
+            gX64ConstTable(gX64ConstCount).nameUpper = constName
+            gX64ConstTable(gX64ConstCount).nsPath = nsPath
+            gX64ConstTable(gX64ConstCount).routineNode = routineNode
+            gX64ConstTable(gX64ConstCount).declNode = nodeIdx
+            gX64ConstTable(gX64ConstCount).busy = 0
+            gX64ConstCount += 1
+        End If
+        Exit Sub
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        X64ConstCollect ps, ch, childNs, childRoutine, depth + 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    If ps.ast.nodes(nodeIdx).left <> -1 Then X64ConstCollect ps, ps.ast.nodes(nodeIdx).left, childNs, childRoutine, depth + 1
+    If ps.ast.nodes(nodeIdx).right <> -1 Then X64ConstCollect ps, ps.ast.nodes(nodeIdx).right, childNs, childRoutine, depth + 1
+End Sub
+
+' True when `nameUpper` is declared as a parameter, local variable, loop variable or catch variable anywhere
+' inside `nodeIdx` (a routine subtree). CONST_DECL is deliberately not a declaration here: a routine-local
+' constant is found through the table.
+Private Function X64ConstSubtreeDeclaresName(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef nameUpper As String, ByVal depth As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Or depth > 400 Then Return 0
+
+    Dim kindUpper As String
+    kindUpper = X64Upper(ps.ast.nodes(nodeIdx).kind)
+    Select Case kindUpper
+    Case "PARAM_DECL", "DIM_DECL", "REDIM_DECL", "FOR_STMT", "CATCH_PART"
+        If X64Upper(Trim(ps.ast.nodes(nodeIdx).value)) = nameUpper Then Return 1
+    Case "FOR_EACH_STMT"
+        If X64Upper(Trim(ps.ast.nodes(nodeIdx).value)) = nameUpper Then Return 1
+        If X64Upper(Trim(ps.ast.nodes(nodeIdx).op)) = nameUpper Then Return 1
+    End Select
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If X64ConstSubtreeDeclaresName(ps, ch, nameUpper, depth + 1) <> 0 Then Return 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If X64ConstSubtreeDeclaresName(ps, ps.ast.nodes(nodeIdx).left, nameUpper, depth + 1) <> 0 Then Return 1
+    End If
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If X64ConstSubtreeDeclaresName(ps, ps.ast.nodes(nodeIdx).right, nameUpper, depth + 1) <> 0 Then Return 1
+    End If
+    Return 0
+End Function
+
+Private Function X64ConstClassHasField(ByRef ps As ParseState, ByVal classNode As Integer, ByRef nameUpper As String) As Integer
+    If classNode < 0 Or classNode >= ps.ast.count Then Return 0
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        Dim chKind As String
+        chKind = X64Upper(ps.ast.nodes(ch).kind)
+        If chKind = "CLASS_FIELD" Or chKind = "TYPE_FIELD" Or chKind = "DIM_DECL" Then
+            If X64Upper(Trim(ps.ast.nodes(ch).value)) = nameUpper Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 0
+End Function
+
+' Finds the constant a plain identifier `nameUpper` means at a use site; -1 when it is not a constant there.
+Private Function X64ConstFindPlain(ByRef ps As ParseState, ByRef nameUpper As String, ByVal nsPath As String, ByVal routineNode As Integer, ByVal classNode As Integer) As Integer
+    Dim found As Integer
+    found = -1
+    Dim i As Integer
+
+    If routineNode <> -1 Then
+        For i = 0 To gX64ConstCount - 1
+            If gX64ConstTable(i).routineNode = routineNode And gX64ConstTable(i).nameUpper = nameUpper Then
+                found = i
+                Exit For
+            End If
+        Next i
+    End If
+
+    If found = -1 Then
+        Dim path As String
+        path = nsPath
+        Do
+            For i = 0 To gX64ConstCount - 1
+                If gX64ConstTable(i).routineNode = -1 And gX64ConstTable(i).nsPath = path And gX64ConstTable(i).nameUpper = nameUpper Then
+                    found = i
+                    Exit For
+                End If
+            Next i
+            If found <> -1 Or path = "" Then Exit Do
+            Dim dotPos As Integer
+            dotPos = InStrRev(path, ".")
+            If dotPos > 0 Then path = Left(path, dotPos - 1) Else path = ""
+        Loop
+    End If
+
+    If found = -1 Then Return -1
+
+    ' a parameter / local / loop variable / class field of the same name shadows a constant declared outside
+    If gX64ConstTable(found).routineNode = -1 Then
+        If routineNode <> -1 Then
+            If X64ConstSubtreeDeclaresName(ps, routineNode, nameUpper, 0) <> 0 Then Return -1
+        End If
+        If X64ConstClassHasField(ps, classNode, nameUpper) <> 0 Then Return -1
+    End If
+    Return found
+End Function
+
+' `ns.K` : the qualified form of a NAMESPACE/MODULE constant.
+Private Function X64ConstFindQualified(ByRef ps As ParseState, ByVal fieldNode As Integer) As Integer
+    Dim ownerNode As Integer
+    ownerNode = ps.ast.nodes(fieldNode).left
+    If ownerNode = -1 Then ownerNode = ps.ast.nodes(fieldNode).firstChild
+    If ownerNode < 0 Or ownerNode >= ps.ast.count Then Return -1
+    If X64ConstIsIdentUseKind(X64Upper(ps.ast.nodes(ownerNode).kind)) = 0 Then Return -1
+
+    Dim ownerUpper As String
+    Dim memberUpper As String
+    ownerUpper = X64Upper(Trim(ps.ast.nodes(ownerNode).value))
+    memberUpper = X64Upper(Trim(ps.ast.nodes(fieldNode).value))
+    If memberUpper = "" And ps.ast.nodes(fieldNode).right <> -1 Then memberUpper = X64Upper(Trim(ps.ast.nodes(ps.ast.nodes(fieldNode).right).value))
+    If ownerUpper = "" Or memberUpper = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To gX64ConstCount - 1
+        If gX64ConstTable(i).routineNode = -1 And gX64ConstTable(i).nameUpper = memberUpper Then
+            If gX64ConstTable(i).nsPath = ownerUpper Then Return i
+            If Right(gX64ConstTable(i).nsPath, Len(ownerUpper) + 1) = "." & ownerUpper Then Return i
+        End If
+    Next i
+    Return -1
+End Function
+
+Private Function X64ConstClone(ByRef ps As ParseState, ByVal srcIdx As Integer, ByVal depth As Integer) As Integer
+    If srcIdx < 0 Or srcIdx >= ps.ast.count Or depth > 400 Then Return -1
+
+    Dim newIdx As Integer
+    newIdx = ASTNewNode(ps.ast, "X", "", "", 0, 0)
+    ps.ast.nodes(newIdx) = ps.ast.nodes(srcIdx)
+
+    Dim leftSrc As Integer
+    Dim rightSrc As Integer
+    Dim childSrc As Integer
+    leftSrc = ps.ast.nodes(srcIdx).left
+    rightSrc = ps.ast.nodes(srcIdx).right
+    childSrc = ps.ast.nodes(srcIdx).firstChild
+
+    Dim c As Integer
+    c = X64ConstClone(ps, leftSrc, depth + 1)
+    ps.ast.nodes(newIdx).left = c
+    c = X64ConstClone(ps, rightSrc, depth + 1)
+    ps.ast.nodes(newIdx).right = c
+
+    ps.ast.nodes(newIdx).firstChild = -1
+    ps.ast.nodes(newIdx).nextSibling = -1
+    ps.ast.nodes(newIdx).parent = -1
+
+    Dim prevChild As Integer
+    prevChild = -1
+    Dim ch As Integer
+    ch = childSrc
+    Do While ch <> -1
+        Dim nextSrc As Integer
+        nextSrc = ps.ast.nodes(ch).nextSibling
+        c = X64ConstClone(ps, ch, depth + 1)
+        If c <> -1 Then
+            ps.ast.nodes(c).parent = newIdx
+            ps.ast.nodes(c).nextSibling = -1
+            If prevChild = -1 Then
+                ps.ast.nodes(newIdx).firstChild = c
+            Else
+                ps.ast.nodes(prevChild).nextSibling = c
+            End If
+            prevChild = c
+        End If
+        ch = nextSrc
+    Loop
+    Return newIdx
+End Function
+
+' Overwrites node `targetIdx` (the use site) with the node tree rooted at `srcIdx`, keeping the use site's
+' place in its parent's child list and its static type stamp.
+Private Sub X64ConstReplaceNode(ByRef ps As ParseState, ByVal targetIdx As Integer, ByVal srcIdx As Integer)
+    If targetIdx = srcIdx Then Exit Sub
+    Dim keepParent As Integer
+    Dim keepNext As Integer
+    Dim keepType As String
+    keepParent = ps.ast.nodes(targetIdx).parent
+    keepNext = ps.ast.nodes(targetIdx).nextSibling
+    keepType = ps.ast.nodes(targetIdx).typeName
+    ps.ast.nodes(targetIdx) = ps.ast.nodes(srcIdx)
+    ps.ast.nodes(targetIdx).parent = keepParent
+    ps.ast.nodes(targetIdx).nextSibling = keepNext
+    If keepType <> "" Then ps.ast.nodes(targetIdx).typeName = keepType
+    Dim ch As Integer
+    ch = ps.ast.nodes(targetIdx).firstChild
+    Do While ch <> -1
+        ps.ast.nodes(ch).parent = targetIdx
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+End Sub
+
+Declare Sub X64ConstWalk(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal nsPath As String, ByVal routineNode As Integer, ByVal classNode As Integer, ByVal depth As Integer)
+
+' A copy of the constant's initializer, with nested constants resolved in the constant's own scope and a
+' float-typed constant given a floating value (`CONST L AS F64 = 2` is 2.0, so `L / 4` is not integer division).
+Private Function X64ConstInstantiate(ByRef ps As ParseState, ByVal entryIdx As Integer) As Integer
+    If gX64ConstTable(entryIdx).busy <> 0 Then Return -1
+
+    Dim declNode As Integer
+    declNode = gX64ConstTable(entryIdx).declNode
+    Dim initNode As Integer
+    initNode = ps.ast.nodes(declNode).left
+    If initNode = -1 Then
+        Dim probe As Integer
+        probe = ps.ast.nodes(declNode).firstChild
+        Do While probe <> -1
+            If X64Upper(ps.ast.nodes(probe).kind) <> "TYPE_REF" Then
+                initNode = probe
+                Exit Do
+            End If
+            probe = ps.ast.nodes(probe).nextSibling
+        Loop
+    End If
+    If initNode = -1 Then Return -1
+
+    gX64ConstTable(entryIdx).busy = 1
+    Dim cloneRoot As Integer
+    cloneRoot = X64ConstClone(ps, initNode, 0)
+    If cloneRoot <> -1 Then
+        X64ConstWalk ps, cloneRoot, gX64ConstTable(entryIdx).nsPath, gX64ConstTable(entryIdx).routineNode, -1, 0
+    End If
+    gX64ConstTable(entryIdx).busy = 0
+    If cloneRoot = -1 Then Return -1
+
+    Dim declaredType As String
+    declaredType = ""
+    Dim typeProbe As Integer
+    typeProbe = ps.ast.nodes(declNode).firstChild
+    Do While typeProbe <> -1
+        If X64Upper(ps.ast.nodes(typeProbe).kind) = "TYPE_REF" Then
+            declaredType = X64Upper(Trim(ps.ast.nodes(typeProbe).value))
+            Exit Do
+        End If
+        typeProbe = ps.ast.nodes(typeProbe).nextSibling
+    Loop
+    If Left(declaredType, 5) = "TYPE_" Then declaredType = Mid(declaredType, 6)
+
+    If declaredType = "F64" Or declaredType = "F32" Or declaredType = "DOUBLE" Or declaredType = "SINGLE" Then
+        Dim rootKind As String
+        rootKind = X64Upper(ps.ast.nodes(cloneRoot).kind)
+        If rootKind = "NUMBER" Then
+            If UXBNumberLiteralIsFloat(ps.ast.nodes(cloneRoot).value) = 0 Then ps.ast.nodes(cloneRoot).value = Trim(ps.ast.nodes(cloneRoot).value) & ".0"
+        ElseIf rootKind <> "STRING" And UXBStep3TypeIsFloat(ps.ast.nodes(cloneRoot).typeName) = 0 Then
+            ' not a literal and not already float-typed: multiply by 1.0 so the value is computed as a float
+            Dim oneNode As Integer
+            oneNode = ASTNewNode(ps.ast, "NUMBER", "1.0", "", ps.ast.nodes(cloneRoot).lineNo, ps.ast.nodes(cloneRoot).colNo)
+            ps.ast.nodes(oneNode).typeName = "TYPE_F64"
+            Dim mulNode As Integer
+            mulNode = ASTNewNode(ps.ast, "BINARY", "", "*", ps.ast.nodes(cloneRoot).lineNo, ps.ast.nodes(cloneRoot).colNo)
+            ps.ast.nodes(mulNode).left = cloneRoot
+            ps.ast.nodes(mulNode).right = oneNode
+            ps.ast.nodes(mulNode).typeName = "TYPE_F64"
+            ps.ast.nodes(cloneRoot).parent = mulNode
+            ps.ast.nodes(oneNode).parent = mulNode
+            cloneRoot = mulNode
+        End If
+    End If
+    Return cloneRoot
+End Function
+
+Sub X64ConstWalk(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal nsPath As String, ByVal routineNode As Integer, ByVal classNode As Integer, ByVal depth As Integer)
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Or depth > 400 Then Exit Sub
+
+    Dim kindUpper As String
+    kindUpper = X64Upper(ps.ast.nodes(nodeIdx).kind)
+
+    Dim entryIdx As Integer
+    entryIdx = -1
+    If X64ConstIsIdentUseKind(kindUpper) <> 0 Then
+        Dim useName As String
+        useName = X64Upper(Trim(ps.ast.nodes(nodeIdx).value))
+        If useName <> "" And InStr(useName, ".") = 0 Then entryIdx = X64ConstFindPlain(ps, useName, nsPath, routineNode, classNode)
+    ElseIf kindUpper = "FIELD_EXPR" Or kindUpper = "MEMBER_EXPR" Then
+        entryIdx = X64ConstFindQualified(ps, nodeIdx)
+    End If
+
+    If entryIdx <> -1 Then
+        Dim inlined As Integer
+        inlined = X64ConstInstantiate(ps, entryIdx)
+        If inlined <> -1 Then
+            X64ConstReplaceNode ps, nodeIdx, inlined
+            Exit Sub
+        End If
+    End If
+
+    Dim childNs As String
+    childNs = X64ConstChildNsPath(ps, nodeIdx, nsPath)
+    Dim childRoutine As Integer
+    childRoutine = routineNode
+    If X64ConstIsRoutineKind(kindUpper) <> 0 Then childRoutine = nodeIdx
+    Dim childClass As Integer
+    childClass = classNode
+    If kindUpper = "CLASS_STMT" Then childClass = nodeIdx
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        Dim nextChild As Integer
+        nextChild = ps.ast.nodes(ch).nextSibling
+        X64ConstWalk ps, ch, childNs, childRoutine, childClass, depth + 1
+        ch = nextChild
+    Loop
+    Dim leftNode As Integer
+    leftNode = ps.ast.nodes(nodeIdx).left
+    If leftNode <> -1 Then X64ConstWalk ps, leftNode, childNs, childRoutine, childClass, depth + 1
+    Dim rightNode As Integer
+    rightNode = ps.ast.nodes(nodeIdx).right
+    If rightNode <> -1 Then X64ConstWalk ps, rightNode, childNs, childRoutine, childClass, depth + 1
+End Sub
+
+Private Sub X64InlineConstants(ByRef ps As ParseState)
+    gX64ConstCount = 0
+    If ps.rootNode < 0 Or ps.rootNode >= ps.ast.count Then Exit Sub
+    X64ConstCollect ps, ps.rootNode, "", -1, 0
+    If gX64ConstCount = 0 Then Exit Sub
+    X64ConstWalk ps, ps.rootNode, "", -1, -1, 0
+End Sub
+
+#endif

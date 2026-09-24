@@ -1,0 +1,229 @@
+' Extracted from code_generator.fbs for wave-14 modular split
+' Scope: dll/ffi call planning and emitters
+
+Private Sub X64CollectDllCallPlanNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext)
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Exit Sub
+
+    If X64IsDllCallNode(ps, nodeIdx) <> 0 Then
+        Dim argc As Integer
+        argc = X64ChildCount(ps, nodeIdx)
+        Dim argStartPos As Integer
+        argStartPos = X64DllCallArgStartPos(ps, nodeIdx)
+
+        If cg.ffiCallTotal >= 0 And cg.ffiCallTotal <= UBound(gX64FfiArgCounts) Then
+            gX64FfiArgCounts(cg.ffiCallTotal) = argc - argStartPos
+            If gX64FfiArgCounts(cg.ffiCallTotal) < 0 Then gX64FfiArgCounts(cg.ffiCallTotal) = 0
+            cg.ffiCallTotal += 1
+        End If
+    Else
+        Dim nodeKind As String
+        nodeKind = X64Upper(ps.ast.nodes(nodeIdx).kind)
+        Dim nodeValue As String
+        nodeValue = X64Upper(ps.ast.nodes(nodeIdx).value)
+        If (nodeKind = "CALL_EXPR" Or nodeKind = "CALL_STMT" Or nodeKind = "CALL") And nodeValue = "CALL" Then
+            Dim firstArg As Integer
+            firstArg = X64ChildAt(ps, nodeIdx, 0)
+            If firstArg <> -1 Then
+                Dim firstKind As String
+                firstKind = X64Upper(ps.ast.nodes(firstArg).kind)
+                Dim markerValue2 As String
+                markerValue2 = X64Upper(ps.ast.nodes(firstArg).value)
+                If (firstKind = "IDENT" Or firstKind = "KEYWORD_REF") And (markerValue2 = "DLL" Or markerValue2 = "API") Then
+                    Dim argc2 As Integer
+                    argc2 = X64ChildCount(ps, nodeIdx)
+                    Dim argStartPos2 As Integer
+                    argStartPos2 = X64DllCallArgStartPos(ps, nodeIdx)
+                    If cg.ffiCallTotal >= 0 And cg.ffiCallTotal <= UBound(gX64FfiArgCounts) Then
+                        gX64FfiArgCounts(cg.ffiCallTotal) = argc2 - argStartPos2
+                        If gX64FfiArgCounts(cg.ffiCallTotal) < 0 Then gX64FfiArgCounts(cg.ffiCallTotal) = 0
+                        cg.ffiCallTotal += 1
+                    End If
+                End If
+            End If
+        End If
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then X64CollectDllCallPlanNode ps, ps.ast.nodes(nodeIdx).left, cg
+    If ps.ast.nodes(nodeIdx).right <> -1 Then X64CollectDllCallPlanNode ps, ps.ast.nodes(nodeIdx).right, cg
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        X64CollectDllCallPlanNode ps, ch, cg
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+End Sub
+
+Private Function X64CollectDllCallPlan(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext) As Integer
+    cg.ffiCallTotal = 0
+    cg.ffiCallEmitIndex = 0
+    X64ResetFfiArgCounts
+    X64CollectDllCallPlanNode ps, nodeIdx, cg
+    Return 1
+End Function
+
+Private Sub X64EmitDllExterns(ByRef cg As X64CodegenContext)
+    Dim i As Integer
+    For i = 0 To cg.ffiCallTotal - 1
+        Dim stubId As String
+        stubId = X64ToStr(i + 1)
+        X64EmitText cg, "extern __uxb_ffi_stub_" & stubId
+
+        Dim argIdx As Integer
+        For argIdx = 1 To X64FfiArgCountAt(i)
+            X64EmitText cg, "extern __uxb_ffi_arg_" & stubId & "_" & X64ToStr(argIdx)
+        Next argIdx
+    Next i
+
+    If cg.ffiCallTotal > 0 Then X64EmitText cg, ""
+End Sub
+
+Private Sub X64EmitFfiSupport(ByRef cg As X64CodegenContext)
+    If cg.ffiCallTotal <= 0 Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To cg.ffiCallTotal - 1
+        Dim stubId As String
+        stubId = X64ToStr(i + 1)
+
+        X64EmitText cg, "global __uxb_ffi_stub_" & stubId
+        X64EmitText cg, "global __uxb_ffi_symptr_" & stubId
+        Dim globalArgIdx As Integer
+        For globalArgIdx = 1 To X64FfiArgCountAt(i)
+            X64EmitText cg, "global __uxb_ffi_arg_" & stubId & "_" & X64ToStr(globalArgIdx)
+        Next globalArgIdx
+        X64EmitText cg, "__uxb_ffi_stub_" & stubId & ":"
+        Dim stackArgCount As Integer
+        stackArgCount = X64FfiArgCountAt(i) - 4
+        If stackArgCount < 0 Then stackArgCount = 0
+        Dim ffiStackBytes As Integer
+        ffiStackBytes = 32 + (stackArgCount * 8)
+        ' Windows x64: caller reserves 32-byte shadow space and RSP must be
+        ' 16-byte aligned immediately before CALL. Entry RSP is 8 mod 16.
+        If (ffiStackBytes Mod 16) = 0 Then ffiStackBytes += 8
+        X64EmitText cg, "    sub rsp, " & X64ToStr(ffiStackBytes)
+
+        If X64FfiArgCountAt(i) >= 1 Then
+            X64EmitText cg, "    mov rcx, qword [rel __uxb_ffi_arg_" & stubId & "_1]"
+            X64EmitText cg, "    movq xmm0, rcx"
+        End If
+        If X64FfiArgCountAt(i) >= 2 Then
+            X64EmitText cg, "    mov rdx, qword [rel __uxb_ffi_arg_" & stubId & "_2]"
+            X64EmitText cg, "    movq xmm1, rdx"
+        End If
+        If X64FfiArgCountAt(i) >= 3 Then
+            X64EmitText cg, "    mov r8, qword [rel __uxb_ffi_arg_" & stubId & "_3]"
+            X64EmitText cg, "    movq xmm2, r8"
+        End If
+        If X64FfiArgCountAt(i) >= 4 Then
+            X64EmitText cg, "    mov r9, qword [rel __uxb_ffi_arg_" & stubId & "_4]"
+            X64EmitText cg, "    movq xmm3, r9"
+        End If
+
+        Dim argIdx As Integer
+        For argIdx = 5 To X64FfiArgCountAt(i)
+            Dim slotOffset As Integer
+            slotOffset = 32 + ((argIdx - 5) * 8)
+            X64EmitText cg, "    mov rax, qword [rel __uxb_ffi_arg_" & stubId & "_" & X64ToStr(argIdx) & "]"
+            X64EmitText cg, "    mov qword [rsp + " & X64ToStr(slotOffset) & "], rax"
+        Next argIdx
+
+        X64EmitText cg, "    mov r11, qword [rel __uxb_ffi_symptr_" & stubId & "]"
+        X64EmitText cg, "    test r11, r11"
+        X64EmitText cg, "    jnz __uxb_ffi_call_" & stubId
+        X64EmitText cg, "    mov ecx, 127"
+        X64EmitText cg, "    call exit"
+        X64EmitText cg, "    ud2"
+        X64EmitText cg, "__uxb_ffi_call_" & stubId & ":"
+        X64EmitText cg, "    call r11"
+        X64EmitText cg, "    add rsp, " & X64ToStr(ffiStackBytes)
+        X64EmitText cg, "    ret"
+        X64EmitText cg, ""
+
+        X64EmitData cg, "__uxb_ffi_symptr_" & stubId & ": dq 0"
+        For argIdx = 1 To X64FfiArgCountAt(i)
+            X64EmitData cg, "__uxb_ffi_arg_" & stubId & "_" & X64ToStr(argIdx) & ": dq 0"
+        Next argIdx
+    Next i
+End Sub
+
+Private Function X64EmitDllCallNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    If cg.ffiCallEmitIndex >= cg.ffiCallTotal Then
+        errText = "x64-codegen: ffi call emit index overflow"
+        Return 0
+    End If
+
+    Dim stubIdNum As Integer
+    stubIdNum = cg.ffiCallEmitIndex + 1
+    Dim stubId As String
+    stubId = X64ToStr(stubIdNum)
+
+    Dim argc As Integer
+    argc = X64ChildCount(ps, nodeIdx)
+
+    Dim argStartPos As Integer
+    argStartPos = X64DllCallArgStartPos(ps, nodeIdx)
+
+    Dim argCount As Integer
+    argCount = argc - argStartPos
+    If argCount < 0 Then argCount = 0
+    If argCount > 10 Then
+        errText = "x64-codegen: CALL(DLL) en fazla 10 runtime argumani destekler"
+        Return 0
+    End If
+
+    Dim i As Integer
+    For i = 0 To argCount - 1
+        Dim argNode As Integer
+        argNode = X64ChildAt(ps, nodeIdx, argStartPos + i)
+        If argNode = -1 Then Continue For
+
+        Dim argFloatKind As Integer
+        argFloatKind = X64InferFloatKindOfExpr(ps, argNode, cg)
+
+        If argFloatKind = UXF_F32 Or argFloatKind = UXF_F64 Then
+            ' C/varargs uyumu: float arglar qword-double bit pattern olarak saklanir.
+            If X64EmitExprToXmm0As(ps, argNode, cg, UXF_F64, errText) = 0 Then Return 0
+            X64EmitText cg, "    movq rax, xmm0"
+        Else
+            If X64EmitExprToRax(ps, argNode, cg, errText) = 0 Then Return 0
+        End If
+
+        X64EmitText cg, "    mov [rel __uxb_ffi_arg_" & stubId & "_" & X64ToStr(i + 1) & "], rax"
+    Next i
+
+    ' S-144: the stub assumes RSP is 16-byte aligned at the call; an enclosing binary expression that keeps its
+    ' left operand with `push rax` (`f() <> "" OR g() = ""`) leaves it 8 mod 16 and the callee crashed on an
+    ' aligned SSE access, so the call realigns the stack at run time (X64EmitCall0). The arguments travel in
+    ' the __uxb_ffi_arg_* cells, so no register is live across it.
+    X64EmitCall0 cg, "__uxb_ffi_stub_" & stubId
+
+    ' S-144: a C function returning `int` only defines EAX (RAX's upper half is undefined/zero), so
+    ' `-1` came back as 4294967295: `IF uxsdl3.DaysInMonth(2026, 13) = -1` was false and every negative
+    ' int return printed as an unsigned 32-bit number. Widen the value according to the declared return
+    ' type (`CALL(DLL, "lib", "sym", RET, CDECL, ...)`: RET is the 4th child).
+    Dim ffiRetTypeUpper As String
+    ffiRetTypeUpper = ""
+    If X64Upper(ps.ast.nodes(nodeIdx).value) = "CALL" Then
+        Dim ffiRetNode As Integer
+        ffiRetNode = X64ChildAt(ps, nodeIdx, 3)
+        If ffiRetNode <> -1 Then ffiRetTypeUpper = X64Upper(Trim(ps.ast.nodes(ffiRetNode).value))
+    End If
+    Select Case ffiRetTypeUpper
+    Case "I32", "INT", "INTEGER", "LONG"
+        X64EmitText cg, "    movsxd rax, eax"
+    Case "U32", "UINT", "ULONG"
+        X64EmitText cg, "    mov eax, eax"
+    Case "I16", "SHORT"
+        X64EmitText cg, "    movsx rax, ax"
+    Case "U16", "USHORT"
+        X64EmitText cg, "    movzx eax, ax"
+    Case "I8", "SBYTE"
+        X64EmitText cg, "    movsx rax, al"
+    Case "U8", "BYTE", "BOOL", "BOOLEAN"
+        X64EmitText cg, "    movzx eax, al"
+    End Select
+
+    cg.ffiCallEmitIndex += 1
+    Return 1
+End Function

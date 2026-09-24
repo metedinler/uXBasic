@@ -1,0 +1,75 @@
+#ifndef UXB_AST_INTERP_LVALUE_FBS
+#define UXB_AST_INTERP_LVALUE_FBS
+
+#include once "../../parser/ast.fbs"
+#include once "../common/interp_context.fbs"
+#include once "ast_interp_helpers.fbs"
+
+Function UXBAstInterpGetLValueName(ByRef ast As ASTPool, ByVal nodeIdx As Integer) As String
+    If nodeIdx < 0 Or nodeIdx >= ast.count Then Return ""
+    Dim n As ASTNode = ast.nodes(nodeIdx)
+    If Trim(n.symbolName) <> "" Then Return n.symbolName
+    If Trim(n.value) <> "" Then Return n.value
+    If n.firstChild <> AST_NULL Then Return UXBAstInterpGetLValueName(ast, n.firstChild)
+    Return ""
+End Function
+
+
+Private Sub UXBAstInterpSyncPipeResultAlias(ByRef ctx As UXBInterpContext, ByVal assignedNameRaw As String, ByRef valueIn As UXBInterpValue)
+    Dim framePtr As UXBInterpFrame Ptr
+    framePtr = UXBInterpStackTop(ctx.stack)
+    If framePtr = 0 Then Exit Sub
+    If UCase(Trim(framePtr->routineKind)) <> ASTK_PIPE_STMT Then Exit Sub
+
+    Dim assignedName As String
+    assignedName = UCase(Trim(assignedNameRaw))
+    Dim pipeName As String
+    pipeName = UCase(Trim(framePtr->frameName))
+    If assignedName = "OUTPUT" Then
+        UXBInterpFrameSetLocal *framePtr, pipeName, valueIn
+    ElseIf assignedName = pipeName Then
+        UXBInterpFrameSetLocal *framePtr, "OUTPUT", valueIn
+    End If
+End Sub
+
+Function UXBAstInterpSetLValue(ByRef ast As ASTPool, ByVal targetIdx As Integer, ByRef ctx As UXBInterpContext, ByRef valueIn As UXBInterpValue) As UXBInterpValue
+    If targetIdx < 0 Or targetIdx >= ast.count Then Return UXBInterpValueError(UXB_INTERP_ERR_SYMBOL_NOT_FOUND, "assignment target is invalid")
+    Dim n As ASTNode = ast.nodes(targetIdx)
+    Select Case UCase(Trim(n.kind))
+    Case ASTK_IDENTIFIER, ASTK_DIM_DECL, ASTK_CONST_DECL, ASTK_PARAM_DECL
+        Dim assignedSimpleName As String
+        assignedSimpleName = UXBAstInterpGetLValueName(ast, targetIdx)
+        UXBInterpContextAssignSymbol ctx, assignedSimpleName, valueIn, n.typeName
+        UXBAstInterpSyncPipeResultAlias ctx, assignedSimpleName, valueIn
+        If ctx.lastErrorCode <> 0 Then Return UXBInterpValueError(ctx.lastErrorCode, ctx.lastError)
+        Return UXBInterpValueVoid()
+    Case ASTK_FIELD_EXPR, ASTK_MEMBER_EXPR
+        Dim objIdx As Integer = n.left
+        If objIdx = AST_NULL Then objIdx = UXBAstInterpChild(ast, targetIdx, 0)
+        Dim objValue As UXBInterpValue = UXBAstInterpEvalExpr(ast, objIdx, ctx)
+        If UXBInterpIsError(objValue) <> 0 Then Return objValue
+        Dim fieldName As String = n.value
+        If fieldName = "" Then fieldName = UXBAstInterpNodeName(ast, UXBAstInterpChild(ast, targetIdx, 1))
+        If UXBInterpHeapSetField(ctx.heap, objValue.handleId, fieldName, valueIn) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_SYMBOL_NOT_FOUND, "field cannot be assigned: " & fieldName)
+        Return UXBInterpValueVoid()
+    Case ASTK_INDEX_EXPR
+        Dim arrIdx As Integer = n.left
+        If arrIdx = AST_NULL Then arrIdx = UXBAstInterpChild(ast, targetIdx, 0)
+        Dim subIdx As Integer = UXBAstInterpChild(ast, targetIdx, 1)
+        Dim arrValue As UXBInterpValue = UXBAstInterpEvalExpr(ast, arrIdx, ctx)
+        If UXBInterpIsError(arrValue) <> 0 Then Return arrValue
+        Dim subValue As UXBInterpValue = UXBAstInterpEvalExpr(ast, subIdx, ctx)
+        If UXBInterpIsError(subValue) <> 0 Then Return subValue
+        If UXBInterpHeapSetIndex(ctx.heap, arrValue.arrayId, CInt(subValue.intValue), valueIn) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_SYMBOL_NOT_FOUND, "array index cannot be assigned")
+        Return UXBInterpValueVoid()
+    End Select
+    Dim nameText As String = UXBAstInterpGetLValueName(ast, targetIdx)
+    If nameText <> "" Then
+        UXBInterpContextAssignSymbol ctx, nameText, valueIn, n.typeName
+        UXBAstInterpSyncPipeResultAlias ctx, nameText, valueIn
+        Return UXBInterpValueVoid()
+    End If
+    Return UXBInterpValueError(UXB_INTERP_ERR_NODE_NOT_EXECUTABLE, "node is not assignable: " & n.kind)
+End Function
+
+#endif

@@ -1,0 +1,265 @@
+Type UXBConsoleEvent
+    opName As String
+    textValue As String
+    row As Integer
+    col As Integer
+    fg As Integer
+    bg As Integer
+End Type
+
+Type UXBConsoleState
+    modeText As String
+    outputTextPath As String
+    outputJsonPath As String
+    finalScreenJsonPath As String
+    outputText As String
+    screenText As String
+    row As Integer
+    col As Integer
+    fg As Integer
+    bg As Integer
+    clsCount As Integer
+    printColumnPos As Integer
+    eventCount As Integer
+End Type
+
+Dim Shared gUxbConsole As UXBConsoleState
+Dim Shared gUxbConsoleEvents(Any) As UXBConsoleEvent
+
+Declare Sub UxbConsoleReset()
+
+Private Function UxbConsoleIsDirectMode() As Integer
+    Return IIf(UCase(Trim(gUxbConsole.modeText)) = "DIRECT", 1, 0)
+End Function
+
+Private Function UxbConsoleJsonEscape(ByRef rawText As String) As String
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        Select Case ch
+        Case "\\"
+            outText &= "\\\\"
+        Case Chr(34)
+            outText &= "\\" & Chr(34)
+        Case Chr(13)
+            outText &= "\\r"
+        Case Chr(10)
+            outText &= "\\n"
+        Case Chr(9)
+            outText &= "\\t"
+        Case Else
+            outText &= ch
+        End Select
+    Next i
+
+    Return outText
+End Function
+
+Private Function UxbConsoleWriteTextFile(ByRef filePath As String, ByRef textIn As String) As Integer
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Output As #f
+    If Err <> 0 Then Return 0
+
+    Print #f, textIn;
+    Close #f
+    Return 1
+End Function
+
+Private Sub UxbConsoleRecordEvent(ByRef opName As String, ByRef textValue As String)
+    Dim eventIdx As Integer
+
+    If gUxbConsole.eventCount = 0 Then
+        ReDim gUxbConsoleEvents(0)
+    Else
+        ReDim Preserve gUxbConsoleEvents(gUxbConsole.eventCount)
+    End If
+
+    eventIdx = gUxbConsole.eventCount
+    gUxbConsole.eventCount += 1
+
+    gUxbConsoleEvents(eventIdx).opName = opName
+    gUxbConsoleEvents(eventIdx).textValue = textValue
+    gUxbConsoleEvents(eventIdx).row = gUxbConsole.row
+    gUxbConsoleEvents(eventIdx).col = gUxbConsole.col
+    gUxbConsoleEvents(eventIdx).fg = gUxbConsole.fg
+    gUxbConsoleEvents(eventIdx).bg = gUxbConsole.bg
+End Sub
+
+Sub UxbConsoleConfigure(ByRef modeText As String, ByRef outputTextPath As String, ByRef outputJsonPath As String, ByRef finalScreenJsonPath As String)
+    Dim normalizedMode As String
+    normalizedMode = UCase(Trim(modeText))
+    If normalizedMode = "" Then normalizedMode = "DIRECT"
+    If normalizedMode <> "DIRECT" And normalizedMode <> "CAPTURE" And normalizedMode <> "VIRTUAL" Then
+        normalizedMode = "DIRECT"
+    End If
+
+    gUxbConsole.modeText = normalizedMode
+    gUxbConsole.outputTextPath = Trim(outputTextPath)
+    gUxbConsole.outputJsonPath = Trim(outputJsonPath)
+    gUxbConsole.finalScreenJsonPath = Trim(finalScreenJsonPath)
+
+    UxbConsoleReset
+End Sub
+
+Sub UxbConsoleReset()
+    gUxbConsole.outputText = ""
+    gUxbConsole.screenText = ""
+    gUxbConsole.row = 1
+    gUxbConsole.col = 1
+    gUxbConsole.fg = 0
+    gUxbConsole.bg = 0
+    gUxbConsole.clsCount = 0
+    gUxbConsole.printColumnPos = 0
+    gUxbConsole.eventCount = 0
+    Erase gUxbConsoleEvents
+End Sub
+
+Sub UxbConsolePrintText(ByRef textValue As String)
+    If UxbConsoleIsDirectMode() <> 0 Then
+        Print textValue;
+    End If
+
+    gUxbConsole.outputText &= textValue
+    gUxbConsole.screenText &= textValue
+    gUxbConsole.col += Len(textValue)
+    gUxbConsole.printColumnPos += Len(textValue)
+    UxbConsoleRecordEvent "PRINT", textValue
+End Sub
+
+Sub UxbConsolePrintNewline()
+    If UxbConsoleIsDirectMode() <> 0 Then
+        Print
+    End If
+
+    gUxbConsole.outputText &= Chr(13) & Chr(10)
+    gUxbConsole.screenText &= Chr(13) & Chr(10)
+    gUxbConsole.row += 1
+    gUxbConsole.col = 1
+    gUxbConsole.printColumnPos = 0
+    UxbConsoleRecordEvent "PRINTLN", ""
+End Sub
+
+Sub UxbConsolePrintSpace()
+    Dim spaceText As String
+    spaceText = " "
+    UxbConsolePrintText spaceText
+End Sub
+
+Sub UxbConsolePrintCommaZone(ByVal zoneWidth As Integer)
+    Dim nextZone As Integer
+    Dim spacesToEmit As Integer
+
+    nextZone = ((gUxbConsole.printColumnPos \ zoneWidth) + 1) * zoneWidth
+    spacesToEmit = nextZone - gUxbConsole.printColumnPos
+    If spacesToEmit < 1 Then spacesToEmit = zoneWidth
+
+    Dim zonePad As String
+    zonePad = String(spacesToEmit, " ")
+    UxbConsolePrintText zonePad
+End Sub
+
+Sub UxbConsoleCls()
+    If UxbConsoleIsDirectMode() <> 0 Then
+        Cls
+    End If
+
+    gUxbConsole.clsCount += 1
+    gUxbConsole.screenText = ""
+    gUxbConsole.row = 1
+    gUxbConsole.col = 1
+    gUxbConsole.printColumnPos = 0
+    UxbConsoleRecordEvent "CLS", ""
+End Sub
+
+Sub UxbConsoleLocate(ByVal rowValue As Integer, ByVal colValue As Integer)
+    If UxbConsoleIsDirectMode() <> 0 Then
+        Locate rowValue, colValue
+    End If
+
+    gUxbConsole.row = rowValue
+    gUxbConsole.col = colValue
+    UxbConsoleRecordEvent "LOCATE", LTrim(Str(rowValue)) & "," & LTrim(Str(colValue))
+End Sub
+
+Sub UxbConsoleColor(ByVal fgValue As Integer, ByVal bgValue As Integer)
+    If UxbConsoleIsDirectMode() <> 0 Then
+        Color fgValue, bgValue
+    End If
+
+    gUxbConsole.fg = fgValue
+    gUxbConsole.bg = bgValue
+    UxbConsoleRecordEvent "COLOR", LTrim(Str(fgValue)) & "," & LTrim(Str(bgValue))
+End Sub
+
+Function UxbConsoleGetPrintColumnPos() As Integer
+    Return gUxbConsole.printColumnPos
+End Function
+
+Function UxbConsoleFlushOutputs(ByRef errText As String) As Integer
+    Dim modeJson As String
+    modeJson = UxbConsoleJsonEscape(gUxbConsole.modeText)
+
+    If Trim(gUxbConsole.outputTextPath) <> "" Then
+        If UxbConsoleWriteTextFile(gUxbConsole.outputTextPath, gUxbConsole.outputText) = 0 Then
+            errText = "Program output text yazilamadi: " & gUxbConsole.outputTextPath
+            Return 0
+        End If
+    End If
+
+    If Trim(gUxbConsole.outputJsonPath) <> "" Then
+        Dim jsonText As String
+        Dim i As Integer
+
+        jsonText = "{" & Chr(13) & Chr(10)
+        jsonText &= "  " & Chr(34) & "mode" & Chr(34) & ": " & Chr(34) & modeJson & Chr(34) & "," & Chr(13) & Chr(10)
+        jsonText &= "  " & Chr(34) & "output_text" & Chr(34) & ": " & Chr(34) & UxbConsoleJsonEscape(gUxbConsole.outputText) & Chr(34) & "," & Chr(13) & Chr(10)
+        jsonText &= "  " & Chr(34) & "event_count" & Chr(34) & ": " & LTrim(Str(gUxbConsole.eventCount)) & "," & Chr(13) & Chr(10)
+        jsonText &= "  " & Chr(34) & "events" & Chr(34) & ": [" & Chr(13) & Chr(10)
+
+        For i = 0 To gUxbConsole.eventCount - 1
+            If i > 0 Then jsonText &= "," & Chr(13) & Chr(10)
+            jsonText &= "    {"
+            jsonText &= Chr(34) & "op" & Chr(34) & ": " & Chr(34) & UxbConsoleJsonEscape(gUxbConsoleEvents(i).opName) & Chr(34)
+            jsonText &= ", " & Chr(34) & "text" & Chr(34) & ": " & Chr(34) & UxbConsoleJsonEscape(gUxbConsoleEvents(i).textValue) & Chr(34)
+            jsonText &= ", " & Chr(34) & "row" & Chr(34) & ": " & LTrim(Str(gUxbConsoleEvents(i).row))
+            jsonText &= ", " & Chr(34) & "col" & Chr(34) & ": " & LTrim(Str(gUxbConsoleEvents(i).col))
+            jsonText &= ", " & Chr(34) & "fg" & Chr(34) & ": " & LTrim(Str(gUxbConsoleEvents(i).fg))
+            jsonText &= ", " & Chr(34) & "bg" & Chr(34) & ": " & LTrim(Str(gUxbConsoleEvents(i).bg))
+            jsonText &= "}"
+        Next i
+
+        jsonText &= Chr(13) & Chr(10) & "  ]" & Chr(13) & Chr(10) & "}" & Chr(13) & Chr(10)
+
+        If UxbConsoleWriteTextFile(gUxbConsole.outputJsonPath, jsonText) = 0 Then
+            errText = "Program output JSON yazilamadi: " & gUxbConsole.outputJsonPath
+            Return 0
+        End If
+    End If
+
+    If Trim(gUxbConsole.finalScreenJsonPath) <> "" Then
+        Dim screenJson As String
+
+        screenJson = "{" & Chr(13) & Chr(10)
+        screenJson &= "  " & Chr(34) & "mode" & Chr(34) & ": " & Chr(34) & modeJson & Chr(34) & "," & Chr(13) & Chr(10)
+        screenJson &= "  " & Chr(34) & "screen_text" & Chr(34) & ": " & Chr(34) & UxbConsoleJsonEscape(gUxbConsole.screenText) & Chr(34) & "," & Chr(13) & Chr(10)
+        screenJson &= "  " & Chr(34) & "row" & Chr(34) & ": " & LTrim(Str(gUxbConsole.row)) & "," & Chr(13) & Chr(10)
+        screenJson &= "  " & Chr(34) & "col" & Chr(34) & ": " & LTrim(Str(gUxbConsole.col)) & "," & Chr(13) & Chr(10)
+        screenJson &= "  " & Chr(34) & "fg" & Chr(34) & ": " & LTrim(Str(gUxbConsole.fg)) & "," & Chr(13) & Chr(10)
+        screenJson &= "  " & Chr(34) & "bg" & Chr(34) & ": " & LTrim(Str(gUxbConsole.bg)) & "," & Chr(13) & Chr(10)
+        screenJson &= "  " & Chr(34) & "cls_count" & Chr(34) & ": " & LTrim(Str(gUxbConsole.clsCount)) & Chr(13) & Chr(10)
+        screenJson &= "}" & Chr(13) & Chr(10)
+
+        If UxbConsoleWriteTextFile(gUxbConsole.finalScreenJsonPath, screenJson) = 0 Then
+            errText = "Final screen JSON yazilamadi: " & gUxbConsole.finalScreenJsonPath
+            Return 0
+        End If
+    End If
+
+    Return 1
+End Function

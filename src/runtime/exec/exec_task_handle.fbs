@@ -1,0 +1,645 @@
+' S-030: TASK / TASKGROUP calisma zamani tutamaclari -- AST yorumlayicisi (`run`).
+'
+' Faz 1 (bu dosya): SPAWN, hedef THREAD/PARALEL govdesini HEMEN, ayni cagri
+' yiginda calistirir -- TASK tutamaci DONE/ERROR durumunda dogar; .STATUS hic
+' PENDING/RUNNING gormez. Bu, acikca belgelenmis, gecici bir Faz 1 siniridir
+' (bkz. ai_koordinasyon/SORUN_TAKIP.md "## S-030"), placeholder DEGILDIR: her
+' uc nokta (SPAWN, .STATUS/.WAIT()/.RESULT/.JOIN()/.CANCEL()/.ERRORTEXT,
+' TASKGROUP) gercekten calisir ve test edilir. Faz 2 native gercek is
+' parcacigi havuzuna gectiginde yalniz YURUTME (ExecSpawnRunTaskBody) degisir;
+' tutamacin disariya gorunen sozlesmesi ayni kalir.
+'
+' Onemli: sonuc/hata BURADA, tutamacin KENDI alaninda tasinir -- eski
+' UXB_TASK_RESULT_NAME/UXB_TASK_INPUT_NAME sozde-genel degiskenleri (bkz.
+' src/common/task_context_names.fbs) TRIGGER'in senkron EVENT/PIPE/eski-ABI
+' yolunda degismeden kalir, TASK tutamaci bunlari YENIDEN KULLANMAZ.
+
+Const UXB_TASK_STATUS_PENDING As String = "PENDING"
+Const UXB_TASK_STATUS_RUNNING As String = "RUNNING"
+Const UXB_TASK_STATUS_DONE As String = "DONE"
+Const UXB_TASK_STATUS_ERROR As String = "ERROR"
+Const UXB_TASK_STATUS_CANCELLED As String = "CANCELLED"
+
+Type ExecTaskHandleRecord
+    used As Integer
+    statusText As String
+    kindText As String       ' THREAD / PARALEL
+    taskName As String
+    resultValue As ExecValue
+    hasResult As Integer
+    errorText As String
+End Type
+
+Type ExecTaskGroupRecord
+    used As Integer
+    memberIds(Any) As Integer
+    memberCount As Integer
+End Type
+
+Dim Shared gExecTaskHandles(Any) As ExecTaskHandleRecord
+Dim Shared gExecTaskHandleCount As Integer
+Dim Shared gExecTaskGroups(Any) As ExecTaskGroupRecord
+Dim Shared gExecTaskGroupCount As Integer
+
+Private Sub ExecTaskHandleEnsureInit()
+    If gExecTaskHandleCount = 0 Then
+        ReDim gExecTaskHandles(0)
+        gExecTaskHandleCount = 1  ' id 0 = NULL gonderge, hic gercek tutamac olarak verilmez
+    End If
+    If gExecTaskGroupCount = 0 Then
+        ReDim gExecTaskGroups(0)
+        gExecTaskGroupCount = 1   ' id 0 = NULL gonderge (TASK ile ayni kural)
+    End If
+End Sub
+
+Private Function ExecTaskHandleAlloc() As Integer
+    ExecTaskHandleEnsureInit()
+    ReDim Preserve gExecTaskHandles(gExecTaskHandleCount)
+    Dim idx As Integer
+    idx = gExecTaskHandleCount
+    gExecTaskHandleCount += 1
+    gExecTaskHandles(idx).used = 1
+    gExecTaskHandles(idx).statusText = UXB_TASK_STATUS_PENDING
+    gExecTaskHandles(idx).kindText = ""
+    gExecTaskHandles(idx).taskName = ""
+    gExecTaskHandles(idx).hasResult = 0
+    gExecTaskHandles(idx).errorText = ""
+    ExecValueInit gExecTaskHandles(idx).resultValue
+    Return idx
+End Function
+
+Function ExecTaskHandleValid(ByVal id As Integer) As Integer
+    If id <= 0 Or id >= gExecTaskHandleCount Then Return 0
+    Return gExecTaskHandles(id).used
+End Function
+
+Private Function ExecTaskGroupAlloc() As Integer
+    ExecTaskHandleEnsureInit()
+    ReDim Preserve gExecTaskGroups(gExecTaskGroupCount)
+    Dim idx As Integer
+    idx = gExecTaskGroupCount
+    gExecTaskGroupCount += 1
+    gExecTaskGroups(idx).used = 1
+    gExecTaskGroups(idx).memberCount = 0
+    Return idx
+End Function
+
+Function ExecTaskGroupValid(ByVal id As Integer) As Integer
+    If id <= 0 Or id >= gExecTaskGroupCount Then Return 0
+    Return gExecTaskGroups(id).used
+End Function
+
+' Hedef THREAD/PARALEL rutininin PARAM_DECL'lerini baglar, govdeyi calistirir,
+' RETURN degerini (varsa) yakalar. Yalnizca BAGLAMA (arity/tip/BYREF/dizi
+' parametre) basarisiz olursa 0 doner (bindErrText dolu) -- bu, cagiranin
+' KENDI hatasi sayilir (semantik katman zaten derleme zamaninda yakalamis
+' olmali). Govde calisirken olusan HER hata yakalanir, bodyErrText'e yazilir,
+' fonksiyon yine de 1 doner -- Mete'nin karari: "yakalanmamis asenkron hata
+' gorev nesnesinde tutulur, WAIT/JOIN/RESULT'ta cagirana aktarilir."
+Private Function ExecSpawnBindAndRunBody(ByRef ps As ParseState, ByRef es As ExecState, ByVal routineIdx As Integer, ByVal callExprIdx As Integer, ByRef resultOut As ExecValue, ByRef hasResultOut As Integer, ByRef bodyErrText As String, ByRef bindErrText As String) As Integer
+    Dim routineNodeIdx As Integer
+    routineNodeIdx = es.runtime.routineDefs(routineIdx).nodeIdx
+    Dim callName As String
+    callName = es.runtime.routineDefs(routineIdx).nameText
+
+    Dim paramNames(Any) As String
+    Dim paramTypes(Any) As String
+    Dim paramCount As Integer
+    paramCount = 0
+
+    Dim bodyStart As Integer
+    bodyStart = ps.ast.nodes(routineNodeIdx).firstChild
+    Do While bodyStart <> -1
+        If UCase(Trim(ps.ast.nodes(bodyStart).kind)) <> "PARAM_DECL" Then Exit Do
+
+        If UCase(Trim(ps.ast.nodes(bodyStart).op)) = "BYREF" Then
+            bindErrText = "exec: SPAWN: BYREF parametre asenkron gorevde henuz desteklenmiyor: " & callName
+            Return 0
+        End If
+
+        If paramCount = 0 Then
+            ReDim paramNames(0)
+            ReDim paramTypes(0)
+        Else
+            ReDim Preserve paramNames(paramCount)
+            ReDim Preserve paramTypes(paramCount)
+        End If
+
+        paramNames(paramCount) = ps.ast.nodes(bodyStart).value
+        paramTypes(paramCount) = UCase(Trim(ps.ast.nodes(bodyStart).typeName))
+        If paramTypes(paramCount) = "" Then
+            Dim paramTypeChild As Integer
+            paramTypeChild = ps.ast.nodes(bodyStart).firstChild
+            Do While paramTypeChild <> -1
+                If UCase(Trim(ps.ast.nodes(paramTypeChild).kind)) = "TYPE_REF" Then
+                    paramTypes(paramCount) = UCase(Trim(ps.ast.nodes(paramTypeChild).value))
+                    Exit Do
+                End If
+                paramTypeChild = ps.ast.nodes(paramTypeChild).nextSibling
+            Loop
+        End If
+
+        If Len(paramTypes(paramCount)) > 2 AndAlso Right(paramTypes(paramCount), 2) = "[]" Then
+            bindErrText = "exec: SPAWN: dizi parametreli gorev henuz desteklenmiyor: " & callName
+            Return 0
+        End If
+
+        paramCount += 1
+        bodyStart = ps.ast.nodes(bodyStart).nextSibling
+    Loop
+
+    Do While bodyStart <> -1 And ExecIsRoutineMetadataNode(ps, bodyStart) <> 0
+        bodyStart = ps.ast.nodes(bodyStart).nextSibling
+    Loop
+
+    Dim explicitArgCount As Integer
+    explicitArgCount = ExecChildCount(ps, callExprIdx)
+
+    If explicitArgCount <> paramCount Then
+        bindErrText = "exec: SPAWN cagri argumani uyusmuyor " & callName & " beklenen=" & LTrim(Str(paramCount)) & " gelen=" & LTrim(Str(explicitArgCount))
+        Return 0
+    End If
+
+    Dim argValues(Any) As ExecValue
+    If paramCount > 0 Then ReDim argValues(paramCount - 1)
+    Dim ai As Integer
+    For ai = 0 To paramCount - 1
+        Dim argNode As Integer
+        argNode = ExecChildAt(ps, callExprIdx, ai)
+        If argNode = -1 Then
+            bindErrText = "exec: SPAWN cagri argumani eksik: " & callName
+            Return 0
+        End If
+        If ExecEvalExpression(ps, argNode, es, argValues(ai), bindErrText) = 0 Then Return 0
+    Next ai
+
+    Dim boundValues(Any) As ExecValue
+    If paramCount > 0 Then ReDim boundValues(paramCount - 1)
+    For ai = 0 To paramCount - 1
+        If ExecApplyDeclaredType(argValues(ai), paramTypes(ai), boundValues(ai), bindErrText) = 0 Then Return 0
+    Next ai
+
+    Dim snapshotVars(Any) As ExecVar
+    Dim snapshotCount As Integer
+    Dim snapshotNextAddr As UInteger
+    ExecSnapshotVars es, snapshotVars(), snapshotCount, snapshotNextAddr
+
+    If es.runtime.callContextDepth >= 63 Then
+        bindErrText = "exec: call stack limit exceeded"
+        Return 0
+    End If
+    es.runtime.callContextDepth += 1
+    es.runtime.callFrameBase(es.runtime.callContextDepth) = es.count
+
+    For ai = 0 To paramCount - 1
+        If ExecFindVar(es, paramNames(ai)) < es.runtime.callFrameBase(es.runtime.callContextDepth) Then
+            If ExecAppendFrameVar(es, paramNames(ai)) = -1 Then
+                bindErrText = "exec: local frame variable capacity exceeded"
+                es.runtime.callContextDepth -= 1
+                Return 0
+            End If
+        End If
+        ExecSetVarValue es, paramNames(ai), boundValues(ai)
+        Dim boundVarIdx As Integer
+        boundVarIdx = ExecFindVar(es, paramNames(ai))
+        If boundVarIdx <> -1 Then es.vars(boundVarIdx).declType = paramTypes(ai)
+    Next ai
+
+    Dim savedReturnValue As Integer
+    Dim savedReturnValueEx As ExecValue
+    Dim savedReturnHasValue As Integer
+    Dim savedRoutineName As String
+    Dim savedRoutineNodeIdx As Integer
+    savedReturnValue = es.runtime.callReturnValue
+    savedReturnValueEx = es.runtime.callReturnValueEx
+    savedReturnHasValue = es.runtime.callReturnHasValue
+    savedRoutineName = es.runtime.currentRoutineName
+    savedRoutineNodeIdx = es.runtime.currentRoutineNodeIdx
+    es.runtime.callReturnValue = 0
+    ExecValueInit es.runtime.callReturnValueEx
+    es.runtime.callReturnHasValue = 0
+    es.runtime.currentRoutineName = callName
+    es.runtime.currentRoutineNodeIdx = routineNodeIdx
+
+    Dim noByRefFlags(0) As Integer
+    Dim noCallerArgNames(0) As String
+
+    Dim bodyRunErr As String
+    Dim bodyOk As Integer
+    bodyOk = 1
+    Dim bodyNode As Integer
+    bodyNode = bodyStart
+    Do While bodyNode <> -1
+        If ExecIsRoutineMetadataNode(ps, bodyNode) <> 0 Then
+            bodyNode = ps.ast.nodes(bodyNode).nextSibling
+            Continue Do
+        End If
+
+        If ExecRunStmt(ps, es, bodyNode, bodyRunErr) = 0 Then
+            bodyOk = 0
+            Exit Do
+        End If
+
+        If es.runtime.exitRequest <> "" Then
+            Dim callReq As String
+            callReq = UCase(es.runtime.exitRequest)
+            If callReq = "RETURN_CALL" Then
+                es.runtime.exitRequest = ""
+                Exit Do
+            End If
+            If callReq = "RETURN" Then
+                es.runtime.exitRequest = "RETURN_CALL"
+                Exit Do
+            End If
+            ' GOTO/GOSUB/EXIT/END: gorev govdesinden disari sizmamali -- Faz 1'de
+            ' bunu bir govde hatasi say (Faz 2'de gercek is parcacigi sinirinda
+            ' zaten anlamsiz olacak).
+            bodyOk = 0
+            bodyRunErr = "exec: SPAWN gorev govdesinde beklenmeyen kontrol akisi: " & es.runtime.exitRequest
+            es.runtime.exitRequest = ""
+            Exit Do
+        End If
+
+        bodyNode = ps.ast.nodes(bodyNode).nextSibling
+    Loop
+
+    hasResultOut = 1
+    If bodyOk <> 0 Then
+        If es.runtime.callReturnHasValue <> 0 Then
+            resultOut = es.runtime.callReturnValueEx
+        Else
+            ExecValueInit resultOut
+        End If
+    Else
+        ExecValueInit resultOut
+    End If
+
+    es.runtime.callContextDepth -= 1
+    es.runtime.callReturnValue = savedReturnValue
+    es.runtime.callReturnValueEx = savedReturnValueEx
+    es.runtime.callReturnHasValue = savedReturnHasValue
+    es.runtime.currentRoutineName = savedRoutineName
+    es.runtime.currentRoutineNodeIdx = savedRoutineNodeIdx
+    ExecRestoreRoutineVars ps, es, routineNodeIdx, paramNames(), paramCount, snapshotVars(), snapshotCount, snapshotNextAddr, noByRefFlags(), 0, noCallerArgNames()
+
+    If bodyOk = 0 Then
+        bodyErrText = bodyRunErr
+        Return 1
+    End If
+
+    bodyErrText = ""
+    Return 1
+End Function
+
+' SPAWN_EXPR -> TASK tutamaci. Faz 1: govde HEMEN calisir; tutamac DONE/ERROR
+' durumunda doner.
+Function ExecRunSpawnExpr(ByRef ps As ParseState, ByRef es As ExecState, ByVal spawnNodeIdx As Integer, ByRef result As ExecValue, ByRef errText As String) As Integer
+    Dim callExprIdx As Integer
+    callExprIdx = ps.ast.nodes(spawnNodeIdx).left
+    If callExprIdx = -1 Then
+        errText = "exec: SPAWN gorev cagrisi eksik"
+        Return 0
+    End If
+
+    Dim taskName As String
+    taskName = Trim(ps.ast.nodes(callExprIdx).value)
+    Dim routineIdx As Integer
+    routineIdx = ExecRoutineIndexOf(es, taskName)
+    If routineIdx = -1 Then
+        errText = "exec: SPAWN hedefi bulunamadi: " & taskName
+        Return 0
+    End If
+
+    Dim routineKind As String
+    routineKind = UCase(Trim(es.runtime.routineDefs(routineIdx).routineKind))
+    If routineKind <> "THREAD_STMT" And routineKind <> "PARALEL_STMT" Then
+        errText = "exec: SPAWN hedefi THREAD veya PARALEL gorevi olmali: " & taskName
+        Return 0
+    End If
+
+    Dim handleId As Integer
+    handleId = ExecTaskHandleAlloc()
+    gExecTaskHandles(handleId).kindText = IIf(routineKind = "THREAD_STMT", "THREAD", "PARALEL")
+    gExecTaskHandles(handleId).taskName = taskName
+    gExecTaskHandles(handleId).statusText = UXB_TASK_STATUS_RUNNING
+
+    Dim bodyResult As ExecValue
+    Dim bodyHasResult As Integer
+    Dim bodyErrText As String
+    Dim bindErrText As String
+    If ExecSpawnBindAndRunBody(ps, es, routineIdx, callExprIdx, bodyResult, bodyHasResult, bodyErrText, bindErrText) = 0 Then
+        ' Baglama hatasi (arity/tip/BYREF/dizi/yigin siniri) -- cagiranin kendi
+        ' hatasi, TASK'a degil SPAWN cagrisinin kendisine mal edilir.
+        errText = bindErrText
+        Return 0
+    End If
+
+    If bodyErrText <> "" Then
+        gExecTaskHandles(handleId).statusText = UXB_TASK_STATUS_ERROR
+        gExecTaskHandles(handleId).errorText = bodyErrText
+        gExecTaskHandles(handleId).hasResult = 0
+    Else
+        gExecTaskHandles(handleId).statusText = UXB_TASK_STATUS_DONE
+        gExecTaskHandles(handleId).hasResult = bodyHasResult
+        If bodyHasResult <> 0 Then gExecTaskHandles(handleId).resultValue = bodyResult
+    End If
+
+    ' S-030: TASK, bu koddaki TUM diger opak tutamaclarla (CLASS ornegi adresi,
+    ' LIST/DICT/SET tutamaci) AYNI kurali izler -- deger duz bir "INTEGER"
+    ' ExecValue'dur (0 = NULL); TASK/TASKGROUP oldugu bilgisi degiskenin KENDI
+    ' declType alaninda tutulur (bkz. ExecTaskReceiverInfo). ExecValue'ya ozel
+    ' bir "TASK" valueType etiketi eklemek, ExecValueToInteger/ToU64/ToFloat/
+    ' ApplyDeclaredType gibi HER genel deger yardimcisina ayri ayri Case
+    ' eklemeyi gerektirirdi -- bu, tutarsizlik riskini artiran gereksiz bir
+    ' ikinci sinif deger turu olustururdu.
+    ExecValueSetInteger result, handleId
+    errText = ""
+    Return 1
+End Function
+
+' Bilesik alici ifadesinin (g(i), F(), s.alan, (ifade) ...) STATIK tipi -- ayni
+' tip cikarimi (UXBStep3InferExprType) semantik kapinin `t = g(i)` atamasini
+' denetlerken kullandigi fonksiyondur; AST yorumlayicisi bunu zaten calisma
+' aninda kullaniyor (bkz. UXBMemoryAddrIsPointer, S-069). Sonuc dugum basina
+' bir kez hesaplanip saklanir: CLASS metot zincirleri de bu on-kontrolden
+' gectigi icin sicak dongude tekrar tekrar tip cikarimi yapilmaz.
+'   memo: 0 = hesaplanmadi, 1 = TASK, 2 = TASKGROUP, 3 = ikisi de degil
+Dim Shared gExecTaskRecvKindMemo(Any) As Byte
+Dim Shared gExecTaskRecvKindMemoSize As Integer
+
+Private Function ExecTaskStaticReceiverKind(ByRef ps As ParseState, ByVal nodeIdx As Integer) As String
+    If gExecTaskRecvKindMemoSize <> ps.ast.count Then
+        gExecTaskRecvKindMemoSize = ps.ast.count
+        If gExecTaskRecvKindMemoSize > 0 Then ReDim gExecTaskRecvKindMemo(gExecTaskRecvKindMemoSize - 1)
+    End If
+
+    If gExecTaskRecvKindMemo(nodeIdx) = 0 Then
+        Dim inferredType As String
+        Dim inferErr As String
+        gExecTaskRecvKindMemo(nodeIdx) = 3
+        If UXBStep3InferExprType(ps, nodeIdx, inferredType, inferErr) <> 0 Then
+            ' Bazi dallar (ornegin FUNCTION donus tipi) ham bildirim adini
+            ' ("TASK") dondurur; karsilastirma kanonik adla yapilir.
+            inferredType = UXBStep3TypeCanonical(inferredType)
+            If inferredType = TYPE_TASK Then
+                gExecTaskRecvKindMemo(nodeIdx) = 1
+            ElseIf inferredType = TYPE_TASKGROUP Then
+                gExecTaskRecvKindMemo(nodeIdx) = 2
+            End If
+        End If
+    End If
+
+    Select Case gExecTaskRecvKindMemo(nodeIdx)
+    Case 1: Return "TASK"
+    Case 2: Return "TASKGROUP"
+    End Select
+    Return ""
+End Function
+
+' Alicinin TASK/TASKGROUP turunde olup olmadigini tespit eder ve tutamaci
+' okur. Alici ifadesi en fazla BIR kez degerlendirilir (cift-degerlendirme
+' YOK -- bkz. S-124); cagiran, 1 donuste aliciyi yeniden degerlendirmez.
+'   -1 = alici TASK/TASKGROUP degil (baska bir cozumleyici denesin)
+'    0 = TASK/TASKGROUP ama hata olustu (errText dolu)
+'    1 = basarili (kindOut="TASK"/"TASKGROUP", handleIdOut = tutamac id, 0=NULL)
+Private Function ExecTaskReceiverInfo(ByRef ps As ParseState, ByRef es As ExecState, ByVal receiverNodeIdx As Integer, ByRef kindOut As String, ByRef handleIdOut As Integer, ByRef errText As String) As Integer
+    kindOut = ""
+    handleIdOut = 0
+    If receiverNodeIdx < 0 Or receiverNodeIdx >= ps.ast.count Then Return -1
+
+    Dim rk As String
+    rk = UCase(Trim(ps.ast.nodes(receiverNodeIdx).kind))
+
+    If rk = "IDENT" Or rk = "KEYWORD_REF" Then
+        Dim receiverName As String
+        receiverName = Trim(ps.ast.nodes(receiverNodeIdx).value)
+        Dim varIdx As Integer
+        varIdx = ExecFindVar(es, receiverName)
+        If varIdx = -1 Then Return -1
+        Dim declT As String
+        declT = UCase(Trim(es.vars(varIdx).declType))
+        If declT <> "TASK" And declT <> "TASKGROUP" Then Return -1
+        If es.vars(varIdx).isArray <> 0 Then
+            errText = "exec: " & declT & " dizisi eleman indeksi olmadan alici olamaz: " & receiverName & " -- " & receiverName & "(i) yazin"
+            Return 0
+        End If
+        kindOut = declT
+        handleIdOut = ExecValueToInteger(es.vars(varIdx).value)
+        Return 1
+    End If
+
+    If rk = "SPAWN_EXPR" Then
+        Dim v As ExecValue
+        If ExecRunSpawnExpr(ps, es, receiverNodeIdx, v, errText) = 0 Then Return 0
+        kindOut = "TASK"
+        handleIdOut = ExecValueToInteger(v)
+        Return 1
+    End If
+
+    ' Bilesik alici: dizi elemani g(i), TASK donduren FUNCTION F(), TASK alani
+    ' s.gorev, parantezli/kosullu ifade. Tip statik cikarimdan gelir; deger
+    ' tek kez degerlendirilir.
+    Select Case rk
+    Case "CALL_EXPR", "INDEX_EXPR", "FIELD_EXPR", "MEMBER_EXPR", "PAREN_EXPR", "GROUP_EXPR", "EXPR_GROUP", "TERNARY_EXPR"
+        Dim staticKind As String
+        staticKind = ExecTaskStaticReceiverKind(ps, receiverNodeIdx)
+        If staticKind = "" Then Return -1
+        Dim recvValue As ExecValue
+        If ExecEvalExpression(ps, receiverNodeIdx, es, recvValue, errText) = 0 Then Return 0
+        kindOut = staticKind
+        handleIdOut = ExecValueToInteger(recvValue)
+        Return 1
+    End Select
+
+    Return -1
+End Function
+
+' K6 (Mete, 2026-09-24): ERROR veya CANCELLED bitmis gorevin .RESULT/.JOIN()
+' okumasi ve TASKGROUP.JOIN() hatayi cagirana aktarir. 1 = basarisiz bitmis
+' (errText dolu), 0 = basarisiz degil.
+Private Function ExecTaskFailureText(ByVal handleId As Integer, ByRef errText As String) As Integer
+    Select Case gExecTaskHandles(handleId).statusText
+    Case UXB_TASK_STATUS_ERROR
+        errText = "exec: gorev hatasi (" & gExecTaskHandles(handleId).taskName & "): " & gExecTaskHandles(handleId).errorText
+        Return 1
+    Case UXB_TASK_STATUS_CANCELLED
+        errText = "exec: gorev iptal edildi (" & gExecTaskHandles(handleId).taskName & "): CANCELLED"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+' TASK/TASKGROUP alan OKUMASI: .STATUS / .RESULT / .ERRORTEXT (FIELD_EXPR).
+Private Function ExecReadTaskField(ByRef kindText As String, ByVal handleId As Integer, ByRef fieldName As String, ByRef valueOut As ExecValue, ByRef errText As String) As Integer
+    Dim f As String
+    f = UCase(Trim(fieldName))
+
+    If kindText <> "TASK" Then
+        errText = "exec: TASKGROUP uzerinde alan yok: " & fieldName
+        Return 0
+    End If
+
+    Select Case f
+    Case "STATUS"
+        ExecValueInit valueOut
+        valueOut.valueType = "STRING"
+        If handleId = 0 Then
+            valueOut.stringValue = UXB_TASK_STATUS_PENDING  ' hic SPAWN edilmemis (NULL) tutamac
+        Else
+            valueOut.stringValue = gExecTaskHandles(handleId).statusText
+        End If
+        Return 1
+
+    Case "ERRORTEXT"
+        ExecValueInit valueOut
+        valueOut.valueType = "STRING"
+        If handleId = 0 Then
+            valueOut.stringValue = ""
+        Else
+            valueOut.stringValue = gExecTaskHandles(handleId).errorText
+        End If
+        Return 1
+
+    Case "RESULT"
+        If handleId = 0 Then
+            errText = "exec: TASK.RESULT: bos (NULL) gorev tutamaci"
+            Return 0
+        End If
+        If ExecTaskFailureText(handleId, errText) <> 0 Then Return 0
+        If gExecTaskHandles(handleId).hasResult <> 0 Then
+            valueOut = gExecTaskHandles(handleId).resultValue
+        Else
+            ExecValueInit valueOut
+        End If
+        Return 1
+    End Select
+
+    errText = "exec: TASK uzerinde bilinmeyen alan: " & fieldName
+    Return 0
+End Function
+
+' TASK/TASKGROUP metot CAGRISI: .WAIT()/.JOIN()/.CANCEL() (TASK),
+' .ADD()/.JOIN()/.JOINALL() (TASKGROUP) (dotted CALL_EXPR).
+Private Function ExecInvokeTaskMember(ByRef ps As ParseState, ByRef es As ExecState, ByRef kindText As String, ByVal handleId As Integer, ByRef methodName As String, ByVal callNodeIdx As Integer, ByRef valueOut As ExecValue, ByRef errText As String) As Integer
+    Dim m As String
+    m = UCase(Trim(methodName))
+    ExecValueInit valueOut
+
+    If kindText = "TASK" Then
+        Select Case m
+        Case "WAIT"
+            If ExecChildCount(ps, callNodeIdx) <> 0 Then
+                errText = "exec: TASK.WAIT() arguman almaz"
+                Return 0
+            End If
+            If handleId = 0 Then
+                errText = "exec: TASK.WAIT(): bos (NULL) gorev tutamaci"
+                Return 0
+            End If
+            ' Faz 1: gorev SPAWN aninda zaten bitti (senkron referans uygulama) --
+            ' WAIT hemen doner. Faz 2 gercek eszamanlilikta burasi gercekten bloke
+            ' edecek; disariya gorunen sozlesme (arguman yok, deger yok) ayni kalir.
+            Return 1
+
+        Case "CANCEL"
+            If ExecChildCount(ps, callNodeIdx) <> 0 Then
+                errText = "exec: TASK.CANCEL() arguman almaz"
+                Return 0
+            End If
+            If handleId = 0 Then
+                errText = "exec: TASK.CANCEL(): bos (NULL) gorev tutamaci"
+                Return 0
+            End If
+            ' K6: yalniz iptal ISTEGI; tekrar CANCEL zararsiz. Baslamamis (PENDING)
+            ' gorev hic calismadan CANCELLED olur, ERRORTEXT = "CANCELLED".
+            If gExecTaskHandles(handleId).statusText = UXB_TASK_STATUS_PENDING Then
+                gExecTaskHandles(handleId).statusText = UXB_TASK_STATUS_CANCELLED
+                gExecTaskHandles(handleId).errorText = UXB_TASK_STATUS_CANCELLED
+            End If
+            ' Faz 1: govde SPAWN aninda zaten calisip bittigi icin CANCEL onu asla
+            ' PENDING yakalayamaz -- belgelenmis Faz 1 siniri (bkz. dosya basi).
+            Return 1
+
+        Case "JOIN"
+            If ExecChildCount(ps, callNodeIdx) <> 0 Then
+                errText = "exec: TASK.JOIN() arguman almaz"
+                Return 0
+            End If
+            If handleId = 0 Then
+                errText = "exec: TASK.JOIN(): bos (NULL) gorev tutamaci"
+                Return 0
+            End If
+            Return ExecReadTaskField(kindText, handleId, "RESULT", valueOut, errText)
+
+        Case Else
+            errText = "exec: TASK uzerinde bilinmeyen metot: " & methodName
+            Return 0
+        End Select
+    End If
+
+    If kindText = "TASKGROUP" Then
+        Select Case m
+        Case "ADD"
+            If ExecChildCount(ps, callNodeIdx) <> 1 Then
+                errText = "exec: TASKGROUP.ADD(gorev) tam bir arguman ister"
+                Return 0
+            End If
+            If handleId = 0 Then
+                errText = "exec: TASKGROUP.ADD(): bos (NULL) grup tutamaci"
+                Return 0
+            End If
+            Dim argNode As Integer
+            argNode = ExecChildAt(ps, callNodeIdx, 0)
+            Dim argKind As String
+            Dim argHandleId As Integer
+            Dim argRv As Integer
+            argRv = ExecTaskReceiverInfo(ps, es, argNode, argKind, argHandleId, errText)
+            If argRv = 0 Then Return 0
+            If argRv < 0 Or argKind <> "TASK" Then
+                errText = "exec: TASKGROUP.ADD(): arguman bir TASK olmali"
+                Return 0
+            End If
+            Dim ByRef grpRec As ExecTaskGroupRecord = gExecTaskGroups(handleId)
+            Dim newCount As Integer
+            newCount = grpRec.memberCount
+            If newCount = 0 Then
+                ReDim grpRec.memberIds(0)
+            Else
+                ReDim Preserve grpRec.memberIds(newCount)
+            End If
+            grpRec.memberIds(newCount) = argHandleId
+            grpRec.memberCount += 1
+            Return 1
+
+        Case "JOIN"
+            If ExecChildCount(ps, callNodeIdx) <> 0 Then
+                errText = "exec: TASKGROUP.JOIN() arguman almaz"
+                Return 0
+            End If
+            If handleId = 0 Then
+                errText = "exec: TASKGROUP.JOIN(): bos (NULL) grup tutamaci"
+                Return 0
+            End If
+            ' Faz 1: her uye ADD aninda zaten bitmis; ilk HATALI/IPTAL uyeyi
+            ' (varsa, EKLENME sirasina gore) cagirana yukselt.
+            Dim gi As Integer
+            For gi = 0 To gExecTaskGroups(handleId).memberCount - 1
+                Dim memberId As Integer
+                memberId = gExecTaskGroups(handleId).memberIds(gi)
+                If ExecTaskHandleValid(memberId) <> 0 AndAlso ExecTaskFailureText(memberId, errText) <> 0 Then Return 0
+            Next gi
+            Return 1
+
+        Case "JOINALL"
+            errText = "exec: TASKGROUP.JOINALL() henuz desteklenmiyor (Faz 1 siniri) -- TASKGROUP.JOIN() ile bekleyip her uyenin .RESULT alanini okuyun"
+            Return 0
+
+        Case Else
+            errText = "exec: TASKGROUP uzerinde bilinmeyen metot: " & methodName
+            Return 0
+        End Select
+    End If
+
+    errText = "exec: bilinmeyen tutamac turu: " & kindText
+    Return 0
+End Function

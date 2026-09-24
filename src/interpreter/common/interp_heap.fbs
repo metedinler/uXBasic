@@ -1,0 +1,426 @@
+#ifndef UXB_INTERP_HEAP_FBS
+#define UXB_INTERP_HEAP_FBS
+
+#include once "interp_value.fbs"
+#include once "../../semantic/library_type_contract.fbs"
+
+' Forward declares: real definitions live in
+' src/runtime/exec/exec_state_value_utils.fbs (the AST interpreter's S-036
+' native-scalar-array fix), reused here as-is for S-033's canonical-MIR
+' array rawData support so the "is this a native-scalar type / how many
+' bytes wide" classification has exactly one source of truth across both
+' interpreters. That file is textually included later than this one in the
+' combined build (interpreter bundle after runtime bundle... but this
+' specific file is pulled in earlier via interp_value.fbs's own callers), so
+' a forward declare is needed here despite both ending up in one combined
+' translation unit.
+Declare Function ExecDeclTypeIsNativeScalar(ByRef declTypeRaw As String) As Integer
+Declare Function ExecNativeScalarByteWidth(ByRef declTypeRaw As String) As Integer
+
+Type UXBInterpHeapSlot
+    libraryScopeDepth As Integer = -1
+    slotKind As String
+    typeName As String
+    values(Any) As UXBInterpValue
+    names(Any) As String
+    count As Integer
+    lowerBound As Integer
+    upperBound As Integer
+    boundsDeclared As Integer
+    active As Integer
+    ' S-033 follow-up: an ARRAY slot whose element type is a plain native
+    ' scalar (I8..U64, F32/F64, PTR/BOOL -- see ExecDeclTypeIsNativeScalar,
+    ' reused from the AST interpreter's own S-036 fix) additionally gets a
+    ' tightly-packed raw byte buffer, mirroring ExecArray.rawData exactly.
+    ' `values()` is left untouched/unused for such slots (single source of
+    ' truth, not a second mirrored copy -- the same "two truths" bug class
+    ' S-036 fixed for AST arrays would reappear here otherwise). This is what
+    ' lets MIR_MEMORY_REF hand out a REAL address for a canonical-MIR array,
+    ' so MEMCOPY/MEMFILL/VARPTR on a bare array name works via a real memcpy
+    ' instead of failing closed or acting on disconnected boxed values.
+    isNativeScalar As Integer
+    elemStride As Integer
+    rawData(Any) As UByte
+    ' S-056: name shown in MemoryRef diagnostics ("array a"); set by DIM.
+    ownerName As String
+End Type
+
+Type UXBInterpHeap
+    slots(Any) As UXBInterpHeapSlot
+    slotCount As Integer
+End Type
+
+Sub UXBInterpHeapReleaseLibraryScope(ByRef h As UXBInterpHeap, ByVal scopeDepth As Integer)
+    For slotIdx As Integer = 0 To h.slotCount - 1
+        If h.slots(slotIdx).libraryScopeDepth <> scopeDepth Then Continue For
+        For valueIdx As Integer = 0 To h.slots(slotIdx).count - 1
+            h.slots(slotIdx).values(valueIdx).libraryPayload.Clear()
+        Next valueIdx
+        h.slots(slotIdx).libraryScopeDepth = -1
+    Next slotIdx
+End Sub
+
+Sub UXBInterpHeapInit(ByRef h As UXBInterpHeap)
+    h.slotCount = 0
+    Erase h.slots
+End Sub
+
+Function UXBInterpHeapAlloc(ByRef h As UXBInterpHeap, ByVal kindText As String, ByVal typeText As String) As Integer
+    If h.slotCount = 0 Then
+        ReDim h.slots(0)
+    Else
+        ReDim Preserve h.slots(h.slotCount)
+    End If
+    Dim id As Integer = h.slotCount
+    h.slotCount += 1
+    h.slots(id).slotKind = UCase(Trim(kindText))
+    h.slots(id).typeName = UCase(Trim(typeText))
+    h.slots(id).count = 0
+    h.slots(id).lowerBound = 0
+    h.slots(id).upperBound = -1
+    h.slots(id).boundsDeclared = 0
+    h.slots(id).active = 1
+    h.slots(id).isNativeScalar = 0
+    h.slots(id).elemStride = 0
+    Erase h.slots(id).rawData
+    If h.slots(id).slotKind = "ARRAY" Then
+        If ExecDeclTypeIsNativeScalar(h.slots(id).typeName) <> 0 Then
+            Dim allocStride As Integer = ExecNativeScalarByteWidth(h.slots(id).typeName)
+            If allocStride > 0 Then
+                h.slots(id).isNativeScalar = 1
+                h.slots(id).elemStride = allocStride
+            End If
+        End If
+    End If
+    Erase h.slots(id).values
+    Erase h.slots(id).names
+    Return id
+End Function
+
+Private Sub UXBInterpHeapEnsureIndex(ByRef h As UXBInterpHeap, ByVal id As Integer, ByVal indexValue As Integer)
+    If id < 0 Or id >= h.slotCount Then Exit Sub
+    If indexValue < 0 Then Exit Sub
+    If h.slots(id).count = 0 Then
+        With h.slots(id)
+            ReDim .values(indexValue)
+            ReDim .names(indexValue)
+            .count = indexValue + 1
+        End With
+        Exit Sub
+    End If
+    If indexValue >= h.slots(id).count Then
+        With h.slots(id)
+            ReDim Preserve .values(indexValue)
+            ReDim Preserve .names(indexValue)
+            .count = indexValue + 1
+        End With
+    End If
+End Sub
+
+' S-033 follow-up: mirrors ExecArrayRawGet/ExecArrayRawSet (AST's S-036 fix)
+' exactly, just against a UXBInterpHeapSlot's rawData/UXBInterpValue instead
+' of ExecArray's rawData/ExecValue.
+Private Sub UXBInterpHeapRawGet(ByRef slot As UXBInterpHeapSlot, ByVal storageIndex As Integer, ByRef valueOut As UXBInterpValue)
+    Dim t As String = UCase(Trim(slot.typeName))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Dim baseAddr As UByte Ptr
+    baseAddr = @slot.rawData(storageIndex * slot.elemStride)
+    Select Case t
+    Case "F32", "SINGLE"
+        valueOut = UXBInterpValueFloat(CDbl(*CPtr(Single Ptr, baseAddr)))
+    Case "F64", "DOUBLE", "F80", "EXTENDED"
+        valueOut = UXBInterpValueFloat(*CPtr(Double Ptr, baseAddr))
+    Case "I64", "LONGINT"
+        valueOut = UXBInterpValueInt(*CPtr(LongInt Ptr, baseAddr))
+    Case "U64", "ULONGINT", "PTR", "STRPTR", "WSTRPTR"
+        valueOut = UXBInterpValueUInt(*CPtr(ULongInt Ptr, baseAddr))
+    Case "U32", "UINTEGER", "UINT", "ULONG"
+        valueOut = UXBInterpValueUInt(CULngInt(*CPtr(ULong Ptr, baseAddr)))
+    Case "I8", "BYTE", "SBYTE"
+        valueOut = UXBInterpValueInt(*CPtr(Byte Ptr, baseAddr))
+    Case "U8", "UBYTE"
+        valueOut = UXBInterpValueInt(*CPtr(UByte Ptr, baseAddr))
+    Case "I16", "SHORT"
+        valueOut = UXBInterpValueInt(*CPtr(Short Ptr, baseAddr))
+    Case "U16", "USHORT"
+        valueOut = UXBInterpValueInt(*CPtr(UShort Ptr, baseAddr))
+    Case "BOOL", "BOOLEAN"
+        valueOut = UXBInterpValueBool(IIf(*CPtr(Long Ptr, baseAddr) <> 0, 1, 0))
+    Case Else
+        valueOut = UXBInterpValueInt(*CPtr(Long Ptr, baseAddr))
+    End Select
+End Sub
+
+Private Sub UXBInterpHeapRawSet(ByRef slot As UXBInterpHeapSlot, ByVal storageIndex As Integer, ByRef valueIn As UXBInterpValue)
+    Dim t As String = UCase(Trim(slot.typeName))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Dim baseAddr As UByte Ptr
+    baseAddr = @slot.rawData(storageIndex * slot.elemStride)
+    Select Case t
+    Case "F32", "SINGLE"
+        *CPtr(Single Ptr, baseAddr) = CSng(valueIn.floatValue)
+    Case "F64", "DOUBLE", "F80", "EXTENDED"
+        *CPtr(Double Ptr, baseAddr) = valueIn.floatValue
+    Case "I64", "LONGINT"
+        *CPtr(LongInt Ptr, baseAddr) = valueIn.intValue
+    Case "U64", "ULONGINT", "PTR", "STRPTR", "WSTRPTR"
+        *CPtr(ULongInt Ptr, baseAddr) = valueIn.uintValue
+    Case "U32", "UINTEGER", "UINT", "ULONG"
+        *CPtr(ULong Ptr, baseAddr) = CULng(valueIn.uintValue And &hFFFFFFFFULL)
+    Case "I8", "BYTE", "SBYTE"
+        *CPtr(Byte Ptr, baseAddr) = CByte(valueIn.intValue)
+    Case "U8", "UBYTE"
+        *CPtr(UByte Ptr, baseAddr) = CUByte(valueIn.intValue And &hFF)
+    Case "I16", "SHORT"
+        *CPtr(Short Ptr, baseAddr) = CShort(valueIn.intValue)
+    Case "U16", "USHORT"
+        *CPtr(UShort Ptr, baseAddr) = CUShort(valueIn.intValue And &hFFFF)
+    Case "BOOL", "BOOLEAN"
+        *CPtr(Long Ptr, baseAddr) = IIf(valueIn.boolValue <> 0, -1, 0)
+    Case Else
+        *CPtr(Long Ptr, baseAddr) = CLng(valueIn.intValue)
+    End Select
+End Sub
+
+Function UXBInterpHeapSetIndex(ByRef h As UXBInterpHeap, ByVal id As Integer, ByVal indexValue As Integer, ByRef valueIn As UXBInterpValue) As Integer
+    If id < 0 Or id >= h.slotCount Then Return 0
+    If h.slots(id).active = 0 Then Return 0
+    Dim storageIndex As Integer
+    storageIndex = indexValue
+    If h.slots(id).boundsDeclared <> 0 Then
+        If indexValue < h.slots(id).lowerBound Or indexValue > h.slots(id).upperBound Then Return 0
+        storageIndex = indexValue - h.slots(id).lowerBound
+    End If
+    If storageIndex < 0 Then Return 0
+    UXBInterpHeapEnsureIndex h, id, storageIndex
+    If h.slots(id).isNativeScalar <> 0 Then
+        UXBInterpHeapRawSet h.slots(id), storageIndex, valueIn
+        h.slots(id).names(storageIndex) = LTrim(Str(indexValue))
+        Return 1
+    End If
+    If UXBLibraryTypeRegistryFind(h.slots(id).typeName) >= 0 Then
+        Dim copied As UXBInterpValue = UXBInterpLibraryValueCopy(valueIn)
+        If UXBInterpIsError(copied) <> 0 Then Return 0
+        h.slots(id).values(storageIndex) = UXBInterpApplyDeclaredType(copied, h.slots(id).typeName)
+    Else
+        h.slots(id).values(storageIndex) = valueIn
+    End If
+    h.slots(id).names(storageIndex) = LTrim(Str(indexValue))
+    Return 1
+End Function
+
+Function UXBInterpHeapGetIndex(ByRef h As UXBInterpHeap, ByVal id As Integer, ByVal indexValue As Integer, ByRef outValue As UXBInterpValue) As Integer
+    If id < 0 Or id >= h.slotCount Then Return 0
+    If h.slots(id).active = 0 Then Return 0
+    Dim storageIndex As Integer
+    storageIndex = indexValue
+    If h.slots(id).boundsDeclared <> 0 Then
+        If indexValue < h.slots(id).lowerBound Or indexValue > h.slots(id).upperBound Then Return 0
+        storageIndex = indexValue - h.slots(id).lowerBound
+    End If
+    If storageIndex < 0 Or storageIndex >= h.slots(id).count Then Return 0
+    If h.slots(id).isNativeScalar <> 0 Then
+        UXBInterpHeapRawGet h.slots(id), storageIndex, outValue
+        Return 1
+    End If
+    outValue = h.slots(id).values(storageIndex)
+    ' Unwritten library values use the type's default, including after REDIM.
+    If h.slots(id).names(storageIndex) = "" And UXBLibraryTypeRegistryFind(h.slots(id).typeName) >= 0 Then
+        outValue = UXBInterpValueDefaultForType(h.slots(id).typeName)
+    End If
+    Return 1
+End Function
+
+Function UXBInterpHeapResizeArray(ByRef h As UXBInterpHeap, ByVal id As Integer, ByVal newCount As Integer) As Integer
+    If id < 0 Or id >= h.slotCount Then Return 0
+    If newCount < 0 Then Return 0
+    If newCount = 0 Then
+        Erase h.slots(id).values
+        Erase h.slots(id).names
+        h.slots(id).count = 0
+        h.slots(id).lowerBound = 0
+        h.slots(id).upperBound = -1
+        h.slots(id).boundsDeclared = 1
+        Return 1
+    End If
+    With h.slots(id)
+        ReDim Preserve .values(newCount - 1)
+        ReDim Preserve .names(newCount - 1)
+        .count = newCount
+        .lowerBound = 0
+        .upperBound = newCount - 1
+        .boundsDeclared = 1
+    End With
+    Return 1
+End Function
+
+Function UXBInterpHeapSetArrayBounds(ByRef h As UXBInterpHeap, ByVal id As Integer, ByVal lowerValue As Integer, ByVal upperValue As Integer) As Integer
+    If id < 0 Or id >= h.slotCount Then Return 0
+    If upperValue < lowerValue Then Return 0
+    Dim newCount As Integer
+    newCount = upperValue - lowerValue + 1
+    With h.slots(id)
+        ' S-056: re-bounding replaces the backing store -- the old one goes stale.
+        If .isNativeScalar <> 0 And .count > 0 Then UXBMemRefRelease CULngInt(@.rawData(0))
+        ReDim .values(newCount - 1)
+        ReDim .names(newCount - 1)
+        .count = newCount
+        .lowerBound = lowerValue
+        .upperBound = upperValue
+        .boundsDeclared = 1
+        If .isNativeScalar <> 0 Then
+            ReDim .rawData(newCount * .elemStride - 1)
+            Dim rawZeroPos As Integer
+            For rawZeroPos = 0 To newCount * .elemStride - 1
+                .rawData(rawZeroPos) = 0
+            Next rawZeroPos
+            UXBMemRefRegister UXB_MEMREF_KIND_ARRAY, CULngInt(@.rawData(0)), CULngInt(newCount * .elemStride), IIf(.ownerName = "", "array (heap slot " & LTrim(Str(id)) & ")", .ownerName)
+        Else
+            Erase .rawData
+        End If
+    End With
+    Return 1
+End Function
+
+' S-035: REDIM / REDIM PRESERVE for a canonical-MIR array. Resizes the SAME
+' heap slot in place (the variable's handle/arrayId never changes, unlike
+' MIR_ARRAY_NEW which would hand out a brand-new orphaned slot) to a new
+' [newLower, newUpper] bound range. When preserveFlag is set, copies the
+' overlapping index range's old contents into the new storage -- mirrors
+' ExecArrayResizeVar (AST interpreter, exec_state_value_utils.fbs) exactly,
+' just against a UXBInterpHeapSlot instead of an ExecArray.
+Function UXBInterpHeapRedimArray(ByRef h As UXBInterpHeap, ByVal id As Integer, ByVal newLower As Integer, ByVal newUpper As Integer, ByVal preserveFlag As Integer) As Integer
+    If id < 0 Or id >= h.slotCount Then Return 0
+    If h.slots(id).slotKind <> "ARRAY" Then Return 0
+    If newUpper < newLower Then Return 0
+
+    Dim newCount As Integer
+    newCount = newUpper - newLower + 1
+
+    Dim oldLower As Integer
+    Dim oldCount As Integer
+    Dim oldIsNativeScalar As Integer
+    Dim oldElemStride As Integer
+    Dim oldValues(Any) As UXBInterpValue
+    Dim oldNames(Any) As String
+    Dim oldRawData(Any) As UByte
+
+    oldLower = h.slots(id).lowerBound
+    oldCount = h.slots(id).count
+    oldIsNativeScalar = h.slots(id).isNativeScalar
+    oldElemStride = h.slots(id).elemStride
+
+    If preserveFlag <> 0 And oldCount > 0 Then
+        ReDim oldValues(oldCount - 1)
+        ReDim oldNames(oldCount - 1)
+        Dim oldPos As Integer
+        For oldPos = 0 To oldCount - 1
+            oldValues(oldPos) = h.slots(id).values(oldPos)
+            oldNames(oldPos) = h.slots(id).names(oldPos)
+        Next oldPos
+        If oldIsNativeScalar <> 0 And oldElemStride > 0 Then
+            ReDim oldRawData(oldCount * oldElemStride - 1)
+            Dim oldByte As Integer
+            For oldByte = 0 To oldCount * oldElemStride - 1
+                oldRawData(oldByte) = h.slots(id).rawData(oldByte)
+            Next oldByte
+        End If
+    End If
+
+    With h.slots(id)
+        ' S-056: REDIM replaces the backing store -- pointers taken before it go stale.
+        If .isNativeScalar <> 0 And oldCount > 0 Then UXBMemRefRelease CULngInt(@.rawData(0))
+        Erase .values
+        Erase .names
+        Erase .rawData
+        ReDim .values(newCount - 1)
+        ReDim .names(newCount - 1)
+        .count = newCount
+        .lowerBound = newLower
+        .upperBound = newUpper
+        .boundsDeclared = 1
+        If .isNativeScalar <> 0 Then
+            ReDim .rawData(newCount * .elemStride - 1)
+            Dim zeroPos As Integer
+            For zeroPos = 0 To newCount * .elemStride - 1
+                .rawData(zeroPos) = 0
+            Next zeroPos
+            UXBMemRefRegister UXB_MEMREF_KIND_ARRAY, CULngInt(@.rawData(0)), CULngInt(newCount * .elemStride), IIf(.ownerName = "", "array (heap slot " & LTrim(Str(id)) & ")", .ownerName)
+        End If
+    End With
+
+    If preserveFlag <> 0 And oldCount > 0 And newCount > 0 Then
+        Dim oldUpper As Integer
+        Dim overlapLower As Integer
+        Dim overlapUpper As Integer
+        oldUpper = oldLower + oldCount - 1
+        overlapLower = IIf(newLower > oldLower, newLower, oldLower)
+        overlapUpper = IIf(newUpper < oldUpper, newUpper, oldUpper)
+        If overlapUpper >= overlapLower Then
+            Dim keepIdx As Integer
+            For keepIdx = overlapLower To overlapUpper
+                h.slots(id).values(keepIdx - newLower) = oldValues(keepIdx - oldLower)
+                h.slots(id).names(keepIdx - newLower) = oldNames(keepIdx - oldLower)
+            Next keepIdx
+            If h.slots(id).isNativeScalar <> 0 And oldIsNativeScalar <> 0 And oldElemStride = h.slots(id).elemStride Then
+                Dim srcBase As Integer
+                Dim dstBase As Integer
+                Dim b As Integer
+                For keepIdx = overlapLower To overlapUpper
+                    srcBase = (keepIdx - oldLower) * oldElemStride
+                    dstBase = (keepIdx - newLower) * h.slots(id).elemStride
+                    For b = 0 To h.slots(id).elemStride - 1
+                        h.slots(id).rawData(dstBase + b) = oldRawData(srcBase + b)
+                    Next b
+                Next keepIdx
+            End If
+        End If
+    End If
+
+    Return 1
+End Function
+
+Function UXBInterpHeapSetField(ByRef h As UXBInterpHeap, ByVal id As Integer, ByVal fieldName As String, ByRef valueIn As UXBInterpValue) As Integer
+    If id < 0 Or id >= h.slotCount Then Return 0
+    If h.slots(id).active = 0 Then Return 0
+    Dim key As String = UCase(Trim(fieldName))
+    If key = "" Then Return 0
+    Dim i As Integer
+    For i = 0 To h.slots(id).count - 1
+        If UCase(h.slots(id).names(i)) = key Then
+            h.slots(id).values(i) = valueIn
+            Return 1
+        End If
+    Next i
+    If h.slots(id).count = 0 Then
+        With h.slots(id)
+            ReDim .names(0)
+            ReDim .values(0)
+        End With
+    Else
+        With h.slots(id)
+            ReDim Preserve .names(.count)
+            ReDim Preserve .values(.count)
+        End With
+    End If
+    h.slots(id).names(h.slots(id).count) = Trim(fieldName)
+    h.slots(id).values(h.slots(id).count) = valueIn
+    h.slots(id).count += 1
+    Return 1
+End Function
+
+Function UXBInterpHeapGetField(ByRef h As UXBInterpHeap, ByVal id As Integer, ByVal fieldName As String, ByRef outValue As UXBInterpValue) As Integer
+    If id < 0 Or id >= h.slotCount Then Return 0
+    If h.slots(id).active = 0 Then Return 0
+    Dim key As String = UCase(Trim(fieldName))
+    Dim i As Integer
+    For i = 0 To h.slots(id).count - 1
+        If UCase(h.slots(id).names(i)) = key Then
+            outValue = h.slots(id).values(i)
+            Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+#endif

@@ -1,0 +1,407 @@
+' Extracted from mir_lower_stmt.fbs for wave-14 modular split (phase 2)
+
+Private Function MIRSlotLaneFromStmtKind(ByRef stmtKindRaw As String, ByRef laneOut As String) As Integer
+    laneOut = ""
+    Dim k As String
+    k = UCase(Trim(stmtKindRaw))
+
+    Select Case k
+    Case "EVENT_STMT"
+        laneOut = "EVENT"
+        Return 1
+    Case "THREAD_STMT"
+        laneOut = "THREAD"
+        Return 1
+    Case "PARALEL_STMT"
+        laneOut = "PARALEL"
+        Return 1
+    Case "PIPE_STMT"
+        laneOut = "PIPE"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Function MIRSlotSafeName(ByRef rawName As String) As String
+    Dim inText As String
+    inText = UCase(Trim(rawName))
+    If inText = "" Then Return "ANON"
+
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    For i = 1 To Len(inText)
+        Dim ch As String
+        ch = Mid(inText, i, 1)
+        Dim c As Integer
+        c = Asc(ch)
+        If (c >= 65 And c <= 90) Or (c >= 48 And c <= 57) Or c = 95 Then
+            outText &= ch
+        Else
+            outText &= "_"
+        End If
+    Next i
+
+    If outText = "" Then outText = "ANON"
+    Return outText
+End Function
+
+Private Function MIRSlotEnsureFunctionEntry(ByRef module As MIRModule, ByRef functionNameRaw As String, ByRef fnIdxOut As Integer) As Integer
+    Dim fnName As String
+    fnName = UCase(Trim(functionNameRaw))
+    If fnName = "" Then Return 0
+
+    fnIdxOut = MIRFindFunctionIndex(module, fnName)
+    If fnIdxOut <> -1 Then Return 1
+
+    fnIdxOut = module.functionCount
+    If module.functionCount = 0 Then
+        ReDim module.functions(0)
+    Else
+        ReDim Preserve module.functions(module.functionCount)
+    End If
+    module.functionCount += 1
+
+    Dim fn As MIRFunction Ptr
+    fn = @module.functions(fnIdxOut)
+    fn->name = fnName
+    fn->entryBlock = 0
+    fn->localVarCount = 0
+    fn->paramVarCount = 0
+    fn->returnType = "VOID"
+
+    ReDim fn->blocks(0)
+    fn->blockCount = 1
+    fn->blocks(0).id = 0
+    fn->blocks(0).instructionCount = 0
+    fn->blocks(0).isEntry = 1
+    fn->blocks(0).isExit = 1
+    Return 1
+End Function
+
+Private Function MIRSlotLowerBlockRoutine(ByRef ps As ParseState, ByVal blockStmtIdx As Integer, ByRef module As MIRModule, ByRef tempSeed As Integer, ByRef routineNameOut As String, ByRef errText As String) As Integer
+    routineNameOut = ""
+    If blockStmtIdx < 0 Or blockStmtIdx >= ps.ast.count Then
+        errText = "mir: invalid slot block node"
+        Return 0
+    End If
+
+    Dim laneKind As String
+    If MIRSlotLaneFromStmtKind(ps.ast.nodes(blockStmtIdx).kind, laneKind) = 0 Then
+        errText = "mir: invalid slot block kind"
+        Return 0
+    End If
+
+    Dim blockName As String
+    blockName = MIRSlotSafeName(ps.ast.nodes(blockStmtIdx).value)
+    routineNameOut = "__SLOTLANE_" & laneKind & "_" & blockName
+
+    Dim slotFnIdx As Integer
+    If MIRSlotEnsureFunctionEntry(module, routineNameOut, slotFnIdx) = 0 Then
+        errText = "mir: slot lane routine create failed " & routineNameOut
+        Return 0
+    End If
+
+    Dim slotBodyBlock As Integer
+    slotBodyBlock = 0
+
+    If laneKind = "PIPE" Then
+        Dim pipeReturnDefault As String
+        pipeReturnDefault = "I64"
+        module.functions(slotFnIdx).returnType = MIRDeclaredTypeForAstNode(ps, blockStmtIdx, pipeReturnDefault)
+    Else
+        module.functions(slotFnIdx).returnType = "VOID"
+    End If
+
+    Dim firstParamName As String
+    Dim ch As Integer
+    ch = ps.ast.nodes(blockStmtIdx).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "PARAM_DECL" Then
+            Dim taskParamDefault As String
+            taskParamDefault = "I64"
+            Dim taskParamType As String
+            taskParamType = MIRDeclaredTypeForAstNode(ps, ch, taskParamDefault)
+            MIRAppendFunctionParam module, slotFnIdx, ps.ast.nodes(ch).value, taskParamType
+            If firstParamName = "" Then firstParamName = UCase(Trim(ps.ast.nodes(ch).value))
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    ' TASKIN mirrors the first typed parameter, so a task body can read its
+    ' payload without naming the parameter.  This is the task context name, not
+    ' the INPUT console statement; see common/task_context_names.fbs.
+    If firstParamName <> "" Then MIRAppendInstruction module, slotFnIdx, slotBodyBlock, MIR_OP_STORE_VAR, UXB_TASK_INPUT_NAME, 1, firstParamName
+
+    If laneKind = "PIPE" Then
+        Dim pipeDefaultResult As String
+        pipeDefaultResult = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, slotFnIdx, slotBodyBlock, MIR_OP_LOAD_CONST, pipeDefaultResult, 1, "0"
+        MIRAppendInstruction module, slotFnIdx, slotBodyBlock, MIR_OP_STORE_VAR, "__PIPE_RESULT", 1, pipeDefaultResult
+    End If
+
+    ch = ps.ast.nodes(blockStmtIdx).firstChild
+    Do While ch <> -1
+        Dim childKind As String
+        childKind = UCase(Trim(ps.ast.nodes(ch).kind))
+        If childKind <> "SLOT_HEADER_ARGS" And childKind <> "PARAM_DECL" And childKind <> "RETURN_TYPE" Then
+            If MIRLowerTopLevelStmt(ps, ch, module, slotFnIdx, slotBodyBlock, tempSeed, errText) = 0 Then Return 0
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Dim defaultTaskResult As String
+    defaultTaskResult = "__result__"
+    If laneKind = "PIPE" Then defaultTaskResult = "__PIPE_RESULT"
+    MIRAppendInstruction module, slotFnIdx, slotBodyBlock, MIR_OP_RET, "", 1, defaultTaskResult
+    Return 1
+End Function
+
+Private Function MIRSlotEmitConst(ByRef module As MIRModule, ByVal fnIdx As Integer, ByVal blkIdx As Integer, ByRef tempSeed As Integer, ByRef textValue As String, ByRef nameOut As String) As Integer
+    nameOut = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, nameOut, 1, Chr(34) & textValue & Chr(34)
+    Return 1
+End Function
+
+
+Private Function MIRSlotEntryChildByRole(ByRef ps As ParseState, ByVal entryIdx As Integer, ByRef roleRaw As String) As Integer
+    Dim wanted As String
+    wanted = UCase(Trim(roleRaw))
+    Dim ch As Integer
+    ch = ps.ast.nodes(entryIdx).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).role)) = wanted Then Return ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return -1
+End Function
+
+Private Function MIRLowerTopLevelSlotLane(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    handledOut = 1
+    If stmtIdx < 0 Or stmtIdx >= ps.ast.count Then handledOut = 0: Return 1
+
+    Dim st As ASTNode
+    st = ps.ast.nodes(stmtIdx)
+    Dim k As String
+    k = UCase(st.kind)
+
+    Select Case k
+    Case "EVENT_STMT", "THREAD_STMT", "PARALEL_STMT", "PIPE_STMT"
+        Dim laneKind As String
+        If MIRSlotLaneFromStmtKind(k, laneKind) = 0 Then
+            errText = "mir: invalid slot lane statement"
+            Return 0
+        End If
+
+        Dim laneRoutine As String
+        If MIRSlotLowerBlockRoutine(ps, stmtIdx, module, tempSeed, laneRoutine, errText) = 0 Then Return 0
+
+        Dim laneName As String
+        Dim laneNameNode As String
+        laneName = Trim(st.value)
+        If laneName = "" Then
+            errText = "mir: slot lane name cannot be empty"
+            Return 0
+        End If
+        If MIRSlotEmitConst(module, fnIdx, blkIdx, tempSeed, laneName, laneNameNode) = 0 Then Return 0
+
+        Dim laneKindNode As String
+        If MIRSlotEmitConst(module, fnIdx, blkIdx, tempSeed, laneKind, laneKindNode) = 0 Then Return 0
+
+        Dim laneIdNode As String
+        laneIdNode = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, laneIdNode, 1, "-1"
+
+        Dim headerNode As Integer
+        headerNode = ps.ast.nodes(stmtIdx).firstChild
+        Do While headerNode <> -1
+            If UCase(Trim(ps.ast.nodes(headerNode).kind)) = "SLOT_HEADER_ARGS" Then Exit Do
+            headerNode = ps.ast.nodes(headerNode).nextSibling
+        Loop
+        If headerNode <> -1 Then
+            Dim idExpr As Integer
+            idExpr = MIRChildAt(ps, headerNode, 0)
+            If idExpr <> -1 Then
+                If MIRLowerExprNode(ps, idExpr, module, fnIdx, blkIdx, tempSeed, laneIdNode, errText) = 0 Then Return 0
+            End If
+        End If
+
+        Dim laneRoutineNode As String
+        If MIRSlotEmitConst(module, fnIdx, blkIdx, tempSeed, laneRoutine, laneRoutineNode) = 0 Then Return 0
+
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 5, "SLOT_DEF", laneKindNode, laneNameNode, laneIdNode, laneRoutineNode
+        Return 1
+
+
+    Case "SLOT_TABLE_STMT"
+        Dim entryIdx As Integer
+        entryIdx = st.firstChild
+        Do While entryIdx <> -1
+            If UCase(ps.ast.nodes(entryIdx).kind) <> "SLOT_BIND_ENTRY" Then
+                errText = "mir: invalid SLOT table entry"
+                Return 0
+            End If
+
+            Dim slotNameNode As String
+            If MIRSlotEmitConst(module, fnIdx, blkIdx, tempSeed, Trim(ps.ast.nodes(entryIdx).value), slotNameNode) = 0 Then Return 0
+
+            Dim slotOpNode As String
+            If MIRSlotEmitConst(module, fnIdx, blkIdx, tempSeed, UCase(Trim(ps.ast.nodes(entryIdx).op)), slotOpNode) = 0 Then Return 0
+
+            Dim slotKindNode As String
+            If MIRSlotEmitConst(module, fnIdx, blkIdx, tempSeed, UCase(Trim(ps.ast.nodes(entryIdx).typeName)), slotKindNode) = 0 Then Return 0
+
+            Dim idIdx As Integer
+            idIdx = MIRSlotEntryChildByRole(ps, entryIdx, "SLOT_ID")
+            If idIdx = -1 Then errText = "mir: SLOT_BIND id missing": Return 0
+            Dim slotIdName As String
+            If MIRLowerExprNode(ps, idIdx, module, fnIdx, blkIdx, tempSeed, slotIdName, errText) = 0 Then Return 0
+
+            Dim targetIdx As Integer
+            targetIdx = MIRSlotEntryChildByRole(ps, entryIdx, "TARGET")
+            If targetIdx = -1 Then errText = "mir: SLOT_BIND target missing": Return 0
+            Dim targetName As String
+            If MIRLowerExprNode(ps, targetIdx, module, fnIdx, blkIdx, tempSeed, targetName, errText) = 0 Then Return 0
+
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 6, "SLOT_BIND", slotNameNode, slotIdName, slotOpNode, slotKindNode, targetName
+            entryIdx = ps.ast.nodes(entryIdx).nextSibling
+        Loop
+        Return 1
+
+    Case "SLOT_STMT"
+        Dim slotKind As String
+        slotKind = UCase(Trim(st.value))
+        If slotKind = "" Then
+            errText = "mir: SLOT kind missing"
+            Return 0
+        End If
+
+        Dim slotKindNode As String
+        If MIRSlotEmitConst(module, fnIdx, blkIdx, tempSeed, slotKind, slotKindNode) = 0 Then Return 0
+
+        Dim slotCapNode As String
+        slotCapNode = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, slotCapNode, 1, "0"
+
+        Dim capExpr As Integer
+        capExpr = MIRChildAt(ps, stmtIdx, 0)
+        If capExpr <> -1 Then
+            If MIRLowerExprNode(ps, capExpr, module, fnIdx, blkIdx, tempSeed, slotCapNode, errText) = 0 Then Return 0
+        End If
+
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 3, "SLOT_CAP", slotKindNode, slotCapNode
+        Return 1
+
+    Case "SLOT_CONTROL_STMT"
+        Dim controlKind As String
+        controlKind = UCase(Trim(st.value))
+        Dim controlKindNode As String
+        If MIRSlotEmitConst(module, fnIdx, blkIdx, tempSeed, controlKind, controlKindNode) = 0 Then Return 0
+
+        Dim targetNodeIdx As Integer
+        targetNodeIdx = MIRChildAt(ps, stmtIdx, 0)
+        If targetNodeIdx = -1 Then
+            errText = "mir: slot control target missing"
+            Return 0
+        End If
+
+        Dim targetName As String
+        If MIRLowerExprNode(ps, targetNodeIdx, module, fnIdx, blkIdx, tempSeed, targetName, errText) = 0 Then Return 0
+
+        Dim opName As String
+        opName = UCase(Trim(st.op))
+        Dim explicitSlotNode As Integer
+        explicitSlotNode = MIRChildAt(ps, stmtIdx, 1)
+        Dim explicitSlotName As String
+        If explicitSlotNode <> -1 Then
+            If MIRLowerExprNode(ps, explicitSlotNode, module, fnIdx, blkIdx, tempSeed, explicitSlotName, errText) = 0 Then Return 0
+        End If
+        If opName = "ON" Then
+            If explicitSlotNode <> -1 Then
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 4, "SLOT_ON", controlKindNode, targetName, explicitSlotName
+            Else
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 3, "SLOT_ON", controlKindNode, targetName
+            End If
+        ElseIf opName = "OFF" Then
+            If explicitSlotNode <> -1 Then
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 4, "SLOT_OFF", controlKindNode, targetName, explicitSlotName
+            Else
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 3, "SLOT_OFF", controlKindNode, targetName
+            End If
+        Else
+            errText = "mir: invalid SLOT control op " & st.op
+            Return 0
+        End If
+        Return 1
+
+    Case "TRIGGER_STMT"
+        Dim triggerKind As String
+        triggerKind = UCase(Trim(st.value))
+        If triggerKind = "" Or triggerKind = "TASK" Then triggerKind = UCase(Trim(st.typeName))
+        If triggerKind = "" Then triggerKind = "TASK"
+
+        Dim triggerTargetIdx As Integer
+        triggerTargetIdx = MIRChildAt(ps, stmtIdx, 0)
+        If triggerTargetIdx = -1 Then
+            errText = "mir: TRIGGER target missing"
+            Return 0
+        End If
+
+        Dim triggerTargetText As String
+        triggerTargetText = UCase(Trim(ps.ast.nodes(triggerTargetIdx).value))
+        If triggerTargetText = "" Then
+            errText = "mir: TRIGGER named target required for typed task call"
+            Return 0
+        End If
+        Dim taskRoutineName As String
+        taskRoutineName = "__SLOTLANE_" & triggerKind & "_" & MIRSlotSafeName(triggerTargetText)
+
+        Dim taskArgCount As Integer
+        taskArgCount = MIRChildCount(ps, stmtIdx) - 1
+        If taskArgCount < 0 Then taskArgCount = 0
+        If taskArgCount > 15 Then
+            errText = "mir: TRIGGER arguman sayisi limiti asildi"
+            Return 0
+        End If
+
+        Dim ta1 As String, ta2 As String, ta3 As String, ta4 As String, ta5 As String, ta6 As String, ta7 As String, ta8 As String
+        Dim ta9 As String, ta10 As String, ta11 As String, ta12 As String, ta13 As String, ta14 As String, ta15 As String, ta16 As String
+        ta1 = taskRoutineName
+        Dim taskArgPos As Integer
+        For taskArgPos = 0 To taskArgCount - 1
+            Dim taskArgNode As Integer
+            taskArgNode = MIRChildAt(ps, stmtIdx, taskArgPos + 1)
+            Dim taskArgName As String
+            If MIRLowerExprNode(ps, taskArgNode, module, fnIdx, blkIdx, tempSeed, taskArgName, errText) = 0 Then Return 0
+            Select Case taskArgPos + 2
+            Case 2: ta2 = taskArgName
+            Case 3: ta3 = taskArgName
+            Case 4: ta4 = taskArgName
+            Case 5: ta5 = taskArgName
+            Case 6: ta6 = taskArgName
+            Case 7: ta7 = taskArgName
+            Case 8: ta8 = taskArgName
+            Case 9: ta9 = taskArgName
+            Case 10: ta10 = taskArgName
+            Case 11: ta11 = taskArgName
+            Case 12: ta12 = taskArgName
+            Case 13: ta13 = taskArgName
+            Case 14: ta14 = taskArgName
+            Case 15: ta15 = taskArgName
+            Case 16: ta16 = taskArgName
+            End Select
+        Next taskArgPos
+
+        Dim taskCallResult As String
+        taskCallResult = ""
+        If triggerKind = "PIPE" Then taskCallResult = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, taskCallResult, taskArgCount + 1, ta1, ta2, ta3, ta4, ta5, ta6, ta7, ta8, ta9, ta10, ta11, ta12, ta13, ta14, ta15, ta16
+        If triggerKind = "PIPE" Then MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, UXB_TASK_RESULT_NAME, 1, taskCallResult
+        Return 1
+
+    Case Else
+        handledOut = 0
+        Return 1
+    End Select
+End Function

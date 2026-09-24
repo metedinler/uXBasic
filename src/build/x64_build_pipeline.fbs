@@ -1,0 +1,966 @@
+#include once "../parser/parser.fbs"
+#include once "../codegen/x64/cg_context.fbs"
+#include once "../codegen/x64/ffi_call_backend.fbs"
+#include once "../codegen/x64/inline_backend.fbs"
+#include once "../common/report_writer.fbs"
+
+Declare Function X64BuildStripCr(ByRef textIn As String) As String
+
+Private Function X64BuildSaveTextFile(ByRef filePath As String, ByRef textIn As String, ByRef errText As String) As Integer
+    UXBReportEnsureParentDir filePath
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Output As #f
+    If Err <> 0 Then
+        errText = "x64-build: cannot write " & filePath
+        Return 0
+    End If
+
+    Print #f, textIn;
+    Close #f
+    Return 1
+End Function
+
+Private Function X64BuildLoadTextFile(ByRef filePath As String, ByRef textOut As String, ByRef errText As String) As Integer
+    Dim f As Integer
+    f = FreeFile
+
+    Open filePath For Input As #f
+    If Err <> 0 Then
+        errText = "x64-build: cannot read " & filePath
+        Return 0
+    End If
+
+    textOut = ""
+    Do While Not Eof(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        textOut &= lineText & Chr(13) & Chr(10)
+    Loop
+
+    Close #f
+    Return 1
+End Function
+
+Private Sub X64BuildEnsureDir(ByRef dirPath As String)
+    UXBReportEnsureDir dirPath
+End Sub
+
+Private Function X64BuildElapsedMs(ByVal startTick As Double) As Integer
+    Dim nowTick As Double
+    nowTick = Timer
+    If nowTick < startTick Then nowTick += 86400.0
+    Return CInt((nowTick - startTick) * 1000.0)
+End Function
+
+Private Function X64BuildAcquireGlobalSlot(ByRef sourcePath As String, ByRef errText As String) As Integer
+    Dim lockRoot As String
+    lockRoot = "build\manual\locks"
+
+    Dim lockPath As String
+    lockPath = lockRoot & "\x64_native_slot_0.lock"
+
+    X64BuildEnsureDir "build"
+    X64BuildEnsureDir lockRoot
+
+    Dim startTick As Double
+    startTick = Timer
+
+    Do
+        Err = 0
+        MkDir lockPath
+        If Err = 0 Then
+            Dim ownerText As String
+            ownerText = "source=" & PathNormalize(sourcePath) & Chr(13) & Chr(10)
+            ownerText &= "acquired_ms=" & LTrim(Str(X64BuildElapsedMs(startTick))) & Chr(13) & Chr(10)
+
+            Dim ownerErr As String
+            ownerErr = ""
+            X64BuildSaveTextFile lockPath & "\owner.txt", ownerText, ownerErr
+            Return 1
+        End If
+
+        Err = 0
+        If X64BuildElapsedMs(startTick) >= 120000 Then
+            errText = "x64-build: native slot wait timeout (" & lockPath & ")"
+            Return 0
+        End If
+
+        Sleep 100
+    Loop
+End Function
+
+Private Sub X64BuildReleaseGlobalSlot()
+    Dim lockPath As String
+    lockPath = "build\manual\locks\x64_native_slot_0.lock"
+
+    If Dir(lockPath & "\owner.txt") <> "" Then
+        Kill lockPath & "\owner.txt"
+        Err = 0
+    End If
+
+    RmDir lockPath
+    Err = 0
+End Sub
+
+Private Function X64BuildSlashify(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+    outText = ""
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        If Asc(ch) = 92 Then
+            outText &= "/"
+        Else
+            outText &= ch
+        End If
+    Next i
+    Return outText
+End Function
+
+Private Function X64BuildRspQuotePath(ByRef pathIn As String) As String
+    Dim normalized As String
+    normalized = pathIn
+    If Len(normalized) >= 2 Then
+        If Mid(normalized, 2, 1) <> ":" Then normalized = PathNormalize(CurDir & "\" & normalized)
+    Else
+        normalized = PathNormalize(CurDir & "\" & normalized)
+    End If
+    normalized = X64BuildSlashify(normalized)
+    Return Chr(34) & normalized & Chr(34)
+End Function
+
+Private Function X64BuildFindRuntimeImportLib() As String
+    ' Prefer the compiler installation; retain checkout-local lookup for dev hosts.
+    Dim candidates(0 To 6) As String
+    candidates(0) = ExePath & "\libuxb_runtime.dll.a"
+    candidates(1) = ExePath & "\..\native\uxb_runtime\build\libuxb_runtime.dll.a"
+    candidates(2) = ExePath & "\..\dist\libraries\lib\libuxb_runtime.dll.a"
+    candidates(3) = ExePath & "\native\uxb_runtime\build\libuxb_runtime.dll.a"
+    candidates(4) = CurDir & "\native\uxb_runtime\build\libuxb_runtime.dll.a"
+    candidates(5) = CurDir & "\dist\libraries\lib\libuxb_runtime.dll.a"
+    candidates(6) = CurDir & "\bin\libuxb_runtime.dll.a"
+
+    Dim i As Integer
+    For i = 0 To 6
+        If FileExistsPath(candidates(i)) <> 0 Then Return candidates(i)
+    Next
+    Return ""
+End Function
+
+Private Function X64BuildFindBigRuntimeImportLib() As String
+    Dim candidates(0 To 1) As String
+    candidates(0) = "dist\runtime_ext\libuxb_bigfp.dll.a"
+    candidates(1) = "bin\libuxb_bigfp.dll.a"
+    Dim i As Integer
+    For i = 0 To 1
+        If FileExistsPath(candidates(i)) <> 0 Then Return candidates(i)
+    Next
+    Return ""
+End Function
+
+Private Function X64BuildAsmNeedsRuntimeDll(ByRef asmText As String) As Integer
+    If InStr(asmText, "__uxb_rt_") > 0 Then Return 1
+    If InStr(asmText, "uxb_rt_init") > 0 Then Return 1
+    If InStr(asmText, "uxb_task_register") > 0 Then Return 1
+    If InStr(asmText, "uxb_slot_bind") > 0 Then Return 1
+    If InStr(asmText, "uxb_task_trigger") > 0 Then Return 1
+    If InStr(asmText, "uxb_thread_start") > 0 Then Return 1
+    If InStr(asmText, "uxb_pipe_run") > 0 Then Return 1
+    If InStr(asmText, "uxb_parallel_run") > 0 Then Return 1
+    Return 0
+End Function
+
+Private Function X64BuildCsvField(ByRef lineText As String, ByVal wantedIdx As Integer) As String
+    Dim colIdx As Integer
+    Dim startPos As Integer
+    startPos = 1
+
+    For colIdx = 0 To wantedIdx
+        Dim commaPos As Integer
+        commaPos = InStr(startPos, lineText, ",")
+        If colIdx = wantedIdx Then
+            If commaPos = 0 Then Return Trim(Mid(lineText, startPos))
+            Return Trim(Mid(lineText, startPos, commaPos - startPos))
+        End If
+        If commaPos = 0 Then Return ""
+        startPos = commaPos + 1
+    Next
+
+    Return ""
+End Function
+
+Private Function X64BuildDllBaseName(ByRef dllPathRaw As String) As String
+    Dim t As String
+    t = Trim(dllPathRaw)
+    If t = "" Then Return ""
+
+    Dim i As Integer
+    For i = Len(t) To 1 Step -1
+        Dim ch As String
+        ch = Mid(t, i, 1)
+        If ch = "\" Or ch = "/" Then Return Mid(t, i + 1)
+    Next
+
+    Return t
+End Function
+
+Private Function X64BuildIsSafeDllBaseName(ByRef dllBaseRaw As String) As Integer
+    Dim n As String
+    n = Trim(dllBaseRaw)
+    If Len(n) < 5 Then Return 0
+    If UCase(Right(n, 4)) <> ".DLL" Then Return 0
+    If InStr(n, "..") > 0 Then Return 0
+
+    Dim i As Integer
+    For i = 1 To Len(n)
+        Dim c As Integer
+        c = Asc(Mid(n, i, 1))
+        If (c >= 48 And c <= 57) Or (c >= 65 And c <= 90) Or (c >= 97 And c <= 122) Or c = 45 Or c = 46 Or c = 95 Then
+            ' safe basename character
+        Else
+            Return 0
+        End If
+    Next
+
+    Return 1
+End Function
+
+' The directories a bundled DLL is searched in, in priority order (shared by the copy
+' commands and by the dependency scan below).
+Const X64BUILD_FFI_SOURCE_DIR_COUNT As Integer = 11
+Private Function X64BuildFfiSourceDirAt(ByVal idx As Integer) As String
+    Select Case idx
+    Case 0: Return "bin"
+    Case 1: Return "dist\libraries\bin"
+    Case 2: Return "dist\runtime_ext"
+    Case 3: Return "native\uxb_runtime\build"
+    Case 4: Return "dist\runtime_ext\deps\uxdataset"
+    Case 5: Return "dist\runtime_ext\deps\uxonnx"
+    Case 6: Return "dist\runtime_ext\deps\uxonnx\lib"
+    Case 7: Return "dist\runtime_ext\deps\uxonnx2"
+    Case 8: Return "dist\runtime_ext\deps\uxtensor"
+    Case 9: Return "build\libraries\tests\abi10"
+    Case 10: Return "tests\libraries\abi10\build"
+    End Select
+    Return ""
+End Function
+
+Private Function X64BuildFfiDllCopyCommandsForName(ByRef dllBaseRaw As String, ByVal warnMissing As Integer) As String
+    Dim dllBase As String
+    dllBase = LCase(Trim(dllBaseRaw))
+    If X64BuildIsSafeDllBaseName(dllBase) = 0 Then Return ""
+
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 0 To X64BUILD_FFI_SOURCE_DIR_COUNT - 1
+        Dim srcPath As String
+        srcPath = PathNormalize(CurDir & "\" & X64BuildFfiSourceDirAt(i) & "\" & dllBase)
+        outText &= "if not exist ""%~dp0" & dllBase & """ if exist """ & srcPath & """ copy /Y """ & srcPath & """ ""%~dp0" & dllBase & """ >nul" & Chr(13) & Chr(10)
+    Next
+
+    If warnMissing <> 0 Then
+        outText &= "if not exist ""%~dp0" & dllBase & """ echo [x64-build] warning: FFI DLL not bundled: " & dllBase & Chr(13) & Chr(10)
+    End If
+
+    Return outText
+End Function
+
+' ---- exact dependency bundling -------------------------------------------------
+' A bundled FFI DLL needs the DLLs IT imports (uxgsl.dll -> libgsl-28.dll -> ...).
+' The build used to copy a fixed list of common runtime DLLs (incl. the 42 MB
+' libopenblas.dll) for EVERY FFI build -- even a program that only calls kernel32 --
+' and that list lacked the GSL DLLs, so a native uxgsl program failed with
+' "LoadLibraryA dll=uxgsl.dll". Instead the PE import table of each bundled DLL is
+' read and the imports that exist in the known source directories are bundled
+' transitively. Windows system DLLs are never copied.
+
+Private Function X64BuildIsSystemDllName(ByRef dllBaseRaw As String) As Integer
+    Dim n As String
+    n = LCase(Trim(dllBaseRaw))
+    If Left(n, 7) = "api-ms-" Or Left(n, 7) = "ext-ms-" Then Return 1
+    Select Case n
+    Case "kernel32.dll", "kernelbase.dll", "user32.dll", "gdi32.dll", "advapi32.dll", "shell32.dll", "ole32.dll", "oleaut32.dll", _
+         "ws2_32.dll", "wsock32.dll", "winmm.dll", "msvcrt.dll", "ucrtbase.dll", "ntdll.dll", "comdlg32.dll", "comctl32.dll", _
+         "shlwapi.dll", "wininet.dll", "winhttp.dll", "bcrypt.dll", "crypt32.dll", "psapi.dll", "version.dll", "iphlpapi.dll", _
+         "opengl32.dll", "glu32.dll", "dwmapi.dll", "imm32.dll", "setupapi.dll", "secur32.dll", "netapi32.dll", "userenv.dll", _
+         "rpcrt4.dll", "sechost.dll", "combase.dll", "msvcp_win.dll", "d3d9.dll", "d3d11.dll", "dxgi.dll", "dsound.dll", _
+         "xinput1_4.dll", "hid.dll", "cfgmgr32.dll", "mswsock.dll", "normaliz.dll", "shcore.dll", "uxtheme.dll", "wtsapi32.dll", _
+         "dnsapi.dll", "mpr.dll", "powrprof.dll", "avrt.dll", "ncrypt.dll", "wldap32.dll", "msimg32.dll", "oleacc.dll"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+' First existing copy of a DLL in the bundle source directories.
+Private Function X64BuildFindDllSource(ByRef dllBaseRaw As String, ByRef pathOut As String) As Integer
+    pathOut = ""
+    Dim dllBase As String
+    dllBase = LCase(Trim(dllBaseRaw))
+    If X64BuildIsSafeDllBaseName(dllBase) = 0 Then Return 0
+    Dim i As Integer
+    For i = 0 To X64BUILD_FFI_SOURCE_DIR_COUNT - 1
+        Dim candidate As String
+        candidate = PathNormalize(CurDir & "\" & X64BuildFfiSourceDirAt(i) & "\" & dllBase)
+        If FileExistsPath(candidate) <> 0 Then
+            pathOut = candidate
+            Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+Private Function X64BuildPeRvaToOffset(ByVal f As Integer, ByVal secTableOff As LongInt, ByVal secCount As Integer, ByVal rva As ULong, ByRef offOut As LongInt) As Integer
+    Dim i As Integer
+    For i = 0 To secCount - 1
+        Dim secOff As LongInt
+        secOff = secTableOff + i * 40
+        Dim vSize As ULong
+        Dim vAddr As ULong
+        Dim rawSize As ULong
+        Dim rawPtr As ULong
+        Get #f, secOff + 9, vSize
+        Get #f, secOff + 13, vAddr
+        Get #f, secOff + 17, rawSize
+        Get #f, secOff + 21, rawPtr
+        Dim span As ULong
+        span = vSize
+        If rawSize > span Then span = rawSize
+        If rva >= vAddr And rva < vAddr + span Then
+            offOut = CLngInt(rawPtr) + CLngInt(rva - vAddr)
+            Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+' Reads the PE import directory of a 64-bit DLL: importsOut = "|name.dll|other.dll|"
+' (lower case). Returns 0 when the file is not a readable PE32+ image.
+Private Function X64BuildReadDllImports(ByRef filePath As String, ByRef importsOut As String) As Integer
+    importsOut = "|"
+    Dim f As Integer
+    f = FreeFile
+    If Open(filePath For Binary Access Read As #f) <> 0 Then Return 0
+
+    Dim ok As Integer
+    ok = 0
+    Do
+        Dim fileLen As LongInt
+        fileLen = LOF(f)
+        If fileLen < 512 Then Exit Do
+        Dim peOff As Long
+        Get #f, &h3C + 1, peOff
+        If peOff <= 0 Or peOff > fileLen - 264 Then Exit Do
+        Dim peSig As ULong
+        Get #f, peOff + 1, peSig
+        If peSig <> &h00004550UL Then Exit Do
+        Dim secCount As UShort
+        Dim optSize As UShort
+        Dim optMagic As UShort
+        Get #f, peOff + 6 + 1, secCount
+        Get #f, peOff + 20 + 1, optSize
+        Get #f, peOff + 24 + 1, optMagic
+        If optMagic <> &h20B Then Exit Do
+        If secCount = 0 Or secCount > 96 Then Exit Do
+
+        Dim importRva As ULong
+        Get #f, peOff + 24 + 112 + 8 + 1, importRva
+        If importRva = 0 Then
+            ok = 1
+            Exit Do
+        End If
+
+        Dim secTableOff As LongInt
+        secTableOff = CLngInt(peOff) + 24 + optSize
+        Dim descBase As LongInt
+        If X64BuildPeRvaToOffset(f, secTableOff, secCount, importRva, descBase) = 0 Then Exit Do
+
+        Dim k As Integer
+        For k = 0 To 511
+            Dim nameRva As ULong
+            Get #f, descBase + k * 20 + 12 + 1, nameRva
+            If nameRva = 0 Then Exit For
+            Dim nameOff As LongInt
+            If X64BuildPeRvaToOffset(f, secTableOff, secCount, nameRva, nameOff) = 0 Then Continue For
+            Dim nm As String
+            nm = ""
+            Dim j As Integer
+            For j = 0 To 259
+                Dim ch As UByte
+                Get #f, nameOff + j + 1, ch
+                If ch = 0 Then Exit For
+                nm &= Chr(ch)
+            Next j
+            nm = LCase(nm)
+            If nm <> "" And InStr(importsOut, "|" & nm & "|") = 0 Then importsOut &= nm & "|"
+        Next k
+        ok = 1
+    Loop While 0
+    Close #f
+    Return ok
+End Function
+
+' Copy commands for the transitive imports of dllBase that exist in the bundle
+' directories. analyzeFailed is set to 1 when a bundled DLL could not be analysed.
+Private Sub X64BuildCollectDllDeps(ByRef dllBase As String, ByRef visited As String, ByRef outText As String, ByVal depth As Integer, ByRef analyzeFailed As Integer)
+    If depth > 8 Then Exit Sub
+    Dim key As String
+    key = "|" & LCase(Trim(dllBase)) & "|"
+    If InStr(visited, key) > 0 Then Exit Sub
+    visited &= key
+
+    Dim srcPath As String
+    If X64BuildFindDllSource(dllBase, srcPath) = 0 Then Exit Sub
+
+    Dim importsText As String
+    If X64BuildReadDllImports(srcPath, importsText) = 0 Then
+        analyzeFailed = 1
+        Exit Sub
+    End If
+
+    Dim posStart As Integer
+    posStart = 2
+    Do While posStart <= Len(importsText)
+        Dim posEnd As Integer
+        posEnd = InStr(posStart, importsText, "|")
+        If posEnd = 0 Then Exit Do
+        Dim impName As String
+        impName = Mid(importsText, posStart, posEnd - posStart)
+        posStart = posEnd + 1
+        If impName = "" Then Continue Do
+        If X64BuildIsSystemDllName(impName) <> 0 Then Continue Do
+        Dim impSrc As String
+        If X64BuildFindDllSource(impName, impSrc) = 0 Then Continue Do
+        outText &= X64BuildFfiDllCopyCommandsForName(impName, 0)
+        X64BuildCollectDllDeps impName, visited, outText, depth + 1, analyzeFailed
+    Loop
+End Sub
+
+Private Function X64BuildFfiCommonDependencyCopyCommands() As String
+    Dim depNames(0 To 8) As String
+    depNames(0) = "libgcc_s_seh-1.dll"
+    depNames(1) = "libstdc++-6.dll"
+    depNames(2) = "libwinpthread-1.dll"
+    depNames(3) = "libgfortran-5.dll"
+    depNames(4) = "libquadmath-0.dll"
+    depNames(5) = "libopenblas.dll"
+    depNames(6) = "libffi-8.dll"
+    depNames(7) = "libtbb12.dll"
+    depNames(8) = "libuv-1.dll"
+
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 0 To 8
+        outText &= X64BuildFfiDllCopyCommandsForName(depNames(i), 0)
+    Next
+
+    Return outText
+End Function
+
+Private Function X64BuildFfiRuntimeDllCopyCommands(ByRef interopDir As String, ByRef outText As String, ByRef errText As String) As Integer
+    outText = ""
+
+    Dim resolverCsvPath As String
+    resolverCsvPath = interopDir & "\ffi_call_x64_resolver.csv"
+    If FileExistsPath(resolverCsvPath) = 0 Then Return 1
+
+    Dim csvText As String
+    If X64BuildLoadTextFile(resolverCsvPath, csvText, errText) = 0 Then Return 0
+
+    Dim usedKeys As String
+    usedKeys = ""
+    Dim sawFfiDll As Integer
+    sawFfiDll = 0
+    Dim depVisited As String
+    depVisited = ""
+    Dim depAnalyzeFailed As Integer
+    depAnalyzeFailed = 0
+
+    Dim posLine As Integer
+    posLine = 1
+    Dim rowNo As Integer
+    rowNo = 0
+
+    Do While posLine <= Len(csvText)
+        Dim nextLf As Integer
+        nextLf = InStr(posLine, csvText, Chr(10))
+
+        Dim lineText As String
+        If nextLf = 0 Then
+            lineText = Mid(csvText, posLine)
+            posLine = Len(csvText) + 1
+        Else
+            lineText = Mid(csvText, posLine, nextLf - posLine)
+            posLine = nextLf + 1
+        End If
+
+        lineText = Trim(X64BuildStripCr(lineText))
+        If lineText = "" Then Continue Do
+        rowNo += 1
+        If rowNo = 1 Then Continue Do
+
+        Dim dllField As String
+        dllField = X64BuildCsvField(lineText, 1)
+
+        Dim dllBase As String
+        dllBase = X64BuildDllBaseName(dllField)
+        If X64BuildIsSafeDllBaseName(dllBase) = 0 Then Continue Do
+        ' Windows system DLLs (kernel32, msvcrt, ...) are loaded from the system
+        ' directory: nothing to bundle and no "not bundled" warning.
+        If X64BuildIsSystemDllName(dllBase) <> 0 Then Continue Do
+
+        Dim key As String
+        key = "|" & UCase(dllBase) & "|"
+        If InStr(usedKeys, key) = 0 Then
+            usedKeys &= key
+            sawFfiDll = 1
+            outText &= X64BuildFfiDllCopyCommandsForName(dllBase, 1)
+            X64BuildCollectDllDeps dllBase, depVisited, outText, 0, depAnalyzeFailed
+        End If
+    Loop
+
+    ' The old fixed list is only a fallback for a DLL whose import table could not be read.
+    If sawFfiDll <> 0 And depAnalyzeFailed <> 0 Then outText &= X64BuildFfiCommonDependencyCopyCommands()
+
+    Return 1
+End Function
+
+Private Function X64BuildEmitInlineArtifacts(ByRef ps As ParseState, ByRef outputDir As String, ByRef errText As String) As Integer
+    Dim inlinePlan As String
+    Dim inlineErr As String
+
+    If InlineX64BackendEmitPlan(ps, inlinePlan, inlineErr) = 0 Then
+        If Instr(UCase(inlineErr), "NO INLINE BLOCK FOUND") > 0 Then
+            errText = ""
+            Return 1
+        End If
+
+        errText = inlineErr
+        Return 0
+    End If
+
+    X64BuildEnsureDir outputDir
+
+    Dim planPath As String
+    planPath = outputDir & "\inline_x64_plan.csv"
+    Return X64BuildSaveTextFile(planPath, inlinePlan, errText)
+End Function
+
+Private Function X64BuildStripCr(ByRef textIn As String) As String
+    Dim outText As String
+    Dim i As Integer
+    outText = ""
+    For i = 1 To Len(textIn)
+        Dim ch As String
+        ch = Mid(textIn, i, 1)
+        If Asc(ch) <> 13 Then outText &= ch
+    Next i
+    Return outText
+End Function
+
+Private Function X64BuildEnsureFfiStubExports(ByRef interopDir As String, ByRef errText As String) As Integer
+    Dim planPath As String
+    planPath = interopDir & "\ffi_call_x64_plan.csv"
+
+    Dim asmPath As String
+    asmPath = interopDir & "\ffi_call_x64_stubs.asm"
+
+    If FileExistsPath(planPath) = 0 Or FileExistsPath(asmPath) = 0 Then Return 1
+
+    Dim asmText As String
+    If X64BuildLoadTextFile(asmPath, asmText, errText) = 0 Then Return 0
+
+    Dim planText As String
+    If X64BuildLoadTextFile(planPath, planText, errText) = 0 Then Return 0
+
+    Dim exportText As String
+    exportText = ""
+
+    Dim posLine As Integer
+    posLine = 1
+    Dim rowNo As Integer
+    rowNo = 0
+
+    Do While posLine <= Len(planText)
+        Dim nextLf As Integer
+        nextLf = InStr(posLine, planText, Chr(10))
+
+        Dim lineText As String
+        If nextLf = 0 Then
+            lineText = Mid(planText, posLine)
+            posLine = Len(planText) + 1
+        Else
+            lineText = Mid(planText, posLine, nextLf - posLine)
+            posLine = nextLf + 1
+        End If
+
+        lineText = Trim(X64BuildStripCr(lineText))
+        If lineText = "" Then Continue Do
+        rowNo += 1
+        If rowNo = 1 Then Continue Do
+
+        Dim cols(0 To 10) As String
+        Dim colIdx As Integer
+        Dim startPos As Integer
+        startPos = 1
+
+        For colIdx = 0 To 10
+            Dim commaPos As Integer
+            commaPos = InStr(startPos, lineText, ",")
+            If commaPos = 0 Then
+                cols(colIdx) = Mid(lineText, startPos)
+                Exit For
+            Else
+                cols(colIdx) = Mid(lineText, startPos, commaPos - startPos)
+                startPos = commaPos + 1
+            End If
+        Next colIdx
+
+        Dim stubId As String
+        stubId = LTrim(Str(rowNo - 1))
+
+        exportText &= "global __uxb_ffi_stub_" & stubId & Chr(10)
+        exportText &= "global __uxb_ffi_symptr_" & stubId & Chr(10)
+
+        Dim argCount As Integer
+        argCount = Val(cols(5))
+        Dim argIdx As Integer
+        For argIdx = 1 To argCount
+            exportText &= "global __uxb_ffi_arg_" & stubId & "_" & LTrim(Str(argIdx)) & Chr(10)
+        Next argIdx
+    Loop
+
+    If exportText = "" Then Return 1
+
+    Dim patched As String
+    patched = asmText
+
+    If InStr(patched, "global __uxb_ffi_symptr_") = 0 Then
+        patched = exportText & Chr(10) & patched
+    End If
+
+    Return X64BuildSaveTextFile(asmPath, patched, errText)
+End Function
+
+Private Function X64BuildEmitStatusReport(ByRef ps As ParseState, ByRef sourcePath As String, ByRef reportPath As String, ByRef errText As String) As Integer
+    Dim reportText As String
+    reportText = "# uXBasic x64 Build Status" & Chr(13) & Chr(10) & Chr(13) & Chr(10)
+    reportText &= "- source: " & sourcePath & Chr(13) & Chr(10)
+    reportText &= "- AST node count: " & LTrim(Str(ps.ast.count)) & Chr(13) & Chr(10)
+    reportText &= "- x64 lane status: partial, statement-oriented native emit + import/ffi/link pipeline" & Chr(13) & Chr(10)
+    reportText &= "- current guarantees: asm output, object build, import object aggregation, rsp generation, linker invocation, final exe emission" & Chr(13) & Chr(10)
+    reportText &= "- known limits: x64 codegen still does not cover every language construct from PCK4/inceleme, INLINE is reported/planned as artifact but not yet semantically woven into main AST emit path" & Chr(13) & Chr(10)
+    reportText &= "- recommendation: use this report together with COMPILER_TODO.md and generated interop artifacts" & Chr(13) & Chr(10)
+
+    Return X64BuildSaveTextFile(reportPath, reportText, errText)
+End Function
+
+Private Function X64BuildEmitArtifactsCore(ByRef ps As ParseState, ByRef sourcePath As String, ByRef outputDir As String, ByRef exeFileName As String, ByVal useProvidedAsm As Integer, ByRef providedAsmText As String, ByRef errText As String) As Integer
+    Dim outDir As String
+    outDir = outputDir
+    If Trim(outDir) = "" Then outDir = "build\manual\exe\x64build"
+
+    X64BuildEnsureDir "build"
+    X64BuildEnsureDir outDir
+    X64BuildEnsureDir outDir & "\obj"
+    X64BuildEnsureDir outDir & "\interop"
+    X64BuildEnsureDir outDir & "\inline"
+
+    Dim asmText As String
+    If useProvidedAsm <> 0 Then
+        asmText = providedAsmText
+        If Trim(asmText) = "" Then
+            errText = "x64-build: provided compiler ASM is empty"
+            Return 0
+        End If
+    Else
+        If GenerateX64Code(ps, asmText, errText) = 0 Then Return 0
+    End If
+    Dim needsRuntimeDll As Integer
+    needsRuntimeDll = X64BuildAsmNeedsRuntimeDll(asmText)
+    Dim needsBigRuntime As Integer
+    needsBigRuntime = IIf(InStr(asmText, "call __uxb_rt_biginit_text") > 0, 1, 0)
+
+    Dim asmPath As String
+    asmPath = outDir & "\program.asm"
+    If X64BuildSaveTextFile(asmPath, asmText, errText) = 0 Then Return 0
+
+    Dim manifest As InteropManifest
+    If ResolveInteropManifestForSource(sourcePath, manifest, errText) = 0 Then Return 0
+    If EmitInteropArtifacts(manifest, outDir & "\interop", errText) = 0 Then Return 0
+    If FfiX64BackendEmitArtifacts(ps, outDir & "\interop", errText) = 0 Then Return 0
+    If X64BuildEnsureFfiStubExports(outDir & "\interop", errText) = 0 Then Return 0
+    Dim needsStandaloneFfiStubs As Integer
+    needsStandaloneFfiStubs = 0
+    If FileExistsPath(outDir & "\interop\ffi_call_x64_stubs.asm") <> 0 Then
+        If InStr(asmText, "extern __uxb_ffi_stub_") > 0 And InStr(asmText, "global __uxb_ffi_stub_") = 0 Then needsStandaloneFfiStubs = 1
+    End If
+    Dim ffiRuntimeDllCopyText As String
+    If X64BuildFfiRuntimeDllCopyCommands(outDir & "\interop", ffiRuntimeDllCopyText, errText) = 0 Then Return 0
+    If InlineX64BackendValidate(ps, errText) = 0 Then
+        If Instr(UCase(errText), "NO INLINE BLOCK FOUND") = 0 Then Return 0
+        errText = ""
+    Else
+        If X64BuildEmitInlineArtifacts(ps, outDir & "\inline", errText) = 0 Then Return 0
+    End If
+
+    Dim rspText As String
+    rspText = X64BuildRspQuotePath(outDir & "\obj\program.obj") & Chr(13) & Chr(10)
+    If FileExistsPath(outDir & "\interop\ffi_resolver.c") <> 0 Then
+        rspText &= X64BuildRspQuotePath(outDir & "\obj\ffi_resolver.obj") & Chr(13) & Chr(10)
+    End If
+    If needsStandaloneFfiStubs <> 0 Then
+        rspText &= X64BuildRspQuotePath(outDir & "\obj\ffi_call_x64_stubs.obj") & Chr(13) & Chr(10)
+    End If
+
+    Dim importRspPath As String
+    importRspPath = outDir & "\interop\import_link_args.rsp"
+    Dim importRspText As String
+    Dim importRspErr As String
+    If X64BuildLoadTextFile(importRspPath, importRspText, importRspErr) <> 0 Then
+        If Trim(importRspText) <> "" Then rspText &= importRspText
+    End If
+
+    If needsRuntimeDll <> 0 Then
+        Dim runtimeImportLib As String
+        runtimeImportLib = X64BuildFindRuntimeImportLib()
+        If Trim(runtimeImportLib) = "" Then
+            errText = "x64-build: uxb_runtime import library missing; run native\uxb_runtime\build_runtime_dll.bat"
+            Return 0
+        End If
+        If Right(rspText, 2) <> Chr(13) & Chr(10) Then rspText &= Chr(13) & Chr(10)
+        rspText &= X64BuildRspQuotePath(runtimeImportLib) & Chr(13) & Chr(10)
+    End If
+    If needsBigRuntime <> 0 Then
+        Dim bigRuntimeImportLib As String
+        bigRuntimeImportLib = X64BuildFindBigRuntimeImportLib()
+        If Trim(bigRuntimeImportLib) = "" Then
+            errText = "x64-build: uxb_bigfp import library missing; run runtime_ext\bigfp\build_bigfp_dll.bat"
+            Return 0
+        End If
+        If Right(rspText, 2) <> Chr(13) & Chr(10) Then rspText &= Chr(13) & Chr(10)
+        rspText &= X64BuildRspQuotePath(bigRuntimeImportLib) & Chr(13) & Chr(10)
+    End If
+
+    Dim finalRspPath As String
+    finalRspPath = outDir & "\program_link_args.rsp"
+    If X64BuildSaveTextFile(finalRspPath, rspText, errText) = 0 Then Return 0
+
+    Dim buildBat As String
+    buildBat = "@echo off" & Chr(13) & Chr(10)
+    buildBat &= "setlocal EnableExtensions" & Chr(13) & Chr(10)
+    buildBat &= "pushd ""%~dp0\..\..""" & Chr(13) & Chr(10)
+    buildBat &= "if errorlevel 1 exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= "call ""%~dp0interop\toolchain.env.bat""" & Chr(13) & Chr(10)
+    buildBat &= "if errorlevel 1 exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= "if not exist ""%~dp0obj"" mkdir ""%~dp0obj""" & Chr(13) & Chr(10)
+    buildBat &= Chr(34) & "%UXB_ASM_CMD%" & Chr(34) & " -f win64 ""%~dp0program.asm"" -o ""%~dp0obj\program.obj""" & Chr(13) & Chr(10)
+    buildBat &= "if errorlevel 1 (" & Chr(13) & Chr(10)
+    buildBat &= "  popd" & Chr(13) & Chr(10)
+    buildBat &= "  exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= ")" & Chr(13) & Chr(10)
+    buildBat &= "if exist ""%~dp0interop\ffi_resolver.c"" (" & Chr(13) & Chr(10)
+    buildBat &= "  ""%UXB_CC_CMD%"" -c ""%~dp0interop\ffi_resolver.c"" -o ""%~dp0obj\ffi_resolver.obj""" & Chr(13) & Chr(10)
+    buildBat &= "  if errorlevel 1 (" & Chr(13) & Chr(10)
+    buildBat &= "    popd" & Chr(13) & Chr(10)
+    buildBat &= "    exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= "  )" & Chr(13) & Chr(10)
+    buildBat &= ")" & Chr(13) & Chr(10)
+    If needsStandaloneFfiStubs <> 0 Then
+        buildBat &= """%UXB_ASM_CMD%"" -f win64 ""%~dp0interop\ffi_call_x64_stubs.asm"" -o ""%~dp0obj\ffi_call_x64_stubs.obj""" & Chr(13) & Chr(10)
+        buildBat &= "if errorlevel 1 (" & Chr(13) & Chr(10)
+        buildBat &= "  popd" & Chr(13) & Chr(10)
+        buildBat &= "  exit /b 1" & Chr(13) & Chr(10)
+        buildBat &= ")" & Chr(13) & Chr(10)
+    Else
+        buildBat &= "if exist ""%~dp0obj\ffi_call_x64_stubs.obj"" del /Q ""%~dp0obj\ffi_call_x64_stubs.obj""" & Chr(13) & Chr(10)
+    End If
+    buildBat &= "if exist ""%~dp0interop\build_import.bat"" (" & Chr(13) & Chr(10)
+    buildBat &= "  call ""%~dp0interop\build_import.bat""" & Chr(13) & Chr(10)
+    buildBat &= "  if errorlevel 1 (" & Chr(13) & Chr(10)
+    buildBat &= "    popd" & Chr(13) & Chr(10)
+    buildBat &= "    exit /b 1" & Chr(13) & Chr(10)
+    buildBat &= "  )" & Chr(13) & Chr(10)
+    buildBat &= ")" & Chr(13) & Chr(10)
+    buildBat &= "popd" & Chr(13) & Chr(10)
+    buildBat &= "exit /b 0" & Chr(13) & Chr(10)
+
+    If X64BuildSaveTextFile(outDir & "\build_program.bat", buildBat, errText) = 0 Then Return 0
+
+    Dim linkBat As String
+    linkBat = "@echo off" & Chr(13) & Chr(10)
+    linkBat &= "setlocal EnableExtensions" & Chr(13) & Chr(10)
+    linkBat &= "pushd ""%~dp0\..\..""" & Chr(13) & Chr(10)
+    linkBat &= "if errorlevel 1 exit /b 1" & Chr(13) & Chr(10)
+    linkBat &= "call ""%~dp0interop\toolchain.env.bat""" & Chr(13) & Chr(10)
+    linkBat &= "if errorlevel 1 exit /b 1" & Chr(13) & Chr(10)
+    linkBat &= Chr(34) & "%UXB_LINK_CMD%" & Chr(34) & " @""%~dp0program_link_args.rsp"" -o ""%~dp0" & exeFileName & """" & Chr(13) & Chr(10)
+    linkBat &= "if errorlevel 1 (" & Chr(13) & Chr(10)
+    linkBat &= "  popd" & Chr(13) & Chr(10)
+    linkBat &= "  exit /b 1" & Chr(13) & Chr(10)
+    linkBat &= ")" & Chr(13) & Chr(10)
+    If Trim(ffiRuntimeDllCopyText) <> "" Then linkBat &= ffiRuntimeDllCopyText
+    If needsRuntimeDll <> 0 Then
+        Dim runtimeDllPrimary As String
+        Dim runtimeDllBin As String
+        Dim resolvedRuntimeDir As String
+        resolvedRuntimeDir = UXBReportDirName(X64BuildFindRuntimeImportLib())
+        runtimeDllPrimary = PathNormalize(resolvedRuntimeDir & "\uxb_runtime.dll")
+        runtimeDllBin = PathNormalize(ExePath & "\uxb_runtime.dll")
+        linkBat &= "if exist ""native\uxb_runtime\build\uxb_runtime.dll"" copy /Y ""native\uxb_runtime\build\uxb_runtime.dll"" ""%~dp0uxb_runtime.dll"" >nul" & Chr(13) & Chr(10)
+        linkBat &= "if not exist ""%~dp0uxb_runtime.dll"" if exist """ & runtimeDllPrimary & """ copy /Y """ & runtimeDllPrimary & """ ""%~dp0uxb_runtime.dll"" >nul" & Chr(13) & Chr(10)
+        linkBat &= "if not exist ""%~dp0uxb_runtime.dll"" if exist """ & runtimeDllBin & """ copy /Y """ & runtimeDllBin & """ ""%~dp0uxb_runtime.dll"" >nul" & Chr(13) & Chr(10)
+        Dim runtimeDepNames(0 To 4) As String
+        runtimeDepNames(0) = "libwinpthread-1.dll"
+        runtimeDepNames(1) = "libuv-1.dll"
+        runtimeDepNames(2) = "libtbb12.dll"
+        runtimeDepNames(3) = "libgcc_s_seh-1.dll"
+        runtimeDepNames(4) = "libstdc++-6.dll"
+        Dim runtimeDepIdx As Integer
+        For runtimeDepIdx = 0 To 4
+            Dim depFromBuild As String
+            Dim depFromBin As String
+            depFromBuild = PathNormalize(resolvedRuntimeDir & "\" & runtimeDepNames(runtimeDepIdx))
+            depFromBin = PathNormalize(ExePath & "\" & runtimeDepNames(runtimeDepIdx))
+            linkBat &= "if not exist ""%~dp0" & runtimeDepNames(runtimeDepIdx) & """ if exist """ & depFromBuild & """ copy /Y """ & depFromBuild & """ ""%~dp0" & runtimeDepNames(runtimeDepIdx) & """ >nul" & Chr(13) & Chr(10)
+            linkBat &= "if not exist ""%~dp0" & runtimeDepNames(runtimeDepIdx) & """ if exist """ & depFromBin & """ copy /Y """ & depFromBin & """ ""%~dp0" & runtimeDepNames(runtimeDepIdx) & """ >nul" & Chr(13) & Chr(10)
+        Next
+        linkBat &= "if not exist ""%~dp0uxb_runtime.dll"" (" & Chr(13) & Chr(10)
+        linkBat &= "  echo [x64-build] missing uxb_runtime.dll" & Chr(13) & Chr(10)
+        linkBat &= "  popd" & Chr(13) & Chr(10)
+        linkBat &= "  exit /b 1" & Chr(13) & Chr(10)
+        linkBat &= ")" & Chr(13) & Chr(10)
+    End If
+    If needsBigRuntime <> 0 Then
+        Dim bigRuntimeDir As String
+        bigRuntimeDir = PathNormalize(CurDir & "\dist\runtime_ext")
+        linkBat &= "if exist """ & bigRuntimeDir & "\uxb_bigfp.dll"" copy /Y """ & bigRuntimeDir & "\uxb_bigfp.dll"" ""%~dp0uxb_bigfp.dll"" >nul" & Chr(13) & Chr(10)
+        Dim bigDepNames(0 To 3) As String
+        bigDepNames(0) = "libmpfr-6.dll"
+        bigDepNames(1) = "libgmp-10.dll"
+        bigDepNames(2) = "libgcc_s_seh-1.dll"
+        bigDepNames(3) = "libwinpthread-1.dll"
+        Dim bigDepIdx As Integer
+        For bigDepIdx = 0 To 3
+            linkBat &= "if exist """ & bigRuntimeDir & "\" & bigDepNames(bigDepIdx) & """ copy /Y """ & bigRuntimeDir & "\" & bigDepNames(bigDepIdx) & """ ""%~dp0" & bigDepNames(bigDepIdx) & """ >nul" & Chr(13) & Chr(10)
+        Next
+        linkBat &= "if not exist ""%~dp0uxb_bigfp.dll"" (" & Chr(13) & Chr(10)
+        linkBat &= "  echo [x64-build] missing uxb_bigfp.dll" & Chr(13) & Chr(10)
+        linkBat &= "  popd" & Chr(13) & Chr(10)
+        linkBat &= "  exit /b 1" & Chr(13) & Chr(10)
+        linkBat &= ")" & Chr(13) & Chr(10)
+    End If
+    linkBat &= "echo [x64-build] link complete: %~dp0" & exeFileName & Chr(13) & Chr(10)
+    linkBat &= "popd" & Chr(13) & Chr(10)
+    linkBat &= "exit /b 0" & Chr(13) & Chr(10)
+
+    If X64BuildSaveTextFile(outDir & "\link_program.bat", linkBat, errText) = 0 Then Return 0
+
+    Dim allBat As String
+    allBat = "@echo off" & Chr(13) & Chr(10)
+    allBat &= "call ""%~dp0build_program.bat""" & Chr(13) & Chr(10)
+    allBat &= "if errorlevel 1 exit /b 1" & Chr(13) & Chr(10)
+    allBat &= "call ""%~dp0link_program.bat""" & Chr(13) & Chr(10)
+    allBat &= "exit /b %errorlevel%" & Chr(13) & Chr(10)
+    If X64BuildSaveTextFile(outDir & "\build_all.bat", allBat, errText) = 0 Then Return 0
+
+    If X64BuildEmitStatusReport(ps, sourcePath, outDir & "\codegen_status_report.md", errText) = 0 Then Return 0
+
+    Return 1
+End Function
+
+Function X64BuildEmitArtifacts(ByRef ps As ParseState, ByRef sourcePath As String, ByRef outputDir As String, ByRef errText As String) As Integer
+    Dim noAsmOverride As String
+    noAsmOverride = ""
+    Dim defaultExeName As String
+    defaultExeName = "program.exe"
+    Return X64BuildEmitArtifactsCore(ps, sourcePath, outputDir, defaultExeName, 0, noAsmOverride, errText)
+End Function
+
+Function X64BuildEmitArtifactsFromAsm(ByRef ps As ParseState, ByRef sourcePath As String, ByRef outputDir As String, ByRef compilerAsmText As String, ByRef errText As String) As Integer
+    Dim defaultExeName As String
+    defaultExeName = "program.exe"
+    Return X64BuildEmitArtifactsCore(ps, sourcePath, outputDir, defaultExeName, 1, compilerAsmText, errText)
+End Function
+
+Private Function X64BuildRunArtifactsCore(ByRef ps As ParseState, ByRef sourcePath As String, ByRef outputDir As String, ByRef exeFileName As String, ByVal useProvidedAsm As Integer, ByRef providedAsmText As String, ByRef errText As String) As Integer
+    Dim outDir As String
+    outDir = outputDir
+    If Trim(outDir) = "" Then outDir = "build\manual\exe\x64build"
+
+    Dim lockAcquired As Integer
+    lockAcquired = 0
+    If X64BuildAcquireGlobalSlot(sourcePath, errText) = 0 Then Return 0
+    lockAcquired = 1
+
+    Dim ok As Integer
+    ok = 0
+    Dim cmdText As String
+    Dim shellResult As Integer
+    ' X64_BUILD_LOG_CAPTURE_GOTO_SAFE_FIX_20260712:
+    ' FreeBASIC forbids a branch from crossing a local var-len String definition.
+    ' Declare these strings before the first GoTo that targets the cleanup label.
+    Dim buildStdoutPath As String
+    Dim buildStderrPath As String
+
+    If X64BuildEmitArtifactsCore(ps, sourcePath, outDir, exeFileName, useProvidedAsm, providedAsmText, errText) = 0 Then GoTo X64BuildRunArtifactsCleanup
+
+    ' X64_BUILD_LOG_CAPTURE_FIX_20260712:
+    ' Shell() hides child batch stdout/stderr from the compiler.  Capture them next
+    ' to the x64 artifact directory so ABI10/release diagnostics expose the real
+    ' NASM/GCC/linker failure instead of just "uxb.exe : NativeCommandError".
+    buildStdoutPath = PathNormalize(outDir & "\build_all.stdout.txt")
+    buildStderrPath = PathNormalize(outDir & "\build_all.stderr.txt")
+    cmdText = "cmd /c " & Chr(34) & Chr(34) & PathNormalize(outDir & "\build_all.bat") & Chr(34) & " > " & Chr(34) & buildStdoutPath & Chr(34) & " 2> " & Chr(34) & buildStderrPath & Chr(34) & Chr(34)
+    shellResult = Shell(cmdText)
+    If shellResult <> 0 Then
+        errText = "x64-build: build_all.bat failed with exit code " & LTrim(Str(shellResult)) & " stdout=" & buildStdoutPath & " stderr=" & buildStderrPath
+        GoTo X64BuildRunArtifactsCleanup
+    End If
+
+    If FileExistsPath(outDir & "\obj\program.obj") = 0 Then
+        errText = "x64-build: NASM reported success but object artifact is missing: " & outDir & "\obj\program.obj"
+        GoTo X64BuildRunArtifactsCleanup
+    End If
+    If FileExistsPath(outDir & "\" & exeFileName) = 0 Then
+        errText = "x64-build: linker reported success but executable artifact is missing: " & outDir & "\" & exeFileName
+        GoTo X64BuildRunArtifactsCleanup
+    End If
+
+    ok = 1
+
+X64BuildRunArtifactsCleanup:
+    If lockAcquired <> 0 Then X64BuildReleaseGlobalSlot
+    If ok = 0 Then Return 0
+    Return 1
+End Function
+
+Function X64BuildRunArtifacts(ByRef ps As ParseState, ByRef sourcePath As String, ByRef outputDir As String, ByRef errText As String) As Integer
+    Dim noAsmOverride As String
+    noAsmOverride = ""
+    Dim defaultExeName As String
+    defaultExeName = "program.exe"
+    Return X64BuildRunArtifactsCore(ps, sourcePath, outputDir, defaultExeName, 0, noAsmOverride, errText)
+End Function
+
+Function X64BuildRunArtifactsFromAsm(ByRef ps As ParseState, ByRef sourcePath As String, ByRef outputDir As String, ByRef compilerAsmText As String, ByRef errText As String) As Integer
+    Dim defaultExeName As String
+    defaultExeName = "program.exe"
+    Return X64BuildRunArtifactsCore(ps, sourcePath, outputDir, defaultExeName, 1, compilerAsmText, errText)
+End Function
+
+Function X64BuildRunArtifactsNamed(ByRef ps As ParseState, ByRef sourcePath As String, ByRef outputDir As String, ByRef exeFileName As String, ByRef errText As String) As Integer
+    Dim noAsmOverride As String
+    noAsmOverride = ""
+    Return X64BuildRunArtifactsCore(ps, sourcePath, outputDir, exeFileName, 0, noAsmOverride, errText)
+End Function
+
+Function X64BuildRunArtifactsFromAsmNamed(ByRef ps As ParseState, ByRef sourcePath As String, ByRef outputDir As String, ByRef exeFileName As String, ByRef compilerAsmText As String, ByRef errText As String) As Integer
+    Return X64BuildRunArtifactsCore(ps, sourcePath, outputDir, exeFileName, 1, compilerAsmText, errText)
+End Function

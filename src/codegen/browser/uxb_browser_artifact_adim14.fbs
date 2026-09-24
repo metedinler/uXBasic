@@ -1,0 +1,319 @@
+#ifndef UXB_BROWSER_ARTIFACT_ADIM14_FBS
+#define UXB_BROWSER_ARTIFACT_ADIM14_FBS
+
+#include once "../js/runtime/js_runtime_writer.fbs"
+#include once "../../preprocessor/preprocess_meta_model.fbs"
+
+
+Function UXBAdim14BrowserBaseName(ByRef pathText As String) As String
+    Dim i As Integer
+    For i = Len(pathText) To 1 Step -1
+        Dim ch As String
+        ch = Mid(pathText, i, 1)
+        If ch = "\" Or ch = "/" Then Return Mid(pathText, i + 1)
+    Next i
+    Return pathText
+End Function
+
+Function UXBAdim14BrowserJsonEscape(ByRef s As String) As String
+    Dim resultText As String
+    Dim i As Integer
+    resultText = ""
+    For i = 1 To Len(s)
+        Dim ch As String
+        ch = Mid(s, i, 1)
+        Select Case Asc(ch)
+        Case 34
+            resultText &= "\" & Chr(34)
+        Case 92
+            resultText &= "\\"
+        Case 10
+            resultText &= "\n"
+        Case 13
+            resultText &= "\r"
+        Case Else
+            If Asc(ch) < 32 Then resultText &= "?" Else resultText &= ch
+        End Select
+    Next i
+    Return resultText
+End Function
+
+
+Function UXBAdim14BrowserHtmlEscape(ByRef s As String) As String
+    Dim r As String
+    r = ""
+    Dim i As Integer
+    For i = 1 To Len(s)
+        Dim ch As String
+        ch = Mid(s, i, 1)
+        Select Case ch
+        Case "&"
+            r &= "&amp;"
+        Case "<"
+            r &= "&lt;"
+        Case ">"
+            r &= "&gt;"
+        Case Chr(34)
+            r &= "&quot;"
+        Case Else
+            r &= ch
+        End Select
+    Next i
+    Return r
+End Function
+
+Function UXBAdim14BrowserRelativePath(ByRef htmlPath As String, ByRef assetPath As String) As String
+    Dim b As String
+    b = UXBAdim14BrowserBaseName(assetPath)
+    Dim p As String
+    p = assetPath
+    Dim pu As String
+    pu = LCase(p)
+    If InStr(pu, "/js/") > 0 Or InStr(pu, "\\js\\") > 0 Then Return "../js/" & b
+    If InStr(pu, "/wasm/") > 0 Or InStr(pu, "\\wasm\\") > 0 Then Return "../wasm/" & b
+    If InStr(pu, "/browser/") > 0 Or InStr(pu, "\\browser\\") > 0 Then Return b
+    Return b
+End Function
+
+Function UXBAdim14PreprocessBlocksFor(ByRef r As PreprocessResult, ByRef targetText As String, ByRef sectionText As String) As String
+    Dim outText As String
+    outText = ""
+    Dim wantTarget As String
+    Dim wantSection As String
+    wantTarget = UCase(Trim(targetText))
+    wantSection = UCase(Trim(sectionText))
+    Dim i As Integer
+    For i = 0 To r.blockCount - 1
+        If UCase(Trim(r.blocks(i).target)) = wantTarget Then
+            If wantSection = "" Or UCase(Trim(r.blocks(i).section)) = wantSection Then
+                outText &= r.blocks(i).content & Chr(10)
+            End If
+        End If
+    Next i
+    Return outText
+End Function
+
+Function UXBAdim14PreprocessBlocksScript(ByRef r As PreprocessResult) As String
+    Dim s As String
+    s = ""
+    s &= UXBAdim14PreprocessBlocksFor(r, "JS", "LINE")
+    s &= UXBAdim14PreprocessBlocksFor(r, "JS", "RAW")
+    s &= UXBAdim14PreprocessBlocksFor(r, "WASM_HOST_JS", "RAW")
+    Return s
+End Function
+
+Function UXBAdim14PreprocessBlocksStyle(ByRef r As PreprocessResult) As String
+    Dim s As String
+    s = ""
+    s &= UXBAdim14PreprocessBlocksFor(r, "CSS", "IMPORT")
+    s &= UXBAdim14PreprocessBlocksFor(r, "CSS", "LINE")
+    s &= UXBAdim14PreprocessBlocksFor(r, "CSS", "RULE")
+    s &= UXBAdim14PreprocessBlocksFor(r, "CSS", "RAW")
+    Return s
+End Function
+
+Function UXBAdim14BrowserWriteFile(ByRef outPath As String, ByRef contentText As String, ByRef errText As String) As Integer
+    errText = ""
+    If Trim(outPath) = "" Then Return 1
+
+    Dim i As Integer
+    Dim parentPath As String
+    parentPath = ""
+    For i = Len(outPath) To 1 Step -1
+        Dim c As String
+        c = Mid(outPath, i, 1)
+        If c = "\" Or c = "/" Then
+            parentPath = Left(outPath, i - 1)
+            Exit For
+        End If
+    Next i
+    If Trim(parentPath) <> "" Then
+        Shell "cmd /d /c if not exist " & Chr(34) & parentPath & Chr(34) & " mkdir " & Chr(34) & parentPath & Chr(34)
+    End If
+
+    Dim f As Integer
+    f = FreeFile
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errText = "browser artifact write failed: " & outPath
+        Return 0
+    End If
+    Print #f, contentText;
+    Close #f
+    Return 1
+End Function
+
+Function UXBAdim14WriteBrowserManifest(ByRef ctx As UXBBackendContext, ByRef errText As String) As Integer
+    Dim outPath As String
+    outPath = ctx.manifestOutPath
+    If Trim(outPath) = "" Then outPath = ctx.backendReportOutPath
+    If Trim(outPath) = "" Then Return 1
+
+    Dim pr As PreprocessResult
+    LexerPreprocessGetLastResult pr
+
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  " & Chr(34) & "target" & Chr(34) & ": " & Chr(34) & "browser" & Chr(34) & "," & Chr(10)
+    j &= "  " & Chr(34) & "html" & Chr(34) & ": " & Chr(34) & UXBAdim14BrowserJsonEscape(UXBAdim14BrowserBaseName(ctx.htmlOutPath)) & Chr(34) & "," & Chr(10)
+    j &= "  " & Chr(34) & "runtime_js" & Chr(34) & ": " & Chr(34) & UXBAdim14BrowserJsonEscape(UXBAdim14BrowserBaseName(ctx.jsRuntimeOutPath)) & Chr(34) & "," & Chr(10)
+    j &= "  " & Chr(34) & "js" & Chr(34) & ": " & Chr(34) & UXBAdim14BrowserJsonEscape(UXBAdim14BrowserBaseName(ctx.jsOutPath)) & Chr(34) & "," & Chr(10)
+    j &= "  " & Chr(34) & "wat" & Chr(34) & ": " & Chr(34) & UXBAdim14BrowserJsonEscape(UXBAdim14BrowserBaseName(ctx.watOutPath)) & Chr(34) & "," & Chr(10)
+    j &= "  " & Chr(34) & "wasm" & Chr(34) & ": " & Chr(34) & UXBAdim14BrowserJsonEscape(UXBAdim14BrowserBaseName(ctx.wasmOutPath)) & Chr(34) & "," & Chr(10)
+    j &= "  " & Chr(34) & "preprocess_block_count" & Chr(34) & ": " & LTrim(Str(pr.blockCount)) & "," & Chr(10)
+    j &= "  " & Chr(34) & "preprocess_asset_count" & Chr(34) & ": " & LTrim(Str(pr.assetCount)) & "," & Chr(10)
+    j &= "  " & Chr(34) & "preprocess_blocks" & Chr(34) & ": [" & Chr(10)
+    Dim i As Integer
+    For i = 0 To pr.blockCount - 1
+        If i > 0 Then j &= "," & Chr(10)
+        j &= "    {" & Chr(34) & "target" & Chr(34) & ":" & Chr(34) & UXBAdim14BrowserJsonEscape(pr.blocks(i).target) & Chr(34)
+        j &= "," & Chr(34) & "section" & Chr(34) & ":" & Chr(34) & UXBAdim14BrowserJsonEscape(pr.blocks(i).section) & Chr(34)
+        j &= "," & Chr(34) & "outFile" & Chr(34) & ":" & Chr(34) & UXBAdim14BrowserJsonEscape(pr.blocks(i).outFile) & Chr(34)
+        j &= "," & Chr(34) & "source" & Chr(34) & ":" & Chr(34) & UXBAdim14BrowserJsonEscape(pr.blocks(i).sourceFile) & Chr(34)
+        j &= "," & Chr(34) & "startLine" & Chr(34) & ":" & LTrim(Str(pr.blocks(i).startLine))
+        j &= "," & Chr(34) & "endLine" & Chr(34) & ":" & LTrim(Str(pr.blocks(i).endLine)) & "}"
+    Next i
+    j &= Chr(10) & "  ]," & Chr(10)
+    j &= "  " & Chr(34) & "preprocess_assets" & Chr(34) & ": [" & Chr(10)
+    For i = 0 To pr.assetCount - 1
+        If i > 0 Then j &= "," & Chr(10)
+        j &= "    {" & Chr(34) & "kind" & Chr(34) & ":" & Chr(34) & UXBAdim14BrowserJsonEscape(pr.assets(i).assetKind) & Chr(34)
+        j &= "," & Chr(34) & "source" & Chr(34) & ":" & Chr(34) & UXBAdim14BrowserJsonEscape(pr.assets(i).sourcePath) & Chr(34)
+        j &= "," & Chr(34) & "target" & Chr(34) & ":" & Chr(34) & UXBAdim14BrowserJsonEscape(pr.assets(i).targetPath) & Chr(34)
+        j &= "," & Chr(34) & "alias" & Chr(34) & ":" & Chr(34) & UXBAdim14BrowserJsonEscape(pr.assets(i).aliasName) & Chr(34)
+        j &= "," & Chr(34) & "required" & Chr(34) & ":" & LTrim(Str(pr.assets(i).required)) & "}"
+    Next i
+    j &= Chr(10) & "  ]" & Chr(10)
+    j &= "}" & Chr(10)
+
+    Return UXBAdim14BrowserWriteFile(outPath, j, errText)
+End Function
+
+Function UXBAdim14WriteBrowserHtmlShell(ByRef ctx As UXBBackendContext, ByRef errText As String) As Integer
+    If Trim(ctx.htmlOutPath) = "" Then Return 1
+
+    Dim pr As PreprocessResult
+    LexerPreprocessGetLastResult pr
+
+    Dim runtimeErr As String
+    If Trim(ctx.jsRuntimeOutPath) <> "" Then
+        If UXBJsRuntimeWrite(ctx.jsRuntimeOutPath, runtimeErr) = 0 Then
+            errText = runtimeErr
+            Return 0
+        End If
+    End If
+
+    Dim cssText As String
+    Dim jsBlockText As String
+    Dim htmlHeadText As String
+    Dim htmlBodyText As String
+    cssText = UXBAdim14PreprocessBlocksStyle(pr)
+    jsBlockText = UXBAdim14PreprocessBlocksScript(pr)
+    htmlHeadText = UXBAdim14PreprocessBlocksFor(pr, "HTML", "HEAD")
+    htmlBodyText = UXBAdim14PreprocessBlocksFor(pr, "HTML", "BODY") & UXBAdim14PreprocessBlocksFor(pr, "HTML", "LINE")
+
+    Dim h As String
+    h = "<!doctype html>" & Chr(10)
+    h &= "<html><head><meta charset=" & Chr(34) & "utf-8" & Chr(34) & ">" & Chr(10)
+    h &= "<title>uXBasic Browser Output</title>" & Chr(10)
+    If Trim(cssText) <> "" Then h &= "<style>" & Chr(10) & cssText & Chr(10) & "</style>" & Chr(10)
+    If Trim(htmlHeadText) <> "" Then h &= htmlHeadText & Chr(10)
+    h &= "</head>" & Chr(10)
+    h &= "<body>" & Chr(10)
+    h &= "<pre id=" & Chr(34) & "uxb-console" & Chr(34) & "></pre>" & Chr(10)
+    If Trim(htmlBodyText) <> "" Then h &= htmlBodyText & Chr(10)
+    If Trim(ctx.jsRuntimeOutPath) <> "" Then
+        h &= "<script src=" & Chr(34) & UXBAdim14BrowserRelativePath(ctx.htmlOutPath, ctx.jsRuntimeOutPath) & Chr(34) & "></script>" & Chr(10)
+    End If
+    If Trim(ctx.jsOutPath) <> "" Then
+        h &= "<script src=" & Chr(34) & UXBAdim14BrowserRelativePath(ctx.htmlOutPath, ctx.jsOutPath) & Chr(34) & "></script>" & Chr(10)
+    End If
+    If Trim(ctx.wasmOutPath) <> "" Then
+        h &= "<script>globalThis.uxbWasmPath = '" & UXBAdim14BrowserRelativePath(ctx.htmlOutPath, ctx.wasmOutPath) & "';</script>" & Chr(10)
+        h &= "<script>if (globalThis.uxbWasmPath) fetch(globalThis.uxbWasmPath).then(r=>r.arrayBuffer()).then(b=>WebAssembly.instantiate(b,{})).then(x=>globalThis.uxbWasm=x.instance).catch(e=>console.error('uXBasic wasm load failed', e));</script>" & Chr(10)
+    End If
+    If Trim(jsBlockText) <> "" Then h &= "<script>" & Chr(10) & jsBlockText & Chr(10) & "</script>" & Chr(10)
+    h &= "</body></html>" & Chr(10)
+
+    Return UXBAdim14BrowserWriteFile(ctx.htmlOutPath, h, errText)
+End Function
+
+' %%GEN_BLOCK ... %%GEN_END captures arbitrary generated-file content into
+' PreprocessResult.blocks() with target="GEN" (see preprocess_block_scanner.fbs and
+' preprocess_meta_model.fbs) -- but until now nothing ever wrote that captured
+' content to its declared outFile. The block was parsed, stored, even listed in the
+' manifest's preprocess_blocks[] array (see UXBAdim14WriteBrowserManifest above),
+' but the actual file on disk never appeared. This is the missing last step (found
+' 2026-09-07 investigating why %%GEN_BLOCK "seemed to do nothing"): mirror
+' UXBAdim14PreprocessBlocksFor's grouping so multiple %%GEN_BLOCK sections that
+' target the same outFile concatenate (in source order) into one file, instead of
+' each write overwriting the last.
+Function UXBAdim14WriteGeneratedBlocks(ByRef errText As String) As Integer
+    errText = ""
+    Dim pr As PreprocessResult
+    LexerPreprocessGetLastResult pr
+
+    Dim writtenFiles(0 To 2047) As String
+    Dim writtenCount As Integer
+    writtenCount = 0
+
+    Dim i As Integer
+    For i = 0 To pr.blockCount - 1
+        If UCase(Trim(pr.blocks(i).target)) <> "GEN" Then Continue For
+        Dim outFile As String
+        outFile = Trim(pr.blocks(i).outFile)
+        If outFile = "" Then Continue For
+
+        Dim alreadyWritten As Integer
+        alreadyWritten = 0
+        Dim wi As Integer
+        For wi = 0 To writtenCount - 1
+            If writtenFiles(wi) = outFile Then alreadyWritten = 1: Exit For
+        Next wi
+        If alreadyWritten <> 0 Then Continue For
+
+        Dim combined As String
+        combined = ""
+        Dim j As Integer
+        For j = 0 To pr.blockCount - 1
+            If UCase(Trim(pr.blocks(j).target)) = "GEN" And Trim(pr.blocks(j).outFile) = outFile Then
+                combined &= pr.blocks(j).content & Chr(10)
+            End If
+        Next j
+
+        If UXBAdim14BrowserWriteFile(outFile, combined, errText) = 0 Then Return 0
+
+        If writtenCount <= UBound(writtenFiles) Then
+            writtenFiles(writtenCount) = outFile
+            writtenCount += 1
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Function UXBAdim14BrowserBackendEmit(ByRef moduleValue As MIRModule, ByRef ctx As UXBBackendContext, ByRef result As UXBBackendResult) As Integer
+    Dim errText As String
+
+    If UXBAdim14WriteBrowserHtmlShell(ctx, errText) = 0 Then
+        UXBBackendResultFail result, UXB_BACKEND_E_EMIT, errText
+        Return 0
+    End If
+
+    If UXBAdim14WriteBrowserManifest(ctx, errText) = 0 Then
+        UXBBackendResultFail result, UXB_BACKEND_E_EMIT, errText
+        Return 0
+    End If
+
+    If UXBAdim14WriteGeneratedBlocks(errText) = 0 Then
+        UXBBackendResultFail result, UXB_BACKEND_E_EMIT, errText
+        Return 0
+    End If
+
+    result.target = UXB_TARGET_BROWSER
+    UXBBackendResultPass result, ctx.jsOutPath, "Browser JS/HTML emitted"
+    result.auxPath = ctx.htmlOutPath
+    Return 1
+End Function
+
+#endif

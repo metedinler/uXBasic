@@ -1,0 +1,240 @@
+' Extracted from mir_evaluator.fbs for wave-14 modular split
+
+Private Function MIRRol64(ByVal v As ULongInt, ByVal s As LongInt) As ULongInt
+    Dim shiftBits As Integer
+    shiftBits = s And 63
+    If shiftBits = 0 Then Return v
+    Return (v Shl shiftBits) Or (v Shr (64 - shiftBits))
+End Function
+
+Private Function MIRRor64(ByVal v As ULongInt, ByVal s As LongInt) As ULongInt
+    Dim shiftBits As Integer
+    shiftBits = s And 63
+    If shiftBits = 0 Then Return v
+    Return (v Shr shiftBits) Or (v Shl (64 - shiftBits))
+End Function
+
+Private Function MIRArithmeticShr64(ByVal v As LongInt, ByVal s As LongInt) As LongInt
+    Dim shiftBits As Integer
+    shiftBits = s And 63
+    If shiftBits = 0 Then Return v
+    If v >= 0 Then Return CLngInt(CULngInt(v) Shr shiftBits)
+    Return Not CLngInt(CULngInt(Not v) Shr shiftBits)
+End Function
+
+Private Function MIRMemHighFindIndex(ByVal addr As ULongInt) As Integer
+    Dim i As Integer
+    For i = 0 To gMirMemHighCount - 1
+        If gMirMemHigh(i).addr = addr Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function MIRMemReadByte(ByVal addr As ULongInt) As Integer
+    If addr < MIR_MEM_LOW_LIMIT Then
+        Return gMirMemLow(addr)
+    End If
+
+    Dim idx As Integer
+    idx = MIRMemHighFindIndex(addr)
+    If idx = -1 Then Return 0
+    Return gMirMemHigh(idx).value
+End Function
+
+Private Sub MIRMemWriteByte(ByVal addr As ULongInt, ByVal valueRaw As LongInt)
+    Dim valueByte As UByte
+    valueByte = (valueRaw And &hFF)
+
+    If addr < MIR_MEM_LOW_LIMIT Then
+        gMirMemLow(addr) = valueByte
+        Exit Sub
+    End If
+
+    Dim idx As Integer
+    idx = MIRMemHighFindIndex(addr)
+    If idx = -1 Then
+        If gMirMemHighCount = 0 Then
+            ReDim gMirMemHigh(0)
+        Else
+            ReDim Preserve gMirMemHigh(gMirMemHighCount)
+        End If
+        idx = gMirMemHighCount
+        gMirMemHighCount += 1
+        gMirMemHigh(idx).addr = addr
+    End If
+    gMirMemHigh(idx).value = valueByte
+End Sub
+
+Private Function MIRMemReadWord(ByVal addr As ULongInt) As Integer
+    Dim b0 As Integer
+    Dim b1 As Integer
+    b0 = MIRMemReadByte(addr)
+    b1 = MIRMemReadByte(addr + 1)
+    Return (b0 Or (b1 Shl 8))
+End Function
+
+Private Function MIRMemReadDword(ByVal addr As ULongInt) As LongInt
+    Dim b0 As LongInt
+    Dim b1 As LongInt
+    Dim b2 As LongInt
+    Dim b3 As LongInt
+    b0 = MIRMemReadByte(addr)
+    b1 = MIRMemReadByte(addr + 1)
+    b2 = MIRMemReadByte(addr + 2)
+    b3 = MIRMemReadByte(addr + 3)
+    Return (b0 Or (b1 Shl 8) Or (b2 Shl 16) Or (b3 Shl 24))
+End Function
+
+Private Sub MIRMemWriteWord(ByVal addr As ULongInt, ByVal valueRaw As LongInt)
+    MIRMemWriteByte addr, valueRaw
+    MIRMemWriteByte addr + 1, (valueRaw Shr 8)
+End Sub
+
+Private Sub MIRMemWriteDword(ByVal addr As ULongInt, ByVal valueRaw As LongInt)
+    MIRMemWriteByte addr, valueRaw
+    MIRMemWriteByte addr + 1, (valueRaw Shr 8)
+    MIRMemWriteByte addr + 2, (valueRaw Shr 16)
+    MIRMemWriteByte addr + 3, (valueRaw Shr 24)
+End Sub
+
+Private Function MIRMemCopyBytes(ByVal srcAddr As ULongInt, ByVal dstAddr As ULongInt, ByVal byteCount As ULongInt) As Integer
+    Dim countSigned As LongInt
+    countSigned = CLngInt(byteCount)
+    If countSigned <= 0 Then Return 1
+    If srcAddr = dstAddr Then Return 1
+
+    Dim i As LongInt
+    If dstAddr > srcAddr And dstAddr < (srcAddr + byteCount) Then
+        For i = countSigned - 1 To 0 Step -1
+            Dim offsetU As ULongInt
+            offsetU = CULngInt(i)
+            MIRMemWriteByte dstAddr + offsetU, MIRMemReadByte(srcAddr + offsetU)
+        Next i
+    Else
+        For i = 0 To countSigned - 1
+            Dim offsetU As ULongInt
+            offsetU = CULngInt(i)
+            MIRMemWriteByte dstAddr + offsetU, MIRMemReadByte(srcAddr + offsetU)
+        Next i
+    End If
+
+    Return 1
+End Function
+
+Private Function MIRMemCopyUnits(ByVal srcAddr As ULongInt, ByVal dstAddr As ULongInt, ByVal unitCount As LongInt, ByVal unitBytes As Integer) As Integer
+    If unitCount < 0 Then Return 0
+    If unitBytes <> 1 And unitBytes <> 2 And unitBytes <> 4 Then Return 0
+    If unitCount = 0 Then Return 1
+
+    Dim totalBytes As LongInt
+    totalBytes = unitCount * unitBytes
+    If totalBytes < 0 Then Return 0
+
+    Return MIRMemCopyBytes(srcAddr, dstAddr, CULngInt(totalBytes))
+End Function
+
+Private Function MIRMemFillUnits(ByVal startAddr As ULongInt, ByVal fillRaw As LongInt, ByVal unitCount As LongInt, ByVal unitBytes As Integer) As Integer
+    If unitCount < 0 Then Return 0
+    If unitCount = 0 Then Return 1
+
+    Dim i As LongInt
+    For i = 0 To unitCount - 1
+        Dim cellAddr As ULongInt
+        cellAddr = startAddr + CULngInt(i * unitBytes)
+        Select Case unitBytes
+        Case 1
+            MIRMemWriteByte cellAddr, fillRaw
+        Case 2
+            MIRMemWriteWord cellAddr, fillRaw
+        Case 4
+            MIRMemWriteDword cellAddr, fillRaw
+        Case Else
+            Return 0
+        End Select
+    Next i
+
+    Return 1
+End Function
+
+Private Function MIRVarPtrFindByName(ByRef rawName As String) As Integer
+    Dim key As String
+    key = UCase(Trim(rawName))
+    If key = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To gMirVarPtrCount - 1
+        If UCase(Trim(gMirVarPtrEntries(i).nameText)) = key Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function MIRVarPtrFindByAddr(ByVal addr As ULongInt) As Integer
+    Dim i As Integer
+    For i = 0 To gMirVarPtrCount - 1
+        If gMirVarPtrEntries(i).addrValue = addr Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function MIRVarPtrGetOrCreate(ByRef rawName As String, ByRef addrOut As ULongInt) As Integer
+    Dim idx As Integer
+    idx = MIRVarPtrFindByName(rawName)
+    If idx = -1 Then
+        If gMirVarPtrCount = 0 Then
+            ReDim gMirVarPtrEntries(0)
+        Else
+            ReDim Preserve gMirVarPtrEntries(gMirVarPtrCount)
+        End If
+        idx = gMirVarPtrCount
+        gMirVarPtrCount += 1
+        gMirVarPtrEntries(idx).nameText = rawName
+        gMirVarPtrEntries(idx).addrValue = gMirVarPtrNextAddr
+        gMirVarPtrNextAddr += 256
+    End If
+
+    addrOut = gMirVarPtrEntries(idx).addrValue
+    Return 1
+End Function
+
+Private Function MIRObjectClassFindByAddr(ByVal addrValue As ULongInt) As Integer
+    Dim i As Integer
+    For i = 0 To gMirObjectClassCount - 1
+        If gMirObjectClassEntries(i).addrValue = addrValue Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Sub MIRObjectClassSet(ByVal addrValue As ULongInt, ByRef classNameRaw As String)
+    If addrValue = 0 Then Exit Sub
+
+    Dim className As String
+    className = UCase(Trim(classNameRaw))
+    If className = "" Then Exit Sub
+
+    Dim idx As Integer
+    idx = MIRObjectClassFindByAddr(addrValue)
+    If idx = -1 Then
+        If gMirObjectClassCount = 0 Then
+            ReDim gMirObjectClassEntries(0)
+        Else
+            ReDim Preserve gMirObjectClassEntries(gMirObjectClassCount)
+        End If
+        idx = gMirObjectClassCount
+        gMirObjectClassCount += 1
+    End If
+
+    gMirObjectClassEntries(idx).addrValue = addrValue
+    gMirObjectClassEntries(idx).className = className
+End Sub
+
+Private Function MIRObjectClassTryGet(ByVal addrValue As ULongInt, ByRef classNameOut As String) As Integer
+    classNameOut = ""
+    If addrValue = 0 Then Return 0
+
+    Dim idx As Integer
+    idx = MIRObjectClassFindByAddr(addrValue)
+    If idx = -1 Then Return 0
+
+    classNameOut = UCase(Trim(gMirObjectClassEntries(idx).className))
+    Return IIf(classNameOut <> "", 1, 0)
+End Function

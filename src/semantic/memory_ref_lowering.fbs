@@ -1,0 +1,60 @@
+#ifndef UXB_SEMANTIC_MEMORY_REF_LOWERING_FBS
+#define UXB_SEMANTIC_MEMORY_REF_LOWERING_FBS
+
+' array_memory_ref.fbs: see the removal note in main_semantic_include_bundle.fbs
+' (found 2026-09-06) -- already correctly included earlier via parser_shared.fbs.
+' MIRLowerExprNode: already fully defined by this point (mir_lower_expr.fbs, pulled
+' in via the frontend bundle's mir.fbs -> mir_lowering.fbs, well before this file);
+' the Declare here was a leftover that now conflicts with the real definition.
+
+Function MIRLowerMemoryOperandPatch4( _
+    ByRef ps As ParseState, _
+    ByVal exprNode As Integer, _
+    ByRef module As MIRModule, _
+    ByVal fnIdx As Integer, _
+    ByVal blkIdx As Integer, _
+    ByRef tempSeed As Integer, _
+    ByRef valueNameOut As String, _
+    ByRef memoryRefOut As Integer, _
+    ByRef byteLengthOut As LongInt, _
+    ByRef errText As String _
+) As Integer
+    valueNameOut = ""
+    memoryRefOut = 0
+    byteLengthOut = 0
+    If exprNode < 0 Or exprNode >= ps.ast.count Then errText = "mir: memory operand AST node missing": Return 0
+
+    If UCase(Trim(ps.ast.nodes(exprNode).kind)) = "IDENT" Then
+        Dim declaredType As String
+        If UXBFindDeclaredTypeForMemoryOperand(ps, ps.ast.nodes(exprNode).value, declaredType) <> 0 Then
+            Select Case declaredType
+            Case "LIST", "DICT", "SET"
+                errText = "mir: raw MEMCOPY of collection " & ps.ast.nodes(exprNode).value & " is forbidden; use an explicit CopyTo/CopyFrom/MemoryView contract"
+                Return 0
+            End Select
+        End If
+        Dim info As UXBArrayMemoryInfo
+        Dim infoErr As String
+        If UXBFindArrayMemoryInfo(ps, ps.ast.nodes(exprNode).value, info, infoErr) = 0 Then
+            errText = infoErr
+            Return 0
+        End If
+        If info.found <> 0 Then
+            If info.dynamicBounds <> 0 Then
+                errText = "mir: array MemoryRef requires compile-time bounds: " & info.nameText
+                Return 0
+            End If
+            valueNameOut = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, "MIR_MEMORY_REF", valueNameOut, 4, "ARRAY", info.nameText, LTrim(Str(info.elementBytes)), LTrim(Str(info.byteLength))
+            MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "ANY"
+            memoryRefOut = 1
+            byteLengthOut = info.byteLength
+            Return 1
+        End If
+    End If
+
+    If MIRLowerExprNode(ps, exprNode, module, fnIdx, blkIdx, tempSeed, valueNameOut, errText) = 0 Then Return 0
+    Return 1
+End Function
+
+#endif

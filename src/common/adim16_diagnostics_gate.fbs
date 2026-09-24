@@ -1,0 +1,102 @@
+#ifndef UXB_COMMON_ADIM16_DIAGNOSTICS_GATE_FBS
+#define UXB_COMMON_ADIM16_DIAGNOSTICS_GATE_FBS
+
+#include once "diagnostic.fbs"
+#include once "source_mapping.fbs"
+#include once "diagnostic_schema_writer.fbs"
+#include once "json_builder.fbs"
+#include once "report_writer.fbs"
+
+Type UXBAdim16GateResult
+    ok As Integer
+    diagnosticCount As Integer
+    diagnosticErrorCount As Integer
+    emptyCodeCount As Integer
+    sourceMapCount As Integer
+    missingLocationCount As Integer
+    jsonSchemaOk As Integer
+    errorsText As String
+End Type
+
+Sub UXBAdim16GateInit(ByRef r As UXBAdim16GateResult)
+    r.ok = 0
+    r.diagnosticCount = 0
+    r.diagnosticErrorCount = 0
+    r.emptyCodeCount = 0
+    r.sourceMapCount = 0
+    r.missingLocationCount = 0
+    r.jsonSchemaOk = 0
+    r.errorsText = ""
+End Sub
+
+Private Sub UXBAdim16GateError(ByRef r As UXBAdim16GateResult, ByRef msg As String)
+    If Len(r.errorsText) > 0 Then r.errorsText &= Chr(10)
+    r.errorsText &= msg
+End Sub
+
+Function UXBAdim16RunDiagnosticsGate(ByRef diags As UXBDiagnosticList, ByRef smap As UXBSourceMapList, ByRef r As UXBAdim16GateResult) As Integer
+    UXBAdim16GateInit r
+    r.diagnosticCount = diags.count
+    r.diagnosticErrorCount = UXBDiagnosticErrorCount(diags)
+    r.sourceMapCount = smap.count
+    r.missingLocationCount = UXBSourceMapMissingLocationCount(smap)
+
+    Dim i As Integer
+    For i = 0 To diags.count - 1
+        If Trim(diags.items(i).code) = "" Then r.emptyCodeCount += 1
+    Next i
+
+    Dim schemaText As String
+    If UXBDiagnosticSchemaJson(schemaText) <> 0 And InStr(schemaText, "uxb.diagnostic_schema.v1") > 0 Then
+        r.jsonSchemaOk = 1
+    Else
+        UXBAdim16GateError r, "diagnostic schema could not be generated"
+    End If
+
+    If r.emptyCodeCount > 0 Then UXBAdim16GateError r, "diagnostic code empty count=" & LTrim(Str(r.emptyCodeCount))
+    If r.missingLocationCount > 0 Then UXBAdim16GateError r, "source map missing location count=" & LTrim(Str(r.missingLocationCount))
+    If r.jsonSchemaOk = 0 Then UXBAdim16GateError r, "json schema generation failed"
+
+    If r.errorsText = "" Then
+        r.ok = 1
+        Return 1
+    End If
+
+    r.ok = 0
+    Return 0
+End Function
+
+Function UXBAdim16GateJson(ByRef r As UXBAdim16GateResult, ByRef jsonOut As String) As Integer
+    Dim b As UXBJsonBuilder
+    UXBJsonInit b
+    UXBJsonBeginObject b
+    UXBJsonFieldString b, "step", "16_ADIM11_DIAGNOSTICS_SOURCE_MAPPING_JSON"
+    UXBJsonFieldBool b, "ok", r.ok
+    UXBJsonFieldInt b, "diagnostic_count", r.diagnosticCount
+    UXBJsonFieldInt b, "diagnostic_error_count", r.diagnosticErrorCount
+    UXBJsonFieldInt b, "empty_code_count", r.emptyCodeCount
+    UXBJsonFieldInt b, "source_map_count", r.sourceMapCount
+    UXBJsonFieldInt b, "missing_location_count", r.missingLocationCount
+    UXBJsonFieldBool b, "json_schema_ok", r.jsonSchemaOk
+    UXBJsonFieldString b, "errors", r.errorsText
+    UXBJsonEndObject b
+    jsonOut = UXBJsonText(b)
+    Return 1
+End Function
+
+Function UXBAdim16WriteGateReports(ByRef r As UXBAdim16GateResult, ByRef jsonPath As String, ByRef mdPath As String, ByRef errText As String) As Integer
+    Dim jsonText As String
+    UXBAdim16GateJson r, jsonText
+    If UXBReportWriteText(jsonPath, jsonText, errText) = 0 Then Return 0
+    Dim md As String
+    md = "# ADIM16 Diagnostics Gate" & Chr(10) & Chr(10)
+    md &= "status: " & IIf(r.ok <> 0, "PASS", "FAIL") & Chr(10)
+    md &= "diagnostic_count: " & LTrim(Str(r.diagnosticCount)) & Chr(10)
+    md &= "empty_code_count: " & LTrim(Str(r.emptyCodeCount)) & Chr(10)
+    md &= "source_map_count: " & LTrim(Str(r.sourceMapCount)) & Chr(10)
+    md &= "missing_location_count: " & LTrim(Str(r.missingLocationCount)) & Chr(10)
+    If r.errorsText <> "" Then md &= Chr(10) & "errors:" & Chr(10) & r.errorsText & Chr(10)
+    Return UXBReportWriteText(mdPath, md, errText)
+End Function
+
+#endif

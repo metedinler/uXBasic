@@ -1,0 +1,304 @@
+#ifndef UXB_PREPROCESS_META_MODEL_FBS
+#define UXB_PREPROCESS_META_MODEL_FBS
+
+' ADIM33: Pre-lexer meta artifact model.
+' This file is intentionally independent from parser/AST/MIR.
+' %% commands are compile-time preprocessor commands and must not leak to parser.
+
+Type MetaBlock
+    target As String        ' JS / WAT / HTML / CSS / JSON / MD / MANIFEST
+    section As String       ' HEAD / BODY / RUNTIME / IMPORTS / MAIN_PRE / RAW / DEFAULT
+    outFile As String       ' optional artifact file name
+    content As String
+    sourceFile As String
+    startLine As Integer
+    endLine As Integer
+End Type
+
+Type MetaAsset
+    assetKind As String     ' FILE / IMAGE / AUDIO / JS / CSS / MD
+    sourcePath As String
+    targetPath As String
+    aliasName As String
+    required As Integer
+End Type
+
+Type MetaWatImport
+    moduleName As String
+    importName As String
+    aliasName As String
+    signatureText As String
+    hasHostBinding As Integer
+End Type
+
+Type MetaManifestEntry
+    keyText As String
+    valueText As String
+End Type
+
+Type MetaKeyValueEntry
+    keyText As String
+    valueText As String
+End Type
+
+Type PreprocessResult
+    expandedSource As String
+
+    blocks(0 To 2047) As MetaBlock
+    blockCount As Integer
+
+    assets(0 To 1023) As MetaAsset
+    assetCount As Integer
+
+    watImports(0 To 512) As MetaWatImport
+    watImportCount As Integer
+
+    manifest(0 To 1023) As MetaManifestEntry
+    manifestCount As Integer
+
+    sourceMap(0 To 1023) As MetaKeyValueEntry
+    sourceMapCount As Integer
+
+    jsonEntries(0 To 1023) As MetaKeyValueEntry
+    jsonEntryCount As Integer
+
+    locks(0 To 1023) As MetaKeyValueEntry
+    lockCount As Integer
+
+    profiles(0 To 1023) As MetaKeyValueEntry
+    profileCount As Integer
+
+    configFiles(0 To 1023) As MetaKeyValueEntry
+    configFileCount As Integer
+
+    diagnostics(0 To 1023) As String
+    diagnosticCount As Integer
+
+    allowRawJs As Integer
+    allowRawWat As Integer
+    safePaths As Integer
+    requireHostBinding As Integer
+    expandLimit As Integer
+
+    targetText As String
+    outDir As String
+    assetRoot As String
+End Type
+
+Dim Shared gLastPreprocessResult As PreprocessResult
+
+Private Function UXBPreMetaJsonEscape(ByRef s As String) As String
+    Dim q As String: q = Chr(34)
+    Dim r As String: r = ""
+    Dim i As Integer
+    For i = 1 To Len(s)
+        Dim ch As String: ch = Mid(s, i, 1)
+        Select Case ch
+        Case Chr(34): r &= "\" & q
+        Case "\": r &= "\\"
+        Case Chr(10): r &= "\n"
+        Case Chr(13): r &= "\r"
+        Case Chr(9): r &= "\t"
+        Case Else: r &= ch
+        End Select
+    Next i
+    Return r
+End Function
+
+Sub PreprocessResultInit(ByRef r As PreprocessResult)
+    r.expandedSource = ""
+    r.blockCount = 0
+    r.assetCount = 0
+    r.watImportCount = 0
+    r.manifestCount = 0
+    r.sourceMapCount = 0
+    r.jsonEntryCount = 0
+    r.lockCount = 0
+    r.profileCount = 0
+    r.configFileCount = 0
+    r.diagnosticCount = 0
+    r.allowRawJs = 0
+    r.allowRawWat = 0
+    r.safePaths = 1
+    r.requireHostBinding = 1
+    r.expandLimit = 10000
+    r.targetText = ""
+    r.outDir = ""
+    r.assetRoot = ""
+End Sub
+
+Sub PreprocessResultAddDiagnostic(ByRef r As PreprocessResult, ByRef msg As String)
+    If r.diagnosticCount > UBound(r.diagnostics) Then Exit Sub
+    r.diagnostics(r.diagnosticCount) = msg
+    r.diagnosticCount += 1
+End Sub
+
+Sub PreprocessResultAddManifest(ByRef r As PreprocessResult, ByRef keyText As String, ByRef valueText As String)
+    If r.manifestCount > UBound(r.manifest) Then Exit Sub
+    r.manifest(r.manifestCount).keyText = keyText
+    r.manifest(r.manifestCount).valueText = valueText
+    r.manifestCount += 1
+End Sub
+
+Private Sub PreprocessResultAddKeyValue(entries() As MetaKeyValueEntry, ByRef countValue As Integer, ByVal limitValue As Integer, ByRef keyText As String, ByRef valueText As String)
+    If countValue > limitValue Then Exit Sub
+    entries(countValue).keyText = keyText
+    entries(countValue).valueText = valueText
+    countValue += 1
+End Sub
+
+Sub PreprocessResultAddSourceMap(ByRef r As PreprocessResult, ByRef keyText As String, ByRef valueText As String)
+    PreprocessResultAddKeyValue r.sourceMap(), r.sourceMapCount, UBound(r.sourceMap), keyText, valueText
+End Sub
+
+Sub PreprocessResultAddJsonEntry(ByRef r As PreprocessResult, ByRef keyText As String, ByRef valueText As String)
+    PreprocessResultAddKeyValue r.jsonEntries(), r.jsonEntryCount, UBound(r.jsonEntries), keyText, valueText
+End Sub
+
+Sub PreprocessResultAddLock(ByRef r As PreprocessResult, ByRef keyText As String, ByRef valueText As String)
+    PreprocessResultAddKeyValue r.locks(), r.lockCount, UBound(r.locks), keyText, valueText
+End Sub
+
+Sub PreprocessResultAddProfile(ByRef r As PreprocessResult, ByRef keyText As String, ByRef valueText As String)
+    PreprocessResultAddKeyValue r.profiles(), r.profileCount, UBound(r.profiles), keyText, valueText
+End Sub
+
+Sub PreprocessResultAddConfigFile(ByRef r As PreprocessResult, ByRef keyText As String, ByRef valueText As String)
+    PreprocessResultAddKeyValue r.configFiles(), r.configFileCount, UBound(r.configFiles), keyText, valueText
+End Sub
+
+Sub PreprocessResultAddBlock(ByRef r As PreprocessResult, ByRef target As String, ByRef section As String, ByRef outFile As String, ByRef content As String, ByRef sourceFile As String, ByVal startLine As Integer, ByVal endLine As Integer)
+    If r.blockCount > UBound(r.blocks) Then
+        PreprocessResultAddDiagnostic r, "META_BLOCK_LIMIT_EXCEEDED"
+        Exit Sub
+    End If
+    With r.blocks(r.blockCount)
+        .target = UCase(Trim(target))
+        .section = UCase(Trim(section))
+        .outFile = Trim(outFile)
+        .content = content
+        .sourceFile = sourceFile
+        .startLine = startLine
+        .endLine = endLine
+    End With
+    r.blockCount += 1
+End Sub
+
+Sub PreprocessResultAddAsset(ByRef r As PreprocessResult, ByRef assetKind As String, ByRef sourcePath As String, ByRef targetPath As String, ByRef aliasName As String, ByVal required As Integer)
+    If r.assetCount > UBound(r.assets) Then
+        PreprocessResultAddDiagnostic r, "META_ASSET_LIMIT_EXCEEDED"
+        Exit Sub
+    End If
+    With r.assets(r.assetCount)
+        .assetKind = UCase(Trim(assetKind))
+        .sourcePath = Trim(sourcePath)
+        .targetPath = Trim(targetPath)
+        .aliasName = Trim(aliasName)
+        .required = required
+    End With
+    r.assetCount += 1
+End Sub
+
+Sub PreprocessResultAddWatImport(ByRef r As PreprocessResult, ByRef moduleName As String, ByRef importName As String, ByRef aliasName As String, ByRef signatureText As String, ByVal hasHostBinding As Integer)
+    If r.watImportCount > UBound(r.watImports) Then
+        PreprocessResultAddDiagnostic r, "META_WAT_IMPORT_LIMIT_EXCEEDED"
+        Exit Sub
+    End If
+    With r.watImports(r.watImportCount)
+        .moduleName = Trim(moduleName)
+        .importName = Trim(importName)
+        .aliasName = Trim(aliasName)
+        .signatureText = Trim(signatureText)
+        .hasHostBinding = hasHostBinding
+    End With
+    r.watImportCount += 1
+End Sub
+
+Private Function PreprocessKeyValueArrayToJson(ByVal arrayName As String, entries() As MetaKeyValueEntry, ByVal countValue As Integer) As String
+    Dim q As String: q = Chr(34)
+    Dim j As String
+    j = "  " & q & arrayName & q & ": ["
+    Dim i As Integer
+    For i = 0 To countValue - 1
+        If i > 0 Then j &= ","
+        j &= "{" & q & "key" & q & ":" & q & UXBPreMetaJsonEscape(entries(i).keyText) & q
+        j &= "," & q & "value" & q & ":" & q & UXBPreMetaJsonEscape(entries(i).valueText) & q & "}"
+    Next i
+    j &= "]"
+    Return j
+End Function
+
+Function PreprocessResultToJson(ByRef r As PreprocessResult) As String
+    Dim q As String: q = Chr(34)
+    Dim j As String: j = "{" & Chr(10)
+    j &= "  " & q & "schema" & q & ": " & q & "uxb.preprocess.result.v1" & q & "," & Chr(10)
+    j &= "  " & q & "target" & q & ": " & q & UXBPreMetaJsonEscape(r.targetText) & q & "," & Chr(10)
+    j &= "  " & q & "outDir" & q & ": " & q & UXBPreMetaJsonEscape(r.outDir) & q & "," & Chr(10)
+    j &= "  " & q & "assetRoot" & q & ": " & q & UXBPreMetaJsonEscape(r.assetRoot) & q & "," & Chr(10)
+    j &= "  " & q & "blockCount" & q & ": " & LTrim(Str(r.blockCount)) & "," & Chr(10)
+    j &= "  " & q & "assetCount" & q & ": " & LTrim(Str(r.assetCount)) & "," & Chr(10)
+    j &= "  " & q & "watImportCount" & q & ": " & LTrim(Str(r.watImportCount)) & "," & Chr(10)
+    j &= "  " & q & "manifestCount" & q & ": " & LTrim(Str(r.manifestCount)) & "," & Chr(10)
+    j &= "  " & q & "sourceMapCount" & q & ": " & LTrim(Str(r.sourceMapCount)) & "," & Chr(10)
+    j &= "  " & q & "jsonEntryCount" & q & ": " & LTrim(Str(r.jsonEntryCount)) & "," & Chr(10)
+    j &= "  " & q & "lockCount" & q & ": " & LTrim(Str(r.lockCount)) & "," & Chr(10)
+    j &= "  " & q & "profileCount" & q & ": " & LTrim(Str(r.profileCount)) & "," & Chr(10)
+    j &= "  " & q & "configFileCount" & q & ": " & LTrim(Str(r.configFileCount)) & "," & Chr(10)
+    j &= "  " & q & "diagnosticCount" & q & ": " & LTrim(Str(r.diagnosticCount)) & "," & Chr(10)
+
+    j &= "  " & q & "blocks" & q & ": [" & Chr(10)
+    Dim i As Integer
+    For i = 0 To r.blockCount - 1
+        If i > 0 Then j &= "," & Chr(10)
+        j &= "    {" & q & "target" & q & ":" & q & UXBPreMetaJsonEscape(r.blocks(i).target) & q
+        j &= "," & q & "section" & q & ":" & q & UXBPreMetaJsonEscape(r.blocks(i).section) & q
+        j &= "," & q & "outFile" & q & ":" & q & UXBPreMetaJsonEscape(r.blocks(i).outFile) & q
+        j &= "," & q & "source" & q & ":" & q & UXBPreMetaJsonEscape(r.blocks(i).sourceFile) & q
+        j &= "," & q & "startLine" & q & ":" & LTrim(Str(r.blocks(i).startLine))
+        j &= "," & q & "endLine" & q & ":" & LTrim(Str(r.blocks(i).endLine)) & "}"
+    Next i
+    j &= Chr(10) & "  ]," & Chr(10)
+
+    j &= "  " & q & "assets" & q & ": [" & Chr(10)
+    For i = 0 To r.assetCount - 1
+        If i > 0 Then j &= "," & Chr(10)
+        j &= "    {" & q & "kind" & q & ":" & q & UXBPreMetaJsonEscape(r.assets(i).assetKind) & q
+        j &= "," & q & "source" & q & ":" & q & UXBPreMetaJsonEscape(r.assets(i).sourcePath) & q
+        j &= "," & q & "target" & q & ":" & q & UXBPreMetaJsonEscape(r.assets(i).targetPath) & q
+        j &= "," & q & "alias" & q & ":" & q & UXBPreMetaJsonEscape(r.assets(i).aliasName) & q
+        j &= "," & q & "required" & q & ":" & LTrim(Str(r.assets(i).required)) & "}"
+    Next i
+    j &= Chr(10) & "  ]," & Chr(10)
+
+    j &= "  " & q & "watImports" & q & ": [" & Chr(10)
+    For i = 0 To r.watImportCount - 1
+        If i > 0 Then j &= "," & Chr(10)
+        j &= "    {" & q & "module" & q & ":" & q & UXBPreMetaJsonEscape(r.watImports(i).moduleName) & q
+        j &= "," & q & "import" & q & ":" & q & UXBPreMetaJsonEscape(r.watImports(i).importName) & q
+        j &= "," & q & "alias" & q & ":" & q & UXBPreMetaJsonEscape(r.watImports(i).aliasName) & q
+        j &= "," & q & "signature" & q & ":" & q & UXBPreMetaJsonEscape(r.watImports(i).signatureText) & q
+        j &= "," & q & "hasHostBinding" & q & ":" & LTrim(Str(r.watImports(i).hasHostBinding)) & "}"
+    Next i
+    j &= Chr(10) & "  ]," & Chr(10)
+
+    j &= PreprocessKeyValueArrayToJson("sourceMap", r.sourceMap(), r.sourceMapCount) & "," & Chr(10)
+    j &= PreprocessKeyValueArrayToJson("jsonEntries", r.jsonEntries(), r.jsonEntryCount) & "," & Chr(10)
+    j &= PreprocessKeyValueArrayToJson("locks", r.locks(), r.lockCount) & "," & Chr(10)
+    j &= PreprocessKeyValueArrayToJson("profiles", r.profiles(), r.profileCount) & "," & Chr(10)
+    j &= PreprocessKeyValueArrayToJson("configFiles", r.configFiles(), r.configFileCount) & "," & Chr(10)
+
+    j &= "  " & q & "diagnostics" & q & ": ["
+    For i = 0 To r.diagnosticCount - 1
+        If i > 0 Then j &= ","
+        j &= q & UXBPreMetaJsonEscape(r.diagnostics(i)) & q
+    Next i
+    j &= "]" & Chr(10)
+    j &= "}" & Chr(10)
+    Return j
+End Function
+
+Sub LexerPreprocessGetLastResult(ByRef outResult As PreprocessResult)
+    outResult = gLastPreprocessResult
+End Sub
+
+#endif

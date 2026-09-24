@@ -1,0 +1,740 @@
+#ifndef UXB_RUNTIME_FFI_FBS
+#define UXB_RUNTIME_FFI_FBS
+
+#include once "../runtime_context.fbs"
+#include once "../services/runtime_service_ids.fbs"
+
+Const UXB_RTFFI_MAX_ARGS As Long = 10
+Const UXB_RTFFI_KIND_VOID As Long = 0
+Const UXB_RTFFI_KIND_I32 As Long = 1
+Const UXB_RTFFI_KIND_U32 As Long = 2
+Const UXB_RTFFI_KIND_I64 As Long = 3
+Const UXB_RTFFI_KIND_U64 As Long = 4
+Const UXB_RTFFI_KIND_F64 As Long = 5
+Const UXB_RTFFI_KIND_PTR As Long = 6
+Const UXB_RTFFI_KIND_STRPTR As Long = 7
+Const UXB_RTFFI_REQUIRED_VERSION As Long = 131
+Const UXB_RTFFI_REQUIRED_MAX_ARGS As Long = 10
+
+Declare Function UXBRuntimeFfiLoadLibraryA Lib "kernel32" Alias "LoadLibraryA" (ByVal lpLibFileName As ZString Ptr) As Any Ptr
+Declare Function UXBRuntimeFfiGetProcAddress Lib "kernel32" Alias "GetProcAddress" (ByVal hModule As Any Ptr, ByVal lpProcName As ZString Ptr) As Any Ptr
+Declare Function UXBRuntimeFfiGetModuleFileNameA Lib "kernel32" Alias "GetModuleFileNameA" (ByVal hModule As Any Ptr, ByVal lpFilename As ZString Ptr, ByVal nSize As ULong) As ULong
+Declare Function UXBRuntimeFfiFreeLibrary Lib "kernel32" Alias "FreeLibrary" (ByVal hModule As Any Ptr) As Long
+
+Type UXBRuntimeFfiInvoke10Fn As Function Cdecl ( _
+    ByVal dllName As ZString Ptr, _
+    ByVal symbolName As ZString Ptr, _
+    ByVal returnKind As Long, _
+    ByVal argCount As Long, _
+    ByVal argKinds As Long Ptr, _
+    ByVal argU64 As ULongInt Ptr, _
+    ByVal argF64 As Double Ptr, _
+    ByVal returnU64 As ULongInt Ptr, _
+    ByVal returnF64 As Double Ptr, _
+    ByVal errorText As ZString Ptr, _
+    ByVal errorCapacity As Long _
+) As Long
+
+Type UXBRuntimeFfiVersionFn As Function Cdecl () As Long
+Type UXBRuntimeFfiMaxArgsFn As Function Cdecl () As Long
+
+Type UXBRuntimeFfiStringLengthFn As Function Cdecl ( _
+    ByVal tokenValue As ULong _
+) As Long
+
+Type UXBRuntimeFfiCopyStringFn As Function Cdecl ( _
+    ByVal tokenValue As ULong, _
+    ByVal textOut As ZString Ptr, _
+    ByVal textCapacity As Long _
+) As Long
+
+Private Function UXBRuntimeFfiRawText(ByRef value As UXBInterpValue) As String
+    Dim s As String = Trim(value.stringValue)
+    If s <> "" Then Return s
+    Return UXBInterpValueToString(value)
+End Function
+
+Private Function UXBRuntimeFfiNormalizeDllName(ByRef dllNameIn As String, ByRef dllNameOut As String, ByRef errText As String) As Integer
+    dllNameOut = Trim(dllNameIn)
+    If dllNameOut = "" Then
+        errText = "FFI library cannot be empty"
+        Return 0
+    End If
+
+    If Left(dllNameOut, 1) = "\" Or Left(dllNameOut, 1) = "/" Then
+        errText = "FFI library must not be an absolute path"
+        Return 0
+    End If
+
+    If InStr(dllNameOut, "..") > 0 Or InStr(dllNameOut, "\") > 0 Or InStr(dllNameOut, "/") > 0 Then
+        errText = "FFI library path segments are not allowed"
+        Return 0
+    End If
+
+    Dim i As Integer
+    For i = 1 To Len(dllNameOut)
+        Dim ch As Integer
+        ch = Asc(Mid(dllNameOut, i, 1))
+        If ch < 32 Then
+            errText = "FFI library contains invalid characters"
+            Return 0
+        End If
+        Select Case ch
+        Case 34, 42, 59, 60, 62, 63, 124
+            errText = "FFI library contains invalid characters"
+            Return 0
+        End Select
+    Next i
+
+    dllNameOut = UCase(dllNameOut)
+    Return 1
+End Function
+
+Private Function UXBRuntimeFfiNormalizeTypeToken(ByRef tokenText As String, ByRef typeOut As String) As Integer
+    typeOut = UCase(Trim(tokenText))
+    If typeOut = "" Then Return 0
+    If Left(typeOut, 5) = "TYPE_" Then typeOut = Mid(typeOut, 6)
+
+    Select Case typeOut
+    Case "VOID", "BYVAL", "0"
+        typeOut = "VOID"
+    Case "BOOL", "BOOLEAN", "I8", "I16", "I32", "INT", "INTEGER", "LONG"
+        typeOut = "I32"
+    Case "U8", "U16", "U32", "UINT", "ULONG"
+        typeOut = "U32"
+    Case "I64", "LONGINT"
+        typeOut = "I64"
+    Case "U64", "ULONGINT"
+        typeOut = "U64"
+    Case "F32", "SINGLE", "F64", "DOUBLE"
+        typeOut = "F64"
+    Case "PTR", "POINTER", "BYREF", "REF"
+        typeOut = "PTR"
+    Case "STRPTR", "STRING"
+        typeOut = "STRPTR"
+    Case Else
+        Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function UXBRuntimeFfiLooksLikeTypeList(ByVal listText As String) As Integer
+    Dim src As String = Trim(listText)
+    If src = "" Then Return 0
+
+    Dim countValue As Integer = 0
+    Dim posValue As Integer = 1
+    Do
+        Dim commaPos As Integer = InStr(posValue, src, ",")
+        Dim partText As String
+        If commaPos = 0 Then
+            partText = Trim(Mid(src, posValue))
+        Else
+            partText = Trim(Mid(src, posValue, commaPos - posValue))
+        End If
+        If partText = "" Then Return 0
+
+        Dim kindText As String
+        If UXBRuntimeFfiNormalizeTypeToken(partText, kindText) = 0 Then Return 0
+        If kindText = "VOID" Then Return 0
+        countValue += 1
+
+        If commaPos = 0 Then Exit Do
+        posValue = commaPos + 1
+    Loop
+
+    Return IIf(countValue > 0, 1, 0)
+End Function
+
+Private Function UXBRuntimeFfiParseTypeList(ByVal listText As String, typesOut() As String, ByRef typeCountOut As Integer, ByRef errText As String) As Integer
+    typeCountOut = 0
+    Dim src As String = Trim(listText)
+    If src = "" Then Return 0
+
+    Dim posValue As Integer = 1
+    Do
+        Dim commaPos As Integer = InStr(posValue, src, ",")
+        Dim partText As String
+        If commaPos = 0 Then
+            partText = Trim(Mid(src, posValue))
+        Else
+            partText = Trim(Mid(src, posValue, commaPos - posValue))
+        End If
+        If partText = "" Then
+            errText = "FFI argument type list contains an empty token"
+            Return 0
+        End If
+
+        Dim kindText As String
+        If UXBRuntimeFfiNormalizeTypeToken(partText, kindText) = 0 Then
+            errText = "FFI argument type list token is invalid: " & partText
+            Return 0
+        End If
+        If kindText = "VOID" Then
+            errText = "FFI argument type list cannot contain VOID"
+            Return 0
+        End If
+
+        If typeCountOut >= UXB_RTFFI_MAX_ARGS Then
+            errText = "FFI argument type list exceeds the ABI10 limit"
+            Return 0
+        End If
+
+        typesOut(typeCountOut) = kindText
+        typeCountOut += 1
+
+        If commaPos = 0 Then Exit Do
+        posValue = commaPos + 1
+    Loop
+
+    Return IIf(typeCountOut > 0, 1, 0)
+End Function
+
+Private Function UXBRuntimeFfiInferArgType(ByRef value As UXBInterpValue, ByRef typeOut As String) As Integer
+    Select Case value.kind
+    Case UXB_VAL_STRING, UXB_VAL_WSTRING
+        typeOut = "STRPTR"
+    Case UXB_VAL_F32, UXB_VAL_F64
+        typeOut = "F64"
+    Case UXB_VAL_BOOL, UXB_VAL_I32, UXB_VAL_I64
+        typeOut = "I64"
+    Case UXB_VAL_U32, UXB_VAL_U64
+        typeOut = "U64"
+    Case UXB_VAL_PTR
+        typeOut = "PTR"
+    Case UXB_VAL_DLL_HANDLE, UXB_VAL_FILE_HANDLE, UXB_VAL_RUNTIME_HANDLE, UXB_VAL_JS_HANDLE, UXB_VAL_WASM_HANDLE
+        typeOut = "U64"
+    Case Else
+        If Len(Trim(value.stringValue)) > 0 Then
+            typeOut = "STRPTR"
+        ElseIf value.ptrValue <> 0 Then
+            typeOut = "PTR"
+        ElseIf value.uintValue <> 0 Then
+            typeOut = "U64"
+        Else
+            typeOut = "I64"
+        End If
+    End Select
+    Return 1
+End Function
+
+Private Function UXBRuntimeFfiPointerBits(ByRef value As UXBInterpValue) As ULongInt
+    If value.ptrValue <> 0 Then
+#Ifdef __FB_64BIT__
+        Return CULngInt(CLngInt(value.ptrValue))
+#Else
+        Return CULngInt(CULng(value.ptrValue))
+#EndIf
+    End If
+
+    If value.kind = UXB_VAL_DLL_HANDLE Or value.kind = UXB_VAL_FILE_HANDLE Or value.kind = UXB_VAL_RUNTIME_HANDLE Or value.kind = UXB_VAL_JS_HANDLE Or value.kind = UXB_VAL_WASM_HANDLE Then
+        If value.handleId <> 0 Then Return CULngInt(value.handleId)
+    End If
+
+    If value.uintValue <> 0 Then Return value.uintValue
+    Return CULngInt(value.intValue)
+End Function
+
+Private Function UXBRuntimeFfiResolveArg( _
+    ByRef value As UXBInterpValue, _
+    ByRef typeText As String, _
+    ByRef keepAlive As String, _
+    ByRef argKindOut As Long, _
+    ByRef argU64Out As ULongInt, _
+    ByRef argF64Out As Double, _
+    ByRef errText As String _
+) As Integer
+    Dim kindText As String = UCase(Trim(typeText))
+    keepAlive = ""
+    argKindOut = UXB_RTFFI_KIND_VOID
+    argU64Out = 0
+    argF64Out = 0#
+
+    If kindText = "" Or kindText = "AUTO" Then
+        If UXBRuntimeFfiInferArgType(value, kindText) = 0 Then Return 0
+    End If
+
+    Select Case kindText
+    Case "F64"
+        If UXBInterpIsNumeric(value) = 0 Then
+            errText = "FFI F64 argument must be numeric"
+            Return 0
+        End If
+        If value.kind = UXB_VAL_F32 Or value.kind = UXB_VAL_F64 Then
+            argF64Out = value.floatValue
+        Else
+            argF64Out = CDbl(value.intValue)
+        End If
+        argKindOut = UXB_RTFFI_KIND_F64
+    Case "STRPTR"
+        keepAlive = UXBInterpValueToString(value)
+        ' S-145: FreeBASIC StrPtr of an empty string is NULL; "" must reach the callee as a real empty C string.
+        If Len(keepAlive) = 0 Then keepAlive = Chr(0)
+#Ifdef __FB_64BIT__
+        argU64Out = CULngInt(CLngInt(CPtr(Any Ptr, StrPtr(keepAlive))))
+#Else
+        argU64Out = CULngInt(CULng(CPtr(Any Ptr, StrPtr(keepAlive))))
+#EndIf
+        argKindOut = UXB_RTFFI_KIND_STRPTR
+    Case "PTR"
+        argU64Out = UXBRuntimeFfiPointerBits(value)
+        argKindOut = UXB_RTFFI_KIND_PTR
+    Case "I32"
+        If UXBInterpIsNumeric(value) = 0 Then
+            errText = "FFI I32 argument must be numeric"
+            Return 0
+        End If
+        argU64Out = CULngInt(CLng(value.intValue))
+        argKindOut = UXB_RTFFI_KIND_I32
+    Case "U32"
+        If UXBInterpIsNumeric(value) = 0 Then
+            errText = "FFI U32 argument must be numeric"
+            Return 0
+        End If
+        If value.intValue < 0 And value.uintValue = 0 Then
+            errText = "FFI U32 argument cannot be negative"
+            Return 0
+        End If
+        If value.uintValue <> 0 Then
+            argU64Out = CULngInt(CUInt(value.uintValue))
+        Else
+            argU64Out = CULngInt(CUInt(value.intValue))
+        End If
+        argKindOut = UXB_RTFFI_KIND_U32
+    Case "I64"
+        If UXBInterpIsNumeric(value) = 0 Then
+            errText = "FFI I64 argument must be numeric"
+            Return 0
+        End If
+        argU64Out = CULngInt(CLngInt(value.intValue))
+        argKindOut = UXB_RTFFI_KIND_I64
+    Case "U64"
+        If UXBInterpIsNumeric(value) = 0 Then
+            errText = "FFI U64 argument must be numeric"
+            Return 0
+        End If
+        If value.intValue < 0 And value.uintValue = 0 Then
+            errText = "FFI U64 argument cannot be negative"
+            Return 0
+        End If
+        If value.uintValue <> 0 Then
+            argU64Out = value.uintValue
+        Else
+            argU64Out = CULngInt(value.intValue)
+        End If
+        argKindOut = UXB_RTFFI_KIND_U64
+    Case "BYREF"
+        argU64Out = UXBRuntimeFfiPointerBits(value)
+        argKindOut = UXB_RTFFI_KIND_PTR
+    Case "VOID"
+        argKindOut = UXB_RTFFI_KIND_VOID
+    Case Else
+        errText = "FFI argument type is unsupported: " & kindText
+        Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function UXBRuntimeFfiPointerResult(ByVal tokenValue As ULongInt, ByVal typeText As String) As UXBInterpValue
+    Dim result As UXBInterpValue
+    result.kind = UXB_VAL_PTR
+    result.typeName = UCase(Trim(typeText))
+    result.uintValue = tokenValue
+    result.intValue = CLngInt(tokenValue)
+    result.floatValue = CDbl(tokenValue)
+    result.handleId = CInt(tokenValue And &h7FFFFFFF)
+    ' uxffi PTR results are opaque generation-checked tokens, not process pointers.
+    result.ptrValue = 0
+    Return result
+End Function
+
+Private Function UXBRuntimeFfiDirName(ByRef pathText As String) As String
+    Dim slashPos As Integer
+    slashPos = InStrRev(pathText, "\")
+    If slashPos = 0 Then slashPos = InStrRev(pathText, "/")
+    If slashPos <= 1 Then Return ""
+    Return Left(pathText, slashPos - 1)
+End Function
+
+Private Sub UXBRuntimeFfiTryLoad(ByRef moduleOut As Any Ptr, ByRef candidate As String)
+    If moduleOut <> 0 Or Trim(candidate) = "" Then Exit Sub
+    moduleOut = UXBRuntimeFfiLoadLibraryA(StrPtr(candidate))
+End Sub
+
+Private Sub UXBRuntimeFfiUnloadBridge(ByRef moduleHandle As Any Ptr)
+    If moduleHandle = 0 Then Exit Sub
+    Dim ignored As Long
+    ignored = UXBRuntimeFfiFreeLibrary(moduleHandle)
+    moduleHandle = 0
+End Sub
+
+Private Function UXBRuntimeFfiValidateBridge(ByRef moduleHandle As Any Ptr, ByRef errText As String) As Integer
+    Dim versionProc As Any Ptr
+    Dim maxArgsProc As Any Ptr
+    If moduleHandle = 0 Then Return 0
+    versionProc = UXBRuntimeFfiGetProcAddress(moduleHandle, StrPtr("uxffi_version"))
+    maxArgsProc = UXBRuntimeFfiGetProcAddress(moduleHandle, StrPtr("uxffi_max_args"))
+    If versionProc = 0 Or maxArgsProc = 0 Then
+        errText = "stale uxffi.dll: version/max-args exports are missing"
+        UXBRuntimeFfiUnloadBridge moduleHandle
+        Return 0
+    End If
+    Dim versionFn As UXBRuntimeFfiVersionFn
+    Dim maxArgsFn As UXBRuntimeFfiMaxArgsFn
+    versionFn = CPtr(UXBRuntimeFfiVersionFn, versionProc)
+    maxArgsFn = CPtr(UXBRuntimeFfiMaxArgsFn, maxArgsProc)
+    If versionFn() < UXB_RTFFI_REQUIRED_VERSION Or maxArgsFn() < UXB_RTFFI_REQUIRED_MAX_ARGS Then
+        errText = "stale or incompatible uxffi.dll; rebuild runtime_ext\uxffi"
+        UXBRuntimeFfiUnloadBridge moduleHandle
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Sub UXBRuntimeFfiLoadBridge( _
+    ByRef bridgeModule As Any Ptr, _
+    ByRef bridgeInvokeProc As Any Ptr, _
+    ByRef bridgeLengthProc As Any Ptr, _
+    ByRef bridgeCopyProc As Any Ptr, _
+    ByRef bridgeTried As Integer, _
+    ByRef errText As String _
+)
+    If bridgeTried <> 0 Then Exit Sub
+    bridgeTried = 1
+
+    Dim exeBuffer As ZString * 32768
+    Dim runtimeExePath As String
+    Dim exeDir As String
+    Dim candidate As String
+    exeBuffer = ""
+    If UXBRuntimeFfiGetModuleFileNameA(0, @exeBuffer, 32767) <> 0 Then runtimeExePath = exeBuffer
+    exeDir = UXBRuntimeFfiDirName(runtimeExePath)
+
+    candidate = exeDir & "\uxffi.dll": UXBRuntimeFfiTryLoad bridgeModule, candidate
+    candidate = CurDir & "\bin\uxffi.dll": UXBRuntimeFfiTryLoad bridgeModule, candidate
+    candidate = CurDir & "\dist\runtime_ext\uxffi.dll": UXBRuntimeFfiTryLoad bridgeModule, candidate
+    candidate = exeDir & "\..\bin\uxffi.dll": UXBRuntimeFfiTryLoad bridgeModule, candidate
+    candidate = exeDir & "\..\dist\runtime_ext\uxffi.dll": UXBRuntimeFfiTryLoad bridgeModule, candidate
+    candidate = CurDir & "\uxffi.dll": UXBRuntimeFfiTryLoad bridgeModule, candidate
+    candidate = "uxffi.dll": UXBRuntimeFfiTryLoad bridgeModule, candidate
+
+    If bridgeModule <> 0 Then
+        If UXBRuntimeFfiValidateBridge(bridgeModule, errText) = 0 Then Exit Sub
+        bridgeInvokeProc = UXBRuntimeFfiGetProcAddress(bridgeModule, StrPtr("uxffi_invoke10"))
+        bridgeLengthProc = UXBRuntimeFfiGetProcAddress(bridgeModule, StrPtr("uxffi_string_length"))
+        bridgeCopyProc = UXBRuntimeFfiGetProcAddress(bridgeModule, StrPtr("uxffi_copy_string"))
+    End If
+End Sub
+
+Private Function UXBRuntimeFfiInvokeBridge( _
+    ByRef dllName As String, _
+    ByRef symbolName As String, _
+    ByRef returnTypeRaw As String, _
+    ByRef returnTypeCanon As String, _
+    ByRef callingConventionText As String, _
+    ByRef typeListText As String, _
+    ByVal argStart As Integer, _
+    ByRef args As UXBRuntimeArgList, _
+    ByRef resultOut As UXBInterpValue, _
+    ByRef errText As String _
+) As Integer
+    Static bridgeModule As Any Ptr
+    Static bridgeInvokeProc As Any Ptr
+    Static bridgeLengthProc As Any Ptr
+    Static bridgeCopyProc As Any Ptr
+    Static bridgeTried As Integer
+
+    UXBRuntimeFfiLoadBridge bridgeModule, bridgeInvokeProc, bridgeLengthProc, bridgeCopyProc, bridgeTried, errText
+    If bridgeModule = 0 Then
+        If errText = "" Then errText = "uxffi.dll is required for native CALL(DLL/API) execution"
+        Return 0
+    End If
+    If bridgeInvokeProc = 0 Then
+        errText = "uxffi.dll does not export uxffi_invoke10"
+        Return 0
+    End If
+
+    Dim runtimeArgCount As Integer = args.count - argStart
+    If runtimeArgCount < 0 Then runtimeArgCount = 0
+    If runtimeArgCount > UXB_RTFFI_MAX_ARGS Then
+        errText = "CALL(DLL/API) supports at most 10 runtime arguments"
+        Return 0
+    End If
+
+    Dim argTypes(0 To UXB_RTFFI_MAX_ARGS - 1) As String
+    Dim argTypeCount As Integer
+
+    If typeListText <> "" Then
+        If UXBRuntimeFfiParseTypeList(typeListText, argTypes(), argTypeCount, errText) = 0 Then Return 0
+        If argTypeCount <> runtimeArgCount Then
+            errText = "CALL(DLL/API) argument type count does not match runtime arguments"
+            Return 0
+        End If
+    Else
+        ' Compatibility contract: legacy CALL(DLL/API) records without an explicit
+        ' ABI10 type list are I32 calls. The return signature never describes the
+        ' argument types. This matches the executor and canonical MIR interpreter.
+        Dim i As Integer
+        For i = 0 To runtimeArgCount - 1
+            argTypes(i) = "I32"
+        Next i
+        argTypeCount = runtimeArgCount
+    End If
+
+    Dim argKinds(0 To UXB_RTFFI_MAX_ARGS - 1) As Long
+    Dim argU64(0 To UXB_RTFFI_MAX_ARGS - 1) As ULongInt
+    Dim argF64(0 To UXB_RTFFI_MAX_ARGS - 1) As Double
+    Dim keepAlive(0 To UXB_RTFFI_MAX_ARGS - 1) As String
+    Dim i As Integer
+    For i = 0 To runtimeArgCount - 1
+        If UXBRuntimeFfiResolveArg(args.values(argStart + i), argTypes(i), keepAlive(i), argKinds(i), argU64(i), argF64(i), errText) = 0 Then
+            If errText = "" Then errText = "CALL(DLL/API) argument marshal failed"
+            Return 0
+        End If
+    Next i
+
+    Dim invokeFn As UXBRuntimeFfiInvoke10Fn
+    invokeFn = CPtr(UXBRuntimeFfiInvoke10Fn, bridgeInvokeProc)
+
+    Dim returnKind As Long
+    Select Case returnTypeCanon
+    Case "VOID"
+        returnKind = UXB_RTFFI_KIND_VOID
+    Case "I32"
+        returnKind = UXB_RTFFI_KIND_I32
+    Case "U32"
+        returnKind = UXB_RTFFI_KIND_U32
+    Case "I64"
+        returnKind = UXB_RTFFI_KIND_I64
+    Case "U64"
+        returnKind = UXB_RTFFI_KIND_U64
+    Case "PTR"
+        returnKind = UXB_RTFFI_KIND_PTR
+    Case "F64"
+        returnKind = UXB_RTFFI_KIND_F64
+    Case "STRPTR"
+        returnKind = UXB_RTFFI_KIND_STRPTR
+    Case Else
+        errText = "CALL(DLL/API) unsupported return type " & returnTypeRaw
+        Return 0
+    End Select
+
+    Dim returnU64 As ULongInt
+    Dim returnF64 As Double
+    Dim errorBuffer As ZString * 512
+    errorBuffer = ""
+
+    Dim invokeOk As Long
+    If runtimeArgCount = 0 Then
+        invokeOk = invokeFn(StrPtr(dllName), StrPtr(symbolName), returnKind, 0, 0, 0, 0, @returnU64, @returnF64, @errorBuffer, 512)
+    Else
+        invokeOk = invokeFn(StrPtr(dllName), StrPtr(symbolName), returnKind, runtimeArgCount, @argKinds(0), @argU64(0), @argF64(0), @returnU64, @returnF64, @errorBuffer, 512)
+    End If
+
+    If invokeOk = 0 Then
+        errText = "CALL(DLL/API) invocation failed"
+        If Len(errorBuffer) > 0 Then errText &= ": " & errorBuffer
+        Return 0
+    End If
+
+    Dim result As UXBInterpValue
+    Select Case returnTypeCanon
+    Case "VOID"
+        result = UXBInterpValueVoid()
+    Case "I32"
+        result = UXBInterpValueInt(CLngInt(returnU64))
+        result.kind = UXB_VAL_I32
+        result.typeName = "I32"
+    Case "U32"
+        result = UXBInterpValueUInt(returnU64)
+        result.kind = UXB_VAL_U32
+        result.typeName = "U32"
+    Case "I64"
+        result = UXBInterpValueInt(CLngInt(returnU64))
+    Case "U64"
+        result = UXBInterpValueUInt(returnU64)
+    Case "PTR"
+        result = UXBRuntimeFfiPointerResult(returnU64, "PTR")
+    Case "F64"
+        result = UXBInterpValueFloat(returnF64)
+    Case "STRPTR"
+        If returnU64 = 0 Then
+            result = UXBInterpValueString("")
+        Else
+            If bridgeLengthProc = 0 Or bridgeCopyProc = 0 Then
+                errText = "uxffi.dll does not export uxffi_string_length/copy_string"
+                Return 0
+            End If
+            Dim lengthFn As UXBRuntimeFfiStringLengthFn
+            Dim copyFn As UXBRuntimeFfiCopyStringFn
+            lengthFn = CPtr(UXBRuntimeFfiStringLengthFn, bridgeLengthProc)
+            copyFn = CPtr(UXBRuntimeFfiCopyStringFn, bridgeCopyProc)
+            Dim requiredBytes As Long
+            requiredBytes = lengthFn(CUInt(returnU64))
+            If requiredBytes <= 0 Or requiredBytes > 16777217 Then
+                errText = "CALL(DLL/API) returned an invalid or oversized STRPTR result"
+                Return 0
+            End If
+            Dim textBuffer As ZString Ptr
+            textBuffer = CAllocate(requiredBytes)
+            If textBuffer = 0 Then
+                errText = "CALL(DLL/API) STRPTR allocation failed"
+                Return 0
+            End If
+            *textBuffer = ""
+            If copyFn(CUInt(returnU64), textBuffer, requiredBytes) = 0 Then
+                Deallocate(textBuffer)
+                errText = "CALL(DLL/API) could not copy STRPTR result"
+                Return 0
+            End If
+            result = UXBInterpValueString(*textBuffer)
+            Deallocate(textBuffer)
+        End If
+    End Select
+
+    If returnTypeRaw <> "" Then
+        Select Case UCase(Trim(returnTypeRaw))
+        Case "BOOL", "BOOLEAN", "I8", "I16", "U8", "U16", "F32"
+            result = UXBInterpApplyDeclaredType(result, returnTypeRaw)
+        End Select
+    End If
+
+    resultOut = result
+    Return 1
+End Function
+
+Function UXBRuntimeFfiDispatch(ByRef rt As UXBRuntimeContext, ByVal serviceId As String, ByRef args As UXBRuntimeArgList) As UXBInterpValue
+    Dim targetText As String = UCase(Trim(rt.targetName))
+    If targetText <> "NATIVE" And targetText <> "X64" And targetText <> "X86" Then
+        Return UXBRuntimeSetError(rt, UXB_RT_ERR_NATIVE_ONLY, "FFI service requires native target: " & serviceId)
+    End If
+
+    Select Case UCase(Trim(serviceId))
+    Case RT_DLL_LOAD
+        If args.count < 1 Then
+            Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "FFI DLL load requires a library name")
+        End If
+
+        Dim dllNameRaw As String
+        dllNameRaw = UXBRuntimeFfiRawText(args.values(0))
+
+        Dim dllName As String
+        Dim normalizeErr As String
+        If UXBRuntimeFfiNormalizeDllName(dllNameRaw, dllName, normalizeErr) = 0 Then
+            Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, normalizeErr)
+        End If
+
+        Dim moduleHandle As Any Ptr
+        moduleHandle = UXBRuntimeFfiLoadLibraryA(StrPtr(dllName))
+        If moduleHandle = 0 Then
+            Return UXBRuntimeSetError(rt, UXB_RT_ERR_FFI, "FFI DLL load failed: " & dllName)
+        End If
+
+        Dim hid As Integer
+        hid = UXBRuntimeAllocHandle(rt, "DLL", dllName, 0, moduleHandle)
+        Return UXBInterpValueHandle("DLL_HANDLE", hid)
+
+    Case RT_DLL_CALL, RT_API_CALL
+        If args.count < 2 Then
+            Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "FFI CALL requires library and symbol")
+        End If
+
+        Dim dllNameRaw As String
+        Dim symbolNameRaw As String
+        Dim returnSpecRaw As String
+        Dim returnTypeCanon As String
+        Dim typeListText As String
+        Dim callingConventionText As String
+        Dim argStart As Integer
+
+        dllNameRaw = UXBRuntimeFfiRawText(args.values(0))
+        If args.values(0).kind = UXB_VAL_DLL_HANDLE Or args.values(0).kind = UXB_VAL_RUNTIME_HANDLE Then
+            Dim hp As UXBRuntimeHandle Ptr
+            hp = UXBRuntimeFindHandle(rt, args.values(0).handleId)
+            If hp <> 0 And Trim(hp->nameText) <> "" Then dllNameRaw = hp->nameText
+        End If
+
+        Dim dllName As String
+        Dim normalizeErr As String
+        If UXBRuntimeFfiNormalizeDllName(dllNameRaw, dllName, normalizeErr) = 0 Then
+            Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, normalizeErr)
+        End If
+
+        symbolNameRaw = UXBRuntimeFfiRawText(args.values(1))
+        If symbolNameRaw = "" Then
+            Return UXBRuntimeSetError(rt, UXB_RT_ERR_BAD_ARGUMENT, "FFI symbol cannot be empty")
+        End If
+
+        returnSpecRaw = ""
+        returnTypeCanon = "I32"
+        typeListText = ""
+        callingConventionText = "CDECL"
+        argStart = 2
+
+        If args.count >= 3 Then
+            Dim candidate As String
+            candidate = UXBRuntimeFfiRawText(args.values(2))
+            If candidate = "0" And args.count = 3 Then
+                returnSpecRaw = "VOID"
+                returnTypeCanon = "VOID"
+                argStart = 3
+            Else
+                Dim candidateTypeList As String
+                If InStr(candidate, "->") > 0 Then
+                    Dim arrowPos As Integer = InStr(candidate, "->")
+                    candidateTypeList = Trim(Left(candidate, arrowPos - 1))
+                    returnSpecRaw = Trim(Mid(candidate, arrowPos + 2))
+                Else
+                    candidateTypeList = ""
+                    returnSpecRaw = candidate
+                End If
+
+                If returnSpecRaw <> "" Then
+                    If UXBRuntimeFfiNormalizeTypeToken(returnSpecRaw, returnTypeCanon) <> 0 Then
+                        argStart = 3
+                        typeListText = candidateTypeList
+                    Else
+                        returnSpecRaw = ""
+                        returnTypeCanon = "I32"
+                    End If
+                End If
+            End If
+        End If
+
+        If returnSpecRaw <> "" Then
+            If args.count > argStart Then
+                Dim convCandidate As String
+                convCandidate = UCase(Trim(UXBRuntimeFfiRawText(args.values(argStart))))
+                If convCandidate = "CDECL" Or convCandidate = "STDCALL" Then
+                    callingConventionText = convCandidate
+                    argStart += 1
+                End If
+            End If
+
+            If typeListText = "" And args.count > argStart Then
+                Dim listCandidate As String
+                listCandidate = UXBRuntimeFfiRawText(args.values(argStart))
+                If UXBRuntimeFfiLooksLikeTypeList(listCandidate) <> 0 Then
+                    typeListText = listCandidate
+                    argStart += 1
+                End If
+            End If
+        End If
+
+        Dim result As UXBInterpValue
+        If UXBRuntimeFfiInvokeBridge(dllName, symbolNameRaw, returnSpecRaw, returnTypeCanon, callingConventionText, typeListText, argStart, args, result, normalizeErr) = 0 Then
+            If normalizeErr = "" Then normalizeErr = "FFI CALL(DLL/API) invocation failed"
+            Return UXBRuntimeSetError(rt, UXB_RT_ERR_FFI, normalizeErr)
+        End If
+        Return result
+
+    Case RT_INLINE_NATIVE
+        Return UXBRuntimeSetError(rt, UXB_RT_ERR_NATIVE_ONLY, "FFI inline native execution is not routed through the runtime service")
+    End Select
+
+    Return UXBRuntimeSetError(rt, UXB_RT_ERR_SERVICE_NOT_FOUND, "FFI service not found: " & serviceId)
+End Function
+
+#endif

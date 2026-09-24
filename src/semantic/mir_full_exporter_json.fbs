@@ -1,0 +1,730 @@
+#ifndef UXB_MIR_FULL_EXPORTER_JSON_FBS
+#define UXB_MIR_FULL_EXPORTER_JSON_FBS
+
+#include once "layout/layout_type_table.fbs"
+
+' UXB_MIR_FULL_JSON_V2_20260728:
+' Same CLI surface (--mir-full-json-out), complete MIRModule field export,
+' normalized symbols, operand role/type hints, source offsets and full vtable data.
+
+Function UXBMIRJsonEscape(ByRef s As String) As String
+    Dim As String outText = ""
+    For i As Integer = 1 To Len(s)
+        Dim As Integer c = Asc(Mid(s, i, 1))
+        Select Case c
+        Case 34
+            outText &= "\" & Chr(34)
+        Case 92
+            outText &= "\\"
+        Case 8
+            outText &= "\b"
+        Case 9
+            outText &= "\t"
+        Case 10
+            outText &= "\n"
+        Case 12
+            outText &= "\f"
+        Case 13
+            outText &= "\r"
+        Case Else
+            If c < 32 Then
+                outText &= " "
+            Else
+                outText &= Chr(c)
+            End If
+        End Select
+    Next
+    Return outText
+End Function
+
+Private Function UXBMIRBoolToJson(ByVal value As Integer) As String
+    Return IIf(value <> 0, "true", "false")
+End Function
+
+Function UXBMIRWriteTextFile(ByRef path As String, ByRef content As String, ByRef errText As String) As Integer
+    errText = ""
+    Dim As String safePath = MIRJsonNormalizePath(path)
+    If Trim(safePath) = "" Then
+        errText = "output path is empty"
+        Return 0
+    End If
+    If MIRJsonEnsureParentDir(safePath) = 0 Then
+        errText = "cannot create output parent directory: " & safePath
+        Return 0
+    End If
+
+    Dim As Integer ff = FreeFile
+    If Open(safePath For Output As #ff) <> 0 Then
+        errText = "cannot open output file: " & safePath
+        Return 0
+    End If
+    Print #ff, content;
+    Close #ff
+    Return 1
+End Function
+
+Private Function UXBMIRStringArrayToJson(arr() As String, ByVal itemCount As Integer) As String
+    If itemCount <= 0 Then Return "[]"
+
+    Dim As String j = "["
+    For i As Integer = 0 To itemCount - 1
+        If i > 0 Then j &= ","
+        j &= Chr(34) & UXBMIRJsonEscape(arr(i)) & Chr(34)
+    Next
+    j &= "]"
+    Return j
+End Function
+
+Private Function UXBMIRIntArrayToJson(arr() As Integer, ByVal itemCount As Integer) As String
+    If itemCount <= 0 Then Return "[]"
+
+    Dim As String j = "["
+    For i As Integer = 0 To itemCount - 1
+        If i > 0 Then j &= ","
+        j &= LTrim(Str(arr(i)))
+    Next
+    j &= "]"
+    Return j
+End Function
+
+Private Function UXBMIRBoolArrayToJson(arr() As Integer, ByVal itemCount As Integer) As String
+    If itemCount <= 0 Then Return "[]"
+
+    Dim As String j = "["
+    For i As Integer = 0 To itemCount - 1
+        If i > 0 Then j &= ","
+        j &= UXBMIRBoolToJson(arr(i))
+    Next
+    j &= "]"
+    Return j
+End Function
+
+
+Private Function UXBMIRRecordFieldDimsToJson(ByRef fieldValue As TypeLayoutField) As String
+    If fieldValue.isArray = 0 Or fieldValue.dimCount <= 0 Or fieldValue.firstDim < 0 Then Return "[]"
+    Dim As String j = "["
+    For di As Integer = 0 To fieldValue.dimCount - 1
+        Dim As Integer dimIdx = fieldValue.firstDim + di
+        If di > 0 Then j &= ","
+        j &= "{"
+        j &= Chr(34) & "lower" & Chr(34) & ":" & LTrim(Str(gTypeLayoutDims(dimIdx).lowerBound)) & ","
+        j &= Chr(34) & "upper" & Chr(34) & ":" & LTrim(Str(gTypeLayoutDims(dimIdx).upperBound)) & ","
+        j &= Chr(34) & "extent" & Chr(34) & ":" & LTrim(Str(gTypeLayoutDims(dimIdx).extent))
+        j &= "}"
+    Next di
+    j &= "]"
+    Return j
+End Function
+
+Private Function UXBMIRRecordTypesToJson() As String
+    If gTypeLayoutBuilt = 0 Or gTypeLayoutCount <= 0 Then Return "[]"
+    Dim As String j = "["
+    For ti As Integer = 0 To gTypeLayoutCount - 1
+        If ti > 0 Then j &= ","
+        j &= "{"
+        j &= Chr(34) & "name" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(gTypeLayouts(ti).typeName) & Chr(34) & ","
+        j &= Chr(34) & "kind" & Chr(34) & ":" & Chr(34) & LCase(UXBMIRJsonEscape(gTypeLayouts(ti).recordKind)) & Chr(34) & ","
+        j &= Chr(34) & "abi" & Chr(34) & ":" & Chr(34) & LCase(UXBMIRJsonEscape(gTypeLayouts(ti).abiKind)) & Chr(34) & ","
+        j &= Chr(34) & "size" & Chr(34) & ":" & LTrim(Str(gTypeLayouts(ti).sizeBytes)) & ","
+        j &= Chr(34) & "alignment" & Chr(34) & ":" & LTrim(Str(gTypeLayouts(ti).alignBytes)) & ","
+        j &= Chr(34) & "pack" & Chr(34) & ":" & LTrim(Str(gTypeLayouts(ti).packBytes)) & ","
+        j &= Chr(34) & "explicit_alignment" & Chr(34) & ":" & LTrim(Str(gTypeLayouts(ti).explicitAlign)) & ","
+        j &= Chr(34) & "ffi_by_value" & Chr(34) & ":" & UXBMIRBoolToJson(gTypeLayouts(ti).ffiByValue) & ","
+        j &= Chr(34) & "ffi_by_value_reason" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(gTypeLayouts(ti).ffiByValueReason) & Chr(34) & ","
+        j &= Chr(34) & "ffi_by_reference" & Chr(34) & ":" & UXBMIRBoolToJson(gTypeLayouts(ti).abiKind = "C") & ","
+        j &= Chr(34) & "fields" & Chr(34) & ":["
+        For fi As Integer = 0 To gTypeLayouts(ti).fieldCount - 1
+            Dim As Integer fieldIdx = gTypeLayouts(ti).firstField + fi
+            Dim fieldValue As TypeLayoutField
+            fieldValue = gTypeLayoutFields(fieldIdx)
+            If fi > 0 Then j &= ","
+            j &= "{"
+            j &= Chr(34) & "name" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(fieldValue.fieldName) & Chr(34) & ","
+            j &= Chr(34) & "type" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(fieldValue.fieldTypeName) & Chr(34) & ","
+            j &= Chr(34) & "offset" & Chr(34) & ":" & LTrim(Str(fieldValue.offsetBytes)) & ","
+            j &= Chr(34) & "size" & Chr(34) & ":" & LTrim(Str(fieldValue.sizeBytes)) & ","
+            j &= Chr(34) & "alignment" & Chr(34) & ":" & LTrim(Str(fieldValue.alignBytes)) & ","
+            j &= Chr(34) & "is_array" & Chr(34) & ":" & UXBMIRBoolToJson(fieldValue.isArray) & ","
+            j &= Chr(34) & "element_type" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(fieldValue.elemTypeName) & Chr(34) & ","
+            j &= Chr(34) & "element_size" & Chr(34) & ":" & LTrim(Str(fieldValue.elemSizeBytes)) & ","
+            j &= Chr(34) & "element_alignment" & Chr(34) & ":" & LTrim(Str(fieldValue.elemAlignBytes)) & ","
+            j &= Chr(34) & "element_stride" & Chr(34) & ":" & LTrim(Str(fieldValue.elemStrideBytes)) & ","
+            j &= Chr(34) & "dimensions" & Chr(34) & ":" & UXBMIRRecordFieldDimsToJson(fieldValue)
+            j &= "}"
+        Next fi
+        j &= "]}"
+    Next ti
+    j &= "]"
+    Return j
+End Function
+
+Private Function UXBMIROperandArrayToJson(ByRef inst As MIRIRInstruction) As String
+    If inst.operandCount <= 0 Then Return "[]"
+
+    Dim As String j = "["
+    For i As Integer = 0 To inst.operandCount - 1
+        If i > 0 Then j &= ","
+        j &= Chr(34) & UXBMIRJsonEscape(inst.operands(i)) & Chr(34)
+    Next
+    j &= "]"
+    Return j
+End Function
+
+Private Function UXBMIRSourceLocationToJson(ByRef sourceLoc As SourceLocation, ByRef originText As String) As String
+    Dim As Integer hasData = UXBSourceLocationHasData(sourceLoc)
+    Dim As String j = "{"
+    j &= Chr(34) & "status" & Chr(34) & ":" & Chr(34) & IIf(hasData <> 0, "linked", "missing") & Chr(34) & ","
+    j &= Chr(34) & "origin" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(originText) & Chr(34) & ","
+    j &= Chr(34) & "file" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(sourceLoc.filePath) & Chr(34) & ","
+    j &= Chr(34) & "line" & Chr(34) & ":" & LTrim(Str(sourceLoc.lineNo)) & ","
+    j &= Chr(34) & "column" & Chr(34) & ":" & LTrim(Str(sourceLoc.colNo)) & ","
+    j &= Chr(34) & "length" & Chr(34) & ":" & LTrim(Str(sourceLoc.length)) & ","
+    j &= Chr(34) & "offset" & Chr(34) & ":" & LTrim(Str(sourceLoc.offset)) & ","
+    j &= Chr(34) & "lexeme" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(sourceLoc.lexemeSnippet) & Chr(34)
+    j &= "}"
+    Return j
+End Function
+
+Private Function UXBMIRFunctionSourceToJson(ByRef fn As MIRFunction) As String
+    Dim As String originText
+    If UXBSourceLocationHasData(fn.srcLoc) <> 0 Then
+        originText = "function"
+        Return UXBMIRSourceLocationToJson(fn.srcLoc, originText)
+    End If
+
+    For bi As Integer = 0 To fn.blockCount - 1
+        For ii As Integer = 0 To fn.blocks(bi).instructionCount - 1
+            If MIRInstructionHasSource(fn.blocks(bi).instructions(ii)) <> 0 Then
+                originText = "first_instruction"
+                Return UXBMIRSourceLocationToJson(fn.blocks(bi).instructions(ii).srcLoc, originText)
+            End If
+        Next ii
+    Next bi
+
+    Dim As SourceLocation emptyLoc
+    originText = "missing"
+    Return UXBMIRSourceLocationToJson(emptyLoc, originText)
+End Function
+
+Private Function UXBMIROperandRoleName(ByVal roleValue As Integer) As String
+    Select Case roleValue
+    Case MIR_OPR_VALUE: Return "value"
+    Case MIR_OPR_CONST: Return "const"
+    Case MIR_OPR_VAR: Return "var"
+    Case MIR_OPR_TEMP: Return "temp"
+    Case MIR_OPR_LABEL: Return "label"
+    Case MIR_OPR_TARGET: Return "target"
+    Case MIR_OPR_SOURCE: Return "source"
+    Case MIR_OPR_CONDITION: Return "condition"
+    Case MIR_OPR_FUNCTION: Return "function"
+    Case MIR_OPR_RUNTIME_SERVICE: Return "runtime_service"
+    Case MIR_OPR_DLL_NAME: Return "dll_name"
+    Case MIR_OPR_API_NAME: Return "api_name"
+    Case MIR_OPR_ABI: Return "abi"
+    Case MIR_OPR_SIGNATURE: Return "signature"
+    Case MIR_OPR_TYPE_NAME: Return "type_name"
+    Case MIR_OPR_FIELD_NAME: Return "field_name"
+    Case MIR_OPR_INDEX: Return "index"
+    Case MIR_OPR_ARRAY_NAME: Return "array_name"
+    Case MIR_OPR_OBJECT_NAME: Return "object_name"
+    End Select
+    Return "unknown"
+End Function
+
+Private Function UXBMIROperandRoleFor(ByRef inst As MIRIRInstruction, ByVal operandIndex As Integer) As Integer
+    Dim As MIROpcodeSignature sig
+    If MIROpcodeGetSignature(inst.opcode, sig) = 0 Then Return MIR_OPR_UNKNOWN
+    If operandIndex < 0 Or operandIndex > 15 Then Return MIR_OPR_UNKNOWN
+    If sig.roles(operandIndex) <> MIR_OPR_UNKNOWN Then Return sig.roles(operandIndex)
+    If sig.allowVariadic <> 0 Then Return MIR_OPR_VALUE
+    Return MIR_OPR_UNKNOWN
+End Function
+
+Private Function UXBMIRIsIntegerLiteral(ByRef textValue As String) As Integer
+    Dim As String t = Trim(textValue)
+    If t = "" Then Return 0
+    If Len(t) > 2 Then
+        Dim As String prefix = UCase(Left(t, 2))
+        If prefix = "&H" Or prefix = "&O" Or prefix = "&B" Or prefix = "0X" Then Return 1
+    End If
+
+    For i As Integer = 1 To Len(t)
+        Dim As String ch = Mid(t, i, 1)
+        If i = 1 And (ch = "+" Or ch = "-") Then Continue For
+        If ch < "0" Or ch > "9" Then Return 0
+    Next i
+    Return 1
+End Function
+
+Private Function UXBMIRIsFloatLiteral(ByRef textValue As String) As Integer
+    Dim As String t = UCase(Trim(textValue))
+    If t = "" Then Return 0
+    If UXBNumberLiteralIsFloat(t) = 0 Then Return 0
+
+    Dim As Integer digitCount = 0
+    For i As Integer = 1 To Len(t)
+        Dim As String ch = Mid(t, i, 1)
+        If ch >= "0" And ch <= "9" Then
+            digitCount += 1
+        ElseIf ch = "." Or ch = "E" Or ch = "+" Or ch = "-" Then
+            ' accepted lexical hint; MIR verifier remains the authority
+        Else
+            Return 0
+        End If
+    Next i
+    Return IIf(digitCount > 0, 1, 0)
+End Function
+
+Private Function UXBMIRResolveOperandType(ByRef m As MIRModule, ByRef fn As MIRFunction, ByRef operandText As String, ByRef sourceOut As String) As String
+    Dim As String t = Trim(operandText)
+    Dim As String u = UCase(t)
+    sourceOut = "inferred"
+
+    If t = "" Then sourceOut = "empty": Return "VOID"
+    If Len(t) >= 2 And Left(t, 1) = Chr(34) And Right(t, 1) = Chr(34) Then sourceOut = "literal": Return "STRING"
+    If u = "TRUE" Or u = "FALSE" Then sourceOut = "literal": Return "BOOL"
+    If u = "NULL" Or u = "NIL" Or u = "NOTHING" Then sourceOut = "literal": Return "PTR"
+    If UXBMIRIsIntegerLiteral(t) <> 0 Then sourceOut = "literal": Return "I64"
+    If UXBMIRIsFloatLiteral(t) <> 0 Then sourceOut = "literal": Return "F64"
+
+    For i As Integer = 0 To fn.paramVarCount - 1
+        If UCase(Trim(fn.paramVars(i))) = u Then
+            sourceOut = "parameter"
+            Return IIf(Trim(fn.paramVarTypes(i)) = "", "missing", fn.paramVarTypes(i))
+        End If
+    Next i
+
+    For i As Integer = 0 To fn.localVarCount - 1
+        If UCase(Trim(fn.localVars(i))) = u Then
+            sourceOut = "local"
+            Return IIf(Trim(fn.localVarTypes(i)) = "", "missing", fn.localVarTypes(i))
+        End If
+    Next i
+
+    For i As Integer = 0 To m.globalVarCount - 1
+        If UCase(Trim(m.globalVars(i))) = u Then
+            sourceOut = "global"
+            Return IIf(Trim(m.globalVarTypes(i)) = "", "missing", m.globalVarTypes(i))
+        End If
+    Next i
+
+    For bi As Integer = 0 To fn.blockCount - 1
+        For ii As Integer = 0 To fn.blocks(bi).instructionCount - 1
+            If UCase(Trim(fn.blocks(bi).instructions(ii).result)) = u Then
+                sourceOut = "instruction_result"
+                Return IIf(Trim(fn.blocks(bi).instructions(ii).resultType) = "", "missing", fn.blocks(bi).instructions(ii).resultType)
+            End If
+        Next ii
+    Next bi
+
+    Return "INFERRED"
+End Function
+
+Private Function UXBMIROpcodeContractToJson(ByRef inst As MIRIRInstruction) As String
+    Dim As MIROpcodeSignature sig
+    Dim As Integer known = MIROpcodeGetSignature(inst.opcode, sig)
+    Dim As String j = "{"
+    j &= Chr(34) & "known" & Chr(34) & ":" & UXBMIRBoolToJson(known) & ","
+    If known <> 0 Then
+        j &= Chr(34) & "min_operands" & Chr(34) & ":" & LTrim(Str(sig.minOps)) & ","
+        j &= Chr(34) & "max_operands" & Chr(34) & ":" & LTrim(Str(sig.maxOps)) & ","
+        j &= Chr(34) & "result_required" & Chr(34) & ":" & UXBMIRBoolToJson(sig.resultRequired) & ","
+        j &= Chr(34) & "variadic" & Chr(34) & ":" & UXBMIRBoolToJson(sig.allowVariadic)
+    Else
+        j &= Chr(34) & "min_operands" & Chr(34) & ":0,"
+        j &= Chr(34) & "max_operands" & Chr(34) & ":16,"
+        j &= Chr(34) & "result_required" & Chr(34) & ":false,"
+        j &= Chr(34) & "variadic" & Chr(34) & ":true"
+    End If
+    j &= "}"
+    Return j
+End Function
+
+Private Function UXBMIROperandRecordsToJson(ByRef m As MIRModule, ByRef fn As MIRFunction, ByRef inst As MIRIRInstruction) As String
+    If inst.operandCount <= 0 Then Return "[]"
+
+    Dim As String j = "["
+    For oi As Integer = 0 To inst.operandCount - 1
+        If oi > 0 Then j &= ","
+        Dim As Integer roleValue = UXBMIROperandRoleFor(inst, oi)
+        Dim As String typeSource
+        Dim As String typeName = UXBMIRResolveOperandType(m, fn, inst.operands(oi), typeSource)
+        Dim As Integer isFfiArg = IIf(inst.ffiArgStart > 0 And oi >= inst.ffiArgStart, 1, 0)
+
+        j &= "{"
+        j &= Chr(34) & "index" & Chr(34) & ":" & LTrim(Str(oi)) & ","
+        j &= Chr(34) & "value" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(inst.operands(oi)) & Chr(34) & ","
+        j &= Chr(34) & "role_id" & Chr(34) & ":" & LTrim(Str(roleValue)) & ","
+        j &= Chr(34) & "role" & Chr(34) & ":" & Chr(34) & UXBMIROperandRoleName(roleValue) & Chr(34) & ","
+        j &= Chr(34) & "type" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(typeName) & Chr(34) & ","
+        j &= Chr(34) & "type_source" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(typeSource) & Chr(34) & ","
+        j &= Chr(34) & "is_ffi_argument" & Chr(34) & ":" & UXBMIRBoolToJson(isFfiArg)
+        j &= "}"
+    Next oi
+    j &= "]"
+    Return j
+End Function
+
+Private Function UXBMIRGlobalSymbolsToJson(ByRef m As MIRModule) As String
+    Dim As String j = "["
+    For i As Integer = 0 To m.globalVarCount - 1
+        If i > 0 Then j &= ","
+        j &= "{"
+        j &= Chr(34) & "id" & Chr(34) & ":" & LTrim(Str(i)) & ","
+        j &= Chr(34) & "scope" & Chr(34) & ":" & Chr(34) & "global" & Chr(34) & ","
+        j &= Chr(34) & "name" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(m.globalVars(i)) & Chr(34) & ","
+        j &= Chr(34) & "type" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(IIf(Trim(m.globalVarTypes(i)) = "", "missing", m.globalVarTypes(i))) & Chr(34) & ","
+        j &= Chr(34) & "is_array" & Chr(34) & ":" & UXBMIRBoolToJson(m.globalVarIsArray(i))
+        j &= "}"
+    Next i
+    j &= "]"
+    Return j
+End Function
+
+Private Function UXBMIRFunctionSymbolsToJson(ByRef fn As MIRFunction, ByVal parametersMode As Integer) As String
+    Dim As String j = "["
+    Dim As Integer itemCount
+    If parametersMode <> 0 Then itemCount = fn.paramVarCount Else itemCount = fn.localVarCount
+
+    For i As Integer = 0 To itemCount - 1
+        If i > 0 Then j &= ","
+        Dim As String nameText
+        Dim As String typeText
+        Dim As String scopeText
+        If parametersMode <> 0 Then
+            nameText = fn.paramVars(i)
+            typeText = fn.paramVarTypes(i)
+            scopeText = "parameter"
+        Else
+            nameText = fn.localVars(i)
+            typeText = fn.localVarTypes(i)
+            scopeText = "local"
+        End If
+
+        j &= "{"
+        j &= Chr(34) & "id" & Chr(34) & ":" & LTrim(Str(i)) & ","
+        j &= Chr(34) & "scope" & Chr(34) & ":" & Chr(34) & scopeText & Chr(34) & ","
+        j &= Chr(34) & "name" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(nameText) & Chr(34) & ","
+        j &= Chr(34) & "type" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(IIf(Trim(typeText) = "", "missing", typeText)) & Chr(34)
+        j &= "}"
+    Next i
+    j &= "]"
+    Return j
+End Function
+
+Private Function UXBMIRVTableClassesToJson(ByRef m As MIRModule) As String
+    Dim As String j = "["
+    For i As Integer = 0 To m.vtableClassCount - 1
+        If i > 0 Then j &= ","
+        Dim As Integer slotStart = m.vtableClassSlotStart(i)
+        Dim As Integer slotCount = m.vtableClassSlotCounts(i)
+        j &= "{"
+        j &= Chr(34) & "id" & Chr(34) & ":" & LTrim(Str(i)) & ","
+        j &= Chr(34) & "name" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(m.vtableClassNames(i)) & Chr(34) & ","
+        j &= Chr(34) & "slot_start" & Chr(34) & ":" & LTrim(Str(slotStart)) & ","
+        j &= Chr(34) & "slot_count" & Chr(34) & ":" & LTrim(Str(slotCount)) & ","
+        j &= Chr(34) & "slot_end_exclusive" & Chr(34) & ":" & LTrim(Str(slotStart + slotCount))
+        j &= "}"
+    Next i
+    j &= "]"
+    Return j
+End Function
+
+Private Function UXBMIRVTableEntriesToJson(ByRef m As MIRModule) As String
+    Dim As String j = "["
+    For i As Integer = 0 To m.vtableEntryCount - 1
+        If i > 0 Then j &= ","
+        Dim As Integer classIndex = m.vtableEntryClassIndex(i)
+        Dim As Integer functionIndex = m.vtableEntryFunctionIndex(i)
+        Dim As String className = ""
+        Dim As String functionName = ""
+        If classIndex >= 0 And classIndex < m.vtableClassCount Then className = m.vtableClassNames(classIndex)
+        If functionIndex >= 0 And functionIndex < m.functionCount Then functionName = m.functions(functionIndex).name
+
+        j &= "{"
+        j &= Chr(34) & "id" & Chr(34) & ":" & LTrim(Str(i)) & ","
+        j &= Chr(34) & "key" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(m.vtableEntryKeys(i)) & Chr(34) & ","
+        j &= Chr(34) & "slot" & Chr(34) & ":" & LTrim(Str(m.vtableEntrySlots(i))) & ","
+        j &= Chr(34) & "class_index" & Chr(34) & ":" & LTrim(Str(classIndex)) & ","
+        j &= Chr(34) & "class_name" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(className) & Chr(34) & ","
+        j &= Chr(34) & "function_index" & Chr(34) & ":" & LTrim(Str(functionIndex)) & ","
+        j &= Chr(34) & "function_name" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(functionName) & Chr(34) & ","
+        j &= Chr(34) & "resolved" & Chr(34) & ":" & UXBMIRBoolToJson(functionIndex >= 0 And functionIndex < m.functionCount)
+        j &= "}"
+    Next i
+    j &= "]"
+    Return j
+End Function
+
+Private Function UXBMIRVerifyDiagnosticsToJson(ByRef r As UXBMIRVerifyResult) As String
+    Dim As String j = "["
+    Dim As Integer firstItem = 1
+
+    If Trim(r.errorsText) <> "" Then
+        j &= "{" & _
+             Chr(34) & "severity" & Chr(34) & ":" & Chr(34) & "error" & Chr(34) & "," & _
+             Chr(34) & "message" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(r.errorsText) & Chr(34) & _
+             "}"
+        firstItem = 0
+    End If
+
+    If Trim(r.warningsText) <> "" Then
+        If firstItem = 0 Then j &= ","
+        j &= "{" & _
+             Chr(34) & "severity" & Chr(34) & ":" & Chr(34) & "warning" & Chr(34) & "," & _
+             Chr(34) & "message" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(r.warningsText) & Chr(34) & _
+             "}"
+    End If
+
+    j &= "]"
+    Return j
+End Function
+
+Function UXBMIRVerifyResultToJson(ByRef r As UXBMIRVerifyResult) As String
+    Dim As String j = ""
+    j &= "{"
+    j &= Chr(34) & "ok" & Chr(34) & ":" & UXBMIRBoolToJson(r.ok) & ","
+    j &= Chr(34) & "error_count" & Chr(34) & ":" & LTrim(Str(r.errorCount)) & ","
+    j &= Chr(34) & "warning_count" & Chr(34) & ":" & LTrim(Str(r.warningCount)) & ","
+    j &= Chr(34) & "stats" & Chr(34) & ":{"
+    j &= Chr(34) & "function_count" & Chr(34) & ":" & LTrim(Str(r.stats.functionCount)) & ","
+    j &= Chr(34) & "block_count" & Chr(34) & ":" & LTrim(Str(r.stats.blockCount)) & ","
+    j &= Chr(34) & "instruction_count" & Chr(34) & ":" & LTrim(Str(r.stats.instructionCount)) & ","
+    j &= Chr(34) & "empty_function_count" & Chr(34) & ":" & LTrim(Str(r.stats.emptyFunctionCount)) & ","
+    j &= Chr(34) & "empty_block_count" & Chr(34) & ":" & LTrim(Str(r.stats.emptyBlockCount)) & ","
+    j &= Chr(34) & "invalid_opcode_count" & Chr(34) & ":" & LTrim(Str(r.stats.invalidOpcodeCount)) & ","
+    j &= Chr(34) & "missing_type_count" & Chr(34) & ":" & LTrim(Str(r.stats.missingTypeCount)) & ","
+    j &= Chr(34) & "invalid_edge_count" & Chr(34) & ":" & LTrim(Str(r.stats.invalidEdgeCount))
+    j &= "},"
+    j &= Chr(34) & "errors_text" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(r.errorsText) & Chr(34) & ","
+    j &= Chr(34) & "warnings_text" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(r.warningsText) & Chr(34)
+    j &= "}"
+    Return j
+End Function
+
+Function UXBMIRModuleToFullJson(ByRef m As MIRModule, ByRef verify As UXBMIRVerifyResult, ByRef sourceFile As String) As String
+    Dim As String j = ""
+    Dim As Integer totalInstructionCount = 0
+    Dim As Integer linkedSourceCount = 0
+    Dim As Integer typedResultCount = 0
+    Dim As Integer missingResultTypeCount = 0
+    Dim As Integer blockIdMatchCount = 0
+    Dim As Integer blockIdMismatchCount = 0
+    Dim As Integer functionSourceLinkedCount = 0
+    Dim As Integer instructionSerial = 0
+
+    For fi As Integer = 0 To m.functionCount - 1
+        Dim As Integer functionHasSource = IIf(UXBSourceLocationHasData(m.functions(fi).srcLoc) <> 0, 1, 0)
+        For bi As Integer = 0 To m.functions(fi).blockCount - 1
+            totalInstructionCount += m.functions(fi).blocks(bi).instructionCount
+            For ii As Integer = 0 To m.functions(fi).blocks(bi).instructionCount - 1
+                Dim inst As MIRIRInstruction Ptr = @m.functions(fi).blocks(bi).instructions(ii)
+                If MIRInstructionHasSource(*inst) <> 0 Then
+                    linkedSourceCount += 1
+                    functionHasSource = 1
+                End If
+                If inst->blockId = m.functions(fi).blocks(bi).id Then blockIdMatchCount += 1 Else blockIdMismatchCount += 1
+                If Trim(inst->result) <> "" Then
+                    If Trim(inst->resultType) <> "" Then
+                        typedResultCount += 1
+                    Else
+                        missingResultTypeCount += 1
+                    End If
+                End If
+            Next ii
+        Next bi
+        If functionHasSource <> 0 Then functionSourceLinkedCount += 1
+    Next fi
+
+    j &= "{"
+    j &= Chr(34) & "schema_version" & Chr(34) & ":" & Chr(34) & "uxb-mir-full-json-2" & Chr(34) & ","
+    j &= Chr(34) & "schema_compatibility" & Chr(34) & ":[" & Chr(34) & "uxb-mir-full-json-1" & Chr(34) & "],"
+    j &= Chr(34) & "producer" & Chr(34) & ":" & Chr(34) & "uXBasiC" & Chr(34) & ","
+    j &= Chr(34) & "kind" & Chr(34) & ":" & Chr(34) & "mir_full" & Chr(34) & ","
+    j &= Chr(34) & "source_file" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(sourceFile) & Chr(34) & ","
+    j &= Chr(34) & "status" & Chr(34) & ":" & Chr(34) & IIf(verify.ok <> 0, "ok", "error") & Chr(34) & ","
+    j &= Chr(34) & "diagnostics" & Chr(34) & ":" & UXBMIRVerifyDiagnosticsToJson(verify) & ","
+    j &= Chr(34) & "verify" & Chr(34) & ":" & UXBMIRVerifyResultToJson(verify) & ","
+
+    j &= Chr(34) & "module" & Chr(34) & ":{"
+    j &= Chr(34) & "function_count" & Chr(34) & ":" & LTrim(Str(m.functionCount)) & ","
+    j &= Chr(34) & "source_file_count" & Chr(34) & ":" & LTrim(Str(m.sourceFileCount)) & ","
+    j &= Chr(34) & "source_files" & Chr(34) & ":" & UXBMIRStringArrayToJson(m.sourceFiles(), m.sourceFileCount) & ","
+    j &= Chr(34) & "global_count" & Chr(34) & ":" & LTrim(Str(m.globalVarCount)) & ","
+    j &= Chr(34) & "globals" & Chr(34) & ":" & UXBMIRStringArrayToJson(m.globalVars(), m.globalVarCount) & ","
+    j &= Chr(34) & "global_types" & Chr(34) & ":" & UXBMIRStringArrayToJson(m.globalVarTypes(), m.globalVarCount) & ","
+    j &= Chr(34) & "global_is_array" & Chr(34) & ":" & UXBMIRBoolArrayToJson(m.globalVarIsArray(), m.globalVarCount) & ","
+    j &= Chr(34) & "global_symbols" & Chr(34) & ":" & UXBMIRGlobalSymbolsToJson(m) & ","
+    j &= Chr(34) & "record_types" & Chr(34) & ":" & UXBMIRRecordTypesToJson() & ","
+
+    j &= Chr(34) & "link_report" & Chr(34) & ":{"
+    j &= Chr(34) & "instruction_count" & Chr(34) & ":" & LTrim(Str(totalInstructionCount)) & ","
+    j &= Chr(34) & "instruction_to_block_linked" & Chr(34) & ":" & LTrim(Str(blockIdMatchCount)) & ","
+    j &= Chr(34) & "instruction_to_block_mismatch" & Chr(34) & ":" & LTrim(Str(blockIdMismatchCount)) & ","
+    j &= Chr(34) & "instruction_to_source_linked" & Chr(34) & ":" & LTrim(Str(linkedSourceCount)) & ","
+    j &= Chr(34) & "instruction_to_source_missing" & Chr(34) & ":" & LTrim(Str(totalInstructionCount - linkedSourceCount)) & ","
+    j &= Chr(34) & "instruction_to_type_linked" & Chr(34) & ":" & LTrim(Str(typedResultCount)) & ","
+    j &= Chr(34) & "instruction_to_type_missing" & Chr(34) & ":" & LTrim(Str(missingResultTypeCount)) & ","
+    j &= Chr(34) & "function_to_source_linked" & Chr(34) & ":" & LTrim(Str(functionSourceLinkedCount)) & ","
+    j &= Chr(34) & "function_to_source_missing" & Chr(34) & ":" & LTrim(Str(m.functionCount - functionSourceLinkedCount))
+    j &= "},"
+
+    j &= Chr(34) & "functions" & Chr(34) & ":["
+    For fi As Integer = 0 To m.functionCount - 1
+        Dim fn As MIRFunction Ptr = @m.functions(fi)
+        Dim As String functionSourceOrigin = "function"
+
+        If fi > 0 Then j &= ","
+        j &= "{"
+        j &= Chr(34) & "id" & Chr(34) & ":" & LTrim(Str(fi)) & ","
+        j &= Chr(34) & "name" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(fn->name) & Chr(34) & ","
+        j &= Chr(34) & "return_type" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(IIf(Trim(fn->returnType) = "", "missing", fn->returnType)) & Chr(34) & ","
+        j &= Chr(34) & "entry_block" & Chr(34) & ":" & LTrim(Str(fn->entryBlock)) & ","
+        j &= Chr(34) & "block_count" & Chr(34) & ":" & LTrim(Str(fn->blockCount)) & ","
+        j &= Chr(34) & "parameter_count" & Chr(34) & ":" & LTrim(Str(fn->paramVarCount)) & ","
+        j &= Chr(34) & "local_count" & Chr(34) & ":" & LTrim(Str(fn->localVarCount)) & ","
+        j &= Chr(34) & "parameters" & Chr(34) & ":" & UXBMIRStringArrayToJson(fn->paramVars(), fn->paramVarCount) & ","
+        j &= Chr(34) & "parameter_types" & Chr(34) & ":" & UXBMIRStringArrayToJson(fn->paramVarTypes(), fn->paramVarCount) & ","
+        j &= Chr(34) & "parameter_symbols" & Chr(34) & ":" & UXBMIRFunctionSymbolsToJson(*fn, 1) & ","
+        j &= Chr(34) & "locals" & Chr(34) & ":" & UXBMIRStringArrayToJson(fn->localVars(), fn->localVarCount) & ","
+        j &= Chr(34) & "local_types" & Chr(34) & ":" & UXBMIRStringArrayToJson(fn->localVarTypes(), fn->localVarCount) & ","
+        j &= Chr(34) & "local_symbols" & Chr(34) & ":" & UXBMIRFunctionSymbolsToJson(*fn, 0) & ","
+        j &= Chr(34) & "declared_source" & Chr(34) & ":" & UXBMIRSourceLocationToJson(fn->srcLoc, functionSourceOrigin) & ","
+        j &= Chr(34) & "source" & Chr(34) & ":" & UXBMIRFunctionSourceToJson(*fn) & ","
+
+        j &= Chr(34) & "blocks" & Chr(34) & ":["
+        For bi As Integer = 0 To fn->blockCount - 1
+            Dim blk As MIRBasicBlock Ptr = @fn->blocks(bi)
+
+            If bi > 0 Then j &= ","
+            j &= "{"
+            j &= Chr(34) & "index" & Chr(34) & ":" & LTrim(Str(bi)) & ","
+            j &= Chr(34) & "id" & Chr(34) & ":" & LTrim(Str(blk->id)) & ","
+            j &= Chr(34) & "label" & Chr(34) & ":" & Chr(34) & "missing" & Chr(34) & ","
+            j &= Chr(34) & "synthetic_label" & Chr(34) & ":" & Chr(34) & "bb_" & LTrim(Str(blk->id)) & Chr(34) & ","
+            j &= Chr(34) & "is_entry" & Chr(34) & ":" & UXBMIRBoolToJson(blk->isEntry) & ","
+            j &= Chr(34) & "is_exit" & Chr(34) & ":" & UXBMIRBoolToJson(blk->isExit) & ","
+            j &= Chr(34) & "instruction_count" & Chr(34) & ":" & LTrim(Str(blk->instructionCount)) & ","
+            j &= Chr(34) & "predecessor_count" & Chr(34) & ":" & LTrim(Str(blk->predecessorCount)) & ","
+            j &= Chr(34) & "successor_count" & Chr(34) & ":" & LTrim(Str(blk->successorCount)) & ","
+            j &= Chr(34) & "predecessors" & Chr(34) & ":" & UXBMIRIntArrayToJson(blk->predecessors(), blk->predecessorCount) & ","
+            j &= Chr(34) & "successors" & Chr(34) & ":" & UXBMIRIntArrayToJson(blk->successors(), blk->successorCount) & ","
+
+            j &= Chr(34) & "instructions" & Chr(34) & ":["
+            For ii As Integer = 0 To blk->instructionCount - 1
+                Dim inst As MIRIRInstruction Ptr = @blk->instructions(ii)
+                Dim As String sourceOrigin = "instruction"
+
+                If ii > 0 Then j &= ","
+                j &= "{"
+                j &= Chr(34) & "id" & Chr(34) & ":" & LTrim(Str(instructionSerial)) & ","
+                j &= Chr(34) & "index" & Chr(34) & ":" & LTrim(Str(ii)) & ","
+                j &= Chr(34) & "function_id" & Chr(34) & ":" & LTrim(Str(fi)) & ","
+                j &= Chr(34) & "block_index" & Chr(34) & ":" & LTrim(Str(bi)) & ","
+                j &= Chr(34) & "block_id" & Chr(34) & ":" & LTrim(Str(blk->id)) & ","
+                j &= Chr(34) & "stored_block_id" & Chr(34) & ":" & LTrim(Str(inst->blockId)) & ","
+                j &= Chr(34) & "block_id_matches" & Chr(34) & ":" & UXBMIRBoolToJson(inst->blockId = blk->id) & ","
+                j &= Chr(34) & "opcode" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(inst->opcode) & Chr(34) & ","
+                j &= Chr(34) & "opcode_contract" & Chr(34) & ":" & UXBMIROpcodeContractToJson(*inst) & ","
+                j &= Chr(34) & "result" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(inst->result) & Chr(34) & ","
+                j &= Chr(34) & "type" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(IIf(Trim(inst->resultType) = "", "missing", inst->resultType)) & Chr(34) & ","
+                j &= Chr(34) & "result_descriptor" & Chr(34) & ":{"
+                j &= Chr(34) & "present" & Chr(34) & ":" & UXBMIRBoolToJson(Trim(inst->result) <> "") & ","
+                j &= Chr(34) & "name" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(inst->result) & Chr(34) & ","
+                j &= Chr(34) & "type" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(IIf(Trim(inst->resultType) = "", "missing", inst->resultType)) & Chr(34)
+                j &= "},"
+                j &= Chr(34) & "operand_count" & Chr(34) & ":" & LTrim(Str(inst->operandCount)) & ","
+                j &= Chr(34) & "operands" & Chr(34) & ":" & UXBMIROperandArrayToJson(*inst) & ","
+                j &= Chr(34) & "operand_records" & Chr(34) & ":" & UXBMIROperandRecordsToJson(m, *fn, *inst) & ","
+                j &= Chr(34) & "comment" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(inst->comment) & Chr(34) & ","
+                j &= Chr(34) & "flags" & Chr(34) & ":" & LTrim(Str(inst->flags)) & ","
+                j &= Chr(34) & "source_ast_node" & Chr(34) & ":" & LTrim(Str(inst->flags)) & ","
+                j &= Chr(34) & "ffi_stub_id" & Chr(34) & ":" & LTrim(Str(inst->ffiStubId)) & ","
+                j &= Chr(34) & "ffi_arg_start" & Chr(34) & ":" & LTrim(Str(inst->ffiArgStart)) & ","
+                j &= Chr(34) & "ffi" & Chr(34) & ":{"
+                j &= Chr(34) & "stub_id" & Chr(34) & ":" & LTrim(Str(inst->ffiStubId)) & ","
+                j &= Chr(34) & "arg_start" & Chr(34) & ":" & LTrim(Str(inst->ffiArgStart)) & ","
+                j &= Chr(34) & "arg_count" & Chr(34) & ":" & LTrim(Str(IIf(inst->ffiArgStart > 0 And inst->ffiArgStart <= inst->operandCount, inst->operandCount - inst->ffiArgStart, 0)))
+                j &= "},"
+                j &= Chr(34) & "source" & Chr(34) & ":" & UXBMIRSourceLocationToJson(inst->srcLoc, sourceOrigin) & ","
+                j &= Chr(34) & "links" & Chr(34) & ":{"
+                j &= Chr(34) & "instruction_to_block" & Chr(34) & ":" & Chr(34) & IIf(inst->blockId = blk->id, "ok", "mismatch") & Chr(34) & ","
+                j &= Chr(34) & "instruction_to_source" & Chr(34) & ":" & Chr(34) & IIf(MIRInstructionHasSource(*inst) <> 0, "ok", "missing") & Chr(34) & ","
+                j &= Chr(34) & "instruction_to_type" & Chr(34) & ":" & Chr(34) & IIf(Trim(inst->result) = "" Or Trim(inst->resultType) <> "", "ok", "missing") & Chr(34)
+                j &= "}"
+                j &= "}"
+                instructionSerial += 1
+            Next ii
+            j &= "]"
+            j &= "}"
+        Next bi
+        j &= "]"
+        j &= "}"
+    Next fi
+    j &= "],"
+
+    j &= Chr(34) & "vtable" & Chr(34) & ":{"
+    j &= Chr(34) & "class_count" & Chr(34) & ":" & LTrim(Str(m.vtableClassCount)) & ","
+    j &= Chr(34) & "entry_count" & Chr(34) & ":" & LTrim(Str(m.vtableEntryCount)) & ","
+    j &= Chr(34) & "class_names" & Chr(34) & ":" & UXBMIRStringArrayToJson(m.vtableClassNames(), m.vtableClassCount) & ","
+    j &= Chr(34) & "class_slot_counts" & Chr(34) & ":" & UXBMIRIntArrayToJson(m.vtableClassSlotCounts(), m.vtableClassCount) & ","
+    j &= Chr(34) & "class_slot_starts" & Chr(34) & ":" & UXBMIRIntArrayToJson(m.vtableClassSlotStart(), m.vtableClassCount) & ","
+    j &= Chr(34) & "entry_keys" & Chr(34) & ":" & UXBMIRStringArrayToJson(m.vtableEntryKeys(), m.vtableEntryCount) & ","
+    j &= Chr(34) & "entry_slots" & Chr(34) & ":" & UXBMIRIntArrayToJson(m.vtableEntrySlots(), m.vtableEntryCount) & ","
+    j &= Chr(34) & "entry_class_indexes" & Chr(34) & ":" & UXBMIRIntArrayToJson(m.vtableEntryClassIndex(), m.vtableEntryCount) & ","
+    j &= Chr(34) & "entry_function_indexes" & Chr(34) & ":" & UXBMIRIntArrayToJson(m.vtableEntryFunctionIndex(), m.vtableEntryCount) & ","
+    j &= Chr(34) & "classes" & Chr(34) & ":" & UXBMIRVTableClassesToJson(m) & ","
+    j &= Chr(34) & "entries" & Chr(34) & ":" & UXBMIRVTableEntriesToJson(m)
+    j &= "}"
+    j &= "},"
+
+    j &= Chr(34) & "capabilities" & Chr(34) & ":{"
+    j &= Chr(34) & "complete_mir_model_fields" & Chr(34) & ":true,"
+    j &= Chr(34) & "normalized_symbol_records" & Chr(34) & ":true,"
+    j &= Chr(34) & "operand_roles" & Chr(34) & ":true,"
+    j &= Chr(34) & "operand_type_hints" & Chr(34) & ":true,"
+    j &= Chr(34) & "source_offsets" & Chr(34) & ":true,"
+    j &= Chr(34) & "full_vtable" & Chr(34) & ":true,"
+    j &= Chr(34) & "stable_instruction_ids" & Chr(34) & ":true,"
+    j &= Chr(34) & "c_abi_record_layouts" & Chr(34) & ":true,"
+    j &= Chr(34) & "struct_union_metadata" & Chr(34) & ":true"
+    j &= "},"
+
+    j &= Chr(34) & "compat" & Chr(34) & ":{"
+    j &= Chr(34) & "old_mir_pipeline_json_unchanged" & Chr(34) & ":true,"
+    j &= Chr(34) & "old_mir_opcodes_json_unchanged" & Chr(34) & ":true,"
+    j &= Chr(34) & "full_json_v1_fields_preserved" & Chr(34) & ":true,"
+    j &= Chr(34) & "cli_option_unchanged" & Chr(34) & ":" & Chr(34) & "--mir-full-json-out" & Chr(34)
+    j &= "}"
+
+    j &= "}"
+    Return j
+End Function
+
+Function UXBMIRWriteFullJson(ByRef m As MIRModule, ByRef outPath As String, ByRef sourceFile As String, ByRef errText As String) As Integer
+    Dim As UXBMIRVerifyResult verify
+    If UXBMIRVerifyModule(m, verify, errText) = 0 Then Return 0
+
+    Dim As String content = UXBMIRModuleToFullJson(m, verify, sourceFile)
+    Return UXBMIRWriteTextFile(outPath, content, errText)
+End Function
+
+Function UXBMIRWriteVerifyJson(ByRef m As MIRModule, ByRef outPath As String, ByRef sourceFile As String, ByRef errText As String) As Integer
+    Dim As UXBMIRVerifyResult verify
+    If UXBMIRVerifyModule(m, verify, errText) = 0 Then Return 0
+
+    Dim As String j = ""
+    j &= "{"
+    j &= Chr(34) & "schema_version" & Chr(34) & ":" & Chr(34) & "uxb-mir-verify-json-1" & Chr(34) & ","
+    j &= Chr(34) & "producer" & Chr(34) & ":" & Chr(34) & "uXBasiC" & Chr(34) & ","
+    j &= Chr(34) & "kind" & Chr(34) & ":" & Chr(34) & "mir_verify" & Chr(34) & ","
+    j &= Chr(34) & "source_file" & Chr(34) & ":" & Chr(34) & UXBMIRJsonEscape(sourceFile) & Chr(34) & ","
+    j &= Chr(34) & "status" & Chr(34) & ":" & Chr(34) & IIf(verify.ok <> 0, "ok", "error") & Chr(34) & ","
+    j &= Chr(34) & "diagnostics" & Chr(34) & ":" & UXBMIRVerifyDiagnosticsToJson(verify) & ","
+    j &= Chr(34) & "verify" & Chr(34) & ":" & UXBMIRVerifyResultToJson(verify)
+    j &= "}"
+
+    Return UXBMIRWriteTextFile(outPath, j, errText)
+End Function
+
+#endif

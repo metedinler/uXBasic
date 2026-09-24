@@ -1,0 +1,3101 @@
+#ifndef UXB_PREPROCESS_ENGINE_FBS
+#define UXB_PREPROCESS_ENGINE_FBS
+
+#include once "preprocess_meta_model.fbs"
+#include once "preprocess_meta_eval_adim34.fbs"
+#include once "preprocess_lexer.fbs"
+#include once "preprocess_parser.fbs"
+#include once "preprocess_selector.fbs"
+#include once "PreproesssorB/preprocess_path_policy.fbs"
+#include once "PreproesssorB/preprocess_manifest_schema.fbs"
+#include once "PreproesssorB/preprocess_block_scanner.fbs"
+#include once "PreproesssorB/preprocess_web_manifest_commands.fbs"
+
+Private Type LexerMacro
+    nameText As String
+    valueText As String
+End Type
+
+Private Type LexerFuncMacro
+    nameText As String
+    paramsText As String
+    paramCount As Integer
+    bodyText As String
+End Type
+
+' ADIM33 pattern anchors (model lives in src/preprocessor/preprocess_meta_model.fbs):
+' Type PreprocessResult
+' Type MetaBlock
+' Type MetaAsset
+' Type MetaWatImport
+
+Declare Function LexerPreprocessSourceImpl(ByRef src As String, ByRef sourcePath As String, ByVal depth As Integer) As String
+Declare Function LexerPreprocessSourceImplEx(ByRef src As String, ByRef sourcePath As String, ByVal depth As Integer, ByRef result As PreprocessResult) As String
+Declare Function LexerResolveMacroToken(ByRef tokenText As String, macros() As LexerMacro, ByVal macroCount As Integer) As String
+
+Dim Shared gPreprocessStop As Integer
+Dim Shared gPreprocessFailed As Integer
+Dim Shared gPreprocessError As String
+Dim Shared gFuncMacros() As LexerFuncMacro
+Dim Shared gFuncMacroCount As Integer
+Dim Shared gPreprocessIncludeStack() As String
+Dim Shared gPreprocessIncludeStackCount As Integer
+Dim Shared gPreprocessIncludeOnce() As String
+Dim Shared gPreprocessIncludeOnceCount As Integer
+
+Const UXB_PREPROCESS_PLAIN_INCLUDE_ENABLED As Integer = 1
+
+
+' =============================================================================
+' uXBasic preprocessor A/B selection bridge
+' -----------------------------------------------------------------------------
+' A = existing source preprocessor command set.
+' B = PreproesssorB helper set imported from UXB_PREPROCESSOR_AYRI_HAT_KOD_PAKETI.
+' CLI can select it by calling UXBPreprocessorSetDefault("A"/"B") before
+' PreprocessRun. Source can also select it with %%PP A or %%PP B near the top.
+' =============================================================================
+
+Private Sub UXBPreprocessEmitSelectionManifest(ByRef result As PreprocessResult)
+    PreprocessResultAddManifest result, "preprocessor.selected", UXBPreprocessorGetDefault()
+    PreprocessResultAddManifest result, "preprocessor.a", "src/preprocessor/preprocess_engine.fbs"
+    PreprocessResultAddManifest result, "preprocessor.b", "src/preprocessor/PreproesssorB"
+End Sub
+
+Private Function UXBPreprocessEnsureDir(ByRef dirPath As String) As Integer
+    Dim d As String
+    d = Trim(dirPath)
+    If d = "" Then Return 1
+    Dim norm As String
+    norm = ""
+    Dim i As Integer
+    For i = 1 To Len(d)
+        Dim ch As String
+        ch = Mid(d, i, 1)
+        If ch = "/" Then ch = Chr(92)
+        norm &= ch
+    Next i
+    Dim cur As String
+    cur = ""
+    For i = 1 To Len(norm)
+        Dim ch2 As String
+        ch2 = Mid(norm, i, 1)
+        cur &= ch2
+        If ch2 = Chr(92) Then
+            Dim part As String
+            part = Left(cur, Len(cur) - 1)
+            If Len(part) > 0 And Len(part) <> 2 Then
+                If Dir(part) = "" Then MkDir part
+            End If
+        End If
+    Next i
+    If Dir(norm) = "" Then MkDir norm
+    Return 1
+End Function
+
+Private Function UXBPreprocessSafeRunId(ByRef sourcePath As String) As String
+    Dim raw As String
+    raw = Date$ & "_" & Time$ & "_" & sourcePath
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    For i = 1 To Len(raw)
+        Dim ch As String
+        ch = Mid(raw, i, 1)
+        If (ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Or (ch >= "0" And ch <= "9") Then
+            outText &= ch
+        Else
+            outText &= "_"
+        End If
+    Next i
+    If outText = "" Then outText = "run"
+    Return outText
+End Function
+
+Private Sub LexerPreprocessResetState()
+    gPreprocessStop = 0
+    gPreprocessFailed = 0
+    gPreprocessError = ""
+    gFuncMacroCount = 0
+    Erase gFuncMacros
+    gPreprocessIncludeStackCount = 0
+    gPreprocessIncludeOnceCount = 0
+    Erase gPreprocessIncludeStack
+    Erase gPreprocessIncludeOnce
+End Sub
+
+Private Function LexerIsIdentStartChar(ByRef ch As String) As Integer
+    If ch = "" Then Return 0
+    Dim n As Integer
+    n = Asc(ch)
+    Return (n >= Asc("A") And n <= Asc("Z")) Or (n >= Asc("a") And n <= Asc("z")) Or n = Asc("_")
+End Function
+
+Private Function LexerIsIdentPartChar(ByRef ch As String) As Integer
+    If LexerIsIdentStartChar(ch) <> 0 Then Return 1
+    If ch = "" Then Return 0
+    Dim n As Integer
+    n = Asc(ch)
+    Return (n >= Asc("0") And n <= Asc("9"))
+End Function
+
+Private Function LexerParamsTextCount(ByRef paramsText As String) As Integer
+    Dim raw As String
+    raw = Trim(paramsText)
+    If raw = "" Then Return 0
+
+    Dim count As Integer
+    count = 1
+
+    Dim i As Integer
+    For i = 1 To Len(raw)
+        If Mid(raw, i, 1) = "," Then count += 1
+    Next i
+
+    Return count
+End Function
+
+Private Function LexerGetParamNameAt(ByRef paramsText As String, ByVal paramIndex As Integer) As String
+    Dim raw As String
+    raw = Trim(paramsText)
+    If raw = "" Then Return ""
+
+    Dim idx As Integer
+    Dim partStart As Integer
+    partStart = 1
+
+    Dim i As Integer
+    For i = 1 To Len(raw) + 1
+        If i > Len(raw) Or Mid(raw, i, 1) = "," Then
+            If idx = paramIndex Then
+                Return UCase(Trim(Mid(raw, partStart, i - partStart)))
+            End If
+            idx += 1
+            partStart = i + 1
+        End If
+    Next i
+
+    Return ""
+End Function
+
+Private Sub LexerSetFuncMacro(ByRef nameText As String, ByRef paramsText As String, ByVal paramCount As Integer, ByRef bodyText As String)
+    Dim key As String
+    key = UCase(Trim(nameText))
+    If key = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To gFuncMacroCount - 1
+        If UCase(gFuncMacros(i).nameText) = key Then
+            gFuncMacros(i).paramsText = UCase(Trim(paramsText))
+            gFuncMacros(i).paramCount = paramCount
+            gFuncMacros(i).bodyText = bodyText
+            Exit Sub
+        End If
+    Next i
+
+    If gFuncMacroCount = 0 Then
+        ReDim gFuncMacros(0)
+    Else
+        ReDim Preserve gFuncMacros(gFuncMacroCount)
+    End If
+
+    gFuncMacros(gFuncMacroCount).nameText = key
+    gFuncMacros(gFuncMacroCount).paramsText = UCase(Trim(paramsText))
+    gFuncMacros(gFuncMacroCount).paramCount = paramCount
+    gFuncMacros(gFuncMacroCount).bodyText = bodyText
+    gFuncMacroCount += 1
+End Sub
+
+Private Function LexerParseFuncMacroDirective(ByRef restText As String, ByRef nameText As String, ByRef paramsText As String, ByRef paramCount As Integer, ByRef bodyText As String) As Integer
+    Dim raw As String
+    raw = Trim(restText)
+    If raw = "" Then Return 0
+
+    Dim lp As Integer
+    lp = InStr(raw, "(")
+    If lp <= 1 Then Return 0
+
+    Dim rp As Integer
+    rp = InStr(lp + 1, raw, ")")
+    If rp <= lp Then Return 0
+
+    nameText = UCase(Trim(Left(raw, lp - 1)))
+    If nameText = "" Then Return 0
+
+    paramsText = Trim(Mid(raw, lp + 1, rp - lp - 1))
+    bodyText = Trim(Mid(raw, rp + 1))
+    If bodyText = "" Then Return 0
+
+    If paramsText = "" Then
+        paramCount = 0
+        Return 1
+    End If
+
+    Dim normalizedParams As String
+    normalizedParams = ""
+
+    Dim i As Integer
+    For i = 0 To LexerParamsTextCount(paramsText) - 1
+        Dim p As String
+        p = LexerGetParamNameAt(paramsText, i)
+        If p = "" Then Return 0
+
+        Dim j As Integer
+        For j = 1 To Len(p)
+            Dim c As String
+            c = Mid(p, j, 1)
+            If j = 1 Then
+                If LexerIsIdentStartChar(c) = 0 Then Return 0
+            Else
+                If LexerIsIdentPartChar(c) = 0 Then Return 0
+            End If
+        Next j
+
+        If normalizedParams <> "" Then normalizedParams &= ","
+        normalizedParams &= p
+    Next i
+
+    paramsText = normalizedParams
+    paramCount = LexerParamsTextCount(paramsText)
+    Return 1
+End Function
+
+Private Function LexerReplaceIdentToken(ByRef src As String, ByRef identName As String, ByRef replaceText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    i = 1
+
+    Dim key As String
+    key = UCase(Trim(identName))
+
+    Do While i <= Len(src)
+        Dim ch As String
+        ch = Mid(src, i, 1)
+
+        If LexerIsIdentStartChar(ch) <> 0 Then
+            Dim j As Integer
+            j = i + 1
+            Do While j <= Len(src)
+                If LexerIsIdentPartChar(Mid(src, j, 1)) = 0 Then Exit Do
+                j += 1
+            Loop
+
+            Dim tok As String
+            tok = Mid(src, i, j - i)
+
+            If UCase(tok) = key Then
+                outText &= replaceText
+            Else
+                outText &= tok
+            End If
+
+            i = j
+        Else
+            outText &= ch
+            i += 1
+        End If
+    Loop
+
+    Return outText
+End Function
+
+' ADIM44: FOREACH expanded helper primitives.
+Private Function UXBMetaReplaceAll44(ByRef srcText As String, ByRef needle As String, ByRef repl As String) As String
+    If needle = "" Then Return srcText
+    Dim outText As String
+    outText = ""
+    Dim scanPos44 As Integer
+    scanPos44 = 1
+    Do
+        Dim hit As Integer
+        hit = InStr(scanPos44, srcText, needle)
+        If hit <= 0 Then Exit Do
+        outText &= Mid(srcText, scanPos44, hit - scanPos44)
+        outText &= repl
+        scanPos44 = hit + Len(needle)
+    Loop
+    outText &= Mid(srcText, scanPos44)
+    Return outText
+End Function
+
+Private Function UXBMetaParseForeachHeader44(ByRef argText As String, ByRef varOut As String, ByRef listOut As String) As Integer
+    Dim u As String
+    u = UCase(Trim(argText))
+    Dim inPos As Integer
+    inPos = InStr(u, " IN ")
+    If inPos <= 1 Then Return 0
+
+    varOut = Trim(Left(argText, inPos - 1))
+    listOut = Trim(Mid(argText, inPos + 4))
+    If varOut = "" Then Return 0
+    If Left(listOut, 1) = "(" And Right(listOut, 1) = ")" Then
+        listOut = Mid(listOut, 2, Len(listOut) - 2)
+    End If
+    Return IIf(listOut <> "", 1, 0)
+End Function
+
+Private Function UXBMetaParseForHeader44(ByRef argText As String, ByRef varOut As String, ByRef startOut As LongInt, ByRef finishOut As LongInt, ByRef stepOut As LongInt) As Integer
+    Dim raw As String = Trim(argText)
+    Dim equalsPos As Integer = InStr(raw, "=")
+    If equalsPos <= 1 Then Return 0
+    varOut = Trim(Left(raw, equalsPos - 1))
+    If varOut = "" Then Return 0
+
+    Dim rangeText As String = Trim(Mid(raw, equalsPos + 1))
+    Dim rangeUpper As String = UCase(rangeText)
+    Dim toPos As Integer = InStr(rangeUpper, " TO ")
+    If toPos <= 1 Then Return 0
+    Dim startText As String = Trim(Left(rangeText, toPos - 1))
+    Dim finishAndStep As String = Trim(Mid(rangeText, toPos + 4))
+    Dim finishUpper As String = UCase(finishAndStep)
+    Dim stepPos As Integer = InStr(finishUpper, " STEP ")
+    Dim finishText As String
+    Dim stepText As String
+    If stepPos > 0 Then
+        finishText = Trim(Left(finishAndStep, stepPos - 1))
+        stepText = Trim(Mid(finishAndStep, stepPos + 6))
+    Else
+        finishText = finishAndStep
+        stepText = "1"
+    End If
+    If startText = "" Or finishText = "" Or stepText = "" Then Return 0
+    startOut = CLngInt(Val(startText))
+    finishOut = CLngInt(Val(finishText))
+    stepOut = CLngInt(Val(stepText))
+    If stepOut = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function UXBMetaLoopBody44(ByRef bodyText As String, ByRef controlOut As Integer) As String
+    controlOut = 0
+    Dim outText As String = ""
+    Dim cursor As Integer = 1
+    Dim nestedDepth As Integer = 0
+    Do While cursor <= Len(bodyText)
+        Dim nextLf As Integer = InStr(cursor, bodyText, Chr(10))
+        Dim lineText As String
+        If nextLf = 0 Then
+            lineText = Mid(bodyText, cursor)
+            cursor = Len(bodyText) + 1
+        Else
+            lineText = Mid(bodyText, cursor, nextLf - cursor)
+            cursor = nextLf + 1
+        End If
+        If Right(lineText, 1) = Chr(13) Then lineText = Left(lineText, Len(lineText) - 1)
+        Dim lineUpper As String = UCase(Trim(lineText))
+        If Left(lineUpper, 6) = "%%FOR " Or Left(lineUpper, 10) = "%%FOREACH " Or Left(lineUpper, 9) = "%%REPEAT " Then
+            nestedDepth += 1
+        ElseIf lineUpper = "%%ENDFOR" Or lineUpper = "%%ENDFOREACH" Or lineUpper = "%%ENDREPEAT" Then
+            If nestedDepth > 0 Then nestedDepth -= 1
+        ElseIf nestedDepth = 0 And lineUpper = "%%BREAK" Then
+            controlOut = 1
+            Exit Do
+        ElseIf nestedDepth = 0 And lineUpper = "%%CONTINUE" Then
+            controlOut = 2
+            Exit Do
+        End If
+        outText &= lineText & Chr(10)
+    Loop
+    Return outText
+End Function
+
+Private Function UXBMetaExpandOneLoopBody44(ByRef bodyText As String, ByRef varName As String, ByRef valueText As String, ByRef controlOut As Integer) As String
+    Dim expanded As String = bodyText
+    If Trim(varName) <> "" Then
+        expanded = UXBMetaReplaceAll44(expanded, "%%" & varName, valueText)
+        expanded = UXBMetaReplaceAll44(expanded, "{{" & varName & "}}", valueText)
+    End If
+    Return UXBMetaLoopBody44(expanded, controlOut)
+End Function
+
+Private Function UXBMetaForeachExpand44(ByRef varName As String, ByRef valuesCsv As String, ByRef bodyText As String) As String
+    Dim outText As String
+    outText = ""
+    Dim rest As String
+    rest = valuesCsv
+    Do While Len(Trim(rest)) > 0
+        Dim oneValue As String
+        Dim commaPos As Integer
+        commaPos = InStr(rest, ",")
+        If commaPos > 0 Then
+            oneValue = Trim(Left(rest, commaPos - 1))
+            rest = Mid(rest, commaPos + 1)
+        Else
+            oneValue = Trim(rest)
+            rest = ""
+        End If
+
+        If Left(oneValue, 1) = Chr(34) And Right(oneValue, 1) = Chr(34) And Len(oneValue) >= 2 Then
+            oneValue = Mid(oneValue, 2, Len(oneValue) - 2)
+        End If
+
+        Dim controlValue As Integer
+        Dim expanded As String = UXBMetaExpandOneLoopBody44(bodyText, varName, oneValue, controlValue)
+        outText &= expanded
+        If Right(outText, 1) <> Chr(10) Then outText &= Chr(10)
+        If controlValue = 1 Then Exit Do
+    Loop
+    Return outText
+End Function
+
+Private Function UXBMetaForExpand44(ByRef varName As String, ByVal startValue As LongInt, ByVal finishValue As LongInt, ByVal stepValue As LongInt, ByRef bodyText As String, ByRef errText As String) As String
+    Dim outText As String = ""
+    Dim currentValue As LongInt = startValue
+    Dim iterationCount As Integer = 0
+    Do While (stepValue > 0 And currentValue <= finishValue) Or (stepValue < 0 And currentValue >= finishValue)
+        iterationCount += 1
+        If iterationCount > 100000 Then errText = "PREPROCESSOR_FOR_ITERATION_LIMIT": Return ""
+        Dim valueText As String = LTrim(Str(currentValue))
+        Dim controlValue As Integer
+        Dim expanded As String = UXBMetaExpandOneLoopBody44(bodyText, varName, valueText, controlValue)
+        outText &= expanded
+        If Right(outText, 1) <> Chr(10) Then outText &= Chr(10)
+        If controlValue = 1 Then Exit Do
+        currentValue += stepValue
+    Loop
+    Return outText
+End Function
+
+Private Function UXBMetaRepeatExpand44(ByVal repeatCount As LongInt, ByRef bodyText As String, ByRef errText As String) As String
+    If repeatCount < 0 Then errText = "PREPROCESSOR_REPEAT_COUNT_NEGATIVE": Return ""
+    If repeatCount > 100000 Then errText = "PREPROCESSOR_REPEAT_ITERATION_LIMIT": Return ""
+    Dim outText As String = ""
+    Dim i As LongInt
+    For i = 1 To repeatCount
+        Dim indexName As String = "INDEX"
+        Dim indexText As String = LTrim(Str(i))
+        Dim controlValue As Integer
+        Dim expanded As String = UXBMetaExpandOneLoopBody44(bodyText, indexName, indexText, controlValue)
+        outText &= expanded
+        If Right(outText, 1) <> Chr(10) Then outText &= Chr(10)
+        If controlValue = 1 Then Exit For
+    Next i
+    Return outText
+End Function
+
+Private Function LexerMacroCollectCallArgs(ByRef callText As String, args() As String, ByRef argCount As Integer) As Integer
+    argCount = 0
+    If callText = "" Then Return 0
+
+    Dim depth As Integer
+    Dim buf As String
+    Dim i As Integer
+
+    For i = 1 To Len(callText)
+        Dim ch As String
+        ch = Mid(callText, i, 1)
+
+        If ch = "(" Then
+            depth += 1
+            If depth > 1 Then buf &= ch
+            Continue For
+        End If
+
+        If ch = ")" Then
+            depth -= 1
+            If depth < 0 Then Return 0
+
+            If depth = 0 Then
+                If Trim(buf) <> "" Or argCount > 0 Then
+                    If argCount = 0 Then
+                        ReDim args(0)
+                    Else
+                        ReDim Preserve args(argCount)
+                    End If
+                    args(argCount) = Trim(buf)
+                    argCount += 1
+                End If
+                Return 1
+            End If
+
+            buf &= ch
+            Continue For
+        End If
+
+        If ch = "," And depth = 1 Then
+            If argCount = 0 Then
+                ReDim args(0)
+            Else
+                ReDim Preserve args(argCount)
+            End If
+            args(argCount) = Trim(buf)
+            argCount += 1
+            buf = ""
+            Continue For
+        End If
+
+        buf &= ch
+    Next i
+
+    Return 0
+End Function
+
+Private Function LexerExpandOneFuncMacro(ByRef lineText As String, ByRef fm As LexerFuncMacro) As String
+    Dim outText As String
+    Dim i As Integer
+    i = 1
+
+    Do While i <= Len(lineText)
+        Dim ch As String
+        ch = Mid(lineText, i, 1)
+
+        If ch = Chr(34) Then
+            outText &= ch
+            i += 1
+            Do While i <= Len(lineText)
+                ch = Mid(lineText, i, 1)
+                outText &= ch
+                If ch = Chr(34) Then
+                    If i < Len(lineText) And Mid(lineText, i + 1, 1) = Chr(34) Then
+                        i += 1
+                        outText &= Chr(34)
+                        i += 1
+                    Else
+                        i += 1
+                        Exit Do
+                    End If
+                Else
+                    i += 1
+                End If
+            Loop
+            Continue Do
+        End If
+
+        If ch = "'" Then
+            outText &= Mid(lineText, i)
+            Exit Do
+        End If
+
+        If LexerIsIdentStartChar(ch) <> 0 Then
+            Dim j As Integer
+            j = i + 1
+            Do While j <= Len(lineText)
+                If LexerIsIdentPartChar(Mid(lineText, j, 1)) = 0 Then Exit Do
+                j += 1
+            Loop
+
+            Dim tok As String
+            tok = Mid(lineText, i, j - i)
+
+            If UCase(tok) = UCase(fm.nameText) Then
+                Dim k As Integer
+                k = j
+                Do While k <= Len(lineText)
+                    Dim ws As String
+                    ws = Mid(lineText, k, 1)
+                    If ws <> " " And ws <> Chr(9) Then Exit Do
+                    k += 1
+                Loop
+
+                If k <= Len(lineText) And Mid(lineText, k, 1) = "(" Then
+                    Dim depth As Integer
+                    Dim p As Integer
+                    depth = 0
+                    For p = k To Len(lineText)
+                        Dim c As String
+                        c = Mid(lineText, p, 1)
+                        If c = "(" Then
+                            depth += 1
+                        ElseIf c = ")" Then
+                            depth -= 1
+                            If depth = 0 Then Exit For
+                        End If
+                    Next p
+
+                    If depth = 0 And p <= Len(lineText) Then
+                        Dim callText As String
+                        callText = Mid(lineText, k, p - k + 1)
+
+                        Dim args() As String
+                        Dim argCount As Integer
+                        If LexerMacroCollectCallArgs(callText, args(), argCount) <> 0 Then
+                            If argCount = fm.paramCount Then
+                                Dim repl As String
+                                repl = fm.bodyText
+
+                                Dim pi As Integer
+                                For pi = 0 To fm.paramCount - 1
+                                    Dim pname As String
+                                    pname = LexerGetParamNameAt(fm.paramsText, pi)
+                                    repl = LexerReplaceIdentToken(repl, pname, args(pi))
+                                Next pi
+
+                                outText &= repl
+                                i = p + 1
+                                Continue Do
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+
+            outText &= tok
+            i = j
+        Else
+            outText &= ch
+            i += 1
+        End If
+    Loop
+
+    Return outText
+End Function
+
+Private Function LexerExpandObjectMacrosInLine(ByRef lineText As String, macros() As LexerMacro, ByVal macroCount As Integer) As String
+    Dim outText As String
+    Dim i As Integer = 1
+    Do While i <= Len(lineText)
+        Dim ch As String = Mid(lineText, i, 1)
+        If ch = Chr(34) Then
+            outText &= ch
+            i += 1
+            Do While i <= Len(lineText)
+                ch = Mid(lineText, i, 1)
+                outText &= ch
+                If ch = Chr(34) Then
+                    If i < Len(lineText) And Mid(lineText, i + 1, 1) = Chr(34) Then
+                        i += 1
+                        outText &= Chr(34)
+                        i += 1
+                    Else
+                        i += 1
+                        Exit Do
+                    End If
+                Else
+                    i += 1
+                End If
+            Loop
+            Continue Do
+        End If
+        If ch = "'" Then
+            outText &= Mid(lineText, i)
+            Exit Do
+        End If
+        If LexerIsIdentStartChar(ch) <> 0 Then
+            Dim j As Integer = i + 1
+            Do While j <= Len(lineText)
+                If LexerIsIdentPartChar(Mid(lineText, j, 1)) = 0 Then Exit Do
+                j += 1
+            Loop
+            Dim tok As String = Mid(lineText, i, j - i)
+            Dim repl As String = tok
+            Dim m As Integer
+            For m = 0 To macroCount - 1
+                If UCase(macros(m).nameText) = UCase(tok) Then
+                    repl = macros(m).valueText
+                    Exit For
+                End If
+            Next m
+            outText &= repl
+            i = j
+        Else
+            outText &= ch
+            i += 1
+        End If
+    Loop
+    Return outText
+End Function
+
+Private Function LexerExpandFuncMacrosInLine(ByRef lineText As String) As String
+    Dim expanded As String
+    expanded = lineText
+
+    Dim i As Integer
+    For i = 0 To gFuncMacroCount - 1
+        expanded = LexerExpandOneFuncMacro(expanded, gFuncMacros(i))
+    Next i
+
+    Return expanded
+End Function
+
+Private Sub LexerPreprocessFail(ByRef sourcePath As String, ByVal lineNo As Integer, ByRef detail As String)
+    If gPreprocessFailed <> 0 Then Exit Sub
+
+    gPreprocessFailed = 1
+    gPreprocessStop = 1
+
+    Dim prefix As String
+    prefix = "preprocess fail"
+    If Trim(sourcePath) <> "" Then
+        prefix &= " [" & sourcePath & ":" & LTrim(Str(lineNo)) & "]"
+    End If
+
+    gPreprocessError = prefix & " " & detail
+End Sub
+
+Function LexerPreprocessHasError() As Integer
+    Return gPreprocessFailed
+End Function
+
+Function LexerPreprocessGetError() As String
+    Return gPreprocessError
+End Function
+
+Private Function LexerDirName(ByRef filePath As String) As String
+    Dim i As Integer
+    For i = Len(filePath) To 1 Step -1
+        Dim ch As String
+        ch = Mid(filePath, i, 1)
+        If ch = "\" Or ch = "/" Then
+            Return Left(filePath, i - 1)
+        End If
+    Next i
+    Return ""
+End Function
+
+Private Function LexerJoinPath(ByRef baseDir As String, ByRef relPath As String) As String
+    If baseDir = "" Then Return relPath
+
+    Dim lastCh As String
+    lastCh = Right(baseDir, 1)
+    If lastCh = "\" Or lastCh = "/" Then
+        Return baseDir & relPath
+    End If
+
+    Return baseDir & "\" & relPath
+End Function
+
+#include once "../common/text_encoding.fbs"
+
+Private Function LexerReadTextFile(ByRef filePath As String, ByRef textOut As String) As Integer
+    ' FIX6_RUNTIME_SEMANTIC_20260610:
+    ' INCLUDE okuma yolu Err durumuna bağlı sessiz kalmasın; hata kontrollü yakalansın.
+    textOut = ""
+    Dim f As Integer
+    f = FreeFile
+
+    On Error GoTo LexerReadTextFile_Error
+    Open filePath For Input As #f
+
+    Do While Not Eof(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        textOut &= lineText & Chr(10)
+    Loop
+
+    Close #f
+    On Error GoTo 0
+    textOut = UXBStripUtf8Bom(textOut)
+    Return 1
+
+LexerReadTextFile_Error:
+    On Error GoTo 0
+    textOut = ""
+    Return 0
+End Function
+
+Private Function LexerPathNormalize(ByRef pathText As String) As String
+    Dim p As String = Trim(pathText)
+    Dim bs As String
+    bs = Chr(92)
+
+    Dim i As Integer
+    For i = 1 To Len(p)
+        If Mid(p, i, 1) = "/" Then Mid(p, i, 1) = bs
+    Next i
+
+    Dim outText As String
+    Dim prevBs As Integer
+    outText = ""
+    prevBs = 0
+    For i = 1 To Len(p)
+        Dim ch As String
+        ch = Mid(p, i, 1)
+        If ch = bs Then
+            If prevBs = 0 Then
+                outText &= ch
+                prevBs = 1
+            End If
+        Else
+            outText &= ch
+            prevBs = 0
+        End If
+    Next i
+
+    p = outText
+    Return p
+End Function
+
+Private Function LexerPathUnsafe(ByRef pathText As String) As Integer
+    Dim p As String = Trim(pathText)
+    If p = "" Then Return 1
+    If InStr(p, "..") > 0 Then Return 1
+    If InStr(p, "|") > 0 Or InStr(p, "<") > 0 Or InStr(p, ">") > 0 Then Return 1
+    If InStr(p, "&") > 0 Or InStr(p, ";") > 0 Then Return 1
+    If Len(p) >= 2 Then
+        If Mid(p, 2, 1) = ":" Then Return 1
+    End If
+    If Left(p, 2) = "\\" Then Return 1
+    Return 0
+End Function
+
+Private Function LexerIncludeStackContains(ByRef filePath As String) As Integer
+    Dim key As String = UCase(LexerPathNormalize(filePath))
+    Dim i As Integer
+    For i = 0 To gPreprocessIncludeStackCount - 1
+        If UCase(gPreprocessIncludeStack(i)) = key Then Return 1
+    Next i
+    Return 0
+End Function
+
+Private Sub LexerIncludeStackPush(ByRef filePath As String)
+    Dim key As String = UCase(LexerPathNormalize(filePath))
+    If gPreprocessIncludeStackCount = 0 Then
+        ReDim gPreprocessIncludeStack(0)
+    Else
+        ReDim Preserve gPreprocessIncludeStack(gPreprocessIncludeStackCount)
+    End If
+    gPreprocessIncludeStack(gPreprocessIncludeStackCount) = key
+    gPreprocessIncludeStackCount += 1
+End Sub
+
+Private Sub LexerIncludeStackPop()
+    If gPreprocessIncludeStackCount <= 0 Then Exit Sub
+    gPreprocessIncludeStackCount -= 1
+    If gPreprocessIncludeStackCount <= 0 Then
+        Erase gPreprocessIncludeStack
+    Else
+        ReDim Preserve gPreprocessIncludeStack(gPreprocessIncludeStackCount - 1)
+    End If
+End Sub
+
+Private Function LexerIncludeOnceSeen(ByRef filePath As String) As Integer
+    Dim key As String = UCase(LexerPathNormalize(filePath))
+    Dim i As Integer
+    For i = 0 To gPreprocessIncludeOnceCount - 1
+        If UCase(gPreprocessIncludeOnce(i)) = key Then Return 1
+    Next i
+    Return 0
+End Function
+
+Private Sub LexerIncludeOnceAdd(ByRef filePath As String)
+    If LexerIncludeOnceSeen(filePath) <> 0 Then Exit Sub
+    Dim key As String = UCase(LexerPathNormalize(filePath))
+    If gPreprocessIncludeOnceCount = 0 Then
+        ReDim gPreprocessIncludeOnce(0)
+    Else
+        ReDim Preserve gPreprocessIncludeOnce(gPreprocessIncludeOnceCount)
+    End If
+    gPreprocessIncludeOnce(gPreprocessIncludeOnceCount) = key
+    gPreprocessIncludeOnceCount += 1
+End Sub
+
+
+Private Function LexerEvalDirectiveCond(ByRef condText As String, macros() As LexerMacro, ByVal macroCount As Integer) As Integer
+    Dim t As String
+    t = UCase(Trim(condText))
+
+    If t = "" Then Return 0
+    If t = "TRUE" Then Return 1
+    If t = "FALSE" Then Return 0
+
+    ' ADIM36/44: support simple comparisons in directives
+    ' ex: 1 == 2, A != B, NAME = VALUE, X <> Y
+    Dim opPos As Integer
+    Dim opText As String
+    opPos = InStr(t, "==")
+    If opPos > 0 Then
+        opText = "=="
+    Else
+        opPos = InStr(t, "<>")
+        If opPos > 0 Then
+            opText = "<>"
+        Else
+            opPos = InStr(t, "!=")
+            If opPos > 0 Then
+                opText = "!="
+            Else
+                opPos = InStr(t, "=")
+                If opPos > 0 Then opText = "="
+            End If
+        End If
+    End If
+    If opPos > 0 Then
+        Dim lhsRaw As String
+        Dim rhsRaw As String
+        lhsRaw = Trim(Left(t, opPos - 1))
+        rhsRaw = Trim(Mid(t, opPos + Len(opText)))
+        Dim lhsVal As String
+        Dim rhsVal As String
+        lhsVal = UCase(Trim(LexerResolveMacroToken(lhsRaw, macros(), macroCount)))
+        rhsVal = UCase(Trim(LexerResolveMacroToken(rhsRaw, macros(), macroCount)))
+        Select Case opText
+        Case "=", "=="
+            Return IIf(lhsVal = rhsVal, 1, 0)
+        Case "<>", "!="
+            Return IIf(lhsVal <> rhsVal, 1, 0)
+        End Select
+    End If
+
+    If (t = "0") Then Return 0
+    If (t = "1") Then Return 1
+
+    If (Left(t, 1) >= "0" And Left(t, 1) <= "9") Or Left(t, 1) = "-" Then
+        Return IIf(ValInt(t) <> 0, 1, 0)
+    End If
+
+    Dim i As Integer
+    For i = 0 To macroCount - 1
+        If UCase(macros(i).nameText) = t Then
+            Return IIf(ValInt(macros(i).valueText) <> 0, 1, 0)
+        End If
+    Next i
+
+    Return 0
+End Function
+
+Private Function LexerResolveMacroToken(ByRef tokenText As String, macros() As LexerMacro, ByVal macroCount As Integer) As String
+    Dim raw As String
+    raw = Trim(tokenText)
+    If raw = "" Then Return ""
+
+    Dim key As String
+    key = UCase(raw)
+
+    Dim i As Integer
+    For i = 0 To macroCount - 1
+        If UCase(macros(i).nameText) = key Then
+            Return Trim(macros(i).valueText)
+        End If
+    Next i
+
+    Return raw
+End Function
+
+Private Function LexerEvalDirectiveIfc(ByRef restText As String, macros() As LexerMacro, ByVal macroCount As Integer, ByRef errText As String) As Integer
+    Dim commaPos As Integer
+    commaPos = InStr(restText, ",")
+    If commaPos <= 0 Then
+        errText = "%%IFC syntax: expected '<lhs>, <rhs>'"
+        Return -1
+    End If
+
+    Dim lhsRaw As String
+    Dim rhsRaw As String
+    lhsRaw = Trim(Left(restText, commaPos - 1))
+    rhsRaw = Trim(Mid(restText, commaPos + 1))
+
+    If lhsRaw = "" Or rhsRaw = "" Then
+        errText = "%%IFC syntax: both operands are required"
+        Return -1
+    End If
+
+    If InStr(rhsRaw, ",") > 0 Then
+        errText = "%%IFC syntax: expected exactly one comma"
+        Return -1
+    End If
+
+    Dim lhsVal As String
+    Dim rhsVal As String
+    lhsVal = LexerResolveMacroToken(lhsRaw, macros(), macroCount)
+    rhsVal = LexerResolveMacroToken(rhsRaw, macros(), macroCount)
+
+    Return IIf(UCase(lhsVal) = UCase(rhsVal), 1, 0)
+End Function
+
+Private Function LexerHostPlatform() As String
+#Ifdef __FB_WIN32__
+    Return "WINDOWS"
+#ElseIf defined(__FB_WIN64__)
+    Return "WINDOWS"
+#ElseIf defined(__FB_LINUX__)
+    Return "LINUX"
+#ElseIf defined(__FB_DARWIN__)
+    Return "MACOS"
+#Else
+    Return "UNKNOWN"
+#EndIf
+End Function
+
+Private Function LexerParseOnOff(ByRef textValue As String, ByRef valueOut As String) As Integer
+    Dim t As String
+    t = UCase(Trim(textValue))
+
+    If t = "" Then
+        valueOut = "1"
+        Return 1
+    End If
+
+    If t = "1" Or t = "ON" Or t = "TRUE" Then
+        valueOut = "1"
+        Return 1
+    End If
+
+    If t = "0" Or t = "OFF" Or t = "FALSE" Then
+        valueOut = "0"
+        Return 1
+    End If
+
+    Return 0
+End Function
+
+Private Sub LexerSetMacro(ByRef nameText As String, ByRef valueText As String, macros() As LexerMacro, ByRef macroCount As Integer)
+    Dim key As String
+    key = UCase(Trim(nameText))
+    If key = "" Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To macroCount - 1
+        If UCase(macros(i).nameText) = key Then
+            macros(i).valueText = Trim(valueText)
+            Exit Sub
+        End If
+    Next i
+
+    If macroCount = 0 Then
+        ReDim macros(0)
+    Else
+        ReDim Preserve macros(macroCount)
+    End If
+
+    macros(macroCount).nameText = key
+    macros(macroCount).valueText = Trim(valueText)
+    macroCount += 1
+End Sub
+
+Private Sub LexerUnsetMacro(ByRef nameText As String, macros() As LexerMacro, ByRef macroCount As Integer)
+    Dim key As String
+    key = UCase(Trim(nameText))
+    If key = "" Or macroCount <= 0 Then Exit Sub
+
+    Dim i As Integer
+    For i = 0 To macroCount - 1
+        If UCase(macros(i).nameText) = key Then
+            Dim j As Integer
+            For j = i To macroCount - 2
+                macros(j) = macros(j + 1)
+            Next j
+
+            macroCount -= 1
+            If macroCount <= 0 Then
+                Erase macros
+            Else
+                ReDim Preserve macros(macroCount - 1)
+            End If
+            Exit Sub
+        End If
+    Next i
+End Sub
+
+Private Sub LexerSplitDirective(ByRef directive As String, ByRef head As String, ByRef restText As String)
+    UXBPreParseDirective directive, head, restText
+End Sub
+
+Private Sub LexerPushCondFrame(ByVal parentActive As Integer, ByVal condValue As Integer, stackParent() As Integer, stackCond() As Integer, stackElseSeen() As Integer, ByRef stackCount As Integer)
+    If stackCount = 0 Then
+        ReDim stackParent(0)
+        ReDim stackCond(0)
+        ReDim stackElseSeen(0)
+    Else
+        ReDim Preserve stackParent(stackCount)
+        ReDim Preserve stackCond(stackCount)
+        ReDim Preserve stackElseSeen(stackCount)
+    End If
+
+    stackParent(stackCount) = parentActive
+    stackCond(stackCount) = condValue
+    stackElseSeen(stackCount) = 0
+    stackCount += 1
+End Sub
+
+Private Sub LexerPopCondFrame(stackParent() As Integer, stackCond() As Integer, stackElseSeen() As Integer, ByRef stackCount As Integer, ByRef active As Integer)
+    If stackCount > 0 Then
+        Dim top As Integer
+        top = stackCount - 1
+        active = stackParent(top)
+
+        stackCount -= 1
+        If stackCount <= 0 Then
+            Erase stackParent
+            Erase stackCond
+            Erase stackElseSeen
+        Else
+            ReDim Preserve stackParent(stackCount - 1)
+            ReDim Preserve stackCond(stackCount - 1)
+            ReDim Preserve stackElseSeen(stackCount - 1)
+        End If
+    Else
+        active = 1
+    End If
+End Sub
+
+Private Sub LexerHandleDefine(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer)
+    Dim nameText As String
+    Dim valueText As String
+    Dim sp2 As Integer
+    sp2 = InStr(restText, " ")
+    If sp2 <= 0 Then
+        nameText = restText
+        valueText = "1"
+    Else
+        nameText = Left(restText, sp2 - 1)
+        valueText = Trim(Mid(restText, sp2 + 1))
+        If valueText = "" Then valueText = "1"
+    End If
+    LexerSetMacro nameText, valueText, macros(), macroCount
+End Sub
+
+Private Sub LexerHandleMacro(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer)
+    Dim nameText As String
+    Dim paramsText As String
+    Dim paramCount As Integer
+    Dim bodyText As String
+
+    If LexerParseFuncMacroDirective(restText, nameText, paramsText, paramCount, bodyText) <> 0 Then
+        LexerSetFuncMacro nameText, paramsText, paramCount, bodyText
+        Exit Sub
+    End If
+
+    ' Fallback: %%MACRO NAME VALUE behaves like %%DEFINE NAME VALUE.
+    LexerHandleDefine restText, macros(), macroCount
+End Sub
+
+Private Function LexerExtractBracedChunk(ByRef srcText As String, ByVal startPos As Integer, ByRef valueOut As String, ByRef nextPos As Integer) As Integer
+    valueOut = ""
+    nextPos = startPos
+    If startPos < 1 Or startPos > Len(srcText) Then Return 0
+    If Mid(srcText, startPos, 1) <> "{" Then Return 0
+
+    Dim depth As Integer
+    depth = 1
+    Dim i As Integer
+    For i = startPos + 1 To Len(srcText)
+        Dim ch As String
+        ch = Mid(srcText, i, 1)
+        If ch = "{" Then
+            depth += 1
+            valueOut &= ch
+        ElseIf ch = "}" Then
+            depth -= 1
+            If depth = 0 Then
+                nextPos = i + 1
+                valueOut = Trim(valueOut)
+                Return 1
+            End If
+            valueOut &= ch
+        Else
+            valueOut &= ch
+        End If
+    Next i
+
+    Return 0
+End Function
+
+Private Function LexerParseAliasDirective(ByRef restText As String, ByRef aliasNameOut As String, ByRef aliasBodyOut As String) As Integer
+    Dim raw As String
+    raw = Trim(restText)
+    aliasNameOut = ""
+    aliasBodyOut = ""
+    If raw = "" Then Return 0
+
+    Dim oldText As String
+    Dim newText As String
+    Dim scanPos As Integer
+    If LexerExtractBracedChunk(raw, 1, oldText, scanPos) = 0 Then
+        ' Canonical plain forms:
+        '   ALIAS old new
+        '   ALIAS old AS new
+        '   ALIAS old = new
+        Dim eqPos As Integer
+        eqPos = InStr(raw, "=")
+        If eqPos > 1 Then
+            oldText = Trim(Left(raw, eqPos - 1))
+            newText = Trim(Mid(raw, eqPos + 1))
+            If oldText <> "" And newText <> "" Then
+                aliasNameOut = oldText
+                aliasBodyOut = newText
+                Return 1
+            End If
+        End If
+
+        Dim firstSp As Integer
+        firstSp = InStr(raw, " ")
+        If firstSp <= 1 Then Return 0
+
+        oldText = Trim(Left(raw, firstSp - 1))
+        newText = Trim(Mid(raw, firstSp + 1))
+        If oldText = "" Or newText = "" Then Return 0
+
+        If UCase(Left(newText, 3)) = "AS " Then
+            newText = Trim(Mid(newText, 4))
+        End If
+
+        If oldText = "" Or newText = "" Then Return 0
+        aliasNameOut = oldText
+        aliasBodyOut = newText
+        Return 1
+    End If
+
+    Do While scanPos <= Len(raw)
+        Dim ws As String
+        ws = Mid(raw, scanPos, 1)
+        If ws <> " " And ws <> Chr(9) Then Exit Do
+        scanPos = scanPos + 1
+    Loop
+
+    If UCase(Mid(raw, scanPos, 2)) <> "AS" Then Return 0
+    scanPos = scanPos + 2
+
+    Do While scanPos <= Len(raw)
+        Dim ws2 As String
+        ws2 = Mid(raw, scanPos, 1)
+        If ws2 <> " " And ws2 <> Chr(9) Then Exit Do
+        scanPos = scanPos + 1
+    Loop
+
+    If LexerExtractBracedChunk(raw, scanPos, newText, scanPos) = 0 Then Return 0
+    If Trim(oldText) = "" Then Return 0
+
+    aliasNameOut = Trim(oldText)
+    aliasBodyOut = newText
+    Return 1
+End Function
+
+Private Sub LexerHandleAlias(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer)
+    Dim aliasName As String
+    Dim aliasBody As String
+    If LexerParseAliasDirective(restText, aliasName, aliasBody) <> 0 Then
+        LexerSetMacro aliasName, aliasBody, macros(), macroCount
+    End If
+End Sub
+
+Private Function LexerFindMacroValue(ByRef keyText As String, macros() As LexerMacro, ByVal macroCount As Integer, ByRef valueOut As String) As Integer
+    valueOut = ""
+    Dim k As String
+    k = UCase(Trim(keyText))
+    Dim i As Integer
+    For i = 0 To macroCount - 1
+        If UCase(Trim(macros(i).nameText)) = k Then
+            valueOut = UCase(Trim(macros(i).valueText))
+            Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+Private Function LexerAliasWouldCycle(ByRef aliasName As String, ByRef aliasTarget As String, macros() As LexerMacro, ByVal macroCount As Integer) As Integer
+    Dim startName As String
+    startName = UCase(Trim(aliasName))
+    Dim cur As String
+    cur = UCase(Trim(aliasTarget))
+    Dim guard As Integer
+    guard = 0
+    Do While cur <> "" And guard <= macroCount + 2
+        If cur = startName Then Return 1
+        Dim nextValue As String
+        If LexerFindMacroValue(cur, macros(), macroCount, nextValue) = 0 Then Exit Do
+        cur = UCase(Trim(nextValue))
+        guard += 1
+    Loop
+    Return 0
+End Function
+
+Private Function LexerAssertExprOnly(ByRef restText As String) As String
+    Dim q As Integer
+    Dim depth As Integer
+    Dim i As Integer
+    For i = 1 To Len(restText)
+        Dim ch As String
+        ch = Mid(restText, i, 1)
+        If ch = Chr(34) Then
+            If q = 0 Then q = 1 Else q = 0
+        ElseIf q = 0 Then
+            If ch = "(" Then
+                depth += 1
+            ElseIf ch = ")" Then
+                If depth > 0 Then depth -= 1
+            ElseIf ch = "," And depth = 0 Then
+                Return Trim(Left(restText, i - 1))
+            End If
+        End If
+    Next i
+    Return Trim(restText)
+End Function
+
+Private Function LexerPathIsBasicSourceInclude(ByRef includePath As String) As Integer
+    Dim p As String
+    p = LCase(Trim(includePath))
+    If Len(p) >= 4 Then
+        If Right(p, 4) = ".bas" Then Return 1
+        If Right(p, 4) = ".uxb" Then Return 1
+        If Right(p, 4) = ".uxh" Then Return 0
+    End If
+    If Len(p) >= 5 Then
+        ' FIX14_INCLUDE_UXBH_META_20260611:
+        ' .uxbh/.uxmh baslik dosyalari %%INCLUDE tarafindan da alinabilmeli.
+        ' .bas/.uxb ana program dosyalari basic-source include sayilip bloklanir;
+        ' baslik dosyalari ise preprocessor kaynak/header akisi icin serbesttir.
+        If Right(p, 5) = ".uxbh" Then Return 0
+        If Right(p, 5) = ".uxmh" Then Return 0
+    End If
+    Return 0
+End Function
+
+Private Function LexerHandleInclude(ByRef restText As String, ByRef sourcePath As String, ByVal depth As Integer, ByVal lineNo As Integer, ByRef outputText As String, ByRef result As PreprocessResult, ByVal allowBasicSource As Integer) As Integer
+    Dim incPath As String
+    incPath = ""
+
+    If Len(restText) >= 2 And Left(restText, 1) = Chr(34) And Right(restText, 1) = Chr(34) Then
+        incPath = Mid(restText, 2, Len(restText) - 2)
+    End If
+
+    If incPath = "" Then
+        LexerPreprocessFail sourcePath, lineNo, "LEX_INCLUDE_FAILED: %%INCLUDE expects quoted path"
+        Return 0
+    End If
+
+    If LexerPathUnsafe(incPath) <> 0 Then
+        LexerPreprocessFail sourcePath, lineNo, "LEX_UNSAFE_INCLUDE_PATH: " & incPath
+        Return 0
+    End If
+
+    If allowBasicSource = 0 And LexerPathIsBasicSourceInclude(incPath) <> 0 Then
+        LexerPreprocessFail sourcePath, lineNo, "LEX_INCLUDE_UNSUPPORTED_SOURCE: " & incPath
+        Return 0
+    End If
+
+    Dim resolvedPath As String
+    resolvedPath = LexerPathNormalize(LexerJoinPath(LexerDirName(sourcePath), incPath))
+
+    Dim includeText As String
+    Dim loadPath As String
+    loadPath = ""
+
+    If LexerReadTextFile(resolvedPath, includeText) <> 0 Then
+        loadPath = resolvedPath
+    Else
+        Dim directPath As String
+        directPath = LexerPathNormalize(incPath)
+        If UCase(directPath) <> UCase(resolvedPath) Then
+            If LexerReadTextFile(directPath, includeText) <> 0 Then
+                loadPath = directPath
+            End If
+        End If
+    End If
+
+    If loadPath = "" Then
+        ' FIX8_STR_NS_INC_FIXED_20260611: project-root relative INCLUDE climb.
+        ' Example: source is xtestx/generated/.../case.uxb and include is xtestx/generated/.../common.uxbh.
+        Dim climbBaseFix8 As String
+        climbBaseFix8 = LexerDirName(sourcePath)
+        Dim climbFix8 As Integer
+        For climbFix8 = 0 To 16
+            If Trim(climbBaseFix8) = "" Then Exit For
+            Dim probeFix8 As String
+            probeFix8 = LexerPathNormalize(LexerJoinPath(climbBaseFix8, incPath))
+            If LexerReadTextFile(probeFix8, includeText) <> 0 Then
+                loadPath = probeFix8
+                Exit For
+            End If
+            Dim nextBaseFix8 As String
+            nextBaseFix8 = LexerDirName(climbBaseFix8)
+            If UCase(nextBaseFix8) = UCase(climbBaseFix8) Then Exit For
+            climbBaseFix8 = nextBaseFix8
+        Next climbFix8
+    End If
+
+    ' FIX8B_STR_NS_INC_20260611: include climb fallback
+    If loadPath = "" Then
+        Dim climbDirFix8B As String
+        climbDirFix8B = LexerPathNormalize(LexerDirName(sourcePath))
+        Dim climbGuardFix8B As Integer
+        climbGuardFix8B = 0
+        Do While climbDirFix8B <> "" And climbGuardFix8B < 32
+            Dim climbCandidateFix8B As String
+            climbCandidateFix8B = LexerPathNormalize(LexerJoinPath(climbDirFix8B, incPath))
+            If LexerReadTextFile(climbCandidateFix8B, includeText) <> 0 Then
+                loadPath = climbCandidateFix8B
+                Exit Do
+            End If
+
+            Dim parentDirFix8B As String
+            parentDirFix8B = LexerPathNormalize(LexerDirName(climbDirFix8B))
+            If parentDirFix8B = "" Or UCase(parentDirFix8B) = UCase(climbDirFix8B) Then Exit Do
+            climbDirFix8B = parentDirFix8B
+            climbGuardFix8B += 1
+        Loop
+    End If
+
+    If loadPath = "" Then
+        LexerPreprocessFail sourcePath, lineNo, "LEX_INCLUDE_FAILED: " & incPath
+        Return 0
+    End If
+
+    If LexerIncludeStackContains(loadPath) <> 0 Then
+        LexerPreprocessFail sourcePath, lineNo, "LEX_INCLUDE_CYCLE: " & loadPath
+        Return 0
+    End If
+
+    If LexerIncludeOnceSeen(loadPath) <> 0 Then Return 1
+
+    LexerIncludeOnceAdd loadPath
+    LexerIncludeStackPush loadPath
+    outputText &= LexerPreprocessSourceImplEx(includeText, loadPath, depth + 1, result)
+    LexerIncludeStackPop
+    If Right(outputText, 1) <> Chr(10) Then outputText &= Chr(10)
+    Return IIf(LexerPreprocessHasError() = 0, 1, 0)
+
+    Return 0
+End Function
+
+Private Function LexerHandleHostDirective(ByRef head As String, ByRef restText As String, ByRef sourcePath As String, ByVal lineNo As Integer, ByRef hostPlatform As String, macros() As LexerMacro, ByRef macroCount As Integer) As Integer
+    Select Case head
+    Case "PLATFORM"
+        Dim requestedPlatform As String
+        requestedPlatform = UCase(Trim(restText))
+        If requestedPlatform <> "" And requestedPlatform <> hostPlatform Then
+            LexerPreprocessFail sourcePath, lineNo, "%%PLATFORM mismatch: host=" & hostPlatform & " requested=" & requestedPlatform
+            Return 0
+        End If
+        LexerSetMacro "PLATFORM", hostPlatform, macros(), macroCount
+
+    Case "DESTOS"
+        Dim targetOs As String
+        targetOs = UCase(Trim(restText))
+        If targetOs = "" Then targetOs = hostPlatform
+        LexerSetMacro "DESTOS", targetOs, macros(), macroCount
+
+    Case "NOZEROVARS"
+        Dim noZeroValue As String
+        If LexerParseOnOff(restText, noZeroValue) = 0 Then
+            LexerPreprocessFail sourcePath, lineNo, "%%NOZEROVARS expects ON/OFF/1/0"
+            Return 0
+        End If
+        LexerSetMacro "NOZEROVARS", noZeroValue, macros(), macroCount
+
+    Case "SECSTACK"
+        Dim secStackValue As String
+        If LexerParseOnOff(restText, secStackValue) = 0 Then
+            LexerPreprocessFail sourcePath, lineNo, "%%SECSTACK expects ON/OFF/1/0"
+            Return 0
+        End If
+        LexerSetMacro "SECSTACK", secStackValue, macros(), macroCount
+    End Select
+
+    Return 1
+End Function
+
+' ADIM33 helper functions for src/parser/lexer/lexer_preprocess.fbs
+
+Private Function LexerStripQuotes(ByRef s As String) As String
+    Dim t As String: t = Trim(s)
+    If Len(t) >= 2 Then
+        If Left(t, 1) = Chr(34) And Right(t, 1) = Chr(34) Then Return Mid(t, 2, Len(t) - 2)
+    End If
+    Return t
+End Function
+
+Private Function LexerParseBraceAlias(ByRef restText As String, ByRef oldText As String, ByRef newText As String) As Integer
+    Dim raw As String: raw = Trim(restText)
+    oldText = "": newText = ""
+    If Left(raw, 1) <> "{" Then Return 0
+    Dim p2 As Integer: p2 = InStr(2, raw, "}")
+    If p2 <= 2 Then Return 0
+    oldText = Mid(raw, 2, p2 - 2)
+    Dim afterOld As String: afterOld = Trim(Mid(raw, p2 + 1))
+    If UCase(Left(afterOld, 2)) <> "AS" Then Return 0
+    afterOld = Trim(Mid(afterOld, 3))
+    If Left(afterOld, 1) <> "{" Then Return 0
+    Dim p4 As Integer: p4 = InStr(2, afterOld, "}")
+    If p4 <= 2 Then Return 0
+    newText = Mid(afterOld, 2, p4 - 2)
+    Return IIf(Trim(oldText) <> "", 1, 0)
+End Function
+
+Private Sub LexerHandleSet(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    Dim raw As String: raw = Trim(restText)
+    Dim eqp As Integer: eqp = InStr(raw, "=")
+    Dim nameText As String, valueText As String
+    If eqp > 0 Then
+        nameText = Trim(Left(raw, eqp - 1))
+        valueText = Trim(Mid(raw, eqp + 1))
+    Else
+        Dim sp As Integer: sp = InStr(raw, " ")
+        If sp <= 0 Then
+            nameText = raw: valueText = "1"
+        Else
+            nameText = Trim(Left(raw, sp - 1))
+            valueText = Trim(Mid(raw, sp + 1))
+        End If
+    End If
+    If valueText = "" Then valueText = "1"
+    LexerSetMacro nameText, LexerStripQuotes(valueText), macros(), macroCount
+    PreprocessResultAddManifest result, "meta." & UCase(nameText), LexerStripQuotes(valueText)
+End Sub
+
+Private Sub LexerHandleEval(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    ' Minimal compile-time numeric eval: %%EVAL NAME = 1+2 is intentionally strict.
+    ' For now supports plain integer literal or existing macro value. This is real behavior, not fake success.
+    Dim raw As String: raw = Trim(restText)
+    Dim eqp As Integer: eqp = InStr(raw, "=")
+    If eqp <= 0 Then
+        PreprocessResultAddDiagnostic result, "%%EVAL syntax: NAME = VALUE"
+        Exit Sub
+    End If
+    Dim nameText As String: nameText = Trim(Left(raw, eqp - 1))
+    Dim exprText As String: exprText = Trim(Mid(raw, eqp + 1))
+    Dim v As String: v = LexerResolveMacroToken(exprText, macros(), macroCount)
+    LexerSetMacro nameText, v, macros(), macroCount
+    PreprocessResultAddManifest result, "eval." & UCase(nameText), v
+End Sub
+
+Private Sub LexerHandleAssetDirective(ByRef head As String, ByRef restText As String, ByRef sourcePath As String, ByVal lineNo As Integer, ByRef result As PreprocessResult)
+    Dim kindText As String: kindText = UCase(head)
+    If kindText = "ASSET_COPY" Then kindText = "FILE"
+    If kindText = "ASSET_FILE" Then kindText = "FILE"
+    If kindText = "ASSET_IMAGE" Then kindText = "IMAGE"
+    If kindText = "ASSET_AUDIO" Then kindText = "AUDIO"
+    If kindText = "ASSET_REQUIRE" Then kindText = "FILE"
+
+    Dim raw As String: raw = Trim(restText)
+    Dim commaPos As Integer: commaPos = InStr(raw, ",")
+    Dim srcPath As String, dstPath As String
+    If commaPos > 0 Then
+        srcPath = LexerStripQuotes(Trim(Left(raw, commaPos - 1)))
+        dstPath = LexerStripQuotes(Trim(Mid(raw, commaPos + 1)))
+    Else
+        srcPath = LexerStripQuotes(raw)
+        dstPath = ""
+    End If
+    Dim required As Integer: required = IIf(UCase(head) = "ASSET_REQUIRE", 1, 0)
+    PreprocessResultAddAsset result, kindText, srcPath, dstPath, "", required
+End Sub
+
+Private Sub LexerHandleManifestDirective(ByRef head As String, ByRef restText As String, ByRef result As PreprocessResult)
+    Dim raw As String: raw = Trim(restText)
+    Dim eqp As Integer: eqp = InStr(raw, "=")
+    If eqp > 0 Then
+        PreprocessResultAddManifest result, Trim(Left(raw, eqp - 1)), LexerStripQuotes(Trim(Mid(raw, eqp + 1)))
+    Else
+        PreprocessResultAddManifest result, UCase(head), LexerStripQuotes(raw)
+    End If
+End Sub
+
+Private Sub LexerHandleWatImport(ByRef restText As String, ByRef result As PreprocessResult)
+    ' Accepted simple form: %%WAT_IMPORT "env", "print_i32", print_i32, "i32->void"
+    Dim raw As String: raw = Trim(restText)
+    Dim parts(0 To 3) As String
+    Dim count As Integer: count = 0
+    Dim startPos As Integer: startPos = 1
+    Dim i As Integer
+    For i = 1 To Len(raw) + 1
+        If i > Len(raw) Or Mid(raw, i, 1) = "," Then
+            If count <= 3 Then parts(count) = LexerStripQuotes(Trim(Mid(raw, startPos, i - startPos)))
+            count += 1
+            startPos = i + 1
+        End If
+    Next i
+    If count < 2 Then
+        PreprocessResultAddDiagnostic result, "%%WAT_IMPORT syntax: module, import [, alias [, signature]]"
+        Exit Sub
+    End If
+    PreprocessResultAddWatImport result, parts(0), parts(1), parts(2), parts(3), 0
+End Sub
+
+Private Function LexerWatImportKnownBinding(ByRef restText As String) As Integer
+    Dim raw As String: raw = Trim(restText)
+    Dim parts(0 To 3) As String
+    Dim count As Integer: count = 0
+    Dim startPos As Integer: startPos = 1
+    Dim i As Integer
+    For i = 1 To Len(raw) + 1
+        If i > Len(raw) Or Mid(raw, i, 1) = "," Then
+            If count <= 3 Then parts(count) = UCase(LexerStripQuotes(Trim(Mid(raw, startPos, i - startPos))))
+            count += 1
+            startPos = i + 1
+        End If
+    Next i
+    If count < 2 Then Return 0
+
+    If parts(0) = "ENV" And parts(1) = "PRINT_I32" Then Return 1
+    If parts(0) = "ENV" And parts(1) = "PRINT_F64" Then Return 1
+    If parts(0) = "ENV" And parts(1) = "MEMORY" Then Return 1
+    Return 0
+End Function
+
+
+' ADIM34 helpers for src/parser/lexer/lexer_preprocess.fbs
+' Requires ADIM33 PreprocessResult model and helper functions.
+
+Private Type LexerMetaLock34
+    nameText As String
+End Type
+
+Private Dim Shared gMetaLocks34() As LexerMetaLock34
+Private Dim Shared gMetaLockCount34 As Integer
+
+Private Function LexerMetaIsLocked34(ByRef nameText As String) As Integer
+    Dim key As String: key = UCase(Trim(nameText))
+    Dim i As Integer
+    For i = 0 To gMetaLockCount34 - 1
+        If UCase(gMetaLocks34(i).nameText) = key Then Return 1
+    Next i
+    Return 0
+End Function
+
+Private Sub LexerMetaLockAdd34(ByRef nameText As String)
+    Dim key As String: key = UCase(Trim(nameText))
+    If key = "" Then Exit Sub
+    If LexerMetaIsLocked34(key) <> 0 Then Exit Sub
+    If gMetaLockCount34 = 0 Then
+        ReDim gMetaLocks34(0)
+    Else
+        ReDim Preserve gMetaLocks34(gMetaLockCount34)
+    End If
+    gMetaLocks34(gMetaLockCount34).nameText = key
+    gMetaLockCount34 = gMetaLockCount34 + 1
+End Sub
+
+Private Function LexerMetaSplitAs34(ByRef restText As String, ByRef leftText As String, ByRef rightText As String) As Integer
+    Dim raw As String: raw = Trim(restText)
+    Dim p As Integer: p = InStr(UCase(raw), " AS ")
+    If p <= 0 Then p = InStr(UCase(raw), " TO ")
+    If p <= 0 Then Return 0
+    leftText = Trim(Left(raw, p - 1))
+    rightText = Trim(Mid(raw, p + 4))
+    Return IIf(leftText <> "" And rightText <> "", 1, 0)
+End Function
+
+Private Function LexerMetaStripQuotes34(ByRef s As String) As String
+    Return UXBMetaTrimQuotes34(s)
+End Function
+
+Private Function LexerMetaReadTextFile34(ByRef filePath As String, ByRef textOut As String) As Integer
+    Return LexerReadTextFile(filePath, textOut)
+End Function
+
+Private Function LexerMetaResolveValue34(ByRef tokenText As String, macros() As LexerMacro, ByVal macroCount As Integer) As String
+    Dim raw As String: raw = Trim(tokenText)
+    If raw = "" Then Return ""
+    If Left(raw, 1) = Chr(34) And Right(raw, 1) = Chr(34) Then Return Mid(raw, 2, Len(raw) - 2)
+    Return LexerResolveMacroToken(raw, macros(), macroCount)
+End Function
+
+Private Function LexerMetaFindCompareOp34(ByRef s As String, ByRef opOut As String) As Integer
+    Dim ops(0 To 5) As String
+    ops(0) = ">=": ops(1) = "<=": ops(2) = "==": ops(3) = "!=": ops(4) = ">": ops(5) = "<"
+    Dim i As Integer
+    For i = 0 To 5
+        Dim p As Integer: p = InStr(s, ops(i))
+        If p > 0 Then opOut = ops(i): Return p
+    Next i
+    opOut = ""
+    Return 0
+End Function
+
+Private Function LexerMetaEvalIntAtom34(ByRef atomText As String, macros() As LexerMacro, ByVal macroCount As Integer, ByRef okOut As Integer) As LongInt
+    Dim t As String: t = Trim(atomText)
+    If t = "" Then okOut = 0: Return 0
+    Dim v As String: v = LexerResolveMacroToken(t, macros(), macroCount)
+    v = LexerMetaStripQuotes34(v)
+    If UCase(v) = "TRUE" Or UCase(v) = "ON" Then okOut = 1: Return 1
+    If UCase(v) = "FALSE" Or UCase(v) = "OFF" Then okOut = 1: Return 0
+    okOut = 1
+    Return CLngInt(Val(v))
+End Function
+
+Private Function LexerMetaEvalNumericCondition34(ByRef condText As String, macros() As LexerMacro, ByVal macroCount As Integer) As Integer
+    Dim raw As String: raw = Trim(condText)
+    Dim opText As String
+    Dim p As Integer: p = LexerMetaFindCompareOp34(raw, opText)
+    If p <= 0 Then
+        Dim okSingle As Integer
+        Dim singleVal As LongInt: singleVal = LexerMetaEvalIntAtom34(raw, macros(), macroCount, okSingle)
+        Return IIf(okSingle <> 0 And singleVal <> 0, 1, 0)
+    End If
+    Dim lhs As String: lhs = Trim(Left(raw, p - 1))
+    Dim rhs As String: rhs = Trim(Mid(raw, p + Len(opText)))
+    Dim okL As Integer, okR As Integer
+    Dim lv As LongInt: lv = LexerMetaEvalIntAtom34(lhs, macros(), macroCount, okL)
+    Dim rv As LongInt: rv = LexerMetaEvalIntAtom34(rhs, macros(), macroCount, okR)
+    If okL = 0 Or okR = 0 Then Return 0
+    Select Case opText
+    Case "==": Return IIf(lv = rv, 1, 0)
+    Case "!=": Return IIf(lv <> rv, 1, 0)
+    Case ">=": Return IIf(lv >= rv, 1, 0)
+    Case "<=": Return IIf(lv <= rv, 1, 0)
+    Case ">": Return IIf(lv > rv, 1, 0)
+    Case "<": Return IIf(lv < rv, 1, 0)
+    End Select
+    Return 0
+End Function
+
+Private Function LexerMetaEvalStringCondition34(ByRef condText As String, macros() As LexerMacro, ByVal macroCount As Integer) As Integer
+    Dim raw As String: raw = Trim(condText)
+    Dim opText As String
+    Dim p As Integer: p = LexerMetaFindCompareOp34(raw, opText)
+    If p <= 0 Then Return LexerEvalDirectiveCond(raw, macros(), macroCount)
+    Dim lhs As String: lhs = LexerMetaResolveValue34(Trim(Left(raw, p - 1)), macros(), macroCount)
+    Dim rhs As String: rhs = LexerMetaResolveValue34(Trim(Mid(raw, p + Len(opText))), macros(), macroCount)
+    Select Case opText
+    Case "==": Return IIf(UCase(lhs) = UCase(rhs), 1, 0)
+    Case "!=": Return IIf(UCase(lhs) <> UCase(rhs), 1, 0)
+    Case Else
+        ' Non-equality string comparison is not accepted. Use %%IFN for numeric comparison.
+        Return 0
+    End Select
+End Function
+
+Private Function LexerMetaEvalAnyCondition34(ByRef condText As String, macros() As LexerMacro, ByVal macroCount As Integer) As Integer
+    Dim raw As String: raw = Trim(condText)
+    Dim opText As String
+    Dim p As Integer: p = LexerMetaFindCompareOp34(raw, opText)
+    If p > 0 Then
+        Dim lhs As String: lhs = Trim(Left(raw, p - 1))
+        Dim rhs As String: rhs = Trim(Mid(raw, p + Len(opText)))
+        Dim lhsVal As String: lhsVal = LexerMetaResolveValue34(lhs, macros(), macroCount)
+        Dim rhsVal As String: rhsVal = LexerMetaResolveValue34(rhs, macros(), macroCount)
+        Dim numericOnly As Integer: numericOnly = 1
+        If (Left(Trim(lhsVal), 1) < "0" Or Left(Trim(lhsVal), 1) > "9") And Left(Trim(lhsVal), 1) <> "-" Then numericOnly = 0
+        If (Left(Trim(rhsVal), 1) < "0" Or Left(Trim(rhsVal), 1) > "9") And Left(Trim(rhsVal), 1) <> "-" Then numericOnly = 0
+        If numericOnly <> 0 Then Return LexerMetaEvalNumericCondition34(raw, macros(), macroCount)
+        Return LexerMetaEvalStringCondition34(raw, macros(), macroCount)
+    End If
+    Return LexerEvalDirectiveCond(raw, macros(), macroCount)
+End Function
+
+Function PreprocessSetMetaValue(ByRef nameText As String, ByRef valueText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult, ByRef errText As String, ByRef manifestPrefix As String = "meta.") As Integer
+    errText = ""
+    Dim keyText As String
+    keyText = UCase(Trim(nameText))
+    If keyText = "" Then
+        errText = "PREPROCESSOR_META_KEY_EMPTY"
+        PreprocessResultAddDiagnostic result, errText
+        Return 0
+    End If
+    If LexerMetaIsLocked34(keyText) <> 0 Then
+        errText = "PREPROCESSOR_LOCKED_META_WRITE: " & keyText
+        PreprocessResultAddDiagnostic result, errText
+        Return 0
+    End If
+    LexerSetMacro keyText, valueText, macros(), macroCount
+    PreprocessResultAddManifest result, manifestPrefix & keyText, valueText
+    Return 1
+End Function
+
+Private Sub LexerMetaSetUnlocked34(ByRef nameText As String, ByRef valueText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    Dim setterErr As String
+    If PreprocessSetMetaValue(nameText, valueText, macros(), macroCount, result, setterErr, "meta.") = 0 Then Exit Sub
+End Sub
+
+Private Sub LexerMetaHandleDefine34(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    Dim raw As String
+    raw = Trim(restText)
+    Dim nameText As String
+    Dim valueText As String
+    Dim sp As Integer
+    sp = InStr(raw, " ")
+    If sp <= 0 Then
+        nameText = raw
+        valueText = "1"
+    Else
+        nameText = Trim(Left(raw, sp - 1))
+        valueText = Trim(Mid(raw, sp + 1))
+        If valueText = "" Then valueText = "1"
+    End If
+    LexerMetaSetUnlocked34 nameText, LexerStripQuotes(valueText), macros(), macroCount, result
+End Sub
+
+Private Sub LexerMetaHandleSet34(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    Dim raw As String: raw = Trim(restText)
+    Dim eqp As Integer: eqp = InStr(raw, "=")
+    Dim nameText As String, valueText As String
+    If eqp > 0 Then
+        nameText = Trim(Left(raw, eqp - 1))
+        valueText = Trim(Mid(raw, eqp + 1))
+    Else
+        Dim sp As Integer: sp = InStr(raw, " ")
+        If sp <= 0 Then
+            nameText = raw: valueText = "1"
+        Else
+            nameText = Trim(Left(raw, sp - 1))
+            valueText = Trim(Mid(raw, sp + 1))
+        End If
+    End If
+    If valueText = "" Then valueText = "1"
+    LexerMetaSetUnlocked34 nameText, LexerStripQuotes(valueText), macros(), macroCount, result
+End Sub
+
+Private Function LexerMetaHandleAlias34(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult) As Integer
+    Dim oldText As String, newText As String
+    If LexerParseBraceAlias(restText, oldText, newText) = 0 Then
+        If LexerParseAliasDirective(restText, oldText, newText) = 0 Then Return 0
+    End If
+    If LexerAliasWouldCycle(oldText, newText, macros(), macroCount) <> 0 Then Return -1
+    Dim aliasSetErr As String
+    If PreprocessSetMetaValue(oldText, newText, macros(), macroCount, result, aliasSetErr, "alias.") = 0 Then Return 1
+    Return 1
+End Function
+
+Private Sub LexerMetaHandleManifest34(ByRef head As String, ByRef restText As String, ByRef result As PreprocessResult)
+    Dim raw As String: raw = Trim(restText)
+    Dim eqp As Integer: eqp = InStr(raw, "=")
+    Dim keyText As String, valueText As String
+    If eqp > 0 Then
+        keyText = Trim(Left(raw, eqp - 1))
+        valueText = LexerStripQuotes(Trim(Mid(raw, eqp + 1)))
+    Else
+        keyText = UCase(head)
+        valueText = LexerStripQuotes(raw)
+    End If
+    If LexerMetaIsLocked34(keyText) <> 0 Then
+        PreprocessResultAddDiagnostic result, "PREPROCESSOR_LOCKED_META_WRITE: " & UCase(Trim(keyText))
+        Exit Sub
+    End If
+    PreprocessResultAddManifest result, keyText, valueText
+End Sub
+
+Private Sub LexerMetaHandleProfile34(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    Dim profileText As String: profileText = UCase(LexerMetaStripQuotes34(restText))
+    If profileText = "" Then profileText = "DEBUG"
+    LexerMetaSetUnlocked34 "PROFILE", profileText, macros(), macroCount, result
+    PreprocessResultAddManifest result, "profile", profileText
+    PreprocessResultAddProfile result, "PROFILE", profileText
+End Sub
+
+Private Sub LexerMetaHandlePathAlias34(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    Dim leftText As String, rightText As String
+    If LexerMetaSplitAs34(restText, leftText, rightText) = 0 Then
+        PreprocessResultAddDiagnostic result, "%%PATH_ALIAS syntax: %%PATH_ALIAS ""@x"" AS ""path"""
+        Exit Sub
+    End If
+    leftText = LexerMetaStripQuotes34(leftText)
+    rightText = LexerMetaStripQuotes34(rightText)
+    LexerMetaSetUnlocked34 "PATH_ALIAS." & UCase(leftText), rightText, macros(), macroCount, result
+    PreprocessResultAddManifest result, "pathAlias." & UCase(leftText), rightText
+End Sub
+
+Private Sub LexerMetaHandleEnv34(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    Dim leftText As String, rightText As String
+    If LexerMetaSplitAs34(restText, leftText, rightText) = 0 Then
+        PreprocessResultAddDiagnostic result, "%%ENV syntax: %%ENV ""PATH"" AS NAME"
+        Exit Sub
+    End If
+    Dim envName As String: envName = LexerMetaStripQuotes34(leftText)
+    Dim targetName As String: targetName = UCase(Trim(rightText))
+    Dim envVal As String: envVal = Environ(envName)
+    LexerMetaSetUnlocked34 targetName, envVal, macros(), macroCount, result
+    PreprocessResultAddManifest result, "env." & targetName, envName
+End Sub
+
+Private Sub LexerMetaHandleHashFile34(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    Dim leftText As String, rightText As String
+    If LexerMetaSplitAs34(restText, leftText, rightText) = 0 Then
+        PreprocessResultAddDiagnostic result, "%%HASHFILE syntax: %%HASHFILE ""file"" AS NAME"
+        Exit Sub
+    End If
+    Dim hashText As String
+    If UXBMetaFnv1aFileHash34(LexerMetaStripQuotes34(leftText), hashText) = 0 Then
+        PreprocessResultAddDiagnostic result, "%%HASHFILE failed: " & leftText
+        Exit Sub
+    End If
+    LexerMetaSetUnlocked34 UCase(Trim(rightText)), hashText, macros(), macroCount, result
+End Sub
+
+Private Sub LexerMetaHandleEmbedText34(ByRef restText As String, ByRef sourcePath As String, ByVal lineNo As Integer, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    Dim leftText As String, rightText As String
+    If LexerMetaSplitAs34(restText, leftText, rightText) = 0 Then
+        PreprocessResultAddDiagnostic result, "%%EMBEDTEXT syntax: %%EMBEDTEXT ""file"" AS NAME"
+        Dim syntaxErrText As String = "EMBEDTEXT syntax is invalid"
+        LexerPreprocessFail sourcePath, lineNo, syntaxErrText
+        Exit Sub
+    End If
+    Dim cleanPath As String
+    If UXBPreNormalizePath(leftText, "embedText.source", sourcePath, lineNo, result, cleanPath) = 0 Then
+        Dim pathErrText As String = "EMBEDTEXT source path is unsafe"
+        LexerPreprocessFail sourcePath, lineNo, pathErrText
+        Exit Sub
+    End If
+    Dim fileText As String
+    If LexerMetaReadTextFile34(cleanPath, fileText) = 0 Then
+        PreprocessResultAddDiagnostic result, "%%EMBEDTEXT failed: " & leftText
+        Dim readErrText As String = "EMBEDTEXT source could not be read"
+        LexerPreprocessFail sourcePath, lineNo, readErrText
+        Exit Sub
+    End If
+    LexerMetaSetUnlocked34 UCase(Trim(rightText)), fileText, macros(), macroCount, result
+End Sub
+
+Private Sub LexerMetaHandleEmbedBase64_34(ByRef restText As String, ByRef sourcePath As String, ByVal lineNo As Integer, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    Dim leftText As String, rightText As String
+    If LexerMetaSplitAs34(restText, leftText, rightText) = 0 Then
+        PreprocessResultAddDiagnostic result, "%%EMBEDBASE64 syntax: %%EMBEDBASE64 ""file"" AS NAME"
+        Dim syntaxErrText As String = "EMBEDBASE64 syntax is invalid"
+        LexerPreprocessFail sourcePath, lineNo, syntaxErrText
+        Exit Sub
+    End If
+    Dim cleanPath As String
+    If UXBPreNormalizePath(leftText, "embedBase64.source", sourcePath, lineNo, result, cleanPath) = 0 Then
+        Dim pathErrText As String = "EMBEDBASE64 source path is unsafe"
+        LexerPreprocessFail sourcePath, lineNo, pathErrText
+        Exit Sub
+    End If
+    Dim dataText As String
+    ' Was hardcoded to 262144 (256 KiB), well below UXBMetaReadBinaryFile34's own
+    ' default cap (1 MiB) -- no stated reason for the smaller override, and it was
+    ' too small for common small assets (icons, small models). Use the function's
+    ' own default instead (found 2026-09-07).
+    If UXBMetaReadBinaryFile34(cleanPath, dataText) = 0 Then
+        PreprocessResultAddDiagnostic result, "%%EMBEDBASE64 failed or file too large: " & leftText
+        Dim readErrText As String = "EMBEDBASE64 source could not be read"
+        LexerPreprocessFail sourcePath, lineNo, readErrText
+        Exit Sub
+    End If
+    LexerMetaSetUnlocked34 UCase(Trim(rightText)), UXBMetaBase64Encode34(dataText), macros(), macroCount, result
+End Sub
+
+Private Sub LexerMetaHandleConfigFile34(ByRef restText As String, macros() As LexerMacro, ByRef macroCount As Integer, ByRef result As PreprocessResult)
+    ' Minimal flat config reader. Supports lines: KEY=VALUE and flat JSON lines "KEY": "VALUE".
+    Dim pathText As String: pathText = LexerMetaStripQuotes34(restText)
+    Dim cfg As String
+    If LexerMetaReadTextFile34(pathText, cfg) = 0 Then
+        PreprocessResultAddDiagnostic result, "%%CONFIG_FILE failed: " & pathText
+        Exit Sub
+    End If
+    PreprocessResultAddConfigFile result, "configFile", pathText
+    Dim scanPos As Integer: scanPos = 1
+    Do While scanPos <= Len(cfg)
+        Dim nl As Integer: nl = InStr(scanPos, cfg, Chr(10))
+        Dim lineText As String
+        If nl <= 0 Then lineText = Mid(cfg, scanPos): scanPos = Len(cfg) + 1 Else lineText = Mid(cfg, scanPos, nl - scanPos): scanPos = nl + 1
+        lineText = Trim(lineText)
+        If lineText = "" Or Left(lineText, 1) = "#" Then Continue Do
+        If Right(lineText, 1) = "," Then lineText = Left(lineText, Len(lineText) - 1)
+        Dim sep As Integer: sep = InStr(lineText, "=")
+        If sep <= 0 Then sep = InStr(lineText, ":")
+        If sep > 0 Then
+            Dim k As String: k = LexerMetaStripQuotes34(Trim(Left(lineText, sep - 1)))
+            Dim v As String: v = LexerMetaStripQuotes34(Trim(Mid(lineText, sep + 1)))
+            If k <> "" Then LexerMetaSetUnlocked34 k, v, macros(), macroCount, result
+        End If
+    Loop
+    PreprocessResultAddManifest result, "configFile", pathText
+End Sub
+
+Private Sub LexerMetaHandleCssRule34(ByRef restText As String, ByRef result As PreprocessResult, ByRef sourcePath As String, ByVal lineNo As Integer)
+    Dim raw As String: raw = Trim(restText)
+    Dim commaPos As Integer: commaPos = InStr(raw, ",")
+    If commaPos <= 0 Then
+        PreprocessResultAddDiagnostic result, "%%CSS_RULE syntax: selector, rule"
+        Exit Sub
+    End If
+    Dim selectorText As String: selectorText = LexerMetaStripQuotes34(Trim(Left(raw, commaPos - 1)))
+    Dim ruleText As String: ruleText = LexerMetaStripQuotes34(Trim(Mid(raw, commaPos + 1)))
+    PreprocessResultAddBlock result, "CSS", "RULE", "", selectorText & " { " & ruleText & " }", sourcePath, lineNo, lineNo
+End Sub
+
+Private Sub LexerMetaHandleHtmlMedia34(ByRef head As String, ByRef restText As String, ByRef result As PreprocessResult, ByRef sourcePath As String, ByVal lineNo As Integer)
+    Dim raw As String: raw = Trim(restText)
+    Dim commaPos As Integer: commaPos = InStr(raw, ",")
+    Dim idText As String, pathText As String
+    If commaPos > 0 Then
+        idText = LexerMetaStripQuotes34(Trim(Left(raw, commaPos - 1)))
+        pathText = LexerMetaStripQuotes34(Trim(Mid(raw, commaPos + 1)))
+    Else
+        idText = ""
+        pathText = LexerMetaStripQuotes34(raw)
+    End If
+    If UCase(head) = "HTMLIMAGE" Then
+        PreprocessResultAddAsset result, "IMAGE", pathText, pathText, idText, 0
+        PreprocessResultAddBlock result, "HTML", "BODY", "", "<img id=" & Chr(34) & idText & Chr(34) & " src=" & Chr(34) & pathText & Chr(34) & ">", sourcePath, lineNo, lineNo
+    Else
+        PreprocessResultAddAsset result, "AUDIO", pathText, pathText, idText, 0
+        PreprocessResultAddBlock result, "HTML", "BODY", "", "<audio id=" & Chr(34) & idText & Chr(34) & " src=" & Chr(34) & pathText & Chr(34) & " controls></audio>", sourcePath, lineNo, lineNo
+    End If
+End Sub
+
+Private Function LexerMetaExpandInlineEval34(ByRef lineText As String, macros() As LexerMacro, ByVal macroCount As Integer) As String
+    ' Minimal inline form: replaces %%EVAL(NAME) with macro value or numeric truthy value.
+    Dim outText As String: outText = ""
+    Dim scanPos As Integer: scanPos = 1
+    Do While scanPos <= Len(lineText)
+        Dim p As Integer: p = InStr(scanPos, lineText, "%%EVAL(")
+        If p <= 0 Then outText &= Mid(lineText, scanPos): Exit Do
+        outText &= Mid(lineText, scanPos, p - scanPos)
+        Dim startExpr As Integer: startExpr = p + Len("%%EVAL(")
+        Dim closePos As Integer: closePos = InStr(startExpr, lineText, ")")
+        If closePos <= 0 Then
+            outText &= Mid(lineText, p)
+            Exit Do
+        End If
+        Dim exprText As String: exprText = Mid(lineText, startExpr, closePos - startExpr)
+        Dim evalText As String
+        evalText = LexerMetaResolveValue34(exprText, macros(), macroCount)
+        If Left(Trim(evalText), 1) = "=" Then
+            evalText = Trim(Mid(Trim(evalText), 2))
+        End If
+        outText &= evalText
+        scanPos = closePos + 1
+    Loop
+    Return outText
+End Function
+
+
+Private Function LexerProcessDirective(ByRef head As String, ByRef restText As String, ByRef sourcePath As String, ByVal depth As Integer, ByVal lineNo As Integer, ByRef hostPlatform As String, macros() As LexerMacro, ByRef macroCount As Integer, stackParent() As Integer, stackCond() As Integer, stackElseSeen() As Integer, ByRef stackCount As Integer, ByRef active As Integer, ByRef outputText As String, ByRef result As PreprocessResult) As Integer
+    head = UCase(Trim(head))
+
+    If head = "PP" Then
+        If active <> 0 Then
+            If UXBPreprocessorSetDefault(restText) = 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "PREPROCESSOR_PP_INVALID: %%PP expects A or B"
+                Return 0
+            End If
+            UXBPreprocessEmitSelectionManifest result
+        End If
+        Return 1
+    End If
+
+    If UXBPreprocessorIsBActive() <> 0 Then
+        Dim bStatus As Integer
+        bStatus = UXBPreHandleWebManifestDirective(head, restText, sourcePath, lineNo, active, result)
+        If bStatus < 0 Then
+            LexerPreprocessFail sourcePath, lineNo, "PREPROCESSOR_B_DIRECTIVE_FAILED: " & head
+            Return 0
+        End If
+        If bStatus > 0 Then Return 1
+    End If
+
+    If UXBPreParseIsCanonicalCommand(head) = 0 Then
+        PreprocessResultAddDiagnostic result, "META_UNKNOWN_DIRECTIVE: " & head
+        LexerPreprocessFail sourcePath, lineNo, "META_UNKNOWN_DIRECTIVE: " & head
+        Return 0
+    End If
+
+    Select Case head
+    ' UXB_FIX: preprocessor directive dispatch de-duplication
+    ' UXB_REASON: SET/ALIAS duplicate Case branches were merged from different waves.
+    ' Keep canonical ADIM33/34 handlers below as the only active path.
+    ' UXB_TEST: adim36 preprocessor family (FOREACH/IFN/ELIF + negative fail-close)
+    Case "DEFINE"
+        If active <> 0 Then
+            LexerMetaHandleDefine34 restText, macros(), macroCount, result
+        End If
+
+    Case "MACRO"
+        If active <> 0 Then
+            LexerHandleMacro restText, macros(), macroCount
+        End If
+
+    ' Legacy alias branch kept inert intentionally; canonical ALIAS handler is below.
+    Case "__ALIAS_LEGACY_DISABLED__"
+        If active <> 0 Then
+            Dim oldText As String, newText As String
+            If LexerParseBraceAlias(restText, oldText, newText) <> 0 Then
+                If LexerAliasWouldCycle(oldText, newText, macros(), macroCount) <> 0 Then
+                    ' UXB_FIX: preprocessor negative fail-close code normalization
+                    ' UXB_REASON: ADIM50 contract requires stable diagnostic codes.
+                    ' UXB_TEST: adim36 negative preprocess alias-cycle family.
+                    LexerPreprocessFail sourcePath, lineNo, "PREPROCESSOR_ALIAS_CYCLE: " & oldText & " -> " & newText
+                    Return 0
+                End If
+                LexerSetMacro oldText, newText, macros(), macroCount
+            Else
+                LexerHandleAlias restText, macros(), macroCount
+            End If
+        End If
+
+    Case "UNDEF"
+        If active <> 0 Then
+            LexerUnsetMacro restText, macros(), macroCount
+        End If
+
+    Case "IF"
+        Dim parentActive As Integer
+        parentActive = active
+
+        Dim condValue As Integer
+        condValue = 0
+        If parentActive <> 0 Then
+            condValue = LexerEvalDirectiveCond(restText, macros(), macroCount)
+        End If
+
+        LexerPushCondFrame parentActive, condValue, stackParent(), stackCond(), stackElseSeen(), stackCount
+        active = IIf(parentActive <> 0 And condValue <> 0, 1, 0)
+
+    Case "IFC"
+        Dim parentActiveIfc As Integer
+        parentActiveIfc = active
+
+        Dim ifcErr As String
+        Dim ifcCond As Integer
+        ifcCond = 0
+        If parentActiveIfc <> 0 Then
+            ifcCond = LexerEvalDirectiveIfc(restText, macros(), macroCount, ifcErr)
+            If ifcCond < 0 Then
+                LexerPreprocessFail sourcePath, lineNo, ifcErr
+                Return 0
+            End If
+        End If
+
+        LexerPushCondFrame parentActiveIfc, ifcCond, stackParent(), stackCond(), stackElseSeen(), stackCount
+        active = IIf(parentActiveIfc <> 0 And ifcCond <> 0, 1, 0)
+
+    Case "ELSE"
+        If stackCount > 0 Then
+            Dim top As Integer
+            top = stackCount - 1
+
+            If stackElseSeen(top) = 0 Then
+                stackElseSeen(top) = 1
+                active = IIf(stackParent(top) <> 0 And stackCond(top) = 0, 1, 0)
+            Else
+                active = 0
+            End If
+        End If
+
+    Case "ENDIF"
+        LexerPopCondFrame stackParent(), stackCond(), stackElseSeen(), stackCount, active
+
+    Case "INCLUDE"
+        If active <> 0 Then
+            If LexerHandleInclude(restText, sourcePath, depth, lineNo, outputText, result, 0) = 0 Then Return 0
+        End If
+
+    Case "ENDCOMP"
+        If active <> 0 Then
+            gPreprocessStop = 1
+            Return 0
+        End If
+
+    Case "ERRORENDCOMP"
+        If active <> 0 Then
+            Dim msg As String
+            msg = Trim(restText)
+            If msg = "" Then
+                msg = "%%ERRORENDCOMP"
+            Else
+                msg = "%%ERRORENDCOMP " & msg
+            End If
+            LexerPreprocessFail sourcePath, lineNo, msg
+            Return 0
+        End If
+
+' ADIM33 — add these cases to LexerProcessDirectiveEx(..., ByRef result As PreprocessResult)
+' All commands are compile-time only.
+
+Case "ALIAS"
+    If active <> 0 Then
+        Dim aliasStatus34 As Integer
+        aliasStatus34 = LexerMetaHandleAlias34(restText, macros(), macroCount, result)
+        If aliasStatus34 = 0 Then
+            LexerPreprocessFail sourcePath, lineNo, "%%ALIAS syntax: %%ALIAS {old} AS {new}"
+            Return 0
+        End If
+        If aliasStatus34 < 0 Then
+            LexerPreprocessFail sourcePath, lineNo, "PREPROCESSOR_ALIAS_CYCLE: " & restText
+            Return 0
+        End If
+    End If
+
+Case "SET"
+    If active <> 0 Then
+        LexerMetaHandleSet34 restText, macros(), macroCount, result
+    End If
+
+Case "EVAL"
+    If active <> 0 Then
+        LexerHandleEval restText, macros(), macroCount, result
+    End If
+
+Case "EXPANDLIMIT"
+    If active <> 0 Then
+        result.expandLimit = ValInt(Trim(restText))
+        If result.expandLimit <= 0 Then result.expandLimit = 10000
+        PreprocessResultAddManifest result, "expandLimit", LTrim(Str(result.expandLimit))
+    End If
+
+Case "TARGET"
+    If active <> 0 Then
+        result.targetText = UCase(Trim(restText))
+        LexerSetMacro "TARGET", result.targetText, macros(), macroCount
+        PreprocessResultAddManifest result, "target", result.targetText
+    End If
+
+Case "OUTDIR"
+    If active <> 0 Then
+        result.outDir = LexerStripQuotes(Trim(restText))
+        PreprocessResultAddManifest result, "outDir", result.outDir
+    End If
+
+Case "ASSET_ROOT"
+    If active <> 0 Then
+        result.assetRoot = LexerStripQuotes(Trim(restText))
+        PreprocessResultAddManifest result, "assetRoot", result.assetRoot
+    End If
+
+Case "ASSET_COPY", "ASSET_FILE", "ASSET_IMAGE", "ASSET_AUDIO", "ASSET_REQUIRE"
+    If active <> 0 Then
+        LexerHandleAssetDirective head, restText, sourcePath, lineNo, result
+        If result.safePaths <> 0 Then
+            Dim rawAsset As String
+            rawAsset = UCase(Trim(restText))
+            If InStr(rawAsset, "..\") > 0 Or InStr(rawAsset, "../") > 0 Or InStr(rawAsset, "..") > 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "%%ASSET_* path escape blocked by SAFE_PATHS"
+                Return 0
+            End If
+        End If
+    End If
+
+Case "MANIFEST_SET", "MANIFEST_REQUIRE"
+    If active <> 0 Then
+        LexerMetaHandleManifest34 head, restText, result
+    End If
+
+Case "WAT_IMPORT"
+    If active <> 0 Then
+        If result.requireHostBinding <> 0 Then
+            If LexerWatImportKnownBinding(restText) = 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "WAT_IMPORT_BINDING_MISSING"
+                Return 0
+            End If
+        End If
+        LexerHandleWatImport restText, result
+    End If
+
+Case "WAT_EXPORT"
+    If active <> 0 Then
+        PreprocessResultAddBlock result, "WAT", "EXPORT", "", restText, sourcePath, lineNo, lineNo
+    End If
+
+Case "JS_LINE"
+    If active <> 0 Then PreprocessResultAddBlock result, "JS", "LINE", "", restText, sourcePath, lineNo, lineNo
+
+Case "HTML_LINE"
+    If active <> 0 Then PreprocessResultAddBlock result, "HTML", "LINE", "", restText, sourcePath, lineNo, lineNo
+
+Case "CSS_LINE"
+    If active <> 0 Then PreprocessResultAddBlock result, "CSS", "LINE", "", restText, sourcePath, lineNo, lineNo
+
+Case "JSON_SET"
+    If active <> 0 Then
+        PreprocessResultAddBlock result, "JSON", "SET", "", restText, sourcePath, lineNo, lineNo
+        PreprocessResultAddJsonEntry result, "JSON_SET", restText
+    End If
+
+Case "ALLOW_RAW_JS"
+    If active <> 0 Then
+        Dim v As String
+        If LexerParseOnOff(restText, v) = 0 Then v = "0"
+        result.allowRawJs = ValInt(v)
+    End If
+
+Case "ALLOW_RAW_WAT"
+    If active <> 0 Then
+        Dim w As String
+        If LexerParseOnOff(restText, w) = 0 Then w = "0"
+        result.allowRawWat = ValInt(w)
+    End If
+
+Case "SAFE_PATHS"
+    If active <> 0 Then
+        Dim spv As String
+        If LexerParseOnOff(restText, spv) = 0 Then spv = "1"
+        result.safePaths = ValInt(spv)
+    End If
+
+Case "REQUIRE_HOST_BINDING"
+    If active <> 0 Then
+        Dim hb As String
+        If LexerParseOnOff(restText, hb) = 0 Then hb = "1"
+        result.requireHostBinding = ValInt(hb)
+    End If
+
+Case "ASSERT_META"
+    If active <> 0 Then
+        Dim assertExpr As String
+        assertExpr = LexerAssertExprOnly(restText)
+        If assertExpr = "" Then assertExpr = restText
+        If LexerEvalDirectiveCond(assertExpr, macros(), macroCount) = 0 Then
+            LexerPreprocessFail sourcePath, lineNo, "PREPROCESSOR_ASSERT_META_FAILED: " & restText
+            Return 0
+        End If
+    End If
+
+Case "WARN_META"
+    If active <> 0 Then PreprocessResultAddDiagnostic result, "%%WARN_META: " & restText
+
+' Reserved but recognized section/block controls. Their payload must be collected by block scanner.
+Case "SECTION", "ENDSECTION", "JS_BEGIN", "JS_END", "WAT_BEGIN", "WAT_END", "WAT_FUNC_BEGIN", "WAT_FUNC_END", "WASM_HOST_JS_BEGIN", "WASM_HOST_JS_END", "HTML_BEGIN", "HTML_END", "CSS_BEGIN", "CSS_END", "JSON_BEGIN", "JSON_END", "JSON_ARRAY_BEGIN", "JSON_ARRAY_END", "MD_BEGIN", "MD_END"
+    If active <> 0 Then
+        If head = "JS_BEGIN" And result.allowRawJs = 0 Then
+            ' FIX12_REMAINING16_20260611:
+            ' Fail-close raw JS is correct for ordinary sources. However browser/web
+            ' metadata blocks deliberately use:
+            '   %%TARGET WEB
+            '   %%JS_BEGIN "program.js" RUNTIME
+            ' to generate the runtime JS artifact. Allow that controlled web/runtime
+            ' block only when the source already selected a JS-capable target.
+            ' Negative contract neg_018_raw_js_without_gate.uxb has no %%TARGET WEB,
+            ' so it still fails with RAW_JS_PAYLOAD_NOT_ALLOWED_FOR_TARGET.
+            Dim jsRuntimePayloadFix12 As Integer
+            jsRuntimePayloadFix12 = 0
+            Dim jsRestUpperFix12 As String
+            jsRestUpperFix12 = UCase(Trim(restText))
+            ' FIX14_JS_GATED_TARGET_20260611: WEB/BROWSER/JS hedefinde GATED JS bloklari da kontrollu artifact sayilir.
+            If InStr(jsRestUpperFix12, "RUNTIME") > 0 Or InStr(jsRestUpperFix12, "GATED") > 0 Then
+                Dim jsTargetFix12 As String
+                jsTargetFix12 = UCase(Trim(result.targetText))
+                If jsTargetFix12 = "WEB" Or jsTargetFix12 = "BROWSER" Or jsTargetFix12 = "JS" Or jsTargetFix12 = "JAVASCRIPT" Then
+                    jsRuntimePayloadFix12 = 1
+                End If
+            End If
+
+            If jsRuntimePayloadFix12 = 0 Then
+                LexerPreprocessFail sourcePath, lineNo, "RAW_JS_PAYLOAD_NOT_ALLOWED_FOR_TARGET"
+                Return 0
+            End If
+        End If
+    End If
+
+' ADIM34 dispatch cases for LexerProcessDirectiveEx(...)
+' Insert into the Select Case head block after ADIM33 cases.
+
+Case "IFN"
+    Dim parentActiveIfn34 As Integer
+    parentActiveIfn34 = active
+    Dim condValueIfn34 As Integer
+    condValueIfn34 = 0
+    If parentActiveIfn34 <> 0 Then condValueIfn34 = LexerMetaEvalNumericCondition34(restText, macros(), macroCount)
+    LexerPushCondFrame parentActiveIfn34, condValueIfn34, stackParent(), stackCond(), stackElseSeen(), stackCount
+    active = IIf(parentActiveIfn34 <> 0 And condValueIfn34 <> 0, 1, 0)
+
+Case "ELIF"
+    If stackCount <= 0 Then
+        LexerPreprocessFail sourcePath, lineNo, "%%ELIF without %%IF"
+        Return 0
+    End If
+    Dim topElif34 As Integer
+    topElif34 = stackCount - 1
+    If stackElseSeen(topElif34) <> 0 Then
+        LexerPreprocessFail sourcePath, lineNo, "%%ELIF after %%ELSE"
+        Return 0
+    End If
+    If stackParent(topElif34) = 0 Then
+        active = 0
+    ElseIf stackCond(topElif34) <> 0 Then
+        active = 0
+    Else
+        Dim elifCond34 As Integer
+        elifCond34 = LexerMetaEvalAnyCondition34(restText, macros(), macroCount)
+        If elifCond34 <> 0 Then
+            stackCond(topElif34) = 1
+            active = 1
+        Else
+            active = 0
+        End If
+    End If
+
+Case "PROFILE"
+    If active <> 0 Then LexerMetaHandleProfile34 restText, macros(), macroCount, result
+
+Case "CONFIG_FILE"
+    If active <> 0 Then LexerMetaHandleConfigFile34 restText, macros(), macroCount, result
+
+Case "PATH_ALIAS"
+    If active <> 0 Then LexerMetaHandlePathAlias34 restText, macros(), macroCount, result
+
+Case "LOCK_META"
+    If active <> 0 Then
+        LexerMetaLockAdd34 restText
+        PreprocessResultAddManifest result, "lock." & UCase(Trim(restText)), "1"
+        PreprocessResultAddLock result, UCase(Trim(restText)), "1"
+    End If
+
+Case "DUMP_META"
+    If active <> 0 Then
+        Dim dumpPath34 As String
+        dumpPath34 = LexerMetaStripQuotes34(restText)
+        If dumpPath34 <> "" Then
+            Dim df34 As Integer
+            df34 = FreeFile
+            Open dumpPath34 For Output As #df34
+            If Err = 0 Then
+                Print #df34, PreprocessResultToJson(result)
+                Close #df34
+                PreprocessResultAddManifest result, "dumpMeta", dumpPath34
+            Else
+                PreprocessResultAddDiagnostic result, "%%DUMP_META failed: " & dumpPath34
+            End If
+        End If
+    End If
+
+Case "SOURCE_MAP"
+    If active <> 0 Then
+        PreprocessResultAddManifest result, "sourceMap.current", LexerMetaStripQuotes34(restText)
+        PreprocessResultAddSourceMap result, "current", LexerMetaStripQuotes34(restText)
+    End If
+
+Case "EMITNOTE"
+    If active <> 0 Then
+        Dim noteTarget34 As String
+        noteTarget34 = result.targetText
+        If noteTarget34 = "" Then noteTarget34 = "NOTE"
+        PreprocessResultAddBlock result, noteTarget34, "NOTE", "", LexerMetaStripQuotes34(restText), sourcePath, lineNo, lineNo
+    End If
+
+Case "ENV"
+    If active <> 0 Then LexerMetaHandleEnv34 restText, macros(), macroCount, result
+
+Case "DEPRECATED"
+    If active <> 0 Then PreprocessResultAddManifest result, "deprecated", restText
+
+Case "TEMPLATE"
+    If active <> 0 Then PreprocessResultAddManifest result, "template", restText
+
+Case "TEMPLATE_BEGIN", "TEMPLATE_END"
+    ' Handled by block scanner. TEMPLATE_BEGIN payload must be captured as target TEMPLATE.
+
+Case "TEMPLATE_USE"
+    If active <> 0 Then PreprocessResultAddManifest result, "templateUse", restText
+
+Case "MINIFY"
+    If active <> 0 Then PreprocessResultAddManifest result, "minify." & UCase(Trim(restText)), "1"
+
+Case "FINGERPRINT_ASSETS"
+    If active <> 0 Then
+        Dim fpValue34 As String
+        If LexerParseOnOff(restText, fpValue34) = 0 Then fpValue34 = "1"
+        PreprocessResultAddManifest result, "fingerprintAssets", fpValue34
+    End If
+
+Case "HASHFILE"
+    If active <> 0 Then LexerMetaHandleHashFile34 restText, macros(), macroCount, result
+
+Case "COPY_DIR"
+    If active <> 0 Then
+        Dim cdLeft34 As String, cdRight34 As String
+        If LexerMetaSplitAs34(restText, cdLeft34, cdRight34) <> 0 Then
+            PreprocessResultAddAsset result, "DIR", LexerMetaStripQuotes34(cdLeft34), LexerMetaStripQuotes34(cdRight34), "", 0
+        Else
+            PreprocessResultAddDiagnostic result, "%%COPY_DIR syntax: %%COPY_DIR ""src"" TO/AS ""dst"""
+        End If
+    End If
+
+Case "EMBEDTEXT"
+    If active <> 0 Then LexerMetaHandleEmbedText34 restText, sourcePath, lineNo, macros(), macroCount, result
+
+Case "EMBEDBASE64"
+    If active <> 0 Then LexerMetaHandleEmbedBase64_34 restText, sourcePath, lineNo, macros(), macroCount, result
+
+Case "LICENSEFILE"
+    If active <> 0 Then
+        Dim licensePath34 As String
+        licensePath34 = LexerMetaStripQuotes34(restText)
+        PreprocessResultAddAsset result, "LICENSE", licensePath34, licensePath34, "LICENSE", 1
+        PreprocessResultAddManifest result, "licenseFile", licensePath34
+    End If
+
+Case "HTMLIMAGE", "HTMLAUDIO"
+    If active <> 0 Then LexerMetaHandleHtmlMedia34 head, restText, result, sourcePath, lineNo
+
+Case "CSS_RULE"
+    If active <> 0 Then LexerMetaHandleCssRule34 restText, result, sourcePath, lineNo
+
+Case "CSS_IMPORT"
+    If active <> 0 Then PreprocessResultAddBlock result, "CSS", "IMPORT", "", "@import url(" & Chr(34) & LexerMetaStripQuotes34(restText) & Chr(34) & ");", sourcePath, lineNo, lineNo
+
+Case "MD_SAFE"
+    If active <> 0 Then
+        Dim mdSafe34 As String
+        If LexerParseOnOff(restText, mdSafe34) = 0 Then mdSafe34 = "1"
+        PreprocessResultAddManifest result, "md.safe", mdSafe34
+    End If
+
+Case "MD_CSS"
+    If active <> 0 Then PreprocessResultAddManifest result, "md.css", LexerMetaStripQuotes34(restText)
+
+Case "BREAK", "CONTINUE"
+    LexerPreprocessFail sourcePath, lineNo, "PREPROCESSOR_LOOP_CONTROL_OUTSIDE_LOOP: %%" & head
+    Return 0
+
+Case "FOR", "FOREACH", "REPEAT"
+    LexerPreprocessFail sourcePath, lineNo, "PREPROCESSOR_LOOP_SCANNER_DID_NOT_CONSUME: %%" & head
+    Return 0
+
+Case "ENDFOR", "ENDFOREACH", "NEXTMETA", "ENDREPEAT", "UNTILMETA"
+    LexerPreprocessFail sourcePath, lineNo, "PREPROCESSOR_LOOP_END_WITHOUT_START: %%" & head
+    Return 0
+
+Case "INFOMETA"
+    If active <> 0 Then PreprocessResultAddDiagnostic result, "%%INFOMETA: " & LexerMetaStripQuotes34(restText)
+
+' Explicitly rejected legacy/duplicate aliases. These must not silently pass.
+Case "WARNING", "ERROR", "ASSERT", "INJECT_JS", "INJECT_ASM", "LINK_DLL", "LINK_WASM", "NO_MANGLE", "INLINE", "EXTENSION"
+    LexerPreprocessFail sourcePath, lineNo, "Unsupported/duplicate meta command %%" & head & "; use canonical ADIM34 command set"
+    Return 0
+
+Case "PLATFORM", "DESTOS", "NOZEROVARS", "SECSTACK"
+    If active <> 0 Then
+        If LexerHandleHostDirective(head, restText, sourcePath, lineNo, hostPlatform, macros(), macroCount) = 0 Then Return 0
+    End If
+
+Case Else
+    ' Once iki ozel tani: (a) kanonik listede olup hicbir kumede uygulanmamis komutlar
+    ' icin durust "henuz uygulanmadi" mesaji; (b) yalniz %%PP B'de calisan bir web/
+    ' manifest komutu A kumesindeyken kullanildiysa "bilinmeyen komut" yerine "%%PP B
+    ' gerektirir" mesaji. Ikisi de yoksa gercekten bilinmeyen bir direktiftir.
+    If UXBPreParseIsUnimplementedCanonicalDirective(head) <> 0 Then
+        PreprocessResultAddDiagnostic result, "META_NOT_IMPLEMENTED: " & head
+        LexerPreprocessFail sourcePath, lineNo, "META_NOT_IMPLEMENTED: %%" & head & " kanonik listede kayitlidir ama henuz ne A ne B kumesinde uygulanmadi."
+        Return 0
+    End If
+    If UXBPreprocessorIsBActive() = 0 And UXBPreParseIsWebManifestDirective(head) <> 0 Then
+        PreprocessResultAddDiagnostic result, "META_NEEDS_PP_B: " & head
+        LexerPreprocessFail sourcePath, lineNo, "META_NEEDS_PP_B: %%" & head & " yalnizca %%PP B kumesi aktifken calisir. Bu satirdan once (veya dosyanin basina) %%PP B ekleyin."
+        Return 0
+    End If
+    PreprocessResultAddDiagnostic result, "META_UNKNOWN_DIRECTIVE: " & head
+    LexerPreprocessFail sourcePath, lineNo, "META_UNKNOWN_DIRECTIVE: " & head
+    Return 0
+    End Select
+
+    Return 1
+End Function
+
+
+' ADIM43: plain INCLUDE "file.uxbh" support before lexer.
+Private Function LexerIsPlainIncludeLine43(ByRef trimmedLine As String, ByRef restOut As String) As Integer
+    Dim s As String
+    s = LTrim(trimmedLine)
+    If UCase(Left(s, 7)) <> "INCLUDE" Then Return 0
+    If Len(s) > 7 Then
+        Dim ch As String
+        ch = Mid(s, 8, 1)
+        If ch <> " " And ch <> Chr(9) Then Return 0
+    End If
+    restOut = Trim(Mid(s, 8))
+    If Left(restOut, 1) <> Chr(34) Then Return 0
+    Return 1
+End Function
+
+Private Function LexerPreprocessSourceImplEx(ByRef src As String, ByRef sourcePath As String, ByVal depth As Integer, ByRef result As PreprocessResult) As String
+    If depth > 16 Then
+        LexerPreprocessFail sourcePath, 1, "LEX_INCLUDE_DEPTH: include depth exceeded"
+        Return ""
+    End If
+
+    If gPreprocessStop <> 0 Then Return ""
+
+    Dim macros() As LexerMacro
+    Dim macroCount As Integer
+
+    Dim hostPlatform As String
+    hostPlatform = LexerHostPlatform()
+    LexerSetMacro "PLATFORM", hostPlatform, macros(), macroCount
+    LexerSetMacro "DESTOS", hostPlatform, macros(), macroCount
+    If depth = 0 And Trim(sourcePath) <> "" Then LexerIncludeStackPush sourcePath
+    LexerSetMacro "NOZEROVARS", "0", macros(), macroCount
+    LexerSetMacro "SECSTACK", "0", macros(), macroCount
+
+    Dim stackParent() As Integer
+    Dim stackCond() As Integer
+    Dim stackElseSeen() As Integer
+    Dim stackCount As Integer
+
+    Dim outputText As String
+    Dim cursor As Integer
+    cursor = 1
+
+    Dim lineNo As Integer
+    lineNo = 1
+
+    Dim active As Integer
+    active = 1
+    Dim blockEndDirective As String
+    blockEndDirective = ""
+
+    Do While cursor <= Len(src)
+        If gPreprocessStop <> 0 Then Exit Do
+
+        Dim nextLf As Integer
+        nextLf = InStr(cursor, src, Chr(10))
+
+        Dim lineText As String
+        If nextLf = 0 Then
+            lineText = Mid(src, cursor)
+            cursor = Len(src) + 1
+        Else
+            lineText = Mid(src, cursor, nextLf - cursor)
+            cursor = nextLf + 1
+        End If
+
+        If Right(lineText, 1) = Chr(13) Then
+            lineText = Left(lineText, Len(lineText) - 1)
+        End If
+
+        Dim trimmed As String
+        trimmed = LTrim(lineText)
+
+        ' ADIM43: normal BASIC INCLUDE "x.uxbh" is expanded in the pre-lexer stage.
+        Dim plainIncludeRest43 As String
+        If UXB_PREPROCESS_PLAIN_INCLUDE_ENABLED <> 0 And active <> 0 And LexerIsPlainIncludeLine43(trimmed, plainIncludeRest43) <> 0 Then
+            If LexerHandleInclude(plainIncludeRest43, sourcePath, depth, lineNo, outputText, result, 1) = 0 Then Exit Do
+            lineNo += 1
+            Continue Do
+        End If
+
+        Dim directive As String
+        If UXBPreLexIsDirectiveLine(trimmed, directive) <> 0 Then
+
+            Dim head As String
+            Dim restText As String
+            LexerSplitDirective directive, head, restText
+
+            If UXBPreprocessorIsBActive() <> 0 Then
+                Dim bScanStatus As Integer
+                bScanStatus = UXBPreTryScanKnownBlock(src, cursor, lineNo, head, restText, sourcePath, result)
+                If bScanStatus < 0 Then
+                    LexerPreprocessFail sourcePath, lineNo, "PREPROCESSOR_B_BLOCK_SCAN_FAILED: " & UCase(head)
+                    Exit Do
+                End If
+                If bScanStatus > 0 Then
+                    lineNo += 1
+                    Continue Do
+                End If
+            End If
+
+            If UCase(head) = "FOR" Then
+                Dim forHeader44 As String = LexerExpandObjectMacrosInLine(restText, macros(), macroCount)
+                Dim forVar44 As String
+                Dim forStart44 As LongInt, forFinish44 As LongInt, forStep44 As LongInt
+                If UXBMetaParseForHeader44(forHeader44, forVar44, forStart44, forFinish44, forStep44) = 0 Then
+                    LexerPreprocessFail sourcePath, lineNo, "META_FOR_HEADER_INVALID"
+                    Exit Do
+                End If
+
+                Dim forBody44 As String = ""
+                Dim forDepth44 As Integer = 1
+                Dim forBodyStart44 As Integer = lineNo + 1
+                Do While cursor <= Len(src)
+                    Dim forLf44 As Integer = InStr(cursor, src, Chr(10))
+                    Dim forLine44 As String
+                    If forLf44 = 0 Then
+                        forLine44 = Mid(src, cursor): cursor = Len(src) + 1
+                    Else
+                        forLine44 = Mid(src, cursor, forLf44 - cursor): cursor = forLf44 + 1
+                    End If
+                    If Right(forLine44, 1) = Chr(13) Then forLine44 = Left(forLine44, Len(forLine44) - 1)
+                    lineNo += 1
+                    Dim forTrim44 As String = LTrim(forLine44)
+                    Dim forDir44 As String
+                    If UXBPreLexIsDirectiveLine(forTrim44, forDir44) <> 0 Then
+                        Dim forHead44 As String, forRest44 As String
+                        LexerSplitDirective forDir44, forHead44, forRest44
+                        If UCase(forHead44) = "FOR" Then
+                            forDepth44 += 1
+                        ElseIf UCase(forHead44) = "ENDFOR" Then
+                            forDepth44 -= 1
+                            If forDepth44 = 0 Then Exit Do
+                        End If
+                    End If
+                    forBody44 &= forLine44 & Chr(10)
+                Loop
+                If forDepth44 <> 0 Then
+                    LexerPreprocessFail sourcePath, forBodyStart44, "PREPROCESSOR_FOR_NOT_CLOSED"
+                    Exit Do
+                End If
+                If active <> 0 Then
+                    Dim forExpandErr44 As String
+                    Dim forExpanded44 As String = UXBMetaForExpand44(forVar44, forStart44, forFinish44, forStep44, forBody44, forExpandErr44)
+                    If forExpandErr44 <> "" Then LexerPreprocessFail sourcePath, lineNo, forExpandErr44: Exit Do
+                    If InStr(forExpanded44, "%%") > 0 Then
+                        src = Left(src, cursor - 1) & forExpanded44 & Mid(src, cursor)
+                    Else
+                        outputText &= forExpanded44
+                    End If
+                End If
+                Continue Do
+            End If
+
+            If UCase(head) = "REPEAT" Then
+                Dim repeatHeader44 As String = LexerExpandObjectMacrosInLine(restText, macros(), macroCount)
+                Dim repeatCount44 As LongInt = CLngInt(Val(Trim(repeatHeader44)))
+                If Trim(repeatHeader44) = "" Or repeatCount44 < 0 Then
+                    LexerPreprocessFail sourcePath, lineNo, "META_REPEAT_HEADER_INVALID"
+                    Exit Do
+                End If
+                Dim repeatBody44 As String = ""
+                Dim repeatDepth44 As Integer = 1
+                Dim repeatBodyStart44 As Integer = lineNo + 1
+                Do While cursor <= Len(src)
+                    Dim repeatLf44 As Integer = InStr(cursor, src, Chr(10))
+                    Dim repeatLine44 As String
+                    If repeatLf44 = 0 Then
+                        repeatLine44 = Mid(src, cursor): cursor = Len(src) + 1
+                    Else
+                        repeatLine44 = Mid(src, cursor, repeatLf44 - cursor): cursor = repeatLf44 + 1
+                    End If
+                    If Right(repeatLine44, 1) = Chr(13) Then repeatLine44 = Left(repeatLine44, Len(repeatLine44) - 1)
+                    lineNo += 1
+                    Dim repeatTrim44 As String = LTrim(repeatLine44)
+                    Dim repeatDir44 As String
+                    If UXBPreLexIsDirectiveLine(repeatTrim44, repeatDir44) <> 0 Then
+                        Dim repeatHead44 As String, repeatRest44 As String
+                        LexerSplitDirective repeatDir44, repeatHead44, repeatRest44
+                        If UCase(repeatHead44) = "REPEAT" Then
+                            repeatDepth44 += 1
+                        ElseIf UCase(repeatHead44) = "ENDREPEAT" Then
+                            repeatDepth44 -= 1
+                            If repeatDepth44 = 0 Then Exit Do
+                        End If
+                    End If
+                    repeatBody44 &= repeatLine44 & Chr(10)
+                Loop
+                If repeatDepth44 <> 0 Then
+                    LexerPreprocessFail sourcePath, repeatBodyStart44, "PREPROCESSOR_REPEAT_NOT_CLOSED"
+                    Exit Do
+                End If
+                If active <> 0 Then
+                    Dim repeatExpandErr44 As String
+                    Dim repeatExpanded44 As String = UXBMetaRepeatExpand44(repeatCount44, repeatBody44, repeatExpandErr44)
+                    If repeatExpandErr44 <> "" Then LexerPreprocessFail sourcePath, lineNo, repeatExpandErr44: Exit Do
+                    If InStr(repeatExpanded44, "%%") > 0 Then
+                        src = Left(src, cursor - 1) & repeatExpanded44 & Mid(src, cursor)
+                    Else
+                        outputText &= repeatExpanded44
+                    End If
+                End If
+                Continue Do
+            End If
+
+            If UCase(head) = "FOREACH" Then
+                Dim foreachVar44 As String
+                Dim foreachList44 As String
+                If UXBMetaParseForeachHeader44(restText, foreachVar44, foreachList44) = 0 Then
+                    LexerPreprocessFail sourcePath, lineNo, "META_FOREACH_HEADER_INVALID"
+                    Exit Do
+                End If
+
+                Dim foreachBody44 As String
+                foreachBody44 = ""
+                Dim loopDepth44 As Integer
+                loopDepth44 = 1
+                Dim bodyStartLine44 As Integer
+                bodyStartLine44 = lineNo + 1
+
+                Do While cursor <= Len(src)
+                    Dim bodyLf As Integer
+                    bodyLf = InStr(cursor, src, Chr(10))
+                    Dim bodyLine As String
+                    If bodyLf = 0 Then
+                        bodyLine = Mid(src, cursor)
+                        cursor = Len(src) + 1
+                    Else
+                        bodyLine = Mid(src, cursor, bodyLf - cursor)
+                        cursor = bodyLf + 1
+                    End If
+                    If Right(bodyLine, 1) = Chr(13) Then bodyLine = Left(bodyLine, Len(bodyLine) - 1)
+                    lineNo += 1
+
+                    Dim bodyTrim As String
+                    bodyTrim = LTrim(bodyLine)
+                    Dim bdir As String
+                    If UXBPreLexIsDirectiveLine(bodyTrim, bdir) <> 0 Then
+                        Dim bhead As String, brest As String
+                        LexerSplitDirective bdir, bhead, brest
+                        If UCase(bhead) = "FOREACH" Then
+                            loopDepth44 += 1
+                            foreachBody44 &= bodyLine & Chr(10)
+                            Continue Do
+                        ElseIf UCase(bhead) = "ENDFOREACH" Then
+                            loopDepth44 -= 1
+                            If loopDepth44 = 0 Then Exit Do
+                            foreachBody44 &= bodyLine & Chr(10)
+                            Continue Do
+                        End If
+                    End If
+                    foreachBody44 &= bodyLine & Chr(10)
+                Loop
+
+                If loopDepth44 <> 0 Then
+                    LexerPreprocessFail sourcePath, bodyStartLine44, "PREPROCESSOR_FOREACH_NOT_CLOSED"
+                    Exit Do
+                End If
+
+                If active <> 0 Then
+                    Dim foreachExpanded44 As String = UXBMetaForeachExpand44(foreachVar44, foreachList44, foreachBody44)
+                    If InStr(foreachExpanded44, "%%") > 0 Then
+                        src = Left(src, cursor - 1) & foreachExpanded44 & Mid(src, cursor)
+                    Else
+                        outputText &= foreachExpanded44
+                    End If
+                End If
+                Continue Do
+            End If
+
+            Select Case UCase(head)
+            Case "JS_BEGIN"
+                If active <> 0 Then
+                    ' FIX13_BROWSER_WASM_20260611:
+                    ' This is the real block-scanner gate. LexerProcessDirectiveEx also has
+                    ' a JS_BEGIN guard, but raw JS blocks are consumed here before that
+                    ' generic directive path runs. Therefore WEB/BROWSER/JS + RUNTIME must
+                    ' be allowed in this branch too, while ordinary targetless raw JS
+                    ' remains fail-close for neg_018.
+                    If result.allowRawJs = 0 Then
+                        Dim jsRuntimePayloadFix13 As Integer
+                        jsRuntimePayloadFix13 = 0
+
+                        Dim jsRestUpperFix13 As String
+                        jsRestUpperFix13 = UCase(Trim(restText))
+                        ' FIX14_JS_GATED_TARGET_20260611: WEB/BROWSER/JS hedefinde GATED JS bloklari da kontrollu artifact sayilir.
+                        If InStr(jsRestUpperFix13, "RUNTIME") > 0 Or InStr(jsRestUpperFix13, "GATED") > 0 Then
+                            Dim jsTargetFix13 As String
+                            jsTargetFix13 = UCase(Trim(result.targetText))
+                            If jsTargetFix13 = "WEB" Or jsTargetFix13 = "BROWSER" Or jsTargetFix13 = "JS" Or jsTargetFix13 = "JAVASCRIPT" Then
+                                jsRuntimePayloadFix13 = 1
+                            End If
+                        End If
+
+                        If jsRuntimePayloadFix13 = 0 Then
+                            LexerPreprocessFail sourcePath, lineNo, "RAW_JS_PAYLOAD_NOT_ALLOWED_FOR_TARGET"
+                            Exit Do
+                        End If
+                    End If
+                    Dim payloadJs As String
+                    payloadJs = ""
+                    Dim endLineJs As Integer
+                    endLineJs = lineNo
+                    Do While cursor <= Len(src)
+                        Dim rawLf As Integer
+                        rawLf = InStr(cursor, src, Chr(10))
+                        Dim rawLine As String
+                        If rawLf = 0 Then
+                            rawLine = Mid(src, cursor)
+                            cursor = Len(src) + 1
+                        Else
+                            rawLine = Mid(src, cursor, rawLf - cursor)
+                            cursor = rawLf + 1
+                        End If
+                        If Right(rawLine, 1) = Chr(13) Then rawLine = Left(rawLine, Len(rawLine) - 1)
+                        lineNo += 1
+                        endLineJs = lineNo
+                        Dim rawTrim As String
+                        rawTrim = LTrim(rawLine)
+                        Dim rd As String
+                        If UXBPreLexIsDirectiveLine(rawTrim, rd) <> 0 Then
+                            Dim rh As String, rr As String
+                            LexerSplitDirective rd, rh, rr
+                            If UCase(rh) = "JS_END" Then Exit Do
+                        End If
+                        payloadJs &= rawLine & Chr(10)
+                    Loop
+                    PreprocessResultAddBlock result, "JS", "RAW", LexerMetaStripQuotes34(restText), payloadJs, sourcePath, lineNo, endLineJs
+                End If
+                Continue Do
+            Case "WAT_BEGIN"
+                If active <> 0 Then
+                    Dim payloadWat As String
+                    payloadWat = ""
+                    Dim endLineWat As Integer
+                    endLineWat = lineNo
+                    Do While cursor <= Len(src)
+                        Dim rawLf2 As Integer
+                        rawLf2 = InStr(cursor, src, Chr(10))
+                        Dim rawLine2 As String
+                        If rawLf2 = 0 Then
+                            rawLine2 = Mid(src, cursor)
+                            cursor = Len(src) + 1
+                        Else
+                            rawLine2 = Mid(src, cursor, rawLf2 - cursor)
+                            cursor = rawLf2 + 1
+                        End If
+                        If Right(rawLine2, 1) = Chr(13) Then rawLine2 = Left(rawLine2, Len(rawLine2) - 1)
+                        lineNo += 1
+                        endLineWat = lineNo
+                        Dim rawTrim2 As String
+                        rawTrim2 = LTrim(rawLine2)
+                        Dim rd2 As String
+                        If UXBPreLexIsDirectiveLine(rawTrim2, rd2) <> 0 Then
+                            Dim rh2 As String, rr2 As String
+                            LexerSplitDirective rd2, rh2, rr2
+                            If UCase(rh2) = "WAT_END" Then Exit Do
+                        End If
+                        payloadWat &= rawLine2 & Chr(10)
+                    Loop
+                    PreprocessResultAddBlock result, "WAT", "RAW", LexerMetaStripQuotes34(restText), payloadWat, sourcePath, lineNo, endLineWat
+                End If
+                Continue Do
+            Case "WASM_HOST_JS_BEGIN"
+                If active <> 0 Then
+                    Dim payloadHostJs As String
+                    payloadHostJs = ""
+                    Dim endLineHostJs As Integer
+                    endLineHostJs = lineNo
+                    Do While cursor <= Len(src)
+                        Dim rawLfHost As Integer
+                        rawLfHost = InStr(cursor, src, Chr(10))
+                        Dim rawLineHost As String
+                        If rawLfHost = 0 Then
+                            rawLineHost = Mid(src, cursor)
+                            cursor = Len(src) + 1
+                        Else
+                            rawLineHost = Mid(src, cursor, rawLfHost - cursor)
+                            cursor = rawLfHost + 1
+                        End If
+                        If Right(rawLineHost, 1) = Chr(13) Then rawLineHost = Left(rawLineHost, Len(rawLineHost) - 1)
+                        lineNo += 1
+                        endLineHostJs = lineNo
+                        Dim rawTrimHost As String
+                        rawTrimHost = LTrim(rawLineHost)
+                        Dim rdHost As String
+                        If UXBPreLexIsDirectiveLine(rawTrimHost, rdHost) <> 0 Then
+                            Dim rhHost As String, rrHost As String
+                            LexerSplitDirective rdHost, rhHost, rrHost
+                            If UCase(rhHost) = "WASM_HOST_JS_END" Then Exit Do
+                        End If
+                        payloadHostJs &= rawLineHost & Chr(10)
+                    Loop
+                    PreprocessResultAddBlock result, "WASM_HOST_JS", "RAW", LexerMetaStripQuotes34(restText), payloadHostJs, sourcePath, lineNo, endLineHostJs
+                End If
+                Continue Do
+            Case "HTML_BEGIN"
+                If active <> 0 Then
+                    Dim payloadHtml As String
+                    payloadHtml = ""
+                    Dim endLineHtml As Integer
+                    endLineHtml = lineNo
+                    Do While cursor <= Len(src)
+                        Dim rawLf3 As Integer
+                        rawLf3 = InStr(cursor, src, Chr(10))
+                        Dim rawLine3 As String
+                        If rawLf3 = 0 Then
+                            rawLine3 = Mid(src, cursor)
+                            cursor = Len(src) + 1
+                        Else
+                            rawLine3 = Mid(src, cursor, rawLf3 - cursor)
+                            cursor = rawLf3 + 1
+                        End If
+                        If Right(rawLine3, 1) = Chr(13) Then rawLine3 = Left(rawLine3, Len(rawLine3) - 1)
+                        lineNo += 1
+                        endLineHtml = lineNo
+                        Dim rawTrim3 As String
+                        rawTrim3 = LTrim(rawLine3)
+                        Dim rd3 As String
+                        If UXBPreLexIsDirectiveLine(rawTrim3, rd3) <> 0 Then
+                            Dim rh3 As String, rr3 As String
+                            LexerSplitDirective rd3, rh3, rr3
+                            If UCase(rh3) = "HTML_END" Then Exit Do
+                        End If
+                        payloadHtml &= rawLine3 & Chr(10)
+                    Loop
+                    PreprocessResultAddBlock result, "HTML", "BODY", LexerMetaStripQuotes34(restText), payloadHtml, sourcePath, lineNo, endLineHtml
+                End If
+                Continue Do
+            Case "CSS_BEGIN"
+                If active <> 0 Then
+                    Dim payloadCss As String
+                    payloadCss = ""
+                    Dim endLineCss As Integer
+                    endLineCss = lineNo
+                    Do While cursor <= Len(src)
+                        Dim rawLf4 As Integer
+                        rawLf4 = InStr(cursor, src, Chr(10))
+                        Dim rawLine4 As String
+                        If rawLf4 = 0 Then
+                            rawLine4 = Mid(src, cursor)
+                            cursor = Len(src) + 1
+                        Else
+                            rawLine4 = Mid(src, cursor, rawLf4 - cursor)
+                            cursor = rawLf4 + 1
+                        End If
+                        If Right(rawLine4, 1) = Chr(13) Then rawLine4 = Left(rawLine4, Len(rawLine4) - 1)
+                        lineNo += 1
+                        endLineCss = lineNo
+                        Dim rawTrim4 As String
+                        rawTrim4 = LTrim(rawLine4)
+                        Dim rd4 As String
+                        If UXBPreLexIsDirectiveLine(rawTrim4, rd4) <> 0 Then
+                            Dim rh4 As String, rr4 As String
+                            LexerSplitDirective rd4, rh4, rr4
+                            If UCase(rh4) = "CSS_END" Then Exit Do
+                        End If
+                        payloadCss &= rawLine4 & Chr(10)
+                    Loop
+                    PreprocessResultAddBlock result, "CSS", "RAW", LexerMetaStripQuotes34(restText), payloadCss, sourcePath, lineNo, endLineCss
+                End If
+                Continue Do
+            Case "ENDFOREACH", "JS_END", "WAT_END", "WASM_HOST_JS_END", "HTML_END", "CSS_END"
+                LexerPreprocessFail sourcePath, lineNo, "META_UNMATCHED_END: %%" & UCase(head)
+                Exit Do
+            End Select
+
+            If LexerProcessDirective(head, restText, sourcePath, depth, lineNo, hostPlatform, macros(), macroCount, stackParent(), stackCond(), stackElseSeen(), stackCount, active, outputText, result) = 0 Then
+                Exit Do
+            End If
+        Else
+            If active <> 0 Then
+                Dim plainDirective As String
+                plainDirective = UCase(Trim(trimmed))
+                If UXB_PREPROCESS_PLAIN_INCLUDE_ENABLED <> 0 And (Left(plainDirective, 8) = "INCLUDE " Or plainDirective = "INCLUDE") Then
+                    Dim includeRest As String
+                    includeRest = Trim(Mid(trimmed, 8))
+                    If LexerHandleInclude(includeRest, sourcePath, depth, lineNo, outputText, result, 1) = 0 Then
+                        Exit Do
+                    End If
+                    lineNo += 1
+                    Continue Do
+                End If
+                If Left(plainDirective, 6) = "ALIAS " Or plainDirective = "ALIAS" Then
+                    Dim aliasRest As String
+                    aliasRest = Trim(Mid(trimmed, 6))
+                    If aliasRest <> "" Then LexerHandleAlias aliasRest, macros(), macroCount
+                    lineNo += 1
+                    Continue Do
+                End If
+
+                Dim expandedLine As String
+                expandedLine = LexerMetaExpandInlineEval34(lineText, macros(), macroCount)
+                expandedLine = LexerExpandObjectMacrosInLine(expandedLine, macros(), macroCount)
+                expandedLine = LexerExpandFuncMacrosInLine(expandedLine)
+                outputText &= expandedLine & Chr(10)
+            End If
+        End If
+
+        lineNo += 1
+    Loop
+
+    If depth = 0 Then LexerIncludeStackPop
+    Return outputText
+End Function
+
+Function PreprocessRun(ByRef src As String, ByRef sourcePath As String, ByRef result As PreprocessResult) As Integer
+    LexerPreprocessResetState
+    PreprocessResultInit result
+    Dim sourceRequestedSet As String
+    sourceRequestedSet = UXBPreprocessorDetectSourcePragma(src)
+    If sourceRequestedSet <> "" Then
+        If UXBPreprocessorSetDefault(sourceRequestedSet) = 0 Then
+            PreprocessResultAddDiagnostic result, "PREPROCESSOR_PP_INVALID: %%PP expects A or B"
+            gLastPreprocessResult = result
+            Return 0
+        End If
+    End If
+    UXBPreprocessEmitSelectionManifest result
+    result.expandedSource = LexerPreprocessSourceImplEx(src, sourcePath, 0, result)
+    ' The caller owns artifact paths and reports write failures. Interop resolver
+    ' preprocessing must not overwrite another run's JSON in the current directory.
+    gLastPreprocessResult = result
+    If LexerPreprocessHasError() <> 0 Then Return 0
+    Return 1
+End Function
+
+Function LexerPreprocessSourceEx(ByRef src As String, ByRef sourcePath As String, ByRef result As PreprocessResult) As Integer
+    Return PreprocessRun(src, sourcePath, result)
+End Function
+
+Private Function LexerPreprocessSource(ByRef src As String, ByRef sourcePath As String) As String
+    Dim r As PreprocessResult
+    If LexerPreprocessSourceEx(src, sourcePath, r) = 0 Then
+        Return r.expandedSource
+    End If
+    Return r.expandedSource
+End Function
+
+Private Function LexerPreprocessSourceImpl(ByRef src As String, ByRef sourcePath As String, ByVal depth As Integer) As String
+    Dim r As PreprocessResult
+    PreprocessResultInit r
+    Return LexerPreprocessSourceImplEx(src, sourcePath, depth, r)
+End Function
+
+
+
+#endif

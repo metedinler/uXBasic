@@ -1,0 +1,206 @@
+#ifndef UXB_MIR_X64_REGISTER_ALLOCATOR_FBS
+#define UXB_MIR_X64_REGISTER_ALLOCATOR_FBS
+
+' Small deterministic register discipline for MIR x64 emission.
+' The backend is still memory-backed between MIR instructions, but every
+' instruction now uses a documented scratch contract instead of ad-hoc RBX use.
+
+Const MIRX64_REG_RESULT As String = "rax"
+Const MIRX64_REG_LEFT As String = "rax"
+Const MIRX64_REG_RIGHT As String = "r10"
+Const MIRX64_REG_TEMP As String = "r11"
+Const MIRX64_REG_COUNT As String = "rcx"
+Const MIRX64_REG_ARG0 As String = "rcx"
+Const MIRX64_REG_ARG1 As String = "rdx"
+Const MIRX64_REG_ARG2 As String = "r8"
+Const MIRX64_REG_ARG3 As String = "r9"
+Const MIRX64_RBX_SAVE_BYTES As Integer = 8
+
+Declare Function MIRX64ConditionCode(ByRef op As String) As String
+
+Function MIRX64VolatileScratchReg(ByVal slotIndex As Integer) As String
+    Select Case slotIndex
+    Case 0: Return "rax"
+    Case 1: Return "r10"
+    Case 2: Return "r11"
+    Case 3: Return "r8"
+    Case 4: Return "r9"
+    Case 5: Return "rcx"
+    Case 6: Return "rdx"
+    End Select
+    Return ""
+End Function
+
+Function MIRX64IsScratchReg(ByRef regName As String) As Integer
+    Dim r As String
+    r = LCase(Trim(regName))
+    Select Case r
+    Case "rax", "r10", "r11", "r8", "r9", "rcx", "rdx"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Function MIRX64IsCalleeSavedReg(ByRef regName As String) As Integer
+    Dim r As String
+    r = LCase(Trim(regName))
+    Select Case r
+    Case "rbx", "rsi", "rdi", "r12", "r13", "r14", "r15"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Function MIRX64LocalSlotOffset(ByVal idx As Integer) As Integer
+    ' [rbp-8] is reserved for saved RBX in MIR x64 generated functions.
+    Return -(idx + 2) * 8
+End Function
+
+Function MIRX64StackBytesForLocals(ByVal localCount As Integer) As Integer
+    Dim rawBytes As Integer
+    rawBytes = localCount * 8 + 32
+    Return MIRX64Align16(rawBytes) + MIRX64_RBX_SAVE_BYTES
+End Function
+
+Sub MIRX64EmitRegisterDisciplineComment(ByRef cg As MIRX64Context)
+    MIRX64Emit cg, "    ; uxb register discipline: rax=result r10=rhs r11=temp rcx/rdx/r8/r9=call args rbx=saved"
+End Sub
+
+Function MIRX64EmitLoadPairToRaxR10(ByRef cg As MIRX64Context, ByRef leftText As String, ByRef rightText As String, ByRef errText As String) As Integer
+    If MIRX64LoadOperandToReg(cg, leftText, MIRX64_REG_LEFT, errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, rightText, MIRX64_REG_RIGHT, errText) = 0 Then Return 0
+    Return 1
+End Function
+
+Function MIRX64EmitLoadTripleToRaxR10R11(ByRef cg As MIRX64Context, ByRef aText As String, ByRef bText As String, ByRef cText As String, ByRef errText As String) As Integer
+    If MIRX64LoadOperandToReg(cg, aText, MIRX64_REG_LEFT, errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, bText, MIRX64_REG_RIGHT, errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, cText, MIRX64_REG_TEMP, errText) = 0 Then Return 0
+    Return 1
+End Function
+
+Function MIRX64EmitSafeIDivRaxByR10(ByRef cg As MIRX64Context) As Integer
+    MIRX64Emit cg, "    cmp r10, 0"
+    MIRX64Emit cg, "    je " & MIRX64CurrentDivZeroLabel(cg)
+    MIRX64Emit cg, "    cqo"
+    MIRX64Emit cg, "    idiv r10"
+    Return 1
+End Function
+
+' S-077: unsigned 64-bit rax \ r10 (quotient in rax, remainder in rdx).
+Function MIRX64EmitSafeUDivRaxByR10(ByRef cg As MIRX64Context) As Integer
+    MIRX64Emit cg, "    cmp r10, 0"
+    MIRX64Emit cg, "    je " & MIRX64CurrentDivZeroLabel(cg)
+    MIRX64Emit cg, "    xor edx, edx"
+    MIRX64Emit cg, "    div r10"
+    Return 1
+End Function
+
+Function MIRX64EmitSafeBinaryI64(ByRef cg As MIRX64Context, ByRef op As String, ByRef errText As String) As Integer
+    Select Case UCase(Trim(op))
+    Case "ADD"
+        MIRX64Emit cg, "    add rax, r10"
+    Case "SUB"
+        MIRX64Emit cg, "    sub rax, r10"
+    Case "MUL"
+        MIRX64Emit cg, "    imul rax, r10"
+    Case "DIV", "IDIV"
+        MIRX64EmitSafeIDivRaxByR10 cg
+    Case "MOD"
+        MIRX64EmitSafeIDivRaxByR10 cg
+        MIRX64Emit cg, "    mov rax, rdx"
+    Case "UIDIV"
+        MIRX64EmitSafeUDivRaxByR10 cg
+    Case "UMOD"
+        MIRX64EmitSafeUDivRaxByR10 cg
+        MIRX64Emit cg, "    mov rax, rdx"
+    Case "AND"
+        MIRX64Emit cg, "    and rax, r10"
+    Case "OR"
+        MIRX64Emit cg, "    or rax, r10"
+    Case "XOR"
+        MIRX64Emit cg, "    xor rax, r10"
+    Case "FALSE", "ZERO"
+        ' BASIC/Logic16 FALSE: A AND NOT A = 0. Zero-idiom, no memory traffic.
+        MIRX64Emit cg, "    xor rax, rax"
+    Case "TRUE", "ONE"
+        ' BASIC/Logic16 TRUE: all bits set (-1), not Boolean 1.
+        MIRX64Emit cg, "    mov rax, -1"
+    Case "NAND", "NOR", "XNOR", "NXOR", "EQV", "EQA", "IFF", "IMP", "CIMP", "NIMP", "NCIMP", "IDA", "IDB", "NOTA", "NOTB"
+        ' Logic16 is emitted as full-width BASIC bit logic.
+        ' Contract: A is in RAX, B is in R10, result returns in RAX.
+        ' No stack push/pop is used; R10 is scratch and may be clobbered.
+        Select Case UCase(Trim(op))
+        Case "NAND"
+            MIRX64Emit cg, "    and rax, r10"
+            MIRX64Emit cg, "    not rax"
+        Case "NOR"
+            MIRX64Emit cg, "    or rax, r10"
+            MIRX64Emit cg, "    not rax"
+        Case "XNOR", "NXOR", "EQV", "EQA", "IFF"
+            MIRX64Emit cg, "    xor rax, r10"
+            MIRX64Emit cg, "    not rax"
+        Case "IMP"
+            MIRX64Emit cg, "    not rax"
+            MIRX64Emit cg, "    or rax, r10"
+        Case "CIMP"
+            MIRX64Emit cg, "    not r10"
+            MIRX64Emit cg, "    or rax, r10"
+        Case "NIMP"
+            MIRX64Emit cg, "    not r10"
+            MIRX64Emit cg, "    and rax, r10"
+        Case "NCIMP"
+            MIRX64Emit cg, "    not rax"
+            MIRX64Emit cg, "    and rax, r10"
+        Case "IDA"
+            ' rax already contains A.
+        Case "IDB"
+            MIRX64Emit cg, "    mov rax, r10"
+        Case "NOTA"
+            MIRX64Emit cg, "    not rax"
+        Case "NOTB"
+            MIRX64Emit cg, "    mov rax, r10"
+            MIRX64Emit cg, "    not rax"
+        End Select
+    Case Else
+        errText = "MIR x64 emitter: binary op not mapped: " & op
+        Return 0
+    End Select
+    Return 1
+End Function
+
+Function MIRX64EmitSafeCompareI64(ByRef cg As MIRX64Context, ByRef op As String, ByRef errText As String) As Integer
+    Dim cc As String
+    cc = MIRX64ConditionCode(op)
+    If cc = "" Then
+        errText = "MIR x64 emitter: compare condition map missing: " & op
+        Return 0
+    End If
+    MIRX64Emit cg, "    cmp rax, r10"
+    MIRX64Emit cg, "    set" & cc & " al"
+    MIRX64Emit cg, "    movzx rax, al"
+    MIRX64Emit cg, "    neg rax"
+    Return 1
+End Function
+
+Function MIRX64EmitSafeShiftRotateI64(ByRef cg As MIRX64Context, ByRef op As String, ByRef errText As String) As Integer
+    MIRX64Emit cg, "    mov rcx, r10"
+    Select Case UCase(Trim(op))
+    Case "SHL"
+        MIRX64Emit cg, "    shl rax, cl"
+    Case "SHR"
+        MIRX64Emit cg, "    sar rax, cl"
+    Case "USHR"
+        MIRX64Emit cg, "    shr rax, cl"
+    Case "ROL"
+        MIRX64Emit cg, "    rol rax, cl"
+    Case "ROR"
+        MIRX64Emit cg, "    ror rax, cl"
+    Case Else
+        errText = "MIR x64 emitter: shift/rotate op not mapped: " & op
+        Return 0
+    End Select
+    Return 1
+End Function
+
+#endif

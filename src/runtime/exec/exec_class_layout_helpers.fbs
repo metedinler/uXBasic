@@ -1,0 +1,560 @@
+#include once "../../semantic/ast_name_index.fbs"
+
+' The AST executor asks for a class/interface node by name on every variable read and
+' assignment; the plain scans below walk the whole AST each time (a 1000-statement
+' program spent most of its run time here). The declaration-name index
+' (semantic/ast_name_index.fbs) returns the same first matching node directly.
+Private Function ExecFindClassDeclNode(ByRef ps As ParseState, ByRef classTypeName As String) As Integer
+    Dim targetName As String
+    targetName = UCase(Trim(classTypeName))
+    If targetName = "" Then Return -1
+
+    If UXBAstNameIndexEnsure(ps) <> 0 Then
+        Dim ce As Integer = UXBAstNameIndexFirst(2, targetName)
+        If ce = -1 Then Return -1
+        Return UXBAstNameIndexNode(ce)
+    End If
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = targetName Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function ExecFindInterfaceDeclNode(ByRef ps As ParseState, ByRef interfaceTypeName As String) As Integer
+    Dim targetName As String
+    targetName = UCase(Trim(interfaceTypeName))
+    If targetName = "" Then Return -1
+
+    If UXBAstNameIndexEnsure(ps) <> 0 Then
+        Dim ie As Integer = UXBAstNameIndexFirst(4, targetName)
+        If ie = -1 Then Return -1
+        Return UXBAstNameIndexNode(ie)
+    End If
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "INTERFACE_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = targetName Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+Private Function ExecLayoutGetClassBaseTypeName(ByRef ps As ParseState, ByRef classTypeName As String, ByRef baseTypeOut As String) As Integer
+    baseTypeOut = ""
+
+    Dim classNode As Integer
+    classNode = ExecFindClassDeclNode(ps, classTypeName)
+    If classNode = -1 Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_BASE_REF" Then
+            baseTypeOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(baseTypeOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+
+Private Function ExecClassImplementsInterface(ByRef ps As ParseState, ByRef classTypeRaw As String, ByRef interfaceTypeRaw As String) As Integer
+    Dim curType As String
+    Dim interfaceUpper As String
+    curType = UCase(Trim(classTypeRaw))
+    interfaceUpper = UCase(Trim(interfaceTypeRaw))
+    If curType = "" Or interfaceUpper = "" Then Return 0
+    If ExecFindInterfaceDeclNode(ps, interfaceUpper) = -1 Then Return 0
+
+    Dim hop As Integer
+    Do While curType <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+
+        Dim classNode As Integer
+        classNode = ExecFindClassDeclNode(ps, curType)
+        If classNode = -1 Then Exit Do
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(classNode).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CLASS_IMPLEMENTS_REF" Then
+                If UCase(Trim(ps.ast.nodes(ch).value)) = interfaceUpper Then Return 1
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+
+        Dim baseType As String
+        baseType = ""
+        ch = ps.ast.nodes(classNode).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CLASS_BASE_REF" Then
+                baseType = UCase(Trim(ps.ast.nodes(ch).value))
+                Exit Do
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+        If baseType = "" Then Exit Do
+        curType = baseType
+    Loop
+
+    Return 0
+End Function
+
+
+Private Function ExecClassHasFlag(ByRef ps As ParseState, ByVal classNode As Integer, ByRef flagRaw As String) As Integer
+    If classNode < 0 Or classNode >= ps.ast.count Then Return 0
+    If UCase(Trim(ps.ast.nodes(classNode).kind)) <> "CLASS_STMT" Then Return 0
+
+    Dim targetFlag As String
+    targetFlag = UCase(Trim(flagRaw))
+    If targetFlag = "" Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_FLAG" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = targetFlag Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+
+Private Function ExecClassIsOrDerivedFrom(ByRef ps As ParseState, ByRef actualTypeRaw As String, ByRef expectedTypeRaw As String) As Integer
+    Dim actualType As String
+    Dim expectedType As String
+    actualType = UCase(Trim(actualTypeRaw))
+    expectedType = UCase(Trim(expectedTypeRaw))
+
+    If actualType = "" Or expectedType = "" Then Return 0
+    If actualType = expectedType Then Return 1
+
+    Dim curType As String
+    curType = actualType
+
+    Do While curType <> ""
+        Dim classNode As Integer
+        classNode = ExecFindClassDeclNode(ps, curType)
+        If classNode = -1 Then Exit Do
+
+        Dim baseType As String
+        baseType = ""
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(classNode).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CLASS_BASE_REF" Then
+                baseType = UCase(Trim(ps.ast.nodes(ch).value))
+                Exit Do
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+
+        If baseType = "" Then Exit Do
+        If baseType = expectedType Then Return 1
+
+        curType = baseType
+    Loop
+
+    Return 0
+End Function
+
+Private Function ExecCanAssignClassType(ByRef ps As ParseState, ByRef declTypeRaw As String, ByRef actualTypeRaw As String) As Integer
+    Dim declType As String
+    Dim actualType As String
+    declType = UCase(Trim(declTypeRaw))
+    actualType = UCase(Trim(actualTypeRaw))
+
+    If actualType = "" Then Return 0
+    If ExecFindClassDeclNode(ps, actualType) = -1 Then Return 0
+
+    If declType = "OBJECT" Then Return 1
+    If ExecFindInterfaceDeclNode(ps, declType) <> -1 Then Return ExecClassImplementsInterface(ps, actualType, declType)
+    Return ExecClassIsOrDerivedFrom(ps, actualType, declType)
+End Function
+
+Private Function ExecIsCtorSelfTypeSupported(ByRef typeNameRaw As String) As Integer
+    Dim typeUpper As String
+    typeUpper = UCase(Trim(typeNameRaw))
+
+    Select Case typeUpper
+    Case "I32", "U32", "INTEGER", "LONG", "UINTEGER", "ULONG"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function ExecParamDeclTypeName(ByRef ps As ParseState, ByVal paramNode As Integer, ByRef typeNameOut As String) As Integer
+    typeNameOut = ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(paramNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "TYPE_REF" Then
+            typeNameOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(typeNameOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function ExecValidateClassCtorSignature(ByRef ps As ParseState, ByRef es As ExecState, ByVal routineIdx As Integer, ByRef classTypeName As String, ByRef errText As String) As Integer
+    Dim routineName As String
+    routineName = UCase(Trim(classTypeName)) & "_CTOR"
+
+    If es.runtime.routineDefs(routineIdx).routineKind = "CLASS_CONSTRUCTOR_DECL" Then Return 1
+
+    If es.runtime.routineDefs(routineIdx).routineKind <> "SUB_STMT" Then
+        errText = "DIM: constructor must be CONSTRUCTOR or SUB " & routineName
+        Return 0
+    End If
+
+    Dim routineNodeIdx As Integer
+    routineNodeIdx = es.runtime.routineDefs(routineIdx).nodeIdx
+
+    Dim paramCount As Integer
+    Dim firstParamNode As Integer
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNodeIdx).firstChild
+    Do While ch <> -1
+        Dim childKind As String
+        childKind = UCase(ps.ast.nodes(ch).kind)
+        If childKind <> "PARAM_DECL" Then Exit Do
+
+        paramCount += 1
+        If paramCount = 1 Then firstParamNode = ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    If paramCount < 1 Then
+        errText = "DIM: constructor arity mismatch " & routineName & " expected>=1 actual=" & LTrim(Str(paramCount))
+        Return 0
+    End If
+
+    Dim selfType As String
+    If ExecParamDeclTypeName(ps, firstParamNode, selfType) = 0 Then
+        errText = "DIM: constructor signature mismatch " & routineName & " first parameter must declare type"
+        Return 0
+    End If
+
+    If ExecIsCtorSelfTypeSupported(selfType) = 0 Then
+        errText = "DIM: constructor signature mismatch " & routineName & " first parameter type unsupported " & selfType
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecRoutineParamCount(ByRef ps As ParseState, ByVal routineNodeIdx As Integer) As Integer
+    Dim total As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNodeIdx).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) <> "PARAM_DECL" Then Exit Do
+        total += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return total
+End Function
+
+Private Function ExecInvokeClassCtorIfPresent(ByRef ps As ParseState, ByRef es As ExecState, ByRef classTypeName As String, ByVal instanceAddr As UInteger, ByVal ctorCallNodeIdx As Integer, ByRef errText As String) As Integer
+    Dim classUpper As String
+    classUpper = UCase(Trim(classTypeName))
+    If classUpper = "" Then Return 1
+
+    Dim ctorName As String
+    ctorName = classUpper & "_CTOR"
+
+    Dim routineIdx As Integer
+    routineIdx = ExecRoutineIndexOf(es, ctorName)
+    If routineIdx = -1 Then Return 1
+
+    If ExecValidateClassCtorSignature(ps, es, routineIdx, classUpper, errText) = 0 Then Return 0
+
+    ' DIM class variables allocate storage first; if class constructor requires
+    ' explicit arguments, postpone constructor execution until NEW call site.
+    If ctorCallNodeIdx = -1 Then
+        If es.runtime.routineDefs(routineIdx).routineKind = "CLASS_CONSTRUCTOR_DECL" Then
+            Dim ctorParamCount As Integer
+            ctorParamCount = ExecRoutineParamCount(ps, es.runtime.routineDefs(routineIdx).nodeIdx)
+            If ctorParamCount > 0 Then Return 1
+        End If
+    End If
+
+    Dim ctorResult As Integer
+    If ExecInvokeRoutineByIndex(ps, es, routineIdx, ctorCallNodeIdx, 0, 1, CInt(instanceAddr), ctorResult, errText) = 0 Then
+        If errText = "" Then errText = "DIM: constructor invoke failed " & ctorName
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecValidateClassDtorSignature(ByRef ps As ParseState, ByRef es As ExecState, ByVal routineIdx As Integer, ByRef classTypeName As String, ByRef errText As String) As Integer
+    Dim routineName As String
+    routineName = UCase(Trim(classTypeName)) & "_DTOR"
+
+    If es.runtime.routineDefs(routineIdx).routineKind = "CLASS_DESTRUCTOR_DECL" Then Return 1
+
+    If es.runtime.routineDefs(routineIdx).routineKind <> "SUB_STMT" Then
+        errText = "destructor must be DESTRUCTOR or SUB " & routineName
+        Return 0
+    End If
+
+    Dim routineNodeIdx As Integer
+    routineNodeIdx = es.runtime.routineDefs(routineIdx).nodeIdx
+
+    Dim paramCount As Integer
+    Dim firstParamNode As Integer
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNodeIdx).firstChild
+    Do While ch <> -1
+        Dim childKind As String
+        childKind = UCase(ps.ast.nodes(ch).kind)
+        If childKind <> "PARAM_DECL" Then Exit Do
+
+        paramCount += 1
+        If paramCount = 1 Then firstParamNode = ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    If paramCount <> 1 Then
+        errText = "destructor arity mismatch " & routineName & " expected=1 actual=" & LTrim(Str(paramCount))
+        Return 0
+    End If
+
+    Dim selfType As String
+    If ExecParamDeclTypeName(ps, firstParamNode, selfType) = 0 Then
+        errText = "destructor signature mismatch " & routineName & " first parameter must declare type"
+        Return 0
+    End If
+
+    If ExecIsCtorSelfTypeSupported(selfType) = 0 Then
+        errText = "destructor signature mismatch " & routineName & " first parameter type unsupported " & selfType
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecInvokeClassDtorIfPresent(ByRef ps As ParseState, ByRef es As ExecState, ByRef classTypeName As String, ByVal instanceAddr As UInteger, ByRef errText As String) As Integer
+    Dim classUpper As String
+    classUpper = UCase(Trim(classTypeName))
+    If classUpper = "" Then Return 1
+    If instanceAddr = 0 Then Return 1
+
+    Dim dtorName As String
+    dtorName = classUpper & "_DTOR"
+
+    Dim routineIdx As Integer
+    routineIdx = ExecRoutineIndexOf(es, dtorName)
+    If routineIdx = -1 Then Return 1
+
+    If ExecValidateClassDtorSignature(ps, es, routineIdx, classUpper, errText) = 0 Then Return 0
+
+    Dim dtorResult As Integer
+    If ExecInvokeRoutineByIndex(ps, es, routineIdx, -1, 0, 1, CInt(instanceAddr), dtorResult, errText) = 0 Then
+        If errText = "" Then errText = "destructor invoke failed " & dtorName
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecInvokeClassDtorChainIfPresent(ByRef ps As ParseState, ByRef es As ExecState, ByRef classTypeName As String, ByVal instanceAddr As UInteger, ByRef errText As String) As Integer
+    ' Yama 0: DELETE ve program sonu temizliginde destructor zinciri calisir.
+    ' Sira: en turemis sinif destructor'u, sonra base sinif destructor'lari.
+    Dim curType As String
+    curType = UCase(Trim(classTypeName))
+    If curType = "" Or instanceAddr = 0 Then Return 1
+
+    Dim hop As Integer
+    Do While curType <> ""
+        hop += 1
+        If hop > 64 Then
+            errText = "destructor inheritance chain too deep " & UCase(Trim(classTypeName))
+            Return 0
+        End If
+
+        If ExecFindClassDeclNode(ps, curType) = -1 Then Exit Do
+        If ExecInvokeClassDtorIfPresent(ps, es, curType, instanceAddr, errText) = 0 Then Return 0
+
+        Dim baseType As String
+        baseType = ""
+        If ExecLayoutGetClassBaseTypeName(ps, curType, baseType) = 0 Then Exit Do
+        If baseType = curType Then Exit Do
+        curType = baseType
+    Loop
+
+    Return 1
+End Function
+
+Private Function ExecRunClassVarDtorAtIndex(ByRef ps As ParseState, ByRef es As ExecState, ByVal varIdx As Integer, ByRef errText As String) As Integer
+    If varIdx < 0 Or varIdx >= es.count Then Return 1
+    If es.vars(varIdx).isArray <> 0 Then Return 1
+
+    Dim declType As String
+    Dim runtimeType As String
+    declType = UCase(Trim(es.vars(varIdx).declType))
+    runtimeType = UCase(Trim(es.vars(varIdx).runtimeClassType))
+
+    Dim dtorType As String
+    dtorType = runtimeType
+    If dtorType = "" And declType <> "OBJECT" Then dtorType = declType
+    If dtorType = "" Then Return 1
+    If ExecFindClassDeclNode(ps, dtorType) = -1 Then Return 1
+
+    Dim objAddr As UInteger
+    objAddr = es.vars(varIdx).addr
+    If objAddr = 0 Then objAddr = CUInt(ExecValueToInteger(es.vars(varIdx).value))
+    If objAddr = 0 Then Return 1
+
+    If ExecInvokeClassDtorChainIfPresent(ps, es, dtorType, objAddr, errText) = 0 Then Return 0
+
+    ' Bu degisken icin destructor calisti; program sonu veya DELETE sonrasi tekrar calismasin.
+    ExecSetVar es, es.vars(varIdx).nameText, 0
+    ExecSetVarAddr es, es.vars(varIdx).nameText, 0
+    es.vars(varIdx).runtimeClassType = ""
+
+    Return 1
+End Function
+
+Private Function ExecConfigureClassStorage(ByRef ps As ParseState, ByRef es As ExecState, ByRef varName As String, ByRef classTypeName As String, ByRef errText As String) As Integer
+    Dim classNode As Integer
+    classNode = ExecFindClassDeclNode(ps, classTypeName)
+    If classNode = -1 Then Return 1
+    If ExecClassHasFlag(ps, classNode, "ABSTRACT") <> 0 Then
+        errText = "DIM: cannot instantiate ABSTRACT class " & UCase(Trim(classTypeName))
+        Return 0
+    End If
+
+    Dim classSize As Integer
+    Dim classLayoutErr As String
+    If TypeLayoutSizeOf(ps, classTypeName, classSize, classLayoutErr) = 0 Then
+        errText = "DIM: class layout resolve failed " & classLayoutErr
+        Return 0
+    End If
+
+    If classSize <= 0 Then
+        errText = "DIM: invalid class size for " & UCase(classTypeName)
+        Return 0
+    End If
+
+    Dim varIdx As Integer
+    varIdx = ExecFindVar(es, varName)
+    If varIdx = -1 Then
+        errText = "DIM: class variable allocation failed " & UCase(varName)
+        Return 0
+    End If
+
+    Dim objectBase As UInteger
+    objectBase = es.vars(varIdx).addr
+    If objectBase > &h7FFFFFFF - CUInt(classSize) + 1 Then
+        errText = "DIM: class allocation overflow"
+        Return 0
+    End If
+
+    If VMemFillB(objectBase, 0, CUInt(classSize)) = 0 Then
+        errText = "DIM: class allocation out of range"
+        Return 0
+    End If
+
+    Dim objectEnd As UInteger
+    objectEnd = objectBase + CUInt(classSize)
+    If objectEnd > es.nextVarAddr Then es.nextVarAddr = objectEnd
+
+    ' Keep class variable scalar value aligned with its address for pointer-like class workflows.
+    ExecSetVar es, varName, CInt(objectBase)
+
+    ' initialize object header (__vptr in first dword)
+    Dim vtblHandle As UInteger
+    vtblHandle = 0
+    If ExecFindRuntimeVTableHandle(es, classTypeName, vtblHandle) = 0 Then
+        errText = "exec: missing runtime vtable for " & UCase(Trim(classTypeName))
+        Return 0
+    End If
+    VMemPokeD(objectBase, CInt(vtblHandle))
+    VMemPokeD(objectBase + 4, 0)
+
+    If ExecInvokeClassCtorIfPresent(ps, es, classTypeName, objectBase, -1, errText) = 0 Then Return 0
+
+    Return 1
+End Function
+
+Private Function ExecAllocClassInstance(ByRef ps As ParseState, ByRef es As ExecState, ByRef classTypeName As String, ByVal ctorCallNodeIdx As Integer, ByRef errText As String) As Integer
+    Dim classUpper As String
+    classUpper = UCase(Trim(classTypeName))
+    If classUpper = "" Then
+        errText = "exec: NEW class type missing"
+        Return 0
+    End If
+
+    Dim classNode As Integer
+    classNode = ExecFindClassDeclNode(ps, classUpper)
+    If classNode = -1 Then
+        errText = "exec: NEW unknown class " & classUpper
+        Return 0
+    End If
+    If ExecClassHasFlag(ps, classNode, "ABSTRACT") <> 0 Then
+        errText = "exec: NEW target class is ABSTRACT " & classUpper
+        Return 0
+    End If
+
+    Dim classSize As Integer
+    Dim classLayoutErr As String
+    If TypeLayoutSizeOf(ps, classUpper, classSize, classLayoutErr) = 0 Then
+        errText = "exec: NEW class layout resolve failed " & classLayoutErr
+        Return 0
+    End If
+
+    If classSize <= 0 Then
+        errText = "exec: NEW invalid class size " & classUpper
+        Return 0
+    End If
+
+    Dim objectBase As UInteger
+    objectBase = es.nextVarAddr
+    If objectBase > &h7FFFFFFF - CUInt(classSize) + 1 Then
+        errText = "exec: NEW allocation overflow"
+        Return 0
+    End If
+
+    If VMemFillB(objectBase, 0, CUInt(classSize)) = 0 Then
+        errText = "exec: NEW allocation out of range"
+        Return 0
+    End If
+
+    Dim objectEnd As UInteger
+    objectEnd = objectBase + CUInt(classSize)
+    If objectEnd > es.nextVarAddr Then es.nextVarAddr = objectEnd
+
+    ' initialize object header (__vptr in first dword)
+    Dim vtblHandle As UInteger
+    vtblHandle = 0
+    If ExecFindRuntimeVTableHandle(es, classUpper, vtblHandle) = 0 Then
+        errText = "exec: missing runtime vtable for " & classUpper
+        Return 0
+    End If
+    VMemPokeD(objectBase, CInt(vtblHandle))
+    VMemPokeD(objectBase + 4, 0)
+
+    If ExecInvokeClassCtorIfPresent(ps, es, classUpper, objectBase, ctorCallNodeIdx, errText) = 0 Then Return 0
+
+    Return CInt(objectBase)
+End Function

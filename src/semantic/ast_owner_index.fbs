@@ -1,0 +1,76 @@
+#ifndef UXB_AST_OWNER_INDEX_FBS
+#define UXB_AST_OWNER_INDEX_FBS
+
+' Reverse-link index of the AST: "which node lists node N as its left, its right
+' or one of its children?".
+'
+' Why it exists: the semantic type gate asks that question for almost every
+' expression node (is this node FFI metadata? which routine/class encloses it?),
+' and answered it by scanning EVERY node of the tree each time -- O(N) per query,
+' O(N^2) for a program (a 1000-statement file spent ~14 s in `sem`). The tree does
+' not change while the gate runs, so the answer can be tabulated once.
+'
+' Semantics are exactly those of the old scan: the owner is the LOWEST node index
+' i with nodes(i).left = N or nodes(i).right = N or N in the child list of i.
+'
+' The table is only trusted between UXBAstOwnerIndexBegin and UXBAstOwnerIndexEnd,
+' i.e. while the caller guarantees it does not edit left/right/firstChild/
+' nextSibling. Outside such a scope (and for out-of-range node numbers) every query
+' falls back to the plain scan, so a caller that forgets the scope is slower, never
+' wrong.
+
+Dim Shared gUxbAstOwnerIdx() As Integer
+Dim Shared gUxbAstOwnerCount As Integer
+Dim Shared gUxbAstOwnerValid As Integer
+
+Private Sub UXBAstOwnerSet(ByVal target As Integer, ByVal ownerNode As Integer)
+    If target < 0 Or target >= gUxbAstOwnerCount Then Exit Sub
+    If gUxbAstOwnerIdx(target) = -1 Then gUxbAstOwnerIdx(target) = ownerNode
+End Sub
+
+Sub UXBAstOwnerIndexBegin(ByRef ps As ParseState)
+    Dim n As Integer = ps.ast.count
+    gUxbAstOwnerValid = 0
+    If n <= 0 Then Exit Sub
+    ReDim gUxbAstOwnerIdx(0 To n - 1)
+    gUxbAstOwnerCount = n
+    Dim i As Integer
+    For i = 0 To n - 1
+        gUxbAstOwnerIdx(i) = -1
+    Next i
+    ' ascending i + "first writer wins" == the lowest referencing node, as the scan did
+    For i = 0 To n - 1
+        UXBAstOwnerSet ps.ast.nodes(i).left, i
+        UXBAstOwnerSet ps.ast.nodes(i).right, i
+        Dim ch As Integer = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            UXBAstOwnerSet ch, i
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+    gUxbAstOwnerValid = 1
+End Sub
+
+Sub UXBAstOwnerIndexEnd()
+    gUxbAstOwnerValid = 0
+    gUxbAstOwnerCount = 0
+End Sub
+
+Function UXBAstFindOwner(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If gUxbAstOwnerValid <> 0 And gUxbAstOwnerCount = ps.ast.count And nodeIdx >= 0 And nodeIdx < gUxbAstOwnerCount Then
+        Return gUxbAstOwnerIdx(nodeIdx)
+    End If
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If ps.ast.nodes(i).left = nodeIdx Or ps.ast.nodes(i).right = nodeIdx Then Return i
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If ch = nodeIdx Then Return i
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+    Return -1
+End Function
+
+#endif

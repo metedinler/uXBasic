@@ -1,0 +1,2551 @@
+' uXBasic MIR (Mid-Level Intermediate Representation)
+' Basic block tabanli, backend bagimsiz ara format
+' Runtime evaluator icin MIR instruction set
+
+#include once "mir_model.fbs"
+#include once "ast_name_index.fbs"
+
+' MIRFindClassDeclNode is defined further down in this same file but used earlier
+' (found 2026-09-06, blocking a from-scratch build) -- forward declare so its two
+' call sites don't need to be defined-before-use within the file.
+Declare Function MIRFindClassDeclNode(ByRef ps As ParseState, ByRef classTypeNameRaw As String) As Integer
+' UXB_MIR_FULL_JSON_V2_20260728: exporter needs canonical operand roles/signatures
+' at the early frontend MIR include point.
+#include once "mir_operand_role.fbs"
+#include once "mir_opcode_signature.fbs"
+
+#include once "mir_evaluator.fbs"
+#include once "mir_exporter_json.fbs"
+#include once "mir_module_exporter_json.fbs"
+#include once "mir_backend_contract.fbs"
+#include once "mir_verifier.fbs"
+#include once "mir_full_exporter_json.fbs"
+
+' Float kind constants for MIR
+Private Const MIR_UXF_UNKNOWN = 0
+Private Const MIR_UXF_F32 = 1
+Private Const MIR_UXF_F64 = 2
+Private Const MIR_UXF_F80 = 3
+
+Dim Shared gMirLowerIfEnd(Any) As Integer
+Dim Shared gMirLowerIfDepth As Integer
+Dim Shared gMIRCurrentAstNodeId As Integer
+
+Declare Function MIRChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+' S-069: defined in type_binding/type_infer_expr.fbs, which is compiled AFTER
+' the semantic/MIR-lowering files that need it for AUTO memory-mode resolution.
+Declare Function UXBMemoryAddrIsPointer(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+' S-077: MIR lowering needs the static "is this U64" query, which is defined in
+' type_binding/type_infer_expr.fbs (compiled after this file). Declared here
+' exactly once; runtime/memory_exec.fbs is compiled AFTER type_infer_expr.fbs
+' and sees the definition directly (a repeated Declare is a hard error).
+Declare Function UXBExprIsU64(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+Declare Function MIRFindChildByKind(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef kindText As String) As Integer
+Declare Function MIRBuildVTableMap(ByRef ps As ParseState, ByRef module As MIRModule, ByRef errText As String) As Integer
+Declare Function MIRBuildFieldPath(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef pathOut As String, ByRef errText As String) As Integer
+Declare Function MIRCanonicalTypeName(ByRef rawType As String) As String
+Declare Function MIRSlotSafeName(ByRef rawName As String) As String
+Declare Sub MIRAppendFunctionParam(ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef paramNameRaw As String, ByRef paramTypeRaw As String = "I64", ByVal isByRef As Integer = 0)
+Declare Sub MIRAppendFunctionLocal(ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef localNameRaw As String, ByRef localTypeRaw As String = "I64")
+
+' The PIPE's own name and TASKOUT are source-level aliases for its result.
+' Mapping both spellings to one MIR variable preserves "last assignment wins"
+' even inside nested control flow.
+Private Function MIRNormalizeTaskResultAlias(ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef rawName As String) As String
+    Dim key As String
+    key = UCase(Trim(rawName))
+    If fnIdx >= 0 And fnIdx < module.functionCount Then
+        Dim fnName As String
+        Dim pipePrefix As String
+        fnName = UCase(Trim(module.functions(fnIdx).name))
+        pipePrefix = "__SLOTLANE_PIPE_"
+        If Left(fnName, Len(pipePrefix)) = pipePrefix Then
+            Dim pipeName As String
+            pipeName = Mid(fnName, Len(pipePrefix) + 1)
+            If key = UXB_TASK_RESULT_NAME Or key = pipeName Then Return "__PIPE_RESULT"
+        End If
+    End If
+    Return rawName
+End Function
+
+Private Sub MIRSetCurrentSourceFromAstNode(ByRef ps As ParseState, ByVal nodeIdx As Integer)
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then
+        MIRSetCurrentSourceFromParts "", 0, 0, 0, "", 0
+        gMIRCurrentAstNodeId = -1
+        Exit Sub
+    End If
+    MIRSetCurrentSourceFromParts ps.ast.nodes(nodeIdx).sourceFile, ps.ast.nodes(nodeIdx).lineNo, ps.ast.nodes(nodeIdx).colNo, ps.ast.nodes(nodeIdx).sourceLength, ps.ast.nodes(nodeIdx).lexemeSnippet, ps.ast.nodes(nodeIdx).sourceOffset
+    gMIRCurrentAstNodeId = nodeIdx
+End Sub
+
+Private Sub MIREnsureMain(ByRef module As MIRModule)
+    Dim fnMain As MIRFunction Ptr
+
+    If module.functionCount <> 0 Then Exit Sub
+
+    ReDim module.functions(0)
+    module.functionCount = 1
+    module.functions(0).name = "MAIN"
+    module.functions(0).returnType = "I64"
+    module.functions(0).entryBlock = 0
+    fnMain = @module.functions(0)
+    ReDim fnMain->blocks(0)
+    module.functions(0).blockCount = 1
+    module.functions(0).blocks(0).id = 0
+    module.functions(0).blocks(0).instructionCount = 0
+    module.functions(0).blocks(0).isEntry = 1
+    module.functions(0).blocks(0).isExit = 1
+End Sub
+
+Private Sub MIRAppendInstruction(ByRef module As MIRModule, ByVal fnIdx As Integer, ByVal blockIdx As Integer, ByVal opcode As String, ByVal resultName As String, ByVal operandCount As Integer, ByVal op0 As String = "", ByVal op1 As String = "", ByVal op2 As String = "", ByVal op3 As String = "", ByVal op4 As String = "", ByVal op5 As String = "", ByVal op6 As String = "", ByVal op7 As String = "", ByVal op8 As String = "", ByVal op9 As String = "", ByVal op10 As String = "", ByVal op11 As String = "", ByVal op12 As String = "", ByVal op13 As String = "", ByVal op14 As String = "", ByVal op15 As String = "")
+    Dim inst As MIRIRInstruction
+    Dim blk As MIRBasicBlock Ptr
+    inst.opcode = opcode
+    inst.result = resultName
+    inst.blockId = blockIdx
+    inst.srcLoc = gMIRCurrentSource
+    inst.flags = gMIRCurrentAstNodeId
+    inst.resultType = ""
+    inst.ffiStubId = 0
+    inst.ffiArgStart = 0
+    inst.operandCount = operandCount
+    If operandCount > 0 Then inst.operands(0) = op0
+    If operandCount > 1 Then inst.operands(1) = op1
+    If operandCount > 2 Then inst.operands(2) = op2
+    If operandCount > 3 Then inst.operands(3) = op3
+    If operandCount > 4 Then inst.operands(4) = op4
+    If operandCount > 5 Then inst.operands(5) = op5
+    If operandCount > 6 Then inst.operands(6) = op6
+    If operandCount > 7 Then inst.operands(7) = op7
+    If operandCount > 8 Then inst.operands(8) = op8
+    If operandCount > 9 Then inst.operands(9) = op9
+    If operandCount > 10 Then inst.operands(10) = op10
+    If operandCount > 11 Then inst.operands(11) = op11
+    If operandCount > 12 Then inst.operands(12) = op12
+    If operandCount > 13 Then inst.operands(13) = op13
+    If operandCount > 14 Then inst.operands(14) = op14
+    If operandCount > 15 Then inst.operands(15) = op15
+
+    blk = @module.functions(fnIdx).blocks(blockIdx)
+    Dim cnt As Integer
+    cnt = blk->instructionCount
+    If cnt = 0 Then
+        ReDim blk->instructions(0)
+    Else
+        ReDim Preserve blk->instructions(cnt)
+    End If
+    blk->instructions(cnt) = inst
+    blk->instructionCount = cnt + 1
+End Sub
+
+Private Sub MIRSetLastInstructionMetadata(ByRef module As MIRModule, ByVal fnIdx As Integer, ByVal blockIdx As Integer, ByRef resultTypeRaw As String, ByVal ffiStubId As Integer = 0, ByVal ffiArgStart As Integer = 0)
+    If fnIdx < 0 Or fnIdx >= module.functionCount Then Exit Sub
+    If blockIdx < 0 Or blockIdx >= module.functions(fnIdx).blockCount Then Exit Sub
+    Dim blk As MIRBasicBlock Ptr
+    blk = @module.functions(fnIdx).blocks(blockIdx)
+    If blk->instructionCount <= 0 Then Exit Sub
+    Dim inst As MIRIRInstruction Ptr
+    inst = @blk->instructions(blk->instructionCount - 1)
+    inst->resultType = MIRCanonicalTypeName(resultTypeRaw)
+    If inst->opcode = MIR_OP_STORE_VAR And inst->operandCount = 1 And UXBLibraryTypeNeedsManagedCopy(inst->resultType) <> 0 Then
+        inst->opcode = MIR_OP_CALL
+        inst->operands(1) = inst->operands(0)
+        inst->operands(0) = UCase(inst->resultType) & ".COPY"
+        inst->operandCount = 2
+    End If
+    inst->ffiStubId = ffiStubId
+    inst->ffiArgStart = ffiArgStart
+End Sub
+
+' S-140: type of the value a just-lowered expression produced: the result type of the LAST
+' instruction of the block when that instruction produced `resultName` ("" when it did not, or
+' when the type is unknown). Used to type a CONST from its lowered initializer.
+Private Function MIRLastInstructionResultType(ByRef module As MIRModule, ByVal fnIdx As Integer, ByVal blockIdx As Integer, ByRef resultName As String) As String
+    If fnIdx < 0 Or fnIdx >= module.functionCount Then Return ""
+    If blockIdx < 0 Or blockIdx >= module.functions(fnIdx).blockCount Then Return ""
+    Dim blk As MIRBasicBlock Ptr
+    blk = @module.functions(fnIdx).blocks(blockIdx)
+    If blk->instructionCount <= 0 Then Return ""
+    Dim inst As MIRIRInstruction Ptr
+    inst = @blk->instructions(blk->instructionCount - 1)
+    If UCase(Trim(inst->result)) <> UCase(Trim(resultName)) Then Return ""
+    Return UCase(Trim(inst->resultType))
+End Function
+Private Function MIRNextTemp(ByRef seed As Integer) As String
+    seed += 1
+    Return "__t" & LTrim(Str(seed))
+End Function
+
+Private Function MIRAstNodeIsFfiCall(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    Dim k As String
+    Dim v As String
+    k = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    v = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+    If k = "CALL_DLL_STMT" Or k = "CALL_API_STMT" Then Return 1
+    If k <> "CALL_STMT" And k <> "CALL_EXPR" And k <> "CALL" Then Return 0
+    If v = "DLL" Or v = "API" Then Return 1
+    If v <> "CALL" Then Return 0
+    Dim firstArg As Integer
+    firstArg = ps.ast.nodes(nodeIdx).firstChild
+    If firstArg < 0 Or firstArg >= ps.ast.count Then Return 0
+    Dim marker As String
+    marker = UCase(Trim(ps.ast.nodes(firstArg).value))
+    Return IIf(marker = "DLL" Or marker = "API", 1, 0)
+End Function
+
+Private Sub MIRFindFfiCallOrdinalWalk(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal targetNodeIdx As Integer, ByRef seenCount As Integer, ByRef ordinalOut As Integer)
+    If ordinalOut <> 0 Then Exit Sub
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Exit Sub
+    If MIRAstNodeIsFfiCall(ps, nodeIdx) <> 0 Then
+        seenCount += 1
+        If nodeIdx = targetNodeIdx Then ordinalOut = seenCount: Exit Sub
+    End If
+    If ps.ast.nodes(nodeIdx).left <> -1 Then MIRFindFfiCallOrdinalWalk ps, ps.ast.nodes(nodeIdx).left, targetNodeIdx, seenCount, ordinalOut
+    If ordinalOut <> 0 Then Exit Sub
+    If ps.ast.nodes(nodeIdx).right <> -1 Then MIRFindFfiCallOrdinalWalk ps, ps.ast.nodes(nodeIdx).right, targetNodeIdx, seenCount, ordinalOut
+    If ordinalOut <> 0 Then Exit Sub
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        MIRFindFfiCallOrdinalWalk ps, ch, targetNodeIdx, seenCount, ordinalOut
+        If ordinalOut <> 0 Then Exit Sub
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+End Sub
+
+Private Function MIRFfiCallOrdinal(ByRef ps As ParseState, ByVal targetNodeIdx As Integer) As Integer
+    If ps.rootNode < 0 Or targetNodeIdx < 0 Then Return 0
+    Dim seenCount As Integer
+    Dim ordinalValue As Integer
+    seenCount = 0
+    ordinalValue = 0
+    MIRFindFfiCallOrdinalWalk ps, ps.rootNode, targetNodeIdx, seenCount, ordinalValue
+    Return ordinalValue
+End Function
+
+Private Function MIRLooksLikeFfiArgTypeList(ByRef textValue As String) As Integer
+    Dim t As String
+    t = UCase(Trim(textValue))
+    If t = "" Then Return 0
+    Dim startPos As Integer
+    startPos = 1
+    Do
+        Dim commaPos As Integer
+        commaPos = InStr(startPos, t, ",")
+        Dim item As String
+        If commaPos = 0 Then
+            item = Trim(Mid(t, startPos))
+        Else
+            item = Trim(Mid(t, startPos, commaPos - startPos))
+        End If
+        Select Case item
+        Case "I8", "I16", "I32", "I64", "U8", "U16", "U32", "U64", "F32", "F64", "F80", "PTR", "STRPTR", "STRING", "BOOL", "BOOLEAN", "VOID"
+            ' accepted
+        Case Else
+            Return 0
+        End Select
+        If commaPos = 0 Then Exit Do
+        startPos = commaPos + 1
+    Loop
+    Return 1
+End Function
+
+Function MIRCanonicalTypeName(ByRef rawType As String) As String
+    Dim t As String
+    t = UCase(Trim(rawType))
+
+    Select Case t
+    Case "SINGLE", "SNG", "SNGLE"
+        Return "F32"
+    Case "DOUBLE", "DBL", "DBLE"
+        Return "F64"
+    Case "EXTENDED", "EXT"
+        Return "F80"
+    End Select
+
+    Return t
+End Function
+
+Private Function MIRDeclaredTypeForAstNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef defaultType As String) As String
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return MIRCanonicalTypeName(defaultType)
+    Dim typeNode As Integer
+    typeNode = MIRFindChildByKind(ps, nodeIdx, "RETURN_TYPE")
+    If typeNode = -1 Then typeNode = MIRFindChildByKind(ps, nodeIdx, "TYPE_REF")
+    If typeNode <> -1 Then
+        Dim t As String
+        t = MIRCanonicalTypeName(ps.ast.nodes(typeNode).value)
+        If t <> "" Then Return t
+    End If
+
+    Dim inferredType As String
+    inferredType = MIRCanonicalTypeName(ps.ast.nodes(nodeIdx).typeName)
+    If Left(inferredType, 4) <> "SYM_" And inferredType <> "FUNCTION" And inferredType <> "SUB" Then
+        If inferredType <> "" Then Return inferredType
+    End If
+    Return MIRCanonicalTypeName(defaultType)
+End Function
+
+Private Function MIRIsFloatTypeName(ByRef rawType As String) As Integer
+    Dim t As String
+    t = MIRCanonicalTypeName(rawType)
+    Return IIf(t = "F32" Or t = "F64" Or t = "F80", 1, 0)
+End Function
+
+' Same search as the plain scan below, but only over the declaration nodes of that
+' name (ast_name_index.fbs group 0), in the same order: nearest declaration at or
+' before startIdx first (RETURN_TYPE or TYPE_REF child), then any declaration with a
+' TYPE_REF child from the top of the file.
+Private Function MIRFindNearestDeclaredTypeIndexed(ByRef ps As ParseState, ByVal startIdx As Integer, ByRef target As String, ByRef typeOut As String) As Integer
+    Dim e As Integer = UXBAstNameIndexLast(0, target)
+    Do While e <> -1
+        Dim i As Integer = UXBAstNameIndexNode(e)
+        If i <= startIdx Then
+            Dim typeNode As Integer
+            typeNode = MIRFindChildByKind(ps, i, "RETURN_TYPE")
+            If typeNode = -1 Then typeNode = MIRFindChildByKind(ps, i, "TYPE_REF")
+            If typeNode <> -1 Then
+                typeOut = MIRCanonicalTypeName(ps.ast.nodes(typeNode).value)
+                If typeOut <> "" Then Return 1
+            End If
+        End If
+        e = UXBAstNameIndexPrev(e)
+    Loop
+
+    e = UXBAstNameIndexFirst(0, target)
+    Do While e <> -1
+        Dim i2 As Integer = UXBAstNameIndexNode(e)
+        Dim typeNode2 As Integer
+        typeNode2 = MIRFindChildByKind(ps, i2, "TYPE_REF")
+        If typeNode2 <> -1 Then
+            typeOut = MIRCanonicalTypeName(ps.ast.nodes(typeNode2).value)
+            If typeOut <> "" Then Return 1
+        End If
+        e = UXBAstNameIndexNext(e)
+    Loop
+    Return 0
+End Function
+
+Private Function MIRFindNearestDeclaredType(ByRef ps As ParseState, ByVal fromNodeIdx As Integer, ByRef varNameRaw As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+
+    Dim target As String
+    target = UCase(Trim(varNameRaw))
+    If target = "" Then Return 0
+
+    Dim startIdx As Integer
+    startIdx = fromNodeIdx
+    If startIdx < 0 Or startIdx >= ps.ast.count Then startIdx = ps.ast.count - 1
+
+    If UXBAstNameIndexEnsure(ps) <> 0 Then Return MIRFindNearestDeclaredTypeIndexed(ps, startIdx, target, typeOut)
+
+    Dim i As Integer
+    For i = startIdx To 0 Step -1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+        If k <> "DIM_DECL" And k <> "REDIM_DECL" And k <> "PARAM_DECL" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> target Then Continue For
+
+        Dim typeNode As Integer
+        typeNode = MIRFindChildByKind(ps, i, "RETURN_TYPE")
+        If typeNode = -1 Then typeNode = MIRFindChildByKind(ps, i, "TYPE_REF")
+        If typeNode <> -1 Then
+            typeOut = MIRCanonicalTypeName(ps.ast.nodes(typeNode).value)
+            If typeOut <> "" Then Return 1
+        End If
+    Next i
+
+    For i = 0 To ps.ast.count - 1
+        Dim k2 As String
+        k2 = UCase(Trim(ps.ast.nodes(i).kind))
+        If k2 <> "DIM_DECL" And k2 <> "REDIM_DECL" And k2 <> "PARAM_DECL" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> target Then Continue For
+
+        Dim typeNode2 As Integer
+        typeNode2 = MIRFindChildByKind(ps, i, "TYPE_REF")
+        If typeNode2 <> -1 Then
+            typeOut = MIRCanonicalTypeName(ps.ast.nodes(typeNode2).value)
+            If typeOut <> "" Then Return 1
+        End If
+    Next i
+
+    Return 0
+End Function
+
+' S-140: a CONST is a typed name too. `RETURN HALFV * 4` (HALFV an F64 constant) lowered to an
+' INTEGER MUL of IEEE bit patterns because only DIM/REDIM/PARAM declarations were searched
+' (native x64 printed denormal noise). Variables/parameters still win; the constant's own
+' TYPE_REF, or the type the type pass inferred from its initializer, is the fallback.
+Declare Function MIRInferExprFloatKind(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+Private Function MIRFindNearestDeclaredTypeOrConst(ByRef ps As ParseState, ByVal fromNodeIdx As Integer, ByRef varNameRaw As String, ByRef typeOut As String) As Integer
+    If MIRFindNearestDeclaredType(ps, fromNodeIdx, varNameRaw, typeOut) <> 0 Then Return 1
+    typeOut = ""
+    Dim target As String
+    target = UCase(Trim(varNameRaw))
+    If target = "" Then Return 0
+    If UXBAstNameIndexEnsure(ps) = 0 Then Return 0
+    Dim ce As Integer = UXBAstNameIndexFirst(1, target)
+    Do While ce <> -1
+        Dim cnode As Integer = UXBAstNameIndexNode(ce)
+        If UCase(Trim(ps.ast.nodes(cnode).kind)) = "CONST_DECL" Then
+            Dim ctypeNode As Integer
+            ctypeNode = MIRFindChildByKind(ps, cnode, "TYPE_REF")
+            If ctypeNode <> -1 Then
+                typeOut = MIRCanonicalTypeName(ps.ast.nodes(ctypeNode).value)
+            Else
+                typeOut = UCase(Trim(ps.ast.nodes(cnode).typeName))
+                If Left(typeOut, 5) = "TYPE_" Then typeOut = Mid(typeOut, 6)
+                typeOut = MIRCanonicalTypeName(typeOut)
+                If Left(typeOut, 4) = "SYM_" Or typeOut = "OBJECT" Then typeOut = ""
+                If typeOut = "" Then
+                    ' the type pass' stamp is not there yet at MIR time: type it from the initializer
+                    Dim cinit As Integer
+                    cinit = ps.ast.nodes(cnode).left
+                    Select Case MIRInferExprFloatKind(ps, cinit)
+                    Case MIR_UXF_F64: typeOut = "F64"
+                    Case MIR_UXF_F32: typeOut = "F32"
+                    End Select
+                    If typeOut = "" And cinit >= 0 And cinit < ps.ast.count Then
+                        If UCase(Trim(ps.ast.nodes(cinit).kind)) = "STRING" Then typeOut = "STRING"
+                    End If
+                End If
+            End If
+            If typeOut <> "" Then Return 1
+        End If
+        ce = UXBAstNameIndexNext(ce)
+    Loop
+    typeOut = ""
+    Return 0
+End Function
+
+' S-141: namespace (upper case) of the SUB/FUNCTION being lowered ("" outside a namespace);
+' see MIRLowerRoutineNode in mir_tail.fbs and MIRResolveEnclosingNamespaceRoutineCall in mir_lower_expr.fbs.
+Dim Shared gMirCurrentNamespace As String
+
+' the FUNCTION_STMT / DECLARE_FUNCTION_STMT node's declared return type (canonical), "" when none
+Private Function MIRFunctionNodeReturnType(ByRef ps As ParseState, ByVal fnode As Integer, ByRef typeOut As String) As Integer
+    typeOut = ""
+    Dim ftypeNode As Integer
+    ftypeNode = MIRFindChildByKind(ps, fnode, "RETURN_TYPE")
+    If ftypeNode = -1 Then ftypeNode = MIRFindChildByKind(ps, fnode, "TYPE_REF")
+    If ftypeNode = -1 Then Return 0
+    typeOut = MIRCanonicalTypeName(ps.ast.nodes(ftypeNode).value)
+    Return IIf(typeOut <> "", 1, 0)
+End Function
+
+' 1 when the routine node sits directly inside the NAMESPACE/MODULE named ownerUpper
+Private Function MIRFunctionNodeOwnerIs(ByRef ps As ParseState, ByVal fnode As Integer, ByRef ownerUpper As String) As Integer
+    Dim par As Integer
+    par = ps.ast.nodes(fnode).parent
+    If par < 0 Or par >= ps.ast.count Then Return 0
+    Dim parKind As String
+    parKind = UCase(Trim(ps.ast.nodes(par).kind))
+    If parKind <> "NAMESPACE_STMT" And parKind <> "MODULE_STMT" Then Return 0
+    Return IIf(UCase(Trim(ps.ast.nodes(par).value)) = ownerUpper, 1, 0)
+End Function
+
+' Declared return type of a user function called by name. `ns.Name` looks in that namespace only; a plain
+' name prefers the namespace being lowered (S-141), then any function of that name. S-138: the parser
+' stores a routine's declared return type as a RETURN_TYPE child (`FUNCTION f() AS F64` ->
+' RETURN_TYPE value=F64); it never produces a TYPE_REF child there, so this lookup used to fail for
+' EVERY user function. A call like `Half() * 5` then lowered to an INTEGER MUL of IEEE bit patterns
+' (native x64 printed garbage; the interpreters only worked because their values carry a dynamic type
+' tag). Qualified calls (`uxsdl3.GetSoundVolume(h) * 100`) were never found either: the whole dotted
+' text was compared with the routine's plain name.
+Private Function MIRFindFunctionReturnType(ByRef ps As ParseState, ByRef funcNameRaw As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+
+    Dim fn As String
+    fn = UCase(Trim(funcNameRaw))
+    If fn = "" Then Return 0
+
+    Dim requiredOwner As String
+    Dim preferredOwner As String
+    requiredOwner = ""
+    preferredOwner = ""
+    Dim dotPos As Integer
+    dotPos = InStr(fn, ".")
+    If dotPos > 1 And dotPos < Len(fn) Then
+        requiredOwner = Left(fn, dotPos - 1)
+        fn = Mid(fn, dotPos + 1)
+        If InStr(fn, ".") > 0 Then Return 0
+    Else
+        preferredOwner = gMirCurrentNamespace
+    End If
+
+    ' pass 1: the required/preferred owner only; pass 2 (plain names inside a namespace): any owner
+    Dim passNo As Integer
+    For passNo = 1 To 2
+        If passNo = 2 And (requiredOwner <> "" Or preferredOwner = "") Then Exit For
+        Dim wantOwner As String
+        wantOwner = requiredOwner
+        If wantOwner = "" And passNo = 1 Then wantOwner = preferredOwner
+
+        ' only the function nodes of that name (ast_name_index.fbs group 3), same order
+        If UXBAstNameIndexEnsure(ps) <> 0 Then
+            Dim fe As Integer = UXBAstNameIndexFirst(3, fn)
+            Do While fe <> -1
+                Dim fnode As Integer = UXBAstNameIndexNode(fe)
+                If wantOwner = "" Or MIRFunctionNodeOwnerIs(ps, fnode, wantOwner) <> 0 Then
+                    If MIRFunctionNodeReturnType(ps, fnode, typeOut) <> 0 Then Return 1
+                End If
+                fe = UXBAstNameIndexNext(fe)
+            Loop
+        Else
+            Dim i As Integer
+            For i = 0 To ps.ast.count - 1
+                Dim k As String
+                k = UCase(Trim(ps.ast.nodes(i).kind))
+                If k <> "FUNCTION_STMT" And k <> "DECLARE_FUNCTION_STMT" Then Continue For
+                If UCase(Trim(ps.ast.nodes(i).value)) <> fn Then Continue For
+                If wantOwner = "" Or MIRFunctionNodeOwnerIs(ps, i, wantOwner) <> 0 Then
+                    If MIRFunctionNodeReturnType(ps, i, typeOut) <> 0 Then Return 1
+                End If
+            Next i
+        End If
+    Next passNo
+
+    typeOut = ""
+    Return 0
+End Function
+Private Function MIRInferExprFloatKind(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return MIR_UXF_UNKNOWN
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    Dim k As String
+    k = UCase(Trim(n.kind))
+
+    Select Case k
+    Case "NUMBER", "INT", "INTEGER", "INT_LITERAL"
+        Dim v As String
+        v = UCase(Trim(n.value))
+        If UXBNumberLiteralIsFloat(v) <> 0 Then Return MIR_UXF_F64
+        Return MIR_UXF_UNKNOWN
+
+    Case "IDENT", "KEYWORD_REF"
+        Dim typeName As String
+        If MIRFindNearestDeclaredTypeOrConst(ps, nodeIdx, n.value, typeName) <> 0 Then
+            Select Case UCase(Trim(typeName))
+            Case "F32": Return MIR_UXF_F32
+            Case "F64": Return MIR_UXF_F64
+            Case "F80": Return MIR_UXF_F80
+            End Select
+        End If
+        Return MIR_UXF_UNKNOWN
+
+    Case "UNARY"
+        Dim unaryNode As Integer
+        unaryNode = n.left
+        If unaryNode = -1 Then unaryNode = n.right
+        Return MIRInferExprFloatKind(ps, unaryNode)
+
+    Case "BINARY"
+        Dim lk As Integer
+        Dim rk As Integer
+        lk = MIRInferExprFloatKind(ps, n.left)
+        rk = MIRInferExprFloatKind(ps, n.right)
+        If lk = MIR_UXF_F80 Or rk = MIR_UXF_F80 Then Return MIR_UXF_F80
+        If lk = MIR_UXF_F64 Or rk = MIR_UXF_F64 Then Return MIR_UXF_F64
+        If lk = MIR_UXF_F32 Or rk = MIR_UXF_F32 Then Return MIR_UXF_F32
+        If Trim(n.op) = "/" Then Return MIR_UXF_F64
+        Return MIR_UXF_UNKNOWN
+
+    Case "TERNARY_EXPR"
+        Dim thenNode As Integer
+        thenNode = MIRChildAt(ps, nodeIdx, 0)
+        If MIRInferExprFloatKind(ps, n.right) <> MIR_UXF_UNKNOWN Then Return MIRInferExprFloatKind(ps, n.right)
+        If MIRInferExprFloatKind(ps, thenNode) <> MIR_UXF_UNKNOWN Then Return MIRInferExprFloatKind(ps, thenNode)
+        Return MIR_UXF_UNKNOWN
+
+    Case "CALL_EXPR"
+        Dim callName As String
+        callName = UCase(Trim(n.value))
+
+        Dim retType As String
+        Dim callIsFunction As Integer
+        callIsFunction = MIRFindFunctionReturnType(ps, callName, retType)
+        If callIsFunction <> 0 Then
+            Select Case UCase(Trim(retType))
+            Case "F32": Return MIR_UXF_F32
+            Case "F64": Return MIR_UXF_F64
+            Case "F80": Return MIR_UXF_F80
+            End Select
+        Else
+            ' S-068: an indexed access to a float-typed ARRAY (or an `arr AS F64[]`
+            ' parameter) is a float expression. Without this `pg(0) + pg(1)` lowered to an
+            ' INTEGER ADD of two IEEE bit patterns: native x64 printed nan, and the
+            ' interpreters only worked because their values carry a dynamic type tag.
+            Dim elemDeclType As String
+            If MIRFindNearestDeclaredType(ps, nodeIdx, callName, elemDeclType) <> 0 Then
+                elemDeclType = UCase(Trim(elemDeclType))
+                If Right(elemDeclType, 2) = "[]" Then elemDeclType = Left(elemDeclType, Len(elemDeclType) - 2)
+                Select Case elemDeclType
+                Case "F32": Return MIR_UXF_F32
+                Case "F64": Return MIR_UXF_F64
+                Case "F80": Return MIR_UXF_F80
+                End Select
+            End If
+        End If
+
+        Select Case callName
+        Case "CDBL", "VAL", "SQR", "SIN", "COS", "TAN", "ATN", "EXP", "LOG", "RND", "TIMER", "INPUTF"
+            Return MIR_UXF_F64
+        Case "CSNG"
+            Return MIR_UXF_F32
+        End Select
+
+        Return MIR_UXF_UNKNOWN
+    End Select
+
+    Return MIR_UXF_UNKNOWN
+End Function
+
+Private Function MIRMapBinaryOpcode(ByRef opText As String, ByVal preferFloat As Integer, ByRef opcodeOut As String) As Integer
+    Dim opu As String
+    opu = UCase(Trim(opText))
+    Select Case opu
+    Case "+"
+        If preferFloat <> 0 Then opcodeOut = MIR_OP_FADD Else opcodeOut = MIR_OP_ADD
+    Case "-"
+        If preferFloat <> 0 Then opcodeOut = MIR_OP_FSUB Else opcodeOut = MIR_OP_SUB
+    Case "*"
+        If preferFloat <> 0 Then opcodeOut = MIR_OP_FMUL Else opcodeOut = MIR_OP_MUL
+    Case "/"
+        If preferFloat <> 0 Then opcodeOut = MIR_OP_FDIV Else opcodeOut = MIR_OP_DIV
+    Case "\"
+        opcodeOut = MIR_OP_IDIV
+    Case "%", "MOD"
+        opcodeOut = MIR_OP_MOD
+    Case "**", "POW"
+        opcodeOut = MIR_OP_POW
+    Case "=", "=="
+        opcodeOut = MIR_OP_EQ
+    Case "<>", "!="
+        opcodeOut = MIR_OP_NE
+    Case "<"
+        opcodeOut = MIR_OP_LT
+    Case "<="
+        opcodeOut = MIR_OP_LE
+    Case ">"
+        opcodeOut = MIR_OP_GT
+    Case ">="
+        opcodeOut = MIR_OP_GE
+    Case "AND", "&", "BAND", "BITAND", "&&"
+        opcodeOut = MIR_OP_AND
+    Case "OR", "|", "BOR", "BITOR", "||"
+        opcodeOut = MIR_OP_OR
+    Case "XOR", "^", "BXOR", "BITXOR"
+        opcodeOut = MIR_OP_XOR
+    Case "NAND"
+        opcodeOut = MIR_OP_NAND
+    Case "NOR"
+        opcodeOut = MIR_OP_NOR
+    Case "XNOR", "NXOR", "EQV", "EQA", "IFF"
+        opcodeOut = MIR_OP_XNOR
+    Case "IMP"
+        opcodeOut = MIR_OP_IMP
+    Case "CIMP"
+        opcodeOut = MIR_OP_CIMP
+    Case "NIMP"
+        opcodeOut = MIR_OP_NIMP
+    Case "NCIMP"
+        opcodeOut = MIR_OP_NCIMP
+    Case "IDA"
+        opcodeOut = MIR_OP_IDA
+    Case "IDB"
+        opcodeOut = MIR_OP_IDB
+    Case "NOTA"
+        opcodeOut = MIR_OP_NOTA
+    Case "NOTB"
+        opcodeOut = MIR_OP_NOTB
+    Case "SHL", "<<"
+        opcodeOut = MIR_OP_SHL
+    Case "SHR", ">>"
+        opcodeOut = MIR_OP_SHR
+    Case "ROL"
+        opcodeOut = MIR_OP_ROL
+    Case "ROR"
+        opcodeOut = MIR_OP_ROR
+    Case Else
+        Return 0
+    End Select
+    Return 1
+End Function
+
+Private Function MIRRegisterGlobal(ByRef module As MIRModule, ByRef varName As String, ByRef typeNameRaw As String, ByVal isArray As Integer) As Integer
+    Dim nameUpper As String
+    nameUpper = UCase(Trim(varName))
+    If nameUpper = "" Then Return 0
+
+    Dim typeName As String
+    typeName = MIRCanonicalTypeName(typeNameRaw)
+    If typeName = "" Then typeName = "I64"
+
+    Dim i As Integer
+    For i = 0 To module.globalVarCount - 1
+        If UCase(Trim(module.globalVars(i))) = nameUpper Then
+            If Trim(module.globalVarTypes(i)) = "" Or typeName <> "I64" Then module.globalVarTypes(i) = typeName
+            If isArray <> 0 Then module.globalVarIsArray(i) = 1
+            Return 1
+        End If
+    Next i
+
+    If module.globalVarCount = 0 Then
+        ReDim module.globalVars(0)
+        ReDim module.globalVarTypes(0)
+        ReDim module.globalVarIsArray(0)
+    Else
+        ReDim Preserve module.globalVars(module.globalVarCount)
+        ReDim Preserve module.globalVarTypes(module.globalVarCount)
+        ReDim Preserve module.globalVarIsArray(module.globalVarCount)
+    End If
+    module.globalVars(module.globalVarCount) = nameUpper
+    module.globalVarTypes(module.globalVarCount) = typeName
+    module.globalVarIsArray(module.globalVarCount) = IIf(isArray <> 0, 1, 0)
+    module.globalVarCount += 1
+    Return 1
+End Function
+
+Private Function MIRRegisterArrayGlobal(ByRef module As MIRModule, ByRef varName As String, ByRef elementTypeName As String) As Integer
+    Dim arrayType As String
+    arrayType = UCase(Trim(elementTypeName))
+    If arrayType = "" Then arrayType = "ARRAY"
+    Return MIRRegisterGlobal(module, varName, arrayType, 1)
+End Function
+
+Private Function MIRIsKnownArray(ByRef module As MIRModule, ByRef varName As String) As Integer
+    Dim nameUpper As String
+    nameUpper = UCase(Trim(varName))
+    Dim i As Integer
+    For i = 0 To module.globalVarCount - 1
+        If UCase(Trim(module.globalVars(i))) = nameUpper And module.globalVarIsArray(i) <> 0 Then Return 1
+    Next i
+    Dim fnIdx As Integer
+    For fnIdx = 0 To module.functionCount - 1
+        Dim pi As Integer
+        For pi = 0 To module.functions(fnIdx).paramVarCount - 1
+            If UCase(Trim(module.functions(fnIdx).paramVars(pi))) = nameUpper Then
+                Dim paramType As String
+                paramType = UCase(Trim(module.functions(fnIdx).paramVarTypes(pi)))
+                If Len(paramType) > 2 And Right(paramType, 2) = "[]" Then Return 1
+            End If
+        Next pi
+    Next fnIdx
+    Return 0
+End Function
+
+' S-050: element type of a known array, as registered by MIRRegisterArrayGlobal
+' at DIM-lowering time (this "global" registry is used for both true globals
+' and function-locals -- see the DIM_STMT lowering, which calls it
+' unconditionally regardless of fnIdx). Used by the array-of-struct field
+' access fix to know which TYPE to instantiate for a lazily-created element.
+Private Function MIRArrayElementTypeOf(ByRef module As MIRModule, ByRef varName As String) As String
+    Dim nameUpper As String
+    nameUpper = UCase(Trim(varName))
+    Dim i As Integer
+    For i = 0 To module.globalVarCount - 1
+        If UCase(Trim(module.globalVars(i))) = nameUpper And module.globalVarIsArray(i) <> 0 Then Return module.globalVarTypes(i)
+    Next i
+    Dim fnIdx As Integer
+    For fnIdx = 0 To module.functionCount - 1
+        Dim pi As Integer
+        For pi = 0 To module.functions(fnIdx).paramVarCount - 1
+            If UCase(Trim(module.functions(fnIdx).paramVars(pi))) = nameUpper Then
+                Dim paramType As String
+                paramType = UCase(Trim(module.functions(fnIdx).paramVarTypes(pi)))
+                If Len(paramType) > 2 And Right(paramType, 2) = "[]" Then Return Left(paramType, Len(paramType) - 2)
+            End If
+        Next pi
+    Next fnIdx
+    Return ""
+End Function
+
+Private Function MIRChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim cnt As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return cnt
+End Function
+
+Private Function MIRChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    If childPos < 0 Then Return -1
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    Dim ch As Integer
+    Dim i As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    i = 0
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return -1
+End Function
+
+Private Function MIRFindChildByKind(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef kindText As String) As Integer
+    Dim wantKind As String
+    wantKind = UCase(Trim(kindText))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = wantKind Then Return ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function MIRHasClassDecl(ByRef ps As ParseState, ByRef classNameRaw As String) As Integer
+    Dim className As String
+    className = UCase(Trim(classNameRaw))
+    If className = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = className Then Return 1
+        End If
+    Next i
+
+    Return 0
+End Function
+
+Private Function MIRClassHasRoutineDecl(ByRef ps As ParseState, ByRef classNameRaw As String, ByRef routineKindRaw As String) As Integer
+    Dim className As String
+    Dim routineKind As String
+    className = UCase(Trim(classNameRaw))
+    routineKind = UCase(Trim(routineKindRaw))
+    If className = "" Or routineKind = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "CLASS_STMT" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> className Then Continue For
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(Trim(ps.ast.nodes(ch).kind)) = routineKind Then Return 1
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
+    Return 0
+End Function
+
+Private Function MIRClassHasDestructorDecl(ByRef ps As ParseState, ByRef classNameRaw As String) As Integer
+    Return MIRClassHasRoutineDecl(ps, classNameRaw, "CLASS_DESTRUCTOR_DECL")
+End Function
+
+
+
+' FIX14_CANONICAL_MAGIC_DISPATCH_20260611: MIR method lookup helper.
+Private Function MIRMagicFallbackMethodName(ByRef methodNameRaw As String) As String
+    Dim m As String
+    m = UCase(Trim(methodNameRaw))
+    If m = "" Then Return ""
+    If Left(m, 6) = "MAGIC_" Then Return ""
+    If Left(m, 2) = "__" Then
+        Dim d As String
+        d = Mid(m, 3)
+        If d = "" Then Return ""
+        Return "MAGIC_" & d
+    End If
+    Return "MAGIC_" & m
+End Function
+
+Private Function MIRClassPropertyHasFlag(ByRef ps As ParseState, ByVal propertyNode As Integer, ByRef flagRaw As String) As Integer
+    If propertyNode < 0 Or propertyNode >= ps.ast.count Then Return 0
+    Dim want As String
+    want = UCase(Trim(flagRaw))
+    If want = "" Then Return 0
+    Dim ch As Integer
+    ch = ps.ast.nodes(propertyNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_PROPERTY_FLAG" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = want Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 0
+End Function
+
+Private Function MIRClassMethodHasFlag(ByRef ps As ParseState, ByVal methodNode As Integer, ByRef flagRaw As String) As Integer
+    If methodNode < 0 Or methodNode >= ps.ast.count Then Return 0
+    Dim want As String
+    want = UCase(Trim(flagRaw))
+    If want = "" Then Return 0
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_METHOD_FLAG" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = want Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 0
+End Function
+
+Private Function MIRGlobalVirtualSlotCount(ByRef ps As ParseState) As Integer
+    Dim maxSlot As Integer
+    maxSlot = -1
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "CLASS_METHOD_DECL" Then Continue For
+        Dim meta As Integer
+        meta = MIRFindChildByKind(ps, i, "CLASS_METHOD_SLOT")
+        If meta <> -1 Then
+            Dim si As Integer
+            si = Val(ps.ast.nodes(meta).value)
+            If si > maxSlot Then maxSlot = si
+        End If
+    Next i
+    Return maxSlot + 1
+End Function
+
+Private Function MIRFindInterfaceMethodSlot(ByRef ps As ParseState, ByRef interfaceNameRaw As String, ByRef methodNameRaw As String, ByRef slotOut As Integer) As Integer
+    slotOut = -1
+    Dim wantInterface As String
+    Dim wantMethod As String
+    wantInterface = UCase(Trim(interfaceNameRaw))
+    wantMethod = UCase(Trim(methodNameRaw))
+    If wantInterface = "" Or wantMethod = "" Then Return 0
+
+    Dim seenPairs() As String
+    Dim seenCount As Integer
+    seenCount = 0
+    Dim slot As Integer
+    slot = 0
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "INTERFACE_STMT" Then Continue For
+        Dim ifaceName As String
+        ifaceName = UCase(Trim(ps.ast.nodes(i).value))
+        Dim m As Integer
+        m = ps.ast.nodes(i).firstChild
+        Do While m <> -1
+            If UCase(Trim(ps.ast.nodes(m).kind)) = "INTERFACE_METHOD_DECL" Then
+                Dim methodName As String
+                methodName = UCase(Trim(ps.ast.nodes(m).value))
+                Dim pairKey As String
+                pairKey = ifaceName & "." & methodName
+                Dim seen As Integer
+                seen = 0
+                Dim pi As Integer
+                For pi = 0 To seenCount - 1
+                    If seenPairs(pi) = pairKey Then seen = 1: Exit For
+                Next pi
+                If seen = 0 Then
+                    If seenCount = 0 Then
+                        ReDim seenPairs(0)
+                    Else
+                        ReDim Preserve seenPairs(seenCount)
+                    End If
+                    seenPairs(seenCount) = pairKey
+                    seenCount += 1
+                    If ifaceName = wantInterface And methodName = wantMethod Then
+                        slotOut = MIRGlobalVirtualSlotCount(ps) + slot
+                        Return 1
+                    End If
+                    slot += 1
+                End If
+            End If
+            m = ps.ast.nodes(m).nextSibling
+        Loop
+    Next i
+    Return 0
+End Function
+
+Private Function MIRClassImplementsInterface(ByRef ps As ParseState, ByRef classNameRaw As String, ByRef interfaceNameRaw As String) As Integer
+    Dim curClass As String
+    curClass = UCase(Trim(classNameRaw))
+    Dim wantInterface As String
+    wantInterface = UCase(Trim(interfaceNameRaw))
+    Dim hop As Integer
+    Do While curClass <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+        Dim classNode As Integer
+        classNode = MIRFindClassDeclNode(ps, curClass)
+        If classNode = -1 Then Exit Do
+        Dim ch As Integer
+        ch = ps.ast.nodes(classNode).firstChild
+        Do While ch <> -1
+            If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_IMPLEMENTS_REF" Then
+                If UCase(Trim(ps.ast.nodes(ch).value)) = wantInterface Then Return 1
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+        Dim baseNode As Integer
+        baseNode = MIRFindChildByKind(ps, classNode, "CLASS_BASE_REF")
+        If baseNode = -1 Then Exit Do
+        curClass = UCase(Trim(ps.ast.nodes(baseNode).value))
+    Loop
+    Return 0
+End Function
+
+Private Function MIRFindClassInterfaceImplementation(ByRef ps As ParseState, ByRef classNameRaw As String, ByRef interfaceNameRaw As String, ByRef methodNameRaw As String, ByRef ownerOut As String, ByRef methodNodeOut As Integer) As Integer
+    ownerOut = ""
+    methodNodeOut = -1
+    Dim curClass As String
+    curClass = UCase(Trim(classNameRaw))
+    Dim ifaceName As String
+    ifaceName = UCase(Trim(interfaceNameRaw))
+    Dim methodName As String
+    methodName = UCase(Trim(methodNameRaw))
+    If curClass = "" Or ifaceName = "" Or methodName = "" Then Return 0
+
+    Dim hop As Integer
+    Do While curClass <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+        Dim classNode As Integer
+        classNode = MIRFindClassDeclNode(ps, curClass)
+        If classNode = -1 Then Exit Do
+        Dim ch As Integer
+        ch = ps.ast.nodes(classNode).firstChild
+        Do While ch <> -1
+            If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_METHOD_DECL" Then
+                If UCase(Trim(ps.ast.nodes(ch).value)) = methodName Then
+                    ownerOut = curClass
+                    methodNodeOut = ch
+                    Return 1
+                End If
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+        Dim baseNode As Integer
+        baseNode = MIRFindChildByKind(ps, classNode, "CLASS_BASE_REF")
+        If baseNode = -1 Then Exit Do
+        curClass = UCase(Trim(ps.ast.nodes(baseNode).value))
+    Loop
+    Return 0
+End Function
+
+Private Function MIRFindMethodSlotInClass(ByRef ps As ParseState, ByRef classNameRaw As String, ByRef methodNameRaw As String, ByRef slotOut As Integer) As Integer
+    slotOut = -1
+    Dim className As String
+    className = UCase(Trim(classNameRaw))
+    Dim methodName As String
+    methodName = UCase(Trim(methodNameRaw))
+    If className = "" Or methodName = "" Then Return 0
+
+    Dim fallbackName As String
+    fallbackName = MIRMagicFallbackMethodName(methodName)
+
+    Dim curClass As String
+    curClass = className
+    Dim hop As Integer
+    hop = 0
+    Do While curClass <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+
+        Dim classNode As Integer
+        classNode = -1
+        Dim i As Integer
+        For i = 0 To ps.ast.count - 1
+            If UCase(Trim(ps.ast.nodes(i).kind)) = "CLASS_STMT" Then
+                If UCase(Trim(ps.ast.nodes(i).value)) = curClass Then
+                    classNode = i
+                    Exit For
+                End If
+            End If
+        Next i
+        If classNode = -1 Then Exit Do
+
+        Dim pass As Integer
+        For pass = 0 To 1
+            Dim wanted As String
+            wanted = IIf(pass = 0, methodName, fallbackName)
+            If wanted = "" Then Continue For
+
+            Dim ch As Integer
+            ch = ps.ast.nodes(classNode).firstChild
+            Do While ch <> -1
+                If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+                    If UCase(Trim(ps.ast.nodes(ch).value)) = wanted Then
+                        Dim meta As Integer
+                        meta = MIRFindChildByKind(ps, ch, "CLASS_METHOD_SLOT")
+                        If meta <> -1 Then
+                            slotOut = Val(ps.ast.nodes(meta).value)
+                            Return 1
+                        Else
+                            Return 0
+                        End If
+                    End If
+                End If
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+        Next pass
+
+        Dim baseNode As Integer
+        baseNode = MIRFindChildByKind(ps, classNode, "CLASS_BASE_REF")
+        If baseNode = -1 Then Exit Do
+        curClass = UCase(Trim(ps.ast.nodes(baseNode).value))
+    Loop
+
+    slotOut = -1
+    Return 0
+End Function
+
+Private Function MIRFindMethodSlotGlobal(ByRef ps As ParseState, ByRef methodNameRaw As String, ByRef slotOut As Integer) As Integer
+    slotOut = -1
+    Dim methodName As String
+    methodName = UCase(Trim(methodNameRaw))
+    If methodName = "" Then Return 0
+
+    Dim lookupNames(0 To 1) As String
+    lookupNames(0) = methodName
+    lookupNames(1) = MIRMagicFallbackMethodName(methodName)
+
+    Dim found As Integer
+    found = 0
+
+    Dim pass As Integer
+    For pass = 0 To 1
+        Dim wanted As String
+        wanted = lookupNames(pass)
+        If wanted = "" Then Continue For
+
+        Dim i As Integer
+        For i = 0 To ps.ast.count - 1
+            If UCase(Trim(ps.ast.nodes(i).kind)) <> "CLASS_METHOD_DECL" Then Continue For
+            If UCase(Trim(ps.ast.nodes(i).value)) <> wanted Then Continue For
+
+            Dim meta As Integer
+            meta = MIRFindChildByKind(ps, i, "CLASS_METHOD_SLOT")
+            If meta = -1 Then Continue For
+
+            Dim s As Integer
+            s = Val(ps.ast.nodes(meta).value)
+            If found = 0 Then
+                slotOut = s
+                found = 1
+            ElseIf slotOut <> s Then
+                slotOut = -1
+                Return 0
+            End If
+        Next i
+        If found <> 0 Then Exit For
+    Next pass
+
+    Return found
+End Function
+
+Private Function MIRHasRoutineNamed(ByRef ps As ParseState, ByRef routineNameRaw As String) As Integer
+    Dim routineName As String
+    routineName = UCase(Trim(routineNameRaw))
+    If routineName = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+        If k <> "SUB_STMT" And k <> "FUNCTION_STMT" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) = routineName Then Return 1
+    Next i
+
+    Return 0
+End Function
+
+Private Function MIRFindNearestDimDeclType(ByRef ps As ParseState, ByVal fromNodeIdx As Integer, ByRef varNameRaw As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+
+    Dim varName As String
+    varName = UCase(Trim(varNameRaw))
+    If varName = "" Then Return 0
+
+    Dim i As Integer
+    For i = fromNodeIdx To 0 Step -1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "DIM_DECL" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> varName Then Continue For
+
+        Dim typeNode As Integer
+        typeNode = MIRFindChildByKind(ps, i, "TYPE_REF")
+        If typeNode <> -1 Then
+            typeOut = UCase(Trim(ps.ast.nodes(typeNode).value))
+            If typeOut <> "" Then Return 1
+        End If
+    Next i
+
+    Return 0
+End Function
+
+Private Function MIRSplitMethodCallName(ByRef callNameRaw As String, ByRef ownerOut As String, ByRef methodOut As String) As Integer
+    ownerOut = ""
+    methodOut = ""
+
+    Dim callName As String
+    callName = UCase(Trim(callNameRaw))
+    Dim dotPos As Integer
+    dotPos = InStr(callName, ".")
+    If dotPos <= 1 Then Return 0
+
+    ownerOut = Trim(Left(callName, dotPos - 1))
+    methodOut = Trim(Mid(callName, dotPos + 1))
+    If ownerOut = "" Or methodOut = "" Then Return 0
+    If InStr(methodOut, ".") > 0 Then Return 0
+    Return 1
+End Function
+
+Private Function MIRResolveMethodCallRoute(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef callNameRaw As String, ByRef loweredNameOut As String, ByRef injectReceiverOut As Integer, ByRef receiverVarOut As String) As Integer
+    loweredNameOut = UCase(Trim(callNameRaw))
+    injectReceiverOut = 0
+    receiverVarOut = ""
+
+    Dim ownerName As String
+    Dim methodName As String
+    If MIRSplitMethodCallName(callNameRaw, ownerName, methodName) = 0 Then Return 0
+
+    Dim ownerType As String
+    If MIRFindNearestDimDeclType(ps, nodeIdx, ownerName, ownerType) <> 0 Then
+        ' If semantic assigned a slot for this method on the owner type (or its bases), encode a slot call
+        Dim slotIdx As Integer
+        Dim ownerIsClass As Integer
+        ownerIsClass = MIRHasClassDecl(ps, ownerType)
+        If MIRFindMethodSlotInClass(ps, ownerType, methodName, slotIdx) <> 0 And slotIdx >= 0 Then
+            loweredNameOut = "__VT_SLOT__:" & UCase(Trim(ownerType)) & ":" & LTrim(Str(slotIdx))
+        ElseIf ownerIsClass = 0 And MIRFindMethodSlotGlobal(ps, methodName, slotIdx) <> 0 And slotIdx >= 0 Then
+            loweredNameOut = "__VT_SLOT__:" & UCase(Trim(ownerType)) & ":" & LTrim(Str(slotIdx))
+        Else
+            loweredNameOut = ownerType & "_" & methodName
+        End If
+        injectReceiverOut = 1
+        receiverVarOut = ownerName
+        Return 1
+    End If
+
+    If MIRHasClassDecl(ps, ownerName) <> 0 Then
+        loweredNameOut = ownerName & "_" & methodName
+        injectReceiverOut = 0
+        receiverVarOut = ""
+        Return 1
+    End If
+
+    Return 0
+End Function
+
+Private Function MIRFindClassDeclNode(ByRef ps As ParseState, ByRef classTypeNameRaw As String) As Integer
+    Dim classTypeName As String
+    classTypeName = UCase(Trim(classTypeNameRaw))
+    If classTypeName = "" Then Return -1
+
+    ' first class node of that name (ast_name_index.fbs group 2); the scan below then
+    ' starts AT that node, so it is a hint, never a shortcut past an earlier match
+    Dim firstIdx As Integer = 0
+    If UXBAstNameIndexEnsure(ps) <> 0 Then
+        Dim ce As Integer = UXBAstNameIndexFirst(2, classTypeName)
+        If ce = -1 Then Return -1
+        firstIdx = UXBAstNameIndexNode(ce)
+    End If
+
+    Dim i As Integer
+    For i = firstIdx To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = classTypeName Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function MIRGetClassBaseTypeName(ByRef ps As ParseState, ByRef classTypeNameRaw As String, ByRef baseTypeOut As String) As Integer
+    baseTypeOut = ""
+
+    Dim classNode As Integer
+    classNode = MIRFindClassDeclNode(ps, classTypeNameRaw)
+    If classNode = -1 Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_BASE_REF" Then
+            baseTypeOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(baseTypeOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function MIRFindClassMethodDeclNode(ByRef ps As ParseState, ByRef classTypeNameRaw As String, ByRef methodNameRaw As String) As Integer
+    Dim classNode As Integer
+    classNode = MIRFindClassDeclNode(ps, classTypeNameRaw)
+    If classNode = -1 Then Return -1
+
+    Dim methodName As String
+    methodName = UCase(Trim(methodNameRaw))
+    If methodName = "" Then Return -1
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_METHOD_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = methodName Then Return ch
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function MIROperatorTokenToRoutineSuffix(ByRef opRaw As String, ByRef suffixOut As String) As Integer
+    Dim opText As String
+    opText = UCase(Trim(opRaw))
+    suffixOut = ""
+
+    Select Case opText
+    Case "+", "ADD", "OP_ADD"
+        suffixOut = "OP_ADD"
+    Case "-", "SUB", "OP_SUB"
+        suffixOut = "OP_SUB"
+    Case "*", "MUL", "OP_MUL"
+        suffixOut = "OP_MUL"
+    Case "/", "DIV", "OP_DIV"
+        suffixOut = "OP_DIV"
+    Case "\", "IDIV", "OP_IDIV"
+        suffixOut = "OP_IDIV"
+    Case "%", "MOD", "OP_MOD"
+        suffixOut = "OP_MOD"
+    Case "&", "BAND", "OP_BAND"
+        suffixOut = "OP_BAND"
+    Case "|", "BOR", "OP_BOR"
+        suffixOut = "OP_BOR"
+    Case "AND", "OP_AND"
+        suffixOut = "OP_AND"
+    Case "OR", "OP_OR"
+        suffixOut = "OP_OR"
+    Case "XOR", "OP_XOR", "^"
+        suffixOut = "OP_XOR"
+    Case "SHL", "<<", "OP_SHL"
+        suffixOut = "OP_SHL"
+    Case "SHR", ">>", "OP_SHR"
+        suffixOut = "OP_SHR"
+    Case "ROL", "OP_ROL"
+        suffixOut = "OP_ROL"
+    Case "ROR", "OP_ROR"
+        suffixOut = "OP_ROR"
+    Case "=", "==", "OP_EQ"
+        suffixOut = "OP_EQ"
+    Case "<>", "!=", "OP_NE"
+        suffixOut = "OP_NE"
+    Case "<", "OP_LT"
+        suffixOut = "OP_LT"
+    Case "<=", "OP_LE"
+        suffixOut = "OP_LE"
+    Case ">", "OP_GT"
+        suffixOut = "OP_GT"
+    Case ">=", "OP_GE"
+        suffixOut = "OP_GE"
+    End Select
+
+    If suffixOut = "" Then
+        Dim cleaned As String
+        cleaned = ""
+        Dim i As Integer
+        For i = 1 To Len(opText)
+            Dim ch As String
+            ch = Mid(opText, i, 1)
+            If (ch >= "A" And ch <= "Z") Or (ch >= "0" And ch <= "9") Then cleaned &= ch
+        Next i
+        If cleaned <> "" Then suffixOut = "OP_" & cleaned
+    End If
+
+    Return IIf(suffixOut <> "", 1, 0)
+End Function
+
+Private Function MIRFindClassOperatorDeclNode(ByRef ps As ParseState, ByRef classTypeNameRaw As String, ByRef opSuffixRaw As String) As Integer
+    Dim classNode As Integer
+    classNode = MIRFindClassDeclNode(ps, classTypeNameRaw)
+    If classNode = -1 Then Return -1
+
+    Dim opSuffix As String
+    opSuffix = UCase(Trim(opSuffixRaw))
+    If opSuffix = "" Then Return -1
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_OPERATOR_DECL" Then
+            Dim candidate As String
+            If MIROperatorTokenToRoutineSuffix(ps.ast.nodes(ch).value, candidate) <> 0 Then
+                If UCase(Trim(candidate)) = opSuffix Then Return ch
+            End If
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function MIRResolveOperatorOwnerType(ByRef ps As ParseState, ByRef startTypeNameRaw As String, ByRef opSuffixRaw As String, ByRef ownerTypeOut As String, ByRef routineSuffixOut As String) As Integer
+    ownerTypeOut = ""
+    routineSuffixOut = ""
+
+    Dim curType As String
+    curType = UCase(Trim(startTypeNameRaw))
+    Dim opSuffix As String
+    opSuffix = UCase(Trim(opSuffixRaw))
+
+    If curType = "" Or opSuffix = "" Then Return 0
+
+    Dim hop As Integer
+    Do While curType <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+
+        If MIRFindClassOperatorDeclNode(ps, curType, opSuffix) <> -1 Then
+            ownerTypeOut = curType
+            routineSuffixOut = opSuffix
+            Return 1
+        End If
+
+        If MIRFindClassMethodDeclNode(ps, curType, opSuffix) <> -1 Then
+            ownerTypeOut = curType
+            routineSuffixOut = opSuffix
+            Return 1
+        End If
+
+        If opSuffix = "OP_ADD" And MIRFindClassMethodDeclNode(ps, curType, "ADD") <> -1 Then
+            ownerTypeOut = curType
+            routineSuffixOut = "ADD"
+            Return 1
+        End If
+
+        Dim baseType As String
+        If MIRGetClassBaseTypeName(ps, curType, baseType) = 0 Then Exit Do
+        curType = UCase(Trim(baseType))
+    Loop
+
+    Return 0
+End Function
+
+Private Function MIRFieldPathReadIdent(ByRef pathText As String, ByRef cursor As Integer, ByRef identOut As String) As Integer
+    identOut = ""
+    If cursor < 1 Or cursor > Len(pathText) Then Return 0
+
+    Do While cursor <= Len(pathText)
+        Dim ws As String
+        ws = Mid(pathText, cursor, 1)
+        If ws <> " " And ws <> Chr(9) Then Exit Do
+        cursor += 1
+    Loop
+    If cursor > Len(pathText) Then Return 0
+
+    Dim ch As String
+    ch = Mid(pathText, cursor, 1)
+    If ((ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Or ch = "_") = 0 Then Return 0
+
+    Dim startPos As Integer
+    startPos = cursor
+    cursor += 1
+    Do While cursor <= Len(pathText)
+        ch = Mid(pathText, cursor, 1)
+        If ((ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Or (ch >= "0" And ch <= "9") Or ch = "_") = 0 Then Exit Do
+        cursor += 1
+    Loop
+
+    identOut = UCase(Mid(pathText, startPos, cursor - startPos))
+    Return IIf(identOut <> "", 1, 0)
+End Function
+
+Private Function MIRFieldPathSkipIndexes(ByRef pathText As String, ByRef cursor As Integer) As Integer
+    Do While cursor <= Len(pathText)
+        Dim ws As String
+        ws = Mid(pathText, cursor, 1)
+        If ws <> " " And ws <> Chr(9) Then Exit Do
+        cursor += 1
+    Loop
+
+    If cursor > Len(pathText) Then Return 1
+    If Mid(pathText, cursor, 1) <> "(" Then Return 1
+
+    Dim depth As Integer
+    depth = 0
+    Do While cursor <= Len(pathText)
+        Dim ch As String
+        ch = Mid(pathText, cursor, 1)
+        If ch = "(" Then
+            depth += 1
+        ElseIf ch = ")" Then
+            depth -= 1
+            If depth = 0 Then
+                cursor += 1
+                Exit Do
+            End If
+        End If
+        cursor += 1
+    Loop
+
+    Return IIf(depth = 0, 1, 0)
+End Function
+
+Private Function MIRFindClassMemberNode(ByRef ps As ParseState, ByVal classNode As Integer, ByRef memberNameRaw As String, ByRef memberNodeOut As Integer) As Integer
+    memberNodeOut = -1
+    If classNode < 0 Or classNode >= ps.ast.count Then Return 0
+
+    Dim memberName As String
+    memberName = UCase(Trim(memberNameRaw))
+    If memberName = "" Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        Dim ck As String
+        ck = UCase(Trim(ps.ast.nodes(ch).kind))
+        If ck = "CLASS_FIELD" Or ck = "CLASS_PROPERTY_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = memberName Then
+                memberNodeOut = ch
+                Return 1
+            End If
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function MIRFindClassMemberInHierarchy(ByRef ps As ParseState, ByRef classNameRaw As String, ByRef memberNameRaw As String, ByRef ownerOut As String, ByRef memberNodeOut As Integer) As Integer
+    ownerOut = ""
+    memberNodeOut = -1
+    Dim curClass As String
+    curClass = UCase(Trim(classNameRaw))
+    Dim memberName As String
+    memberName = UCase(Trim(memberNameRaw))
+    Dim hop As Integer
+    Do While curClass <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+        Dim classNode As Integer
+        classNode = MIRFindClassDeclNode(ps, curClass)
+        If classNode = -1 Then Exit Do
+        If MIRFindClassMemberNode(ps, classNode, memberName, memberNodeOut) <> 0 Then
+            ownerOut = curClass
+            Return 1
+        End If
+        Dim baseNode As Integer
+        baseNode = MIRFindChildByKind(ps, classNode, "CLASS_BASE_REF")
+        If baseNode = -1 Then Exit Do
+        curClass = UCase(Trim(ps.ast.nodes(baseNode).value))
+    Loop
+    Return 0
+End Function
+
+Private Function MIRClassFieldHasFlag(ByRef ps As ParseState, ByVal fieldNode As Integer, ByRef flagRaw As String) As Integer
+    If fieldNode < 0 Or fieldNode >= ps.ast.count Then Return 0
+    If UCase(Trim(ps.ast.nodes(fieldNode).kind)) <> "CLASS_FIELD" Then Return 0
+
+    Dim wantFlag As String
+    wantFlag = UCase(Trim(flagRaw))
+    If wantFlag = "" Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(fieldNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_FIELD_FLAG" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = wantFlag Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function MIRFieldNodeTypeName(ByRef ps As ParseState, ByVal fieldNode As Integer, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If fieldNode < 0 Or fieldNode >= ps.ast.count Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(fieldNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "TYPE_REF" Then
+            typeOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(typeOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function MIRFindPropertyAccessorBody(ByRef ps As ParseState, ByVal propertyNode As Integer, ByRef accessorRaw As String, ByRef bodyNodeOut As Integer) As Integer
+    bodyNodeOut = -1
+    If propertyNode < 0 Or propertyNode >= ps.ast.count Then Return 0
+    If UCase(Trim(ps.ast.nodes(propertyNode).kind)) <> "CLASS_PROPERTY_DECL" Then Return 0
+
+    Dim targetKind As String
+    targetKind = ""
+    If UCase(Trim(accessorRaw)) = "GET" Then
+        targetKind = "CLASS_PROPERTY_GET_STMT"
+    ElseIf UCase(Trim(accessorRaw)) = "SET" Then
+        targetKind = "CLASS_PROPERTY_SET_STMT"
+    Else
+        Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(propertyNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = targetKind Then
+            bodyNodeOut = ch
+            Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function MIRNodeInSubtree(ByRef ps As ParseState, ByVal subtreeRoot As Integer, ByVal targetNode As Integer) As Integer
+    If subtreeRoot < 0 Or subtreeRoot >= ps.ast.count Then Return 0
+    If subtreeRoot = targetNode Then Return 1
+
+    If ps.ast.nodes(subtreeRoot).left <> -1 Then
+        If MIRNodeInSubtree(ps, ps.ast.nodes(subtreeRoot).left, targetNode) <> 0 Then Return 1
+    End If
+    If ps.ast.nodes(subtreeRoot).right <> -1 Then
+        If MIRNodeInSubtree(ps, ps.ast.nodes(subtreeRoot).right, targetNode) <> 0 Then Return 1
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(subtreeRoot).firstChild
+    Do While ch <> -1
+        If MIRNodeInSubtree(ps, ch, targetNode) <> 0 Then Return 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function MIRResolveFieldRootType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef rootNameRaw As String, ByRef rootTypeOut As String) As Integer
+    rootTypeOut = ""
+
+    Dim rootName As String
+    rootName = UCase(Trim(rootNameRaw))
+    If rootName = "" Then Return 0
+
+    If rootName <> "THIS" And rootName <> "ME" And rootName <> "SUPER" Then
+        If MIRFindNearestDeclaredType(ps, nodeIdx, rootName, rootTypeOut) <> 0 Then
+            rootTypeOut = UCase(Trim(rootTypeOut))
+            Return IIf(rootTypeOut <> "", 1, 0)
+        End If
+    End If
+
+    If rootName = "THIS" Or rootName = "ME" Or rootName = "SUPER" Then
+        Dim p As Integer
+        p = nodeIdx
+        Do While p >= 0 And p < ps.ast.count
+            If UCase(Trim(ps.ast.nodes(p).kind)) = "CLASS_STMT" Then
+                rootTypeOut = UCase(Trim(ps.ast.nodes(p).value))
+                If rootName = "SUPER" Then
+                    Dim baseCh As Integer
+                    baseCh = ps.ast.nodes(p).firstChild
+                    Do While baseCh <> -1
+                        If UCase(Trim(ps.ast.nodes(baseCh).kind)) = "CLASS_BASE_REF" Then
+                            rootTypeOut = UCase(Trim(ps.ast.nodes(baseCh).value))
+                            Exit Do
+                        End If
+                        baseCh = ps.ast.nodes(baseCh).nextSibling
+                    Loop
+                End If
+                Return IIf(rootTypeOut <> "", 1, 0)
+            End If
+            p = ps.ast.nodes(p).parent
+        Loop
+
+        Dim i As Integer
+        For i = 0 To ps.ast.count - 1
+            If UCase(Trim(ps.ast.nodes(i).kind)) <> "CLASS_STMT" Then Continue For
+            If MIRNodeInSubtree(ps, i, nodeIdx) <> 0 Then
+                rootTypeOut = UCase(Trim(ps.ast.nodes(i).value))
+                If rootName = "SUPER" Then
+                    Dim baseCh2 As Integer
+                    baseCh2 = ps.ast.nodes(i).firstChild
+                    Do While baseCh2 <> -1
+                        If UCase(Trim(ps.ast.nodes(baseCh2).kind)) = "CLASS_BASE_REF" Then
+                            rootTypeOut = UCase(Trim(ps.ast.nodes(baseCh2).value))
+                            Exit Do
+                        End If
+                        baseCh2 = ps.ast.nodes(baseCh2).nextSibling
+                    Loop
+                End If
+                Return IIf(rootTypeOut <> "", 1, 0)
+            End If
+        Next i
+
+        For i = 0 To ps.ast.count - 1
+            Dim rk As String
+            rk = UCase(Trim(ps.ast.nodes(i).kind))
+            If rk <> "FUNCTION_STMT" And rk <> "SUB_STMT" And rk <> "CLASS_METHOD_DECL" And rk <> "CLASS_CONSTRUCTOR_DECL" And rk <> "CLASS_DESTRUCTOR_DECL" Then Continue For
+            If MIRNodeInSubtree(ps, i, nodeIdx) = 0 Then Continue For
+
+            Dim routineName As String
+            routineName = UCase(Trim(ps.ast.nodes(i).value))
+            Dim sepPos As Integer
+            sepPos = InStr(routineName, "_")
+            If sepPos <= 1 Then Continue For
+
+            Dim classCandidate As String
+            classCandidate = Left(routineName, sepPos - 1)
+            If MIRFindClassDeclNode(ps, classCandidate) <> -1 Then
+                rootTypeOut = classCandidate
+                Return 1
+            End If
+        Next i
+    End If
+
+    Return 0
+End Function
+
+Private Function MIRResolveFieldPathType(ByRef ps As ParseState, ByRef rootTypeRaw As String, ByRef pathText As String, ByRef finalTypeOut As String, ByRef finalNodeOut As Integer) As Integer
+    finalTypeOut = ""
+    finalNodeOut = -1
+
+    Dim currentType As String
+    currentType = UCase(Trim(rootTypeRaw))
+    If currentType = "" Then Return 0
+
+    Dim cursor As Integer
+    cursor = 1
+    Do
+        Dim memberName As String
+        If MIRFieldPathReadIdent(pathText, cursor, memberName) = 0 Then Return 0
+
+        Dim classNode As Integer
+        classNode = MIRFindClassDeclNode(ps, currentType)
+        If classNode = -1 Then Return 0
+
+        Dim memberNode As Integer
+        Dim memberOwner As String
+        If MIRFindClassMemberInHierarchy(ps, currentType, memberName, memberOwner, memberNode) = 0 Then Return 0
+        finalNodeOut = memberNode
+
+        If MIRFieldPathSkipIndexes(pathText, cursor) = 0 Then Return 0
+
+        Do While cursor <= Len(pathText)
+            Dim ws As String
+            ws = Mid(pathText, cursor, 1)
+            If ws <> " " And ws <> Chr(9) Then Exit Do
+            cursor += 1
+        Loop
+
+        Dim memberType As String
+        If MIRFieldNodeTypeName(ps, memberNode, memberType) = 0 Then Return 0
+
+        If cursor > Len(pathText) Then
+            finalTypeOut = UCase(Trim(memberType))
+            Return IIf(finalTypeOut <> "", 1, 0)
+        End If
+
+        If Mid(pathText, cursor, 1) <> "." Then Return 0
+        cursor += 1
+        currentType = UCase(Trim(memberType))
+        If currentType = "" Then Return 0
+    Loop
+
+    Return 0
+End Function
+
+Private Function MIRResolveFieldPathTypeOwner(ByRef ps As ParseState, ByRef rootTypeRaw As String, ByRef pathText As String, ByRef finalTypeOut As String, ByRef finalNodeOut As Integer, ByRef ownerTypeOut As String) As Integer
+    finalTypeOut = ""
+    finalNodeOut = -1
+    ownerTypeOut = ""
+
+    Dim currentType As String
+    currentType = UCase(Trim(rootTypeRaw))
+    If currentType = "" Then Return 0
+
+    Dim cursor As Integer
+    cursor = 1
+    Do
+        Dim memberName As String
+        If MIRFieldPathReadIdent(pathText, cursor, memberName) = 0 Then Return 0
+
+        Dim classNode As Integer
+        classNode = MIRFindClassDeclNode(ps, currentType)
+        If classNode = -1 Then Return 0
+
+        Dim memberNode As Integer
+        If MIRFindClassMemberInHierarchy(ps, currentType, memberName, ownerTypeOut, memberNode) = 0 Then Return 0
+        finalNodeOut = memberNode
+
+        If MIRFieldPathSkipIndexes(pathText, cursor) = 0 Then Return 0
+
+        Do While cursor <= Len(pathText)
+            Dim ws As String
+            ws = Mid(pathText, cursor, 1)
+            If ws <> " " And ws <> Chr(9) Then Exit Do
+            cursor += 1
+        Loop
+
+        Dim memberType As String
+        If MIRFieldNodeTypeName(ps, memberNode, memberType) = 0 Then Return 0
+
+        If cursor > Len(pathText) Then
+            finalTypeOut = UCase(Trim(memberType))
+            Return IIf(finalTypeOut <> "", 1, 0)
+        End If
+
+        If Mid(pathText, cursor, 1) <> "." Then Return 0
+        cursor += 1
+        currentType = UCase(Trim(memberType))
+        If currentType = "" Then Return 0
+    Loop
+
+    Return 0
+End Function
+
+Private Function MIRNormalizeFieldPathForAccess(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef fieldPathInOut As String, ByVal isWrite As Integer, ByRef errText As String) As Integer
+    Dim pathText As String
+    pathText = Trim(fieldPathInOut)
+    Dim dotPos As Integer
+    dotPos = InStr(pathText, ".")
+    If dotPos <= 1 Then Return 1
+
+    Dim rootName As String
+    Dim memberPath As String
+    rootName = UCase(Trim(Left(pathText, dotPos - 1)))
+    memberPath = Trim(Mid(pathText, dotPos + 1))
+    If rootName = "" Or memberPath = "" Then Return 1
+
+    Dim rootType As String
+    If MIRResolveFieldRootType(ps, nodeIdx, rootName, rootType) = 0 Then Return 1
+    If rootType = "" Then Return 1
+
+    Dim finalType As String
+    Dim finalNode As Integer
+    Dim ownerType As String
+    If MIRResolveFieldPathTypeOwner(ps, rootType, memberPath, finalType, finalNode, ownerType) = 0 Then Return 1
+    If finalNode = -1 Then Return 1
+
+    Dim finalKind As String
+    finalKind = UCase(Trim(ps.ast.nodes(finalNode).kind))
+    If finalKind <> "CLASS_FIELD" And finalKind <> "CLASS_PROPERTY_DECL" Then Return 1
+
+    If isWrite <> 0 And finalKind = "CLASS_FIELD" Then
+        If MIRClassFieldHasFlag(ps, finalNode, "READONLY") <> 0 Or MIRClassFieldHasFlag(ps, finalNode, "IMMUTABLE") <> 0 Then
+            errText = "MIR: readonly/immutable field assignment denied " & UCase(Trim(ps.ast.nodes(finalNode).value))
+            Return 0
+        End If
+    End If
+
+    Dim staticMember As Integer
+    If finalKind = "CLASS_FIELD" Then
+        staticMember = MIRClassFieldHasFlag(ps, finalNode, "STATIC")
+    Else
+        staticMember = MIRClassPropertyHasFlag(ps, finalNode, "STATIC")
+    End If
+    If staticMember <> 0 Then
+        Dim staticOwner As String
+        staticOwner = UCase(Trim(ownerType))
+        If staticOwner = "" Then staticOwner = UCase(Trim(rootType))
+        fieldPathInOut = staticOwner & "." & UCase(Trim(ps.ast.nodes(finalNode).value))
+    End If
+
+    Return 1
+End Function
+
+Private Function MIRResolvePropertyAccessorRoutine(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef rootTypeRaw As String, ByRef pathText As String, ByRef accessorRaw As String, ByRef routineNameOut As String, ByRef propertyTypeOut As String) As Integer
+    routineNameOut = ""
+    propertyTypeOut = ""
+
+    Dim currentType As String
+    currentType = UCase(Trim(rootTypeRaw))
+    If currentType = "" Then Return 0
+
+    Dim accessor As String
+    accessor = UCase(Trim(accessorRaw))
+    If accessor <> "GET" And accessor <> "SET" Then Return 0
+
+    Dim cursor As Integer
+    cursor = 1
+    Do
+        Dim memberName As String
+        If MIRFieldPathReadIdent(pathText, cursor, memberName) = 0 Then Return 0
+
+        Dim ownerType As String
+        Dim memberNode As Integer
+        If MIRFindClassMemberInHierarchy(ps, currentType, memberName, ownerType, memberNode) = 0 Then Return 0
+
+        If MIRFieldPathSkipIndexes(pathText, cursor) = 0 Then Return 0
+
+        Do While cursor <= Len(pathText)
+            Dim ws As String
+            ws = Mid(pathText, cursor, 1)
+            If ws <> " " And ws <> Chr(9) Then Exit Do
+            cursor += 1
+        Loop
+
+        If cursor > Len(pathText) Then
+            If UCase(Trim(ps.ast.nodes(memberNode).kind)) <> "CLASS_PROPERTY_DECL" Then Return 0
+            Dim bodyNode As Integer
+            If MIRFindPropertyAccessorBody(ps, memberNode, accessor, bodyNode) = 0 Then Return 0
+            If MIRFieldNodeTypeName(ps, memberNode, propertyTypeOut) = 0 Then propertyTypeOut = "I32"
+            routineNameOut = ownerType & "_PROP" & accessor & "_" & UCase(Trim(ps.ast.nodes(memberNode).value))
+            Return IIf(routineNameOut <> "", 1, 0)
+        End If
+
+        If Mid(pathText, cursor, 1) <> "." Then Return 0
+        cursor += 1
+
+        Dim memberType As String
+        If MIRFieldNodeTypeName(ps, memberNode, memberType) = 0 Then Return 0
+        currentType = UCase(Trim(memberType))
+        If currentType = "" Then Return 0
+    Loop
+
+    Return 0
+End Function
+
+Private Function MIRTryInferExprTypeName(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+    Dim k As String
+    k = UCase(Trim(n.kind))
+
+    ' S-037: THIS / ME / SUPER as a METHOD-CALL receiver have no declaration, and the type
+    ' pass stamps them TYPE_OBJECT (deliberately -- see type_infer_expr.fbs), so both the
+    ' stamped type and the declaration lookup left the call target as `OBJECT_<method>`,
+    ' which exists nowhere (`THIS.Hidden()`/`ME.A()` failed in the interpreter and native
+    ' x64 alike). They are the enclosing class (SUPER: its base) -- the rule field paths
+    ' already use -- so resolve them BEFORE the stamped-type shortcut.
+    If k = "IDENT" Or k = "KEYWORD_REF" Then
+        Dim receiverWord As String
+        receiverWord = UCase(Trim(n.value))
+        If receiverWord = "THIS" Or receiverWord = "ME" Or receiverWord = "SUPER" Then
+            If MIRResolveFieldRootType(ps, nodeIdx, receiverWord, typeOut) <> 0 Then
+                typeOut = UCase(Trim(typeOut))
+                Return IIf(typeOut <> "", 1, 0)
+            End If
+        End If
+    End If
+
+    If Trim(n.typeName) <> "" Then
+        typeOut = UCase(Trim(n.typeName))
+        If Left(typeOut, 5) = "TYPE_" Then typeOut = Mid(typeOut, 6)
+        Return 1
+    End If
+
+    If k = "IDENT" Or k = "KEYWORD_REF" Then
+        If MIRFindNearestDeclaredType(ps, nodeIdx, n.value, typeOut) <> 0 Then
+            typeOut = UCase(Trim(typeOut))
+            Return IIf(typeOut <> "", 1, 0)
+        End If
+        Return 0
+    End If
+
+    If k = "FIELD_EXPR" Then
+        Dim rootName As String
+        Dim pathText As String
+        Dim typeErr As String
+        If MIRBuildFieldPath(ps, nodeIdx, pathText, typeErr) = 0 Then Return 0
+
+        Dim dotPos As Integer
+        dotPos = InStr(pathText, ".")
+        If dotPos <= 1 Then Return 0
+
+        rootName = UCase(Trim(Left(pathText, dotPos - 1)))
+        pathText = Trim(Mid(pathText, dotPos + 1))
+        If rootName = "" Or pathText = "" Then Return 0
+
+        Dim rootType As String
+        If MIRResolveFieldRootType(ps, nodeIdx, rootName, rootType) = 0 Then Return 0
+
+        Dim finalNode As Integer
+        If MIRResolveFieldPathType(ps, rootType, pathText, typeOut, finalNode) = 0 Then Return 0
+        typeOut = UCase(Trim(typeOut))
+        Return IIf(typeOut <> "", 1, 0)
+    End If
+
+    If k = "NEW_EXPR" Then
+        typeOut = UCase(Trim(n.value))
+        Return IIf(typeOut <> "", 1, 0)
+    End If
+
+    Return 0
+End Function
+
+Private Function MIRTypeNameIsUnsignedInteger(ByRef typeNameRaw As String) As Integer
+    Dim t As String
+    t = UCase(Trim(typeNameRaw))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Select Case t
+    Case "U8", "U16", "U32", "U64", "UBYTE", "USHORT", "UINTEGER", "ULONG", "ULONGINT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function MIRTypeNameIsFloat64Family(ByRef typeNameRaw As String) As Integer
+    Dim t As String
+    t = UCase(Trim(typeNameRaw))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Return IIf(t = "F32" Or t = "F64" Or t = "SINGLE" Or t = "DOUBLE", 1, 0)
+End Function
+
+' S-080: the MIR opcode of a compound assignment `x op= y`, given whether the
+' operation is floating point, the LEFT operand's declared type and whether the
+' right operand is U64 (S-077: an unsigned operand makes `\=`/`%=` unsigned and
+' `>>=` logical). Returns 0 for an operator that is not a compound assignment.
+Private Function MIRCompoundAssignOpcode(ByRef opText As String, ByVal isFloat As Integer, ByRef leftTypeName As String, ByVal rightIsU64 As Integer, ByRef opcodeOut As String) As Integer
+    Select Case opText
+    Case "+=": opcodeOut = IIf(isFloat <> 0, MIR_OP_FADD, MIR_OP_ADD)
+    Case "-=": opcodeOut = IIf(isFloat <> 0, MIR_OP_FSUB, MIR_OP_SUB)
+    Case "*=": opcodeOut = IIf(isFloat <> 0, MIR_OP_FMUL, MIR_OP_MUL)
+    Case "/=": opcodeOut = IIf(isFloat <> 0, MIR_OP_FDIV, MIR_OP_DIV)
+    Case "\=": opcodeOut = MIR_OP_IDIV
+    Case "%=": opcodeOut = MIR_OP_MOD
+    Case "&=": opcodeOut = MIR_OP_AND
+    Case "|=": opcodeOut = MIR_OP_OR
+    Case "^=": opcodeOut = MIR_OP_XOR
+    Case "<<=": opcodeOut = MIR_OP_SHL
+    Case ">>=": opcodeOut = MIR_OP_SHR
+    Case "**=": opcodeOut = MIR_OP_POW
+    Case "ROL=": opcodeOut = MIR_OP_ROL
+    Case "ROR=": opcodeOut = MIR_OP_ROR
+    Case Else: Return 0
+    End Select
+    If opText = ">>=" And MIRTypeNameIsUnsignedInteger(leftTypeName) <> 0 Then opcodeOut = MIR_OP_USHR
+    If isFloat = 0 And (opcodeOut = MIR_OP_IDIV Or opcodeOut = MIR_OP_MOD) Then
+        Dim lt As String
+        lt = UCase(Trim(leftTypeName))
+        If Left(lt, 5) = "TYPE_" Then lt = Mid(lt, 6)
+        If lt = "U64" Or lt = "ULONGINT" Or rightIsU64 <> 0 Then opcodeOut = IIf(opcodeOut = MIR_OP_IDIV, MIR_OP_UIDIV, MIR_OP_UMOD)
+    End If
+    Return 1
+End Function
+
+Private Function MIRBuildFieldPath(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef pathOut As String, ByRef errText As String) As Integer
+    pathOut = ""
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then
+        errText = "mir: invalid field node"
+        Return 0
+    End If
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+
+    Dim k As String
+    k = UCase(Trim(n.kind))
+
+    If k = "IDENT" Or k = "KEYWORD_REF" Then
+        pathOut = UCase(Trim(n.value))
+        If pathOut = "" Then
+            errText = "mir: field root name missing"
+            Return 0
+        End If
+        Return 1
+    End If
+
+    If k = "CALL_EXPR" Then
+        Dim baseName As String
+        baseName = UCase(Trim(n.value))
+        If baseName = "" Then
+            errText = "mir: field root name missing"
+            Return 0
+        End If
+
+        If MIRChildCount(ps, nodeIdx) <> 1 Then
+            errText = "mir: indexed field root expects one index"
+            Return 0
+        End If
+
+        Dim idxExpr As Integer
+        idxExpr = MIRChildAt(ps, nodeIdx, 0)
+        If idxExpr = -1 Then
+            errText = "mir: indexed field root missing index"
+            Return 0
+        End If
+
+        Dim idxText As String
+        If MIRDescribeNodeText(ps, idxExpr, idxText) = 0 Then
+            errText = "mir: indexed field root index unsupported"
+            Return 0
+        End If
+
+        pathOut = baseName & "(" & idxText & ")"
+        Return 1
+    End If
+
+    If k <> "FIELD_EXPR" Then
+        errText = "mir: field base must be identifier, indexed access or field"
+        Return 0
+    End If
+
+    Dim basePath As String
+    If MIRBuildFieldPath(ps, n.left, basePath, errText) = 0 Then Return 0
+
+    Dim memberName As String
+    memberName = UCase(Trim(n.value))
+    If memberName = "" Then
+        errText = "mir: field member name missing"
+        Return 0
+    End If
+
+    If basePath = "" Then
+        pathOut = memberName
+    Else
+        pathOut = basePath & "." & memberName
+    End If
+
+    Return 1
+End Function
+
+Private Function MIRIsStmtKind(ByRef kindText As String) As Integer
+    Dim k As String
+    k = UCase(Trim(kindText))
+
+    If Right(k, 5) = "_STMT" Then Return 1
+    If k = "EXIT" Then Return 1
+    If k = "CONTINUE" Then Return 1
+    Return 0
+End Function
+
+Private Function MIRAllocBlock(ByRef module As MIRModule, ByVal fnIdx As Integer) As Integer
+    Dim fnPtr As MIRFunction Ptr
+    Dim bIdx As Integer
+    fnPtr = @module.functions(fnIdx)
+    bIdx = fnPtr->blockCount
+
+    If bIdx = 0 Then
+        ReDim fnPtr->blocks(0)
+    Else
+        ReDim Preserve fnPtr->blocks(bIdx)
+    End If
+
+    fnPtr->blockCount = bIdx + 1
+    fnPtr->blocks(bIdx).id = bIdx
+    fnPtr->blocks(bIdx).instructionCount = 0
+    fnPtr->blocks(bIdx).predecessorCount = 0
+    fnPtr->blocks(bIdx).successorCount = 0
+    fnPtr->blocks(bIdx).isEntry = 0
+    fnPtr->blocks(bIdx).isExit = 0
+
+    Return bIdx
+End Function
+
+Private Sub MIRPushLoopContext(ByRef loopType As String, ByVal breakBlock As Integer, ByVal continueBlock As Integer)
+    If gMirLowerLoopDepth = 0 Then
+        ReDim gMirLowerLoopType(0)
+        ReDim gMirLowerLoopBreak(0)
+        ReDim gMirLowerLoopContinue(0)
+    Else
+        ReDim Preserve gMirLowerLoopType(gMirLowerLoopDepth)
+        ReDim Preserve gMirLowerLoopBreak(gMirLowerLoopDepth)
+        ReDim Preserve gMirLowerLoopContinue(gMirLowerLoopDepth)
+    End If
+
+    gMirLowerLoopType(gMirLowerLoopDepth) = UCase(Trim(loopType))
+    gMirLowerLoopBreak(gMirLowerLoopDepth) = breakBlock
+    gMirLowerLoopContinue(gMirLowerLoopDepth) = continueBlock
+    gMirLowerLoopDepth += 1
+End Sub
+
+Private Sub MIRPopLoopContext()
+    If gMirLowerLoopDepth <= 0 Then Exit Sub
+    gMirLowerLoopDepth -= 1
+End Sub
+
+Private Function MIRFindLoopContext(ByRef wantType As String, ByRef breakBlockOut As Integer, ByRef continueBlockOut As Integer) As Integer
+    Dim i As Integer
+    Dim w As String
+    w = UCase(Trim(wantType))
+
+    For i = gMirLowerLoopDepth - 1 To 0 Step -1
+        If w = "" Or gMirLowerLoopType(i) = w Then
+            breakBlockOut = gMirLowerLoopBreak(i)
+            continueBlockOut = gMirLowerLoopContinue(i)
+            Return 1
+        End If
+    Next i
+
+    Return 0
+End Function
+
+Private Sub MIRPushIfExitTarget(ByVal endBlock As Integer)
+    If gMirLowerIfDepth = 0 Then
+        ReDim gMirLowerIfEnd(0)
+    Else
+        ReDim Preserve gMirLowerIfEnd(gMirLowerIfDepth)
+    End If
+    gMirLowerIfEnd(gMirLowerIfDepth) = endBlock
+    gMirLowerIfDepth += 1
+End Sub
+
+Private Sub MIRPopIfExitTarget()
+    If gMirLowerIfDepth <= 0 Then Exit Sub
+    gMirLowerIfDepth -= 1
+End Sub
+
+Private Function MIRCurrentIfExitTarget(ByRef endBlockOut As Integer) As Integer
+    If gMirLowerIfDepth <= 0 Then Return 0
+    endBlockOut = gMirLowerIfEnd(gMirLowerIfDepth - 1)
+    Return 1
+End Function
+
+Private Sub MIRPushTryTarget(ByVal targetBlock As Integer)
+    If gMirLowerTryDepth = 0 Then
+        ReDim gMirLowerTryTarget(0)
+    Else
+        ReDim Preserve gMirLowerTryTarget(gMirLowerTryDepth)
+    End If
+    gMirLowerTryTarget(gMirLowerTryDepth) = targetBlock
+    gMirLowerTryDepth += 1
+End Sub
+
+Private Sub MIRPopTryTarget()
+    If gMirLowerTryDepth <= 0 Then Exit Sub
+    gMirLowerTryDepth -= 1
+End Sub
+
+Private Function MIRCurrentTryTarget(ByRef targetOut As Integer) As Integer
+    If gMirLowerTryDepth <= 0 Then Return 0
+    targetOut = gMirLowerTryTarget(gMirLowerTryDepth - 1)
+    Return 1
+End Function
+
+Private Sub MIRMarkExceptionActive(ByRef module As MIRModule, ByVal fnIdx As Integer, ByVal blkIdx As Integer, ByRef tempSeed As Integer)
+    Dim oneName As String
+    oneName = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, oneName, 1, "1"
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, "__mir_exc_active", 1, oneName
+End Sub
+
+Private Sub MIRClearExceptionActive(ByRef module As MIRModule, ByVal fnIdx As Integer, ByVal blkIdx As Integer, ByRef tempSeed As Integer)
+    Dim zeroName As String
+    zeroName = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, zeroName, 1, "0"
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, "__mir_exc_active", 1, zeroName
+End Sub
+
+Private Function MIREnsureBoolVar(ByRef module As MIRModule, ByVal fnIdx As Integer, ByVal blkIdx As Integer, ByRef tempSeed As Integer, ByRef inName As String, ByRef outName As String) As Integer
+    Dim zeroName As String
+    Dim boolName As String
+
+    zeroName = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, zeroName, 1, "0"
+
+    boolName = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_NE, boolName, 2, inName, zeroName
+
+    outName = boolName
+    Return 1
+End Function
+
+Private Function MIRLowerStmtRange(ByRef ps As ParseState, ByVal parentIdx As Integer, ByVal fromPos As Integer, ByVal toPos As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    Dim p As Integer
+    For p = fromPos To toPos
+        Dim stIdx As Integer
+        stIdx = MIRChildAt(ps, parentIdx, p)
+        If stIdx = -1 Then
+            errText = "mir: statement child missing"
+            Return 0
+        End If
+        If MIRLowerTopLevelStmt(ps, stIdx, module, fnIdx, blkIdx, tempSeed, errText) = 0 Then Return 0
+    Next p
+    Return 1
+End Function
+
+#include once "mir_lowering.fbs"
+
+
+' ADIM07: canonical MIR surface contract bridge.
+#include once "../surface/uxb_surface_layer_bridge.fbs"
+Function UXBMIRSurfaceContractStatus(ByRef surfaceText As String) As String
+    Dim layerText As String = "MIR"
+    Select Case UCase(Trim(surfaceText))
+    Case "ABS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ASC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ATN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CDBL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CHR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CINT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "COS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CSNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DECORATOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EVENT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EXP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FIX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GETKEY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INKEY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INLINE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LCASE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LEN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LTRIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MAGIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MID": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MIXIN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OFF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ON": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OVERRIDE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PARALEL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PARALEL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PIPE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RANDOMIZE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RTRIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SETSTRINGSIZE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SGN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MAGIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SIN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SLOT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SPACE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SQR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SQRT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STRPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TAN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THREAD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THREAD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TIMER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TRIGGER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "UCASE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "VAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NATIVE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "VIRTUAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ARRAY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DICT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LIST": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SET": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ABSTRACT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ALIAS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BYREF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BYVAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CDECL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FINAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FRIEND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMMUTABLE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMPORT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INCLUDE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MODULE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MUTABLE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NAMESPACE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PRIVATE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PROTECTED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PUBLIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "READONLY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RESTRICTED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SEALED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STATIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STDCALL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "USING": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CASE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EACH": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ELSE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ELSEIF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "END": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EXIT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GOSUB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GOTO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOOP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NEXT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RETURN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SELECT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STEP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THEN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "UNTIL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "WHILE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "AS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CONST": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFBYT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFDBL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFEXT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFINT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFLNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFSNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFSTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "REDIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ASSERT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CATCH": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FINALLY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THROW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TRY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".ast.json": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".bas": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".bi": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".h": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".hx": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".js": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".json": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".mir.json": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxb": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxbasic": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxm": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxmh": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".wasm": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".wat": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLOSE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "COLOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GET": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INPUT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOCATE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OPEN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PRINT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PUT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SEEK": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ARCHIVE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "AUDIO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BROWSER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CANVAS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CRYPTO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CURL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GRAPHICS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "HTTP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMAGE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "JSON": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LLAMA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LUA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MATH": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ONNX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PROLOG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "REGEX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SERVER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SQLITE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STRINGX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "WEBGPU": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CODEPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OFFSETOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKEB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKEQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKES": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKEW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SADD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SETNEWOFFSET": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SIZEOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "VARPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LBOUND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "UBOUND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MAIN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "%": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "%=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "&": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "&=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "(": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ")": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "*": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "*=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "+": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "++": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "+=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ",": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "-": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "--": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "-=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "/": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "/=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ":": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<<": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<<=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<>": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">>": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">>=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "@": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "AND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MOD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NOT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ROL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ROR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SHL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SHR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "XOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "[": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "\": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "\=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "]": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "^": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "^=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "|": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "|=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CALL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLASS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CONSTRUCTOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DECLARE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DELETE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DESTRUCTOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FUNCTION": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMPLEMENTS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INTERFACE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "METHOD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NEW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OPERATOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PROPERTY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SUB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TYPE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BALL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BIGD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BIGF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BOOLEAN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BYTE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F128": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F32": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F64": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F80": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I16": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I32": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I64": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I8": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OBJECT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STRING": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U16": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U32": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U64": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U8": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    End Select
+    Return "MISSING"
+End Function

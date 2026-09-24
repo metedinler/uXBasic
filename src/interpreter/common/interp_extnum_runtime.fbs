@@ -1,0 +1,246 @@
+#ifndef UXB_INTERP_EXTNUM_RUNTIME_FBS
+#define UXB_INTERP_EXTNUM_RUNTIME_FBS
+
+#include once "interp_value.fbs"
+
+Const UXB_INTERP_EXT_CMP_ERROR As Long = (-2147483647 - 1)
+
+Declare Function UXBInterpExtLoadLibraryA Lib "kernel32" Alias "LoadLibraryA" (ByVal fileName As ZString Ptr) As Any Ptr
+Declare Function UXBInterpExtGetProcAddress Lib "kernel32" Alias "GetProcAddress" (ByVal moduleHandle As Any Ptr, ByVal symbolName As ZString Ptr) As Any Ptr
+
+Type UXBInterpExtInitFn As Function Cdecl (ByVal kindText As ZString Ptr, ByVal valueText As ZString Ptr, ByVal precisionValue As Long) As Any Ptr
+Type UXBInterpExtToStrFn As Function Cdecl (ByVal kindText As ZString Ptr, ByVal handle As Any Ptr, ByVal textOut As ZString Ptr, ByVal textCapacity As Long) As Long
+Type UXBInterpExtFreeFn As Sub Cdecl (ByVal kindText As ZString Ptr, ByVal handle As Any Ptr)
+Type UXBInterpExtBinaryFn As Sub Cdecl (ByVal leftHandle As Any Ptr, ByVal rightHandle As Any Ptr, ByVal outHandle As Any Ptr)
+Type UXBInterpExtBigiBinaryFn As Function Cdecl (ByVal outHandle As Any Ptr, ByVal leftHandle As Any Ptr, ByVal rightHandle As Any Ptr) As Long
+Type UXBInterpExtCmpFn As Function Cdecl (ByVal leftHandle As Any Ptr, ByVal rightHandle As Any Ptr) As Long
+
+Type UXBInterpExtHandleEntry
+    kindText As String
+    handle As Any Ptr
+End Type
+
+Private Dim Shared gUXBInterpExtModule As Any Ptr
+Private Dim Shared gUXBInterpExtInitProc As Any Ptr
+Private Dim Shared gUXBInterpExtToStrProc As Any Ptr
+Private Dim Shared gUXBInterpExtFreeProc As Any Ptr
+Private Dim Shared gUXBInterpExtLoadTried As Integer
+Private Dim Shared gUXBInterpExtHandles(Any) As UXBInterpExtHandleEntry
+Private Dim Shared gUXBInterpExtHandleCount As Integer
+
+Private Function UXBInterpExtExeDir() As String
+    Dim p As String = Command(0)
+    Dim slashPos As Integer = InStrRev(p, "\")
+    If slashPos <= 0 Then Return CurDir
+    Return Left(p, slashPos - 1)
+End Function
+
+Private Sub UXBInterpExtTryLoad(ByRef candidate As String)
+    If gUXBInterpExtModule <> 0 Or Trim(candidate) = "" Then Exit Sub
+    gUXBInterpExtModule = UXBInterpExtLoadLibraryA(StrPtr(candidate))
+End Sub
+
+Private Function UXBInterpExtRuntimeLoad(ByRef errText As String) As Integer
+    errText = ""
+    If gUXBInterpExtModule <> 0 And gUXBInterpExtInitProc <> 0 And gUXBInterpExtToStrProc <> 0 And gUXBInterpExtFreeProc <> 0 Then Return 1
+    If gUXBInterpExtLoadTried <> 0 Then
+        errText = "MIR: uxb_bigfp.dll was not loaded or required external-number exports are missing"
+        Return 0
+    End If
+    gUXBInterpExtLoadTried = 1
+
+    Dim exeDir As String = UXBInterpExtExeDir()
+    Dim candidate As String
+    candidate = exeDir & "\uxb_bigfp.dll": UXBInterpExtTryLoad candidate
+    candidate = CurDir & "\bin\uxb_bigfp.dll": UXBInterpExtTryLoad candidate
+    candidate = CurDir & "\dist\runtime_ext\uxb_bigfp.dll": UXBInterpExtTryLoad candidate
+    candidate = exeDir & "\..\dist\runtime_ext\uxb_bigfp.dll": UXBInterpExtTryLoad candidate
+    If gUXBInterpExtModule = 0 Then
+        errText = "MIR: real external-number runtime not found: uxb_bigfp.dll"
+        Return 0
+    End If
+
+    gUXBInterpExtInitProc = UXBInterpExtGetProcAddress(gUXBInterpExtModule, StrPtr("__uxb_rt_biginit"))
+    gUXBInterpExtToStrProc = UXBInterpExtGetProcAddress(gUXBInterpExtModule, StrPtr("__uxb_rt_big_to_str"))
+    gUXBInterpExtFreeProc = UXBInterpExtGetProcAddress(gUXBInterpExtModule, StrPtr("__uxb_rt_big_free"))
+    If gUXBInterpExtInitProc = 0 Or gUXBInterpExtToStrProc = 0 Or gUXBInterpExtFreeProc = 0 Then
+        errText = "MIR: uxb_bigfp.dll does not export the required external-number ABI"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function UXBInterpExtNormalizeKind(ByVal rawKind As String) As String
+    Dim kindText As String = UCase(Trim(rawKind))
+    Dim precisionPos As Integer = InStr(kindText, "(")
+    If precisionPos > 1 Then kindText = Trim(Left(kindText, precisionPos - 1))
+    If kindText = "BIGINT" Or kindText = "BIGINTEGER" Then kindText = "BIGI"
+    Select Case kindText
+    Case "BIGI", "BIGF", "BIGD", "BALL"
+        Return kindText
+    End Select
+    Return ""
+End Function
+
+Private Function UXBInterpExtDefaultPrecision(ByVal kindText As String) As Integer
+    Select Case UXBInterpExtNormalizeKind(kindText)
+    Case "BIGF", "BALL": Return 256
+    Case "BIGD": Return 80
+    End Select
+    Return 0
+End Function
+
+Private Sub UXBInterpExtRegisterHandle(ByRef kindText As String, ByVal handle As Any Ptr)
+    If handle = 0 Then Exit Sub
+    If gUXBInterpExtHandleCount = 0 Then
+        ReDim gUXBInterpExtHandles(0)
+    Else
+        ReDim Preserve gUXBInterpExtHandles(gUXBInterpExtHandleCount)
+    End If
+    gUXBInterpExtHandles(gUXBInterpExtHandleCount).kindText = kindText
+    gUXBInterpExtHandles(gUXBInterpExtHandleCount).handle = handle
+    gUXBInterpExtHandleCount += 1
+End Sub
+
+Private Function UXBInterpExtSerialize(ByRef kindText As String, ByVal handle As Any Ptr, ByRef textOut As String, ByRef errText As String) As Integer
+    textOut = ""
+    If handle = 0 Then errText = "MIR: external-number handle is null": Return 0
+    Dim textBuf As ZString * 65536
+    textBuf = ""
+    Dim toStrFn As UXBInterpExtToStrFn = CPtr(UXBInterpExtToStrFn, gUXBInterpExtToStrProc)
+    If toStrFn(StrPtr(kindText), handle, @textBuf, CLng(65536)) = 0 Then
+        errText = "MIR: external-number runtime could not serialize " & kindText
+        Return 0
+    End If
+    textOut = textBuf
+    Return 1
+End Function
+
+Function UXBInterpExtNumCreate(ByVal rawKind As String, ByVal valueText As String, ByVal precisionValue As Integer, ByRef errText As String) As UXBInterpValue
+    Dim kindText As String = UXBInterpExtNormalizeKind(rawKind)
+    If kindText = "" Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR BIGINIT unknown kind: " & UCase(Trim(rawKind)))
+    If Trim(valueText) = "" Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR BIGINIT value cannot be empty")
+    If precisionValue <= 0 Then precisionValue = UXBInterpExtDefaultPrecision(kindText)
+    If kindText <> "BIGI" And precisionValue <= 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR BIGINIT precision must be positive")
+    If UXBInterpExtRuntimeLoad(errText) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_NATIVE_ONLY, errText)
+
+    Dim initFn As UXBInterpExtInitFn = CPtr(UXBInterpExtInitFn, gUXBInterpExtInitProc)
+    Dim handle As Any Ptr = initFn(StrPtr(kindText), StrPtr(valueText), CLng(precisionValue))
+    If handle = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR BIGINIT runtime rejected value for " & kindText)
+
+    Dim runtimeText As String
+    If UXBInterpExtSerialize(kindText, handle, runtimeText, errText) = 0 Then
+        Dim freeFn As UXBInterpExtFreeFn = CPtr(UXBInterpExtFreeFn, gUXBInterpExtFreeProc)
+        freeFn(StrPtr(kindText), handle)
+        Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, errText)
+    End If
+
+    UXBInterpExtRegisterHandle kindText, handle
+    Dim resultValue As UXBInterpValue = UXBInterpValueExternal(kindText, 0, runtimeText)
+    resultValue.ptrValue = handle
+    resultValue.externalPrecision = precisionValue
+    Return resultValue
+End Function
+
+Function UXBInterpExtNumIsValue(ByRef value As UXBInterpValue) As Integer
+    If value.ptrValue = 0 Then Return 0
+    Select Case UXBInterpExtNormalizeKind(value.typeName)
+    Case "BIGI", "BIGF", "BIGD", "BALL": Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function UXBInterpExtNumCoerce(ByRef sourceValue As UXBInterpValue, ByRef peerValue As UXBInterpValue, ByRef errText As String) As UXBInterpValue
+    If UXBInterpExtNumIsValue(sourceValue) <> 0 Then Return sourceValue
+    Dim kindText As String = UXBInterpExtNormalizeKind(peerValue.typeName)
+    Dim precisionValue As Integer = peerValue.externalPrecision
+    Return UXBInterpExtNumCreate(kindText, UXBInterpValueToString(sourceValue), precisionValue, errText)
+End Function
+
+Function UXBInterpExtNumBinary(ByVal opName As String, ByRef leftValueRaw As UXBInterpValue, ByRef rightValueRaw As UXBInterpValue, ByRef errText As String) As UXBInterpValue
+    Dim leftValue As UXBInterpValue = UXBInterpExtNumCoerce(leftValueRaw, rightValueRaw, errText)
+    If UXBInterpIsError(leftValue) <> 0 Then Return leftValue
+    Dim rightValue As UXBInterpValue = UXBInterpExtNumCoerce(rightValueRaw, leftValue, errText)
+    If UXBInterpIsError(rightValue) <> 0 Then Return rightValue
+
+    Dim kindText As String = UXBInterpExtNormalizeKind(leftValue.typeName)
+    If kindText = "" Or kindText <> UXBInterpExtNormalizeKind(rightValue.typeName) Then
+        Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR external-number arithmetic requires matching kinds or an explicit cast")
+    End If
+    Dim precisionValue As Integer = leftValue.externalPrecision
+    If rightValue.externalPrecision > precisionValue Then precisionValue = rightValue.externalPrecision
+    Dim resultValue As UXBInterpValue = UXBInterpExtNumCreate(kindText, "0", precisionValue, errText)
+    If UXBInterpIsError(resultValue) <> 0 Then Return resultValue
+
+    Dim opUpper As String = UCase(Trim(opName))
+    Dim symbolName As String
+    If kindText = "BIGI" Then
+        Select Case opUpper
+        Case "ADD": symbolName = "uxb_bigi_add"
+        Case "SUB": symbolName = "uxb_bigi_sub"
+        Case "MUL": symbolName = "uxb_bigi_mul"
+        Case "DIV", "IDIV": symbolName = "uxb_bigi_tdiv_q"
+        Case "MOD": symbolName = "uxb_bigi_mod"
+        End Select
+        If symbolName = "" Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR BIGI operation unsupported: " & opUpper)
+        Dim bigiProc As Any Ptr = UXBInterpExtGetProcAddress(gUXBInterpExtModule, StrPtr(symbolName))
+        If bigiProc = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "MIR external-number symbol missing: " & symbolName)
+        Dim bigiFn As UXBInterpExtBigiBinaryFn = CPtr(UXBInterpExtBigiBinaryFn, bigiProc)
+        If bigiFn(resultValue.ptrValue, leftValue.ptrValue, rightValue.ptrValue) = 0 Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "MIR BIGI operation failed: " & opUpper)
+        End If
+    Else
+        Select Case opUpper
+        Case "ADD": symbolName = "uxb_" & LCase(kindText) & "_add"
+        Case "SUB": symbolName = "uxb_" & LCase(kindText) & "_sub"
+        Case "MUL": symbolName = "uxb_" & LCase(kindText) & "_mul"
+        Case "DIV": symbolName = "uxb_" & LCase(kindText) & "_div"
+        End Select
+        If symbolName = "" Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR external-number operation unsupported: " & opUpper)
+        Dim binaryProc As Any Ptr = UXBInterpExtGetProcAddress(gUXBInterpExtModule, StrPtr(symbolName))
+        If binaryProc = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "MIR external-number symbol missing: " & symbolName)
+        Dim binaryFn As UXBInterpExtBinaryFn = CPtr(UXBInterpExtBinaryFn, binaryProc)
+        binaryFn(leftValue.ptrValue, rightValue.ptrValue, resultValue.ptrValue)
+    End If
+
+    If UXBInterpExtSerialize(kindText, resultValue.ptrValue, resultValue.stringValue, errText) = 0 Then
+        Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, errText)
+    End If
+    Return resultValue
+End Function
+
+Function UXBInterpExtNumCompare(ByRef leftValueRaw As UXBInterpValue, ByRef rightValueRaw As UXBInterpValue, ByRef errText As String) As Long
+    Dim leftValue As UXBInterpValue = UXBInterpExtNumCoerce(leftValueRaw, rightValueRaw, errText)
+    If UXBInterpIsError(leftValue) <> 0 Then Return UXB_INTERP_EXT_CMP_ERROR
+    Dim rightValue As UXBInterpValue = UXBInterpExtNumCoerce(rightValueRaw, leftValue, errText)
+    If UXBInterpIsError(rightValue) <> 0 Then Return UXB_INTERP_EXT_CMP_ERROR
+    Dim kindText As String = UXBInterpExtNormalizeKind(leftValue.typeName)
+    If kindText = "" Or kindText <> UXBInterpExtNormalizeKind(rightValue.typeName) Then
+        errText = "MIR external-number comparison requires matching kinds or an explicit cast"
+        Return UXB_INTERP_EXT_CMP_ERROR
+    End If
+    Dim symbolName As String
+    Select Case kindText
+    Case "BIGI": symbolName = "uxb_bigi_cmp"
+    Case "BALL": symbolName = "uxb_ball_cmp_mid"
+    Case Else: symbolName = "uxb_" & LCase(kindText) & "_cmp"
+    End Select
+    Dim cmpProc As Any Ptr = UXBInterpExtGetProcAddress(gUXBInterpExtModule, StrPtr(symbolName))
+    If cmpProc = 0 Then errText = "MIR external-number symbol missing: " & symbolName: Return UXB_INTERP_EXT_CMP_ERROR
+    Dim cmpFn As UXBInterpExtCmpFn = CPtr(UXBInterpExtCmpFn, cmpProc)
+    Return cmpFn(leftValue.ptrValue, rightValue.ptrValue)
+End Function
+
+Sub UXBInterpExtNumReleaseAll()
+    If gUXBInterpExtFreeProc <> 0 Then
+        Dim freeFn As UXBInterpExtFreeFn = CPtr(UXBInterpExtFreeFn, gUXBInterpExtFreeProc)
+        Dim i As Integer
+        For i = 0 To gUXBInterpExtHandleCount - 1
+            If gUXBInterpExtHandles(i).handle <> 0 Then freeFn(StrPtr(gUXBInterpExtHandles(i).kindText), gUXBInterpExtHandles(i).handle)
+        Next i
+    End If
+    Erase gUXBInterpExtHandles
+    gUXBInterpExtHandleCount = 0
+End Sub
+
+#endif

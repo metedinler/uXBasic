@@ -1,0 +1,88 @@
+#ifndef UXB_CLI_RESPONSE_FILE_FBS
+#define UXB_CLI_RESPONSE_FILE_FBS
+
+#include once "cli_args.fbs"
+#include once "../common/text_encoding.fbs"
+
+Private Function UXBCliReadTextFile(ByRef filePath As String, ByRef textOut As String) As Integer
+    Dim f As Integer = FreeFile
+    Open filePath For Input As #f
+    If Err <> 0 Then Return 0
+    textOut = ""
+    Do While Not Eof(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        textOut &= lineText & Chr(10)
+    Loop
+    Close #f
+    textOut = UXBStripUtf8Bom(textOut)
+    Return 1
+End Function
+
+Private Function UXBCliTokenizeText(ByRef textIn As String, ByRef outArgs As UXBCliArgList) As Integer
+    Dim i As Integer = 1
+    Dim token As String = ""
+    Dim inQuote As Integer = 0
+    Do While i <= Len(textIn)
+        Dim ch As String = Mid(textIn, i, 1)
+        If inQuote = 0 Then
+            If ch = "#" Then
+                Do While i <= Len(textIn) And Mid(textIn, i, 1) <> Chr(10)
+                    i += 1
+                Loop
+            ElseIf ch = Chr(34) Then
+                inQuote = 1
+            ElseIf ch = " " Or ch = Chr(9) Or ch = Chr(10) Or ch = Chr(13) Then
+                If token <> "" Then
+                    If UXBCliArgListAdd(outArgs, token) = 0 Then Return 0
+                    token = ""
+                End If
+            Else
+                token &= ch
+            End If
+        Else
+            If ch = Chr(34) Then
+                inQuote = 0
+            Else
+                token &= ch
+            End If
+        End If
+        i += 1
+    Loop
+    If token <> "" Then If UXBCliArgListAdd(outArgs, token) = 0 Then Return 0
+    Return IIf(inQuote = 0, 1, 0)
+End Function
+
+Function UXBCliExpandResponseFilesRecursive(ByRef inputArgs As UXBCliArgList, ByRef outputArgs As UXBCliArgList, ByRef errText As String, ByVal depth As Integer) As Integer
+    If depth > 8 Then errText = "CLI_RESPONSE_FILE_DEPTH_LIMIT": Return 0
+    Dim i As Integer
+    For i = 0 To inputArgs.count - 1
+        Dim item As String = Trim(inputArgs.items(i))
+        If UXBCliIsResponseFile(item) <> 0 Then
+            Dim pathText As String = Mid(item, 2)
+            If Trim(pathText) = "" Then errText = "CLI_RESPONSE_FILE_EMPTY": Return 0
+            Dim fileText As String
+            If UXBCliReadTextFile(pathText, fileText) = 0 Then errText = "CLI_RESPONSE_FILE_NOT_FOUND: " & pathText: Return 0
+            Dim nested As UXBCliArgList
+            Dim nestedExpanded As UXBCliArgList
+            UXBCliArgListInit nested
+            UXBCliArgListInit nestedExpanded
+            If UXBCliTokenizeText(fileText, nested) = 0 Then errText = "CLI_RESPONSE_FILE_PARSE_FAIL: " & pathText: Return 0
+            If UXBCliExpandResponseFilesRecursive(nested, nestedExpanded, errText, depth + 1) = 0 Then Return 0
+            Dim j As Integer
+            For j = 0 To nestedExpanded.count - 1
+                If UXBCliArgListAdd(outputArgs, nestedExpanded.items(j)) = 0 Then errText = "CLI_ARG_LIMIT": Return 0
+            Next j
+        Else
+            If UXBCliArgListAdd(outputArgs, inputArgs.items(i)) = 0 Then errText = "CLI_ARG_LIMIT": Return 0
+        End If
+    Next i
+    Return 1
+End Function
+
+Function UXBCliExpandResponseFiles(ByRef inputArgs As UXBCliArgList, ByRef outputArgs As UXBCliArgList, ByRef errText As String) As Integer
+    UXBCliArgListInit outputArgs
+    Return UXBCliExpandResponseFilesRecursive(inputArgs, outputArgs, errText, 0)
+End Function
+
+#endif

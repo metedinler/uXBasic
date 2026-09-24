@@ -1,0 +1,1481 @@
+#ifndef UXB_TYPE_INFER_EXPR_FBS
+#define UXB_TYPE_INFER_EXPR_FBS
+#include once "type_registry.fbs"
+#include once "type_check_call.fbs"
+#include once "type_rules.fbs"
+#include once "../symbols/symbol_resolver.fbs"
+#include once "../semantic/ast_owner_index.fbs"
+#include once "../semantic/ast_name_index.fbs"
+
+Declare Function UXBStep3InferExprType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String, ByRef errText As String) As Integer
+
+Private Function UXBStep3InferChild(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer, ByRef typeOut As String, ByRef errText As String) As Integer
+    ' Hybrid AST support:
+    ' prefer list children, fallback to left/right for binary/unary legacy nodes.
+    Dim i As Integer = 0
+    Dim ch As Integer = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return UXBStep3InferExprType(ps, ch, typeOut, errText)
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    If childPos = 0 And ps.ast.nodes(nodeIdx).left <> -1 Then
+        Return UXBStep3InferExprType(ps, ps.ast.nodes(nodeIdx).left, typeOut, errText)
+    End If
+    If childPos = 0 And ps.ast.nodes(nodeIdx).right <> -1 Then
+        Return UXBStep3InferExprType(ps, ps.ast.nodes(nodeIdx).right, typeOut, errText)
+    End If
+    If childPos = 1 And ps.ast.nodes(nodeIdx).right <> -1 Then
+        Return UXBStep3InferExprType(ps, ps.ast.nodes(nodeIdx).right, typeOut, errText)
+    End If
+    If childPos = 1 And ps.ast.nodes(nodeIdx).left <> -1 Then
+        Return UXBStep3InferExprType(ps, ps.ast.nodes(nodeIdx).left, typeOut, errText)
+    End If
+
+    errText = "type: missing child"
+    Return 0
+End Function
+
+
+Private Function UXBStep3ChildNodeAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+    Dim i As Integer
+    i = 0
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    If childPos = 0 And ps.ast.nodes(nodeIdx).left <> -1 Then Return ps.ast.nodes(nodeIdx).left
+    If childPos = 1 And ps.ast.nodes(nodeIdx).right <> -1 Then Return ps.ast.nodes(nodeIdx).right
+    Return -1
+End Function
+
+Private Function UXBStep3InferFfiCallReturnType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String, ByRef errText As String) As Integer
+    typeOut = ""
+    errText = ""
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    If UCase(Trim(ps.ast.nodes(nodeIdx).kind)) <> "CALL_EXPR" Then Return 0
+
+    Dim callName As String
+    callName = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+
+    Dim basePos As Integer
+    basePos = -1
+    Select Case callName
+    Case "DLL", "API"
+        basePos = 0
+    Case "CALL"
+        Dim markerNode As Integer
+        markerNode = UXBStep3ChildNodeAt(ps, nodeIdx, 0)
+        If markerNode = -1 Then Return 0
+        Dim markerKind As String
+        Dim markerValue As String
+        markerKind = UCase(Trim(ps.ast.nodes(markerNode).kind))
+        markerValue = UCase(Trim(ps.ast.nodes(markerNode).value))
+        If (markerKind = "IDENT" Or markerKind = "IDENTIFIER" Or markerKind = "KEYWORD_REF") And (markerValue = "DLL" Or markerValue = "API") Then
+            basePos = 1
+        End If
+    End Select
+    If basePos < 0 Then Return 0
+
+    Dim sigNode As Integer
+    sigNode = UXBStep3ChildNodeAt(ps, nodeIdx, basePos + 2)
+    If sigNode = -1 Then Return 0
+    Dim sigKind As String
+    sigKind = UCase(Trim(ps.ast.nodes(sigNode).kind))
+    If sigKind <> "KEYWORD_REF" And sigKind <> "IDENT" And sigKind <> "IDENTIFIER" Then Return 0
+
+    Dim sigText As String
+    sigText = UCase(Trim(ps.ast.nodes(sigNode).value))
+    Select Case sigText
+    Case "VOID"
+        typeOut = TYPE_VOID
+    Case "STRPTR"
+        ' Runtime converts STRPTR results to managed uXBasic STRING values.
+        typeOut = TYPE_STRING
+    Case "PTR"
+        typeOut = TYPE_U64
+    Case Else
+        typeOut = UXBStep3TypeCanonical(sigText)
+    End Select
+    If typeOut = "" Or typeOut = TYPE_UNKNOWN Or typeOut = TYPE_ERROR Then Return 0
+    errText = ""
+    Return 1
+End Function
+
+Private Function UXBStep3NodeOpText(ByRef ps As ParseState, ByVal nodeIdx As Integer) As String
+    Dim opText As String = UCase(Trim(ps.ast.nodes(nodeIdx).op))
+    If opText = "" Then opText = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+    Return opText
+End Function
+
+Private Function UXBStep3FindOwnerNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Return UXBAstFindOwner(ps, nodeIdx)
+End Function
+
+Private Function UXBStep3InferScopeForNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim p As Integer = nodeIdx
+    Dim guard As Integer
+    guard = 0
+    Do While p >= 0 And p < ps.ast.count
+        If ps.ast.nodes(p).parent <> -1 Then Exit Do
+        Dim owner As Integer
+        owner = UXBStep3FindOwnerNode(ps, p)
+        If owner = -1 Or owner = p Then Exit Do
+        p = owner
+        guard += 1
+        If guard > ps.ast.count Then Exit Do
+    Loop
+    Do While p >= 0 And p < ps.ast.count
+        Dim k As String = UCase(Trim(ps.ast.nodes(p).kind))
+        Select Case k
+        Case "FUNCTION_STMT", "SUB_STMT", "CLASS_STMT", "TYPE_STMT", "ENUM_STMT", "INTERFACE_STMT", "MODULE_STMT", "NAMESPACE_STMT"
+            Return p + 1
+        End Select
+        p = ps.ast.nodes(p).parent
+    Loop
+    Return 0
+End Function
+
+
+Private Function UXBStep3FindAncestorClassNodeForType(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim p As Integer
+    p = nodeIdx
+    Dim guard As Integer
+    guard = 0
+    Do While p >= 0 And p < ps.ast.count
+        If ps.ast.nodes(p).parent <> -1 Then Exit Do
+        Dim owner As Integer
+        owner = UXBStep3FindOwnerNode(ps, p)
+        If owner = -1 Or owner = p Then Exit Do
+        p = owner
+        guard += 1
+        If guard > ps.ast.count Then Exit Do
+    Loop
+    Do While p >= 0 And p < ps.ast.count
+        If UCase(Trim(ps.ast.nodes(p).kind)) = "CLASS_STMT" Then Return p
+        p = ps.ast.nodes(p).parent
+    Loop
+    Return -1
+End Function
+
+Private Function UXBStep3ClassFieldTypeFromAst(ByRef ps As ParseState, ByVal classNode As Integer, ByRef fieldName As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If classNode < 0 Or classNode >= ps.ast.count Then Return 0
+
+    Dim target As String
+    target = UCase(Trim(fieldName))
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_FIELD" Or UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_PROPERTY_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = target Then
+                If Trim(ps.ast.nodes(ch).typeName) <> "" Then
+                    typeOut = UXBStep3TypeCanonical(ps.ast.nodes(ch).typeName)
+                    Return 1
+                End If
+                Dim typeNode As Integer
+                typeNode = ps.ast.nodes(ch).firstChild
+                Do While typeNode <> -1
+                    If UCase(Trim(ps.ast.nodes(typeNode).kind)) = "TYPE_REF" Then
+                        typeOut = UXBStep3TypeCanonical(ps.ast.nodes(typeNode).value)
+                        Return 1
+                    End If
+                    typeNode = ps.ast.nodes(typeNode).nextSibling
+                Loop
+                typeOut = TYPE_OBJECT
+                Return 1
+            End If
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function UXBStep3ClassFieldTypeFromNode(ByRef ps As ParseState, ByVal fieldNode As Integer, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If fieldNode < 0 Or fieldNode >= ps.ast.count Then Return 0
+    Dim fk As String
+    fk = UCase(Trim(ps.ast.nodes(fieldNode).kind))
+    If fk <> "CLASS_FIELD" And fk <> "CLASS_PROPERTY_DECL" Then Return 0
+
+    If Trim(ps.ast.nodes(fieldNode).typeName) <> "" Then
+        typeOut = UXBStep3TypeCanonical(ps.ast.nodes(fieldNode).typeName)
+        Return 1
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(fieldNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "TYPE_REF" Then
+            typeOut = UXBStep3TypeCanonical(ps.ast.nodes(ch).value)
+            If Trim(typeOut) = "" Then typeOut = TYPE_OBJECT
+            Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    typeOut = TYPE_OBJECT
+    Return 1
+End Function
+
+Private Function UXBStep3ResolveImplicitClassFieldType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef nameText As String, ByRef typeOut As String) As Integer
+    Dim classNode As Integer
+    classNode = UXBStep3FindAncestorClassNodeForType(ps, nodeIdx)
+    If classNode <> -1 Then
+        If UXBStep3ClassFieldTypeFromAst(ps, classNode, nameText, typeOut) <> 0 Then Return 1
+    End If
+    Return 0
+End Function
+
+Private Function UXBStep3DeclaredVarTypeFromAst(ByRef ps As ParseState, ByRef nameText As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+    Dim target As String
+    target = UCase(Trim(nameText))
+    If target = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+        If (k = "DIM_DECL" Or k = "PARAM_DECL") And UCase(Trim(ps.ast.nodes(i).value)) = target Then
+            If Trim(ps.ast.nodes(i).typeName) <> "" Then
+                typeOut = UXBStep3TypeCanonical(ps.ast.nodes(i).typeName)
+                Return IIf(Trim(typeOut) <> "", 1, 0)
+            End If
+            Dim ch As Integer
+            ch = ps.ast.nodes(i).firstChild
+            Do While ch <> -1
+                If UCase(Trim(ps.ast.nodes(ch).kind)) = "TYPE_REF" Then
+                    typeOut = UXBStep3TypeCanonical(ps.ast.nodes(ch).value)
+                    Return IIf(Trim(typeOut) <> "", 1, 0)
+                End If
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+        End If
+    Next i
+    Return 0
+End Function
+
+Private Function UXBStep3DeclaredVarTypeRawFromAst(ByRef ps As ParseState, ByRef nameText As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+    Dim target As String
+    target = UCase(Trim(nameText))
+    If target = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+        If (k = "DIM_DECL" Or k = "PARAM_DECL") And UCase(Trim(ps.ast.nodes(i).value)) = target Then
+            If Trim(ps.ast.nodes(i).typeName) <> "" Then
+                typeOut = Trim(ps.ast.nodes(i).typeName)
+                Return 1
+            End If
+            Dim ch As Integer
+            ch = ps.ast.nodes(i).firstChild
+            Do While ch <> -1
+                If UCase(Trim(ps.ast.nodes(ch).kind)) = "TYPE_REF" Then
+                    typeOut = Trim(ps.ast.nodes(ch).value)
+                    Return IIf(Trim(typeOut) <> "", 1, 0)
+                End If
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+        End If
+    Next i
+    Return 0
+End Function
+
+Private Function UXBStep3DeclaredRoutineReturnTypeFromAst(ByRef ps As ParseState, ByRef nameText As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+    Dim target As String
+    target = UCase(Trim(nameText))
+    If target = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+        If (k = "FUNCTION_STMT" Or k = "DECLARE_FUNCTION_STMT" Or k = "CLASS_METHOD_DECL" Or k = "INTERFACE_METHOD_DECL" Or k = "CLASS_OPERATOR_DECL") And UCase(Trim(ps.ast.nodes(i).value)) = target Then
+            If Trim(ps.ast.nodes(i).typeName) <> "" Then
+                typeOut = UXBStep3TypeCanonical(ps.ast.nodes(i).typeName)
+                Return IIf(Trim(typeOut) <> "", 1, 0)
+            End If
+            Dim ch As Integer
+            ch = ps.ast.nodes(i).firstChild
+            Do While ch <> -1
+                If UCase(Trim(ps.ast.nodes(ch).kind)) = "RETURN_TYPE" Or UCase(Trim(ps.ast.nodes(ch).kind)) = "TYPE_REF" Then
+                    typeOut = UXBStep3TypeCanonical(ps.ast.nodes(ch).value)
+                    Return IIf(Trim(typeOut) <> "", 1, 0)
+                End If
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+            typeOut = TYPE_OBJECT
+            Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+' FIX15_MAGIC_DISPATCH_COMPLETION_20260611:
+' Semantic/type inference bridge for user-defined MAGIC methods.
+' Parser stores MAGIC HASH as CLASS_METHOD_DECL value=MAGIC_HASH.  The user
+' surface is obj.HASH(); when a normal HASH method is not present, type binding
+' must look for MAGIC_HASH before falling back to OBJECT.
+Private Function UXBStep3MagicFallbackMethodName(ByRef methodNameRaw As String) As String
+    Dim m As String
+    m = UCase(Trim(methodNameRaw))
+    If m = "" Then Return ""
+    If Left(m, 6) = "MAGIC_" Then Return ""
+    If Left(m, 2) = "__" Then
+        Dim d As String
+        d = Mid(m, 3)
+        If d = "" Then Return ""
+        Return "MAGIC_" & d
+    End If
+    Return "MAGIC_" & m
+End Function
+
+Private Function UXBStep3FindClassNodeByName(ByRef ps As ParseState, ByRef classNameRaw As String) As Integer
+    Dim target As String
+    target = UCase(Trim(classNameRaw))
+    If target = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = target Then Return i
+        End If
+    Next i
+    Return -1
+End Function
+
+Private Function UXBStep3ClassBaseName(ByRef ps As ParseState, ByVal classNodeIdx As Integer, ByRef baseNameOut As String) As Integer
+    baseNameOut = ""
+    If classNodeIdx < 0 Or classNodeIdx >= ps.ast.count Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNodeIdx).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "CLASS_BASE_REF" Then
+            baseNameOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(baseNameOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 0
+End Function
+
+Private Function UXBStep3RoutineNodeReturnType(ByRef ps As ParseState, ByVal routineNodeIdx As Integer, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If routineNodeIdx < 0 Or routineNodeIdx >= ps.ast.count Then Return 0
+
+    If Trim(ps.ast.nodes(routineNodeIdx).typeName) <> "" Then
+        typeOut = UXBStep3TypeCanonical(ps.ast.nodes(routineNodeIdx).typeName)
+        Return IIf(Trim(typeOut) <> "", 1, 0)
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(routineNodeIdx).firstChild
+    Do While ch <> -1
+        Dim ck As String
+        ck = UCase(Trim(ps.ast.nodes(ch).kind))
+        If ck = "RETURN_TYPE" Or ck = "TYPE_REF" Then
+            typeOut = UXBStep3TypeCanonical(ps.ast.nodes(ch).value)
+            Return IIf(Trim(typeOut) <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    typeOut = TYPE_OBJECT
+    Return 1
+End Function
+
+Private Function UXBStep3ClassMethodReturnTypeInHierarchy(ByRef ps As ParseState, ByRef classNameRaw As String, ByRef methodNameRaw As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+    Dim curClass As String
+    curClass = UCase(Trim(classNameRaw))
+    Dim methodName As String
+    methodName = UCase(Trim(methodNameRaw))
+    If curClass = "" Or methodName = "" Then Return 0
+
+    Dim fallbackName As String
+    fallbackName = UXBStep3MagicFallbackMethodName(methodName)
+
+    Dim hop As Integer
+    Do While curClass <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+
+        Dim classNode As Integer
+        classNode = UXBStep3FindClassNodeByName(ps, curClass)
+        If classNode = -1 Then Exit Do
+
+        Dim pass As Integer
+        For pass = 0 To 1
+            Dim wanted As String
+            If pass = 0 Then
+                wanted = methodName
+            Else
+                wanted = fallbackName
+            End If
+            If wanted = "" Then Continue For
+
+            Dim ch As Integer
+            ch = ps.ast.nodes(classNode).firstChild
+            Do While ch <> -1
+                Dim ck As String
+                ck = UCase(Trim(ps.ast.nodes(ch).kind))
+                If ck = "CLASS_METHOD_DECL" Or ck = "CLASS_OPERATOR_DECL" Then
+                    If UCase(Trim(ps.ast.nodes(ch).value)) = wanted Then
+                        Return UXBStep3RoutineNodeReturnType(ps, ch, typeOut)
+                    End If
+                End If
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+        Next pass
+
+        Dim nextBase As String
+        If UXBStep3ClassBaseName(ps, classNode, nextBase) = 0 Then Exit Do
+        curClass = nextBase
+    Loop
+
+    Return 0
+End Function
+
+Private Function UXBStep3MethodLeafName(ByRef callNameRaw As String) As String
+    Dim s As String
+    s = UCase(Trim(callNameRaw))
+    If s = "" Then Return ""
+
+    Dim i As Integer
+    For i = Len(s) To 1 Step -1
+        If Mid(s, i, 1) = "." Then
+            If i >= Len(s) Then Return ""
+            Return UCase(Trim(Mid(s, i + 1)))
+        End If
+    Next i
+    Return s
+End Function
+
+Private Function UXBStep3CallOwnerName(ByRef callNameRaw As String) As String
+    Dim s As String
+    s = UCase(Trim(callNameRaw))
+    Dim dotPos As Integer
+    dotPos = 0
+    Dim i As Integer
+    For i = Len(s) To 1 Step -1
+        If Mid(s, i, 1) = "." Then dotPos = i: Exit For
+    Next i
+    If dotPos <= 1 Then Return ""
+    Return UCase(Trim(Left(s, dotPos - 1)))
+End Function
+
+Private Function UXBStep3NamespaceRoutineReturnType(ByRef ps As ParseState, ByRef callNameRaw As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+    Dim ownerName As String
+    ownerName = UXBStep3CallOwnerName(callNameRaw)
+    Dim routineName As String
+    routineName = UXBStep3MethodLeafName(callNameRaw)
+    If ownerName = "" Or routineName = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim containerKind As String
+        containerKind = UCase(Trim(ps.ast.nodes(i).kind))
+        If containerKind <> "NAMESPACE_STMT" And containerKind <> "MODULE_STMT" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> ownerName Then Continue For
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            Dim routineKind As String
+            routineKind = UCase(Trim(ps.ast.nodes(ch).kind))
+            If routineKind = "FUNCTION_STMT" Or routineKind = "DECLARE_FUNCTION_STMT" Then
+                If UCase(Trim(ps.ast.nodes(ch).value)) = routineName Then
+                    Return UXBStep3RoutineNodeReturnType(ps, ch, typeOut)
+                End If
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+    Return 0
+End Function
+
+Private Function UXBStep3InferMethodCallReturnType(ByRef ps As ParseState, ByVal callNodeIdx As Integer, ByRef callNameRaw As String, ByRef typeOut As String, ByRef errText As String) As Integer
+    typeOut = ""
+    If callNodeIdx < 0 Or callNodeIdx >= ps.ast.count Then Return 0
+
+    Dim methodName As String
+    methodName = UXBStep3MethodLeafName(callNameRaw)
+    If methodName = "" Or InStr(UCase(Trim(callNameRaw)), ".") = 0 Then Return 0
+
+    Dim receiverType As String
+    receiverType = ""
+
+    Dim receiverNode As Integer
+    receiverNode = ps.ast.nodes(callNodeIdx).left
+    If receiverNode <> -1 Then
+        Dim recvErr As String
+        recvErr = ""
+        If UXBStep3InferExprType(ps, receiverNode, receiverType, recvErr) = 0 Then
+            receiverType = ""
+        End If
+        receiverType = UCase(Trim(UXBStep3TypeCanonical(receiverType)))
+
+        If receiverType = "" Or receiverType = TYPE_OBJECT Then
+            Dim rk As String
+            rk = UCase(Trim(ps.ast.nodes(receiverNode).kind))
+            If rk = "IDENT" Or rk = "IDENTIFIER" Then
+                Dim rawType As String
+                If UXBStep3DeclaredVarTypeRawFromAst(ps, ps.ast.nodes(receiverNode).value, rawType) <> 0 Then
+                    receiverType = UCase(Trim(rawType))
+                End If
+            ElseIf rk = "NEW_EXPR" Then
+                receiverType = UCase(Trim(ps.ast.nodes(receiverNode).value))
+            End If
+        End If
+    End If
+
+    ' S-037: THIS / ME / SUPER are typed OBJECT on purpose (see the pseudo-identifier rule
+    ' above), which left `r = SUPER.Speak()` -- and `DIM r AS I32 : r = THIS.A()` -- as
+    ' "assignment requires explicit cast TYPE_OBJECT to TYPE_I32" in every engine.
+    ' As a method-call RECEIVER they are the enclosing class (SUPER: its base class).
+    If (receiverType = "" Or receiverType = TYPE_OBJECT) And receiverNode <> -1 Then
+        Dim pseudoKind As String
+        Dim pseudoWord As String
+        pseudoKind = UCase(Trim(ps.ast.nodes(receiverNode).kind))
+        pseudoWord = UCase(Trim(ps.ast.nodes(receiverNode).value))
+        If (pseudoKind = "IDENT" Or pseudoKind = "IDENTIFIER" Or pseudoKind = "KEYWORD_REF") And (pseudoWord = "THIS" Or pseudoWord = "ME" Or pseudoWord = "SUPER") Then
+            Dim pseudoClassNode As Integer
+            pseudoClassNode = UXBStep3FindAncestorClassNodeForType(ps, callNodeIdx)
+            If pseudoClassNode <> -1 Then
+                receiverType = UCase(Trim(ps.ast.nodes(pseudoClassNode).value))
+                If pseudoWord = "SUPER" Then
+                    Dim pseudoBase As Integer
+                    pseudoBase = ps.ast.nodes(pseudoClassNode).firstChild
+                    Do While pseudoBase <> -1
+                        If UCase(Trim(ps.ast.nodes(pseudoBase).kind)) = "CLASS_BASE_REF" Then
+                            receiverType = UCase(Trim(ps.ast.nodes(pseudoBase).value))
+                            Exit Do
+                        End If
+                        pseudoBase = ps.ast.nodes(pseudoBase).nextSibling
+                    Loop
+                End If
+            End If
+        End If
+    End If
+
+    If receiverType = "" Or receiverType = TYPE_OBJECT Then
+        Dim ownerName As String
+        ownerName = UXBStep3CallOwnerName(callNameRaw)
+        If ownerName <> "" Then
+            If UXBStep3DeclaredVarTypeRawFromAst(ps, ownerName, receiverType) <> 0 Then
+                receiverType = UCase(Trim(receiverType))
+            ElseIf UXBStep3FindClassNodeByName(ps, ownerName) <> -1 Then
+                receiverType = ownerName
+            End If
+        End If
+    End If
+
+    receiverType = UCase(Trim(receiverType))
+    If receiverType = "" Or receiverType = TYPE_OBJECT Then Return 0
+
+    If UXBStep3ClassMethodReturnTypeInHierarchy(ps, receiverType, methodName, typeOut) <> 0 Then
+        typeOut = UXBStep3TypeCanonical(typeOut)
+        If Trim(typeOut) = "" Then typeOut = TYPE_OBJECT
+        errText = ""
+        Return 1
+    End If
+
+    Return 0
+End Function
+
+
+Private Function UXBStep3BigInitReturnType43(ByRef ps As ParseState, ByVal callNodeIdx As Integer, ByRef typeOut As String, ByRef errText As String) As Integer
+    Dim kindNode43 As Integer
+    kindNode43 = ps.ast.nodes(callNodeIdx).firstChild
+    If kindNode43 = -1 Then
+        errText = "type: BIGINIT kind missing"
+        Return 0
+    End If
+
+    Dim kindText43 As String
+    kindText43 = UCase(Trim(ps.ast.nodes(kindNode43).value))
+    If kindText43 = "" Then kindText43 = UCase(Trim(ps.ast.nodes(kindNode43).symbolName))
+
+    Select Case kindText43
+    Case "BIGF", "BIGFLOAT"
+        typeOut = TYPE_BIGFLOAT
+    Case "BIGD", "BIGDECIMAL"
+        typeOut = TYPE_BIGD
+    Case "BALL"
+        typeOut = TYPE_BALL
+    Case "BIGI", "BIGINT", "BIG_INTEGER"
+        typeOut = TYPE_BIGINT
+    Case Else
+        errText = "type: BIGINIT unknown kind " & kindText43
+        Return 0
+    End Select
+
+    errText = ""
+    Return 1
+End Function
+
+Private Function UXBStep3FindConstDeclTypeAnyScopeFix6(ByRef ps As ParseState, ByRef nameRaw As String, ByRef typeOut As String) As Integer
+    ' FIX6_RUNTIME_SEMANTIC_20260610:
+    ' Include edilmiş global CONST düğümü symbol table'a yanlış scope ile düşse bile type inference kurtarsın.
+    typeOut = ""
+    Dim target As String
+    target = UCase(Trim(nameRaw))
+    If target = "" Then Return 0
+
+    ' first constant node of that name (ast_name_index.fbs group 1); the scan starts AT
+    ' it, so the index is a hint and can never skip an earlier match
+    Dim firstIdx As Integer = 0
+    If UXBAstNameIndexEnsure(ps) <> 0 Then
+        Dim ce As Integer = UXBAstNameIndexFirst(1, target)
+        If ce = -1 Then Return 0
+        firstIdx = UXBAstNameIndexNode(ce)
+    End If
+
+    Dim i As Integer
+    For i = firstIdx To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) = "CONST_DECL" Or UCase(Trim(ps.ast.nodes(i).kind)) = "CONST_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = target Then
+                If Trim(ps.ast.nodes(i).typeName) <> "" Then
+                    typeOut = UXBStep3TypeCanonical(ps.ast.nodes(i).typeName)
+                    Return 1
+                End If
+                Dim ch As Integer
+                ch = ps.ast.nodes(i).firstChild
+                Do While ch <> -1
+                    If UCase(Trim(ps.ast.nodes(ch).kind)) = "TYPE_REF" Then
+                        typeOut = UXBStep3TypeCanonical(ps.ast.nodes(ch).value)
+                        Return IIf(Trim(typeOut) <> "", 1, 0)
+                    End If
+                    ch = ps.ast.nodes(ch).nextSibling
+                Loop
+                If ps.ast.nodes(i).left <> -1 Then
+                    Dim initKind As String
+                    initKind = UCase(Trim(ps.ast.nodes(ps.ast.nodes(i).left).kind))
+                    If initKind = "STRING" Then typeOut = TYPE_STRING Else typeOut = TYPE_I32
+                    Return 1
+                End If
+                typeOut = TYPE_OBJECT
+                Return 1
+            End If
+        End If
+    Next i
+    Return 0
+End Function
+
+
+Private Function UXBStep3InferBareFfiMetaType(ByVal tokenText As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+    Dim nu As String
+    nu = UCase(Trim(tokenText))
+    If nu = "" Then Return 0
+
+    ' ABI10 / CALL(DLL, ...) semantic guard:
+    ' Parser currently represents FFI marker/signature/convention tokens as ordinary
+    ' IDENT/KEYWORD_REF nodes. Step3 expression validation can therefore visit them
+    ' independently before/after the owning CALL_EXPR is inferred. These are language
+    ' metadata tokens, not user variables; returning a canonical type here prevents
+    ' false "unknown symbol: dll/void/cdecl" failures without changing runtime CALL
+    ' argument evaluation.
+    Select Case nu
+    Case "VOID"
+        typeOut = TYPE_VOID
+        Return 1
+    Case "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "F80", "F128", "PTR", "STRPTR", "WSTRPTR", "STRING", "BOOLEAN"
+        typeOut = UXBStep3TypeCanonical(nu)
+        If typeOut = "" Or typeOut = TYPE_UNKNOWN Or typeOut = TYPE_ERROR Then typeOut = TYPE_OBJECT
+        Return 1
+    Case "DLL", "API", "CDECL", "STDCALL", "BYREF", "BYVAL"
+        typeOut = TYPE_OBJECT
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function UXBStep3CoreScalarConstructorType(ByVal callNameRaw As String, ByRef typeOut As String) As Integer
+    typeOut = UXBStep3TypeCanonical(callNameRaw)
+    Select Case typeOut
+    Case TYPE_BOOL, TYPE_I8, TYPE_U8, TYPE_I16, TYPE_U16, TYPE_I32, TYPE_U32, TYPE_I64, TYPE_U64, TYPE_F32, TYPE_F64, TYPE_PTR
+        Return 1
+    End Select
+    typeOut = ""
+    Return 0
+End Function
+
+Private Function UXBStep3InferTaskAliasType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef aliasName As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+    Dim p As Integer
+    p = nodeIdx
+    Dim guard As Integer
+    Do While p >= 0 And p < ps.ast.count
+        If ps.ast.nodes(p).parent <> -1 Then
+            p = ps.ast.nodes(p).parent
+        Else
+            Dim owner As Integer
+            owner = UXBStep3FindOwnerNode(ps, p)
+            If owner = -1 Or owner = p Then Exit Do
+            p = owner
+        End If
+        guard += 1
+        If guard > ps.ast.count Then Exit Do
+
+        Dim taskKind As String
+        taskKind = UCase(Trim(ps.ast.nodes(p).kind))
+        If taskKind = "EVENT_STMT" Or taskKind = "PIPE_STMT" Or taskKind = "THREAD_STMT" Or taskKind = "PARALEL_STMT" Then
+            Dim aliasUpper As String
+            aliasUpper = UCase(Trim(aliasName))
+            If aliasUpper = UXB_TASK_RESULT_NAME Then
+                If taskKind <> "PIPE_STMT" Then Return 0
+                Dim resultChild As Integer
+                resultChild = ps.ast.nodes(p).firstChild
+                Do While resultChild <> -1
+                    If UCase(Trim(ps.ast.nodes(resultChild).kind)) = "RETURN_TYPE" Then
+                        typeOut = UXBStep3TypeCanonical(ps.ast.nodes(resultChild).value)
+                        If typeOut <> "" Then Return 1
+                    End If
+                    resultChild = ps.ast.nodes(resultChild).nextSibling
+                Loop
+                Return 0
+            End If
+
+            If aliasUpper = UXB_TASK_INPUT_NAME Then
+                Dim paramChild As Integer
+                paramChild = ps.ast.nodes(p).firstChild
+                Do While paramChild <> -1
+                    If UCase(Trim(ps.ast.nodes(paramChild).kind)) = "PARAM_DECL" Then
+                        If Trim(ps.ast.nodes(paramChild).typeName) <> "" Then
+                            typeOut = UXBStep3TypeCanonical(ps.ast.nodes(paramChild).typeName)
+                            Return 1
+                        End If
+                        Dim typeChild As Integer
+                        typeChild = ps.ast.nodes(paramChild).firstChild
+                        Do While typeChild <> -1
+                            If UCase(Trim(ps.ast.nodes(typeChild).kind)) = "TYPE_REF" Then
+                                typeOut = UXBStep3TypeCanonical(ps.ast.nodes(typeChild).value)
+                                Return 1
+                            End If
+                            typeChild = ps.ast.nodes(typeChild).nextSibling
+                        Loop
+                        Return 0
+                    End If
+                    paramChild = ps.ast.nodes(paramChild).nextSibling
+                Loop
+            End If
+            Return 0
+        End If
+    Loop
+    Return 0
+End Function
+
+Private Function UXBStep3InferIdentType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String, ByRef errText As String) As Integer
+    Dim n As String = Trim(ps.ast.nodes(nodeIdx).value)
+    If n = "" Then n = Trim(ps.ast.nodes(nodeIdx).symbolName)
+    Dim nu As String
+    nu = UCase(n)
+
+    Dim ownerNode As Integer = ps.ast.nodes(nodeIdx).parent
+    If ownerNode >= 0 And ownerNode < ps.ast.count Then
+        If UCase(ps.ast.nodes(ownerNode).kind) = "CALL_EXPR" And ps.ast.nodes(ownerNode).left = nodeIdx Then
+            Dim ownerIdx As Integer, ownerType As String, ownerMember As String
+            If UXBLibraryTypeFindCallOwner(ps.ast.nodes(ownerNode).value, ownerIdx, ownerType, ownerMember) <> 0 Then
+                typeOut = ownerType
+                errText = ""
+                Return 1
+            End If
+        End If
+    End If
+
+    If UXBStep3InferBareFfiMetaType(nu, typeOut) <> 0 Then
+        errText = ""
+        Return 1
+    End If
+    If UCase(n) = "TRUE" Or UCase(n) = "FALSE" Then
+        typeOut = TYPE_BOOL
+        errText = ""
+        Return 1
+    End If
+    ' ADIM44: allow bare builtins used as identifiers in BASIC style expressions.
+    If nu = "RND" Or nu = "TIMER" Then
+        typeOut = TYPE_F64
+        errText = ""
+        Return 1
+    End If
+    If nu = "BIGI" Or nu = "BIGINT" Or nu = "BIG_INTEGER" Then
+        typeOut = TYPE_BIGINT
+        errText = ""
+        Return 1
+    End If
+    ' YAMA2-POSTFIX: SUPER/THIS/ME are receiver pseudo-identifiers. Their
+    ' lexical owner is resolved later by class member resolution; retaining
+    ' OBJECT here avoids rejecting valid class bodies before that pass.
+    If nu = "SUPER" Or nu = "THIS" Or nu = "ME" Then
+        typeOut = TYPE_OBJECT
+        errText = ""
+        Return 1
+    End If
+    ' TASKIN/TASKOUT EVENT-PIPE-THREAD-PARALEL task baglaminda runtime
+    ' tarafindan saglanan ozel baglam degiskenleridir. Normal sembol
+    ' tablosunda yok diye type gate dusmemelidir. Eski INPUT/OUTPUT
+    ' yazimi bilerek kabul edilmez; bkz. common/task_context_names.fbs.
+    If nu = UXB_TASK_INPUT_NAME Or nu = UXB_TASK_RESULT_NAME Then
+        If UXBStep3InferTaskAliasType(ps, nodeIdx, nu, typeOut) = 0 Then typeOut = TYPE_OBJECT
+        errText = ""
+        Return 1
+    End If
+    If n = "" Then typeOut = TYPE_OBJECT: errText = "": Return 1
+    Dim scopeId As Integer = UXBStep3InferScopeForNode(ps, nodeIdx)
+    If UXBStep3ResolveImplicitClassFieldType(ps, nodeIdx, n, typeOut) <> 0 Then
+        If typeOut = "" Then typeOut = TYPE_OBJECT
+        typeOut = UXBStep3TypeCanonical(typeOut)
+        errText = ""
+        Return 1
+    End If
+    If UXBStep3ResolveSymbol(n, "", scopeId, typeOut, errText) <> 0 Then
+        If typeOut = "" Or typeOut = "CONST" Or typeOut = "FUNCTION" Or typeOut = "SUB" Then
+            Dim constFallbackTypeFix6 As String
+            If typeOut = "CONST" And UXBStep3FindConstDeclTypeAnyScopeFix6(ps, n, constFallbackTypeFix6) <> 0 Then
+                typeOut = UXBStep3TypeCanonical(constFallbackTypeFix6)
+            Else
+                typeOut = TYPE_OBJECT
+            End If
+        Else
+            typeOut = UXBStep3TypeCanonical(typeOut)
+        End If
+        If typeOut = TYPE_OBJECT Then
+            Dim declType As String
+            If UXBStep3DeclaredVarTypeFromAst(ps, n, declType) <> 0 Then
+                typeOut = UXBStep3TypeCanonical(declType)
+            End If
+        End If
+        If typeOut = TYPE_OBJECT Then
+            Dim fieldType As String
+            If UXBStep3ResolveImplicitClassFieldType(ps, nodeIdx, n, fieldType) <> 0 Then
+                typeOut = UXBStep3TypeCanonical(fieldType)
+            End If
+        End If
+        errText = "": Return 1
+    End If
+
+    ' The legacy binding registry is name-only.  Consult it only after the
+    ' lexical symbol table so equal local names in different routines cannot
+    ' leak the first declaration's type into later routines.
+    If UXBStep3VarTypeName(n, typeOut, errText) <> 0 Then
+        typeOut = UXBStep3TypeCanonical(typeOut)
+        errText = ""
+        Return 1
+    End If
+
+    Dim constAnyScopeTypeFix6 As String
+    If UXBStep3FindConstDeclTypeAnyScopeFix6(ps, n, constAnyScopeTypeFix6) <> 0 Then
+        typeOut = UXBStep3TypeCanonical(constAnyScopeTypeFix6)
+        errText = ""
+        Return 1
+    End If
+
+    typeOut = TYPE_ERROR
+    errText = "type: unknown symbol: " & n
+    Return 0
+End Function
+
+Private Function UXBStep3InferPipeBinaryType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String, ByRef errText As String) As Integer
+    Dim inputType As String
+    If UXBStep3InferChild(ps, nodeIdx, 0, inputType, errText) = 0 Then Return 0
+
+    Dim targetIdx As Integer
+    targetIdx = UXBStep3ChildNodeAt(ps, nodeIdx, 1)
+    If targetIdx = -1 Then errText = "type: |> target missing": Return 0
+
+    Dim targetKind As String
+    targetKind = UCase(Trim(ps.ast.nodes(targetIdx).kind))
+    If targetKind <> "IDENT" And targetKind <> "IDENTIFIER" And targetKind <> "KEYWORD_REF" Then
+        errText = "type: |> target must be identifier"
+        Return 0
+    End If
+
+    Dim targetName As String
+    targetName = Trim(ps.ast.nodes(targetIdx).value)
+    If targetName = "" Then targetName = Trim(ps.ast.nodes(targetIdx).symbolName)
+    If targetName = "" Then errText = "type: |> target name missing": Return 0
+
+    If UXBStep3BuiltinReturnType(targetName, typeOut) <> 0 Then
+        errText = ""
+        Return 1
+    End If
+    If UXBStep3DeclaredRoutineReturnTypeFromAst(ps, targetName, typeOut) <> 0 Then
+        errText = ""
+        Return 1
+    End If
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "PIPE_STMT" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> UCase(Trim(targetName)) And _
+           UCase(Trim(ps.ast.nodes(i).symbolName)) <> UCase(Trim(targetName)) Then Continue For
+
+        Dim bodyNode As Integer
+        bodyNode = ps.ast.nodes(i).firstChild
+        Do While bodyNode <> -1
+            Dim bodyKind As String
+            bodyKind = UCase(Trim(ps.ast.nodes(bodyNode).kind))
+            Dim valueNode As Integer
+            valueNode = -1
+
+            If bodyKind = "RETURN_STMT" Then
+                valueNode = UXBStep3ChildNodeAt(ps, bodyNode, 0)
+            ElseIf bodyKind = "ASSIGN_STMT" Then
+                Dim lhsNode As Integer
+                lhsNode = UXBStep3ChildNodeAt(ps, bodyNode, 0)
+                If lhsNode <> -1 Then
+                    If UCase(Trim(ps.ast.nodes(lhsNode).value)) = UXB_TASK_RESULT_NAME Then valueNode = UXBStep3ChildNodeAt(ps, bodyNode, 1)
+                End If
+            End If
+
+            If valueNode <> -1 Then
+                Dim inferErr As String
+                If UXBStep3InferExprType(ps, valueNode, typeOut, inferErr) <> 0 Then
+                    errText = ""
+                    Return 1
+                End If
+            End If
+            bodyNode = ps.ast.nodes(bodyNode).nextSibling
+        Loop
+
+        ' PIPE declarations have no separate output type clause.  If the body
+        ' cannot prove one, preserving the input type is the only sound static
+        ' contract; runtime values still retain their concrete representation.
+        typeOut = inputType
+        errText = ""
+        Return 1
+    Next i
+
+    errText = "type: unknown |> target: " & targetName
+    Return 0
+End Function
+
+Private Function UXBStep3InferBinaryType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String, ByRef errText As String) As Integer
+    Dim opText As String = UXBStep3NodeOpText(ps, nodeIdx)
+    If opText = "|>" Then Return UXBStep3InferPipeBinaryType(ps, nodeIdx, typeOut, errText)
+
+    Dim lt As String, rt As String
+    If UXBStep3InferChild(ps, nodeIdx, 0, lt, errText) = 0 Then Return 0
+    If UXBStep3InferChild(ps, nodeIdx, 1, rt, errText) = 0 Then Return 0
+
+    Dim libResultType As String
+    Dim libCallName As String
+    If UXBLibraryTypeResolveBinaryOperator(lt, opText, rt, libResultType, libCallName) <> 0 Then
+        typeOut = UXBStep3TypeCanonical(libResultType)
+        errText = ""
+        Return 1
+    End If
+
+    Select Case opText
+    Case "=", "==", "<>", "!=", "<", "<=", ">", ">=", "ANDALSO", "ORELSE", "&&", "||", "IS"
+        typeOut = TYPE_BOOL: errText = "": Return 1
+    Case "AND", "OR", "XOR", "&", "|", "^", "NAND", "NOR", "XNOR", "IMP", "CIMP", "NIMP", "NCIMP", "IDA", "IDB", "NOTA", "NOTB"
+        If UXBStep3TypeCanonical(lt) = TYPE_BOOL And UXBStep3TypeCanonical(rt) = TYPE_BOOL Then
+            typeOut = TYPE_BOOL: errText = "": Return 1
+        End If
+        If UXBStep3TypeIsInteger(lt) = 0 Or UXBStep3TypeIsInteger(rt) = 0 Then errText = "type: integer or Boolean operands required for bit logic": Return 0
+        typeOut = UXBStep3TypePromoteNumeric(lt, rt): errText = "": Return 1
+    Case "+"
+        ' S-071: pointer arithmetic is BYTE-based and stays a pointer (locked
+        ' memory design, item 6): PTR + integer -> PTR. Falling through to
+        ' PromoteNumeric typed `p + 4` as I32, which the native x64 backend
+        ' then sign-extended from 32 bits -- truncating a 64-bit heap pointer
+        ' and crashing the next PEEK/POKE through it.
+        If UXBStep3TypeIsString(lt) = 0 And UXBStep3TypeIsString(rt) = 0 Then
+            If UXBStep3TypeIsBytePointer(lt) <> 0 Or UXBStep3TypeIsBytePointer(rt) <> 0 Then
+                If UXBStep3TypeIsBytePointer(lt) <> 0 And UXBStep3TypeIsBytePointer(rt) <> 0 Then errText = "type: cannot add two pointers": Return 0
+                If UXBStep3TypeIsBytePointer(lt) <> 0 And UXBStep3TypeIsInteger(rt) <> 0 Then typeOut = UXBStep3TypeCanonical(lt): errText = "": Return 1
+                If UXBStep3TypeIsInteger(lt) <> 0 And UXBStep3TypeIsBytePointer(rt) <> 0 Then typeOut = UXBStep3TypeCanonical(rt): errText = "": Return 1
+                errText = "type: pointer arithmetic requires an integer byte offset": Return 0
+            End If
+        End If
+        If UXBStep3TypeIsString(lt) <> 0 Or UXBStep3TypeIsString(rt) <> 0 Then typeOut = TYPE_STRING Else typeOut = UXBStep3TypePromoteNumeric(lt, rt)
+        errText = "": Return 1
+    Case "/"
+        If UXBStep3TypeIsNumeric(lt) = 0 Or UXBStep3TypeIsNumeric(rt) = 0 Then errText = "type: numeric operands required": Return 0
+        typeOut = TYPE_F64
+        errText = "": Return 1
+    Case "\", "MOD", "%", "SHL", "SHR", "ROL", "ROR"
+        If UXBStep3TypeIsInteger(lt) = 0 Or UXBStep3TypeIsInteger(rt) = 0 Then errText = "type: integer operands required": Return 0
+        typeOut = UXBStep3TypeCanonical(lt)
+        ' S-077: `\` and MOD promote like arithmetic when an unsigned 64-bit
+        ' operand is involved (`10 MOD u` must be U64, not the literal's I32).
+        ' Shifts/rotates keep the left operand's type (count is not promoted).
+        If opText = "\" Or opText = "MOD" Or opText = "%" Then
+            If UXBStep3TypeIsU64(lt) <> 0 Or UXBStep3TypeIsU64(rt) <> 0 Then typeOut = TYPE_U64
+        End If
+        errText = "": Return 1
+    Case "-", "*", "**", "POW"
+        ' S-071: PTR - integer -> PTR; PTR - PTR -> I64 byte distance.
+        If opText = "-" And UXBStep3TypeIsBytePointer(lt) <> 0 Then
+            If UXBStep3TypeIsBytePointer(rt) <> 0 Then typeOut = TYPE_I64: errText = "": Return 1
+            If UXBStep3TypeIsInteger(rt) <> 0 Then typeOut = UXBStep3TypeCanonical(lt): errText = "": Return 1
+            errText = "type: pointer arithmetic requires an integer byte offset": Return 0
+        End If
+        If UXBStep3TypeIsNumeric(lt) = 0 Or UXBStep3TypeIsNumeric(rt) = 0 Then errText = "type: numeric operands required": Return 0
+        typeOut = UXBStep3TypePromoteNumeric(lt, rt)
+        errText = "": Return 1
+    End Select
+    typeOut = UXBStep3TypePromoteNumeric(lt, rt)
+    errText = ""
+    Return 1
+End Function
+
+Private Function UXBStep3DeclFieldType(ByRef ps As ParseState, ByVal declNode As Integer, ByRef fieldName As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If declNode < 0 Or declNode >= ps.ast.count Then Return 0
+
+    Dim fkType As String
+    Dim declKind As String
+    declKind = UCase(Trim(ps.ast.nodes(declNode).kind))
+    If declKind = "ENUM_STMT" Then
+        Dim enumBaseType As String
+        enumBaseType = TYPE_I32
+        Dim enumChild As Integer
+        enumChild = ps.ast.nodes(declNode).firstChild
+        Do While enumChild <> -1
+            If UCase(Trim(ps.ast.nodes(enumChild).kind)) = "ENUM_BASE_TYPE" Then
+                If Trim(ps.ast.nodes(enumChild).value) <> "" Then enumBaseType = UXBStep3TypeCanonical(ps.ast.nodes(enumChild).value)
+            End If
+            enumChild = ps.ast.nodes(enumChild).nextSibling
+        Loop
+        enumChild = ps.ast.nodes(declNode).firstChild
+        Do While enumChild <> -1
+            If UCase(Trim(ps.ast.nodes(enumChild).kind)) = "ENUM_ITEM" And UCase(Trim(ps.ast.nodes(enumChild).value)) = UCase(Trim(fieldName)) Then
+                typeOut = enumBaseType
+                Return 1
+            End If
+            enumChild = ps.ast.nodes(enumChild).nextSibling
+        Loop
+        Return 0
+    ElseIf declKind = "TYPE_STMT" Then
+        fkType = "TYPE_FIELD"
+    ElseIf declKind = "CLASS_STMT" Then
+        fkType = "CLASS_FIELD"
+    Else
+        Return 0
+    End If
+
+    Dim target As String
+    target = UCase(Trim(fieldName))
+    Dim ch As Integer
+    ch = ps.ast.nodes(declNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = fkType And UCase(Trim(ps.ast.nodes(ch).value)) = target Then
+            Dim t As String
+            t = ""
+            If fkType = "TYPE_FIELD" Then
+                If Trim(ps.ast.nodes(ch).typeName) <> "" Then
+                    t = ps.ast.nodes(ch).typeName
+                Else
+                    Dim tch As Integer
+                    tch = ps.ast.nodes(ch).firstChild
+                    Do While tch <> -1
+                        If UCase(Trim(ps.ast.nodes(tch).kind)) = "TYPE_REF" Then
+                            t = ps.ast.nodes(tch).value
+                            Exit Do
+                        End If
+                        tch = ps.ast.nodes(tch).nextSibling
+                    Loop
+                End If
+            Else
+                If UXBStep3ClassFieldTypeFromNode(ps, ch, t) = 0 Then t = ""
+            End If
+
+            If Trim(t) <> "" Then
+                typeOut = UXBStep3TypeCanonical(t)
+                If Trim(typeOut) = "" Then typeOut = TYPE_OBJECT
+                Return 1
+            End If
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 0
+End Function
+
+#include once "../parser/ast_namespace_const_lookup.fbs"
+
+Private Function UXBStep3ResolveFieldExprType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String, ByRef errText As String) As Integer
+    typeOut = TYPE_OBJECT
+    errText = ""
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
+
+    Dim memberName As String
+    memberName = Trim(ps.ast.nodes(nodeIdx).value)
+    If memberName = "" Then
+        Dim mIdx As Integer
+        mIdx = ps.ast.nodes(nodeIdx).right
+        If mIdx <> -1 And mIdx < ps.ast.count Then memberName = Trim(ps.ast.nodes(mIdx).value)
+    End If
+    If memberName = "" Then Return 1
+
+    Dim namespaceConstDecl As Integer
+    Dim namespaceConstInit As Integer
+    If UXBAstResolveNamespaceConstField(ps.ast, nodeIdx, namespaceConstDecl, namespaceConstInit) <> 0 Then
+        If Trim(ps.ast.nodes(namespaceConstDecl).typeName) <> "" Then
+            typeOut = UXBStep3TypeCanonical(ps.ast.nodes(namespaceConstDecl).typeName)
+            Return 1
+        End If
+        Return UXBStep3InferExprType(ps, namespaceConstInit, typeOut, errText)
+    End If
+
+    Dim baseIdx As Integer
+    baseIdx = ps.ast.nodes(nodeIdx).left
+    If baseIdx = -1 Then
+        baseIdx = ps.ast.nodes(nodeIdx).firstChild
+    End If
+    If baseIdx = -1 Then Return 1
+
+    Dim baseType As String
+    Dim baseKind As String
+    baseKind = UCase(Trim(ps.ast.nodes(baseIdx).kind))
+    Dim baseIdent As String
+    baseIdent = UCase(Trim(ps.ast.nodes(baseIdx).value))
+    If (baseKind = "IDENT" Or baseKind = "IDENTIFIER" Or baseKind = "KEYWORD_REF") And _
+       (baseIdent = "THIS" Or baseIdent = "ME" Or baseIdent = "SUPER") Then
+        Dim receiverClassNode As Integer
+        receiverClassNode = UXBStep3FindAncestorClassNodeForType(ps, nodeIdx)
+        If receiverClassNode <> -1 Then
+            baseType = UCase(Trim(ps.ast.nodes(receiverClassNode).value))
+            If baseIdent = "SUPER" Then
+                Dim receiverBase As Integer
+                receiverBase = ps.ast.nodes(receiverClassNode).firstChild
+                Do While receiverBase <> -1
+                    If UCase(Trim(ps.ast.nodes(receiverBase).kind)) = "CLASS_BASE_REF" Then
+                        baseType = UCase(Trim(ps.ast.nodes(receiverBase).value))
+                        Exit Do
+                    End If
+                    receiverBase = ps.ast.nodes(receiverBase).nextSibling
+                Loop
+            End If
+        Else
+            baseType = TYPE_OBJECT
+        End If
+    Else
+        If UXBStep3InferExprType(ps, baseIdx, baseType, errText) = 0 Then Return 0
+    End If
+    baseType = UCase(Trim(UXBStep3TypeCanonical(baseType)))
+    If baseType = "" Or baseType = TYPE_OBJECT Then
+        If baseKind = "IDENT" Or baseKind = "IDENTIFIER" Then
+            Dim rawDeclType As String
+            If UXBStep3DeclaredVarTypeRawFromAst(ps, ps.ast.nodes(baseIdx).value, rawDeclType) <> 0 Then
+                baseType = UCase(Trim(rawDeclType))
+            End If
+        End If
+    End If
+    If baseType = "" Or baseType = TYPE_OBJECT Then Return 1
+
+    Dim hop As Integer
+    For hop = 0 To 64
+        Dim i As Integer
+        Dim foundDecl As Integer
+        foundDecl = -1
+        For i = 0 To ps.ast.count - 1
+            Dim dk As String
+            dk = UCase(Trim(ps.ast.nodes(i).kind))
+            If (dk = "TYPE_STMT" Or dk = "CLASS_STMT" Or dk = "ENUM_STMT") And UCase(Trim(ps.ast.nodes(i).value)) = baseType Then
+                foundDecl = i
+                If UXBStep3DeclFieldType(ps, i, memberName, typeOut) <> 0 Then
+                    If Trim(typeOut) = "" Then typeOut = TYPE_OBJECT
+                    Return 1
+                End If
+                Exit For
+            End If
+        Next i
+        If foundDecl < 0 Then Exit For
+        Dim nextBase As String
+        nextBase = ""
+        Dim baseChild As Integer
+        baseChild = ps.ast.nodes(foundDecl).firstChild
+        Do While baseChild <> -1
+            If UCase(Trim(ps.ast.nodes(baseChild).kind)) = "CLASS_BASE_REF" Then
+                nextBase = UCase(Trim(ps.ast.nodes(baseChild).value))
+                Exit Do
+            End If
+            baseChild = ps.ast.nodes(baseChild).nextSibling
+        Loop
+        If nextBase = "" Or nextBase = baseType Then Exit For
+        baseType = nextBase
+    Next hop
+
+    typeOut = TYPE_OBJECT
+    Return 1
+End Function
+
+Function UXBStep3InferExprType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String, ByRef errText As String) As Integer
+    typeOut = TYPE_ERROR
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then errText = "type: bad node": Return 0
+    Dim k As String = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    Dim v As String = Trim(ps.ast.nodes(nodeIdx).value)
+    If Trim(ps.ast.nodes(nodeIdx).typeName) <> "" Then
+        typeOut = UXBStep3TypeCanonical(ps.ast.nodes(nodeIdx).typeName)
+        If UXBStep3TypeIsBlocked(typeOut) <> 0 Then errText = "type: blocked explicit type": Return 0
+        errText = "": Return 1
+    End If
+    Select Case k
+    Case "NUMBER"
+        If UXBNumberLiteralIsFloat(v) <> 0 Then typeOut = TYPE_F64 Else typeOut = TYPE_I32
+        errText = "": Return 1
+    Case "STRING"
+        typeOut = TYPE_STRING: errText = "": Return 1
+    Case "BOOLEAN"
+        typeOut = TYPE_BOOL: errText = "": Return 1
+    Case "IDENT", "IDENTIFIER", "KEYWORD_REF"
+        Dim identOk As Integer
+        identOk = UXBStep3InferIdentType(ps, nodeIdx, typeOut, errText)
+        If identOk <> 0 Then ps.ast.nodes(nodeIdx).typeName = UXBStep3TypeCanonical(typeOut)
+        Return identOk
+    Case "BINARY"
+        Dim binaryOk As Integer
+        binaryOk = UXBStep3InferBinaryType(ps, nodeIdx, typeOut, errText)
+        If binaryOk <> 0 Then ps.ast.nodes(nodeIdx).typeName = UXBStep3TypeCanonical(typeOut)
+        Return binaryOk
+    Case "UNARY"
+        Dim childT As String
+        If UXBStep3InferChild(ps, nodeIdx, 0, childT, errText) = 0 Then Return 0
+        Dim opText As String = UXBStep3NodeOpText(ps, nodeIdx)
+        If opText = "LNOT" Or opText = "!" Then
+            typeOut = TYPE_BOOL
+        ElseIf opText = "NOT" Then
+            If UXBStep3TypeCanonical(childT) = TYPE_BOOL Then
+                typeOut = TYPE_BOOL
+            ElseIf UXBStep3TypeIsInteger(childT) <> 0 Then
+                typeOut = childT
+            Else
+                errText = "type: NOT requires an integer or Boolean operand": Return 0
+            End If
+        ElseIf opText = "BNOT" Or opText = "~" Then
+            If UXBStep3TypeIsInteger(childT) = 0 Then errText = "type: bit NOT requires an integer operand": Return 0
+            typeOut = childT
+        Else
+            typeOut = childT
+        End If
+        ps.ast.nodes(nodeIdx).typeName = UXBStep3TypeCanonical(typeOut)
+        errText = "": Return 1
+    Case "TERNARY_EXPR"
+        Dim thenT As String, elseT As String
+        ' Parser contract: left=condition, firstChild=true arm, right=false arm.
+        Dim conditionT As String
+        If UXBStep3InferExprType(ps, ps.ast.nodes(nodeIdx).left, conditionT, errText) = 0 Then Return 0
+        If UXBStep3InferExprType(ps, ps.ast.nodes(nodeIdx).firstChild, thenT, errText) = 0 Then Return 0
+        If UXBStep3InferExprType(ps, ps.ast.nodes(nodeIdx).right, elseT, errText) = 0 Then Return 0
+        If UXBStep3TypeCanonical(thenT) = UXBStep3TypeCanonical(elseT) Then typeOut = UXBStep3TypeCanonical(thenT) Else typeOut = TYPE_OBJECT
+        errText = "": Return 1
+    Case "CAST_EXPR"
+        If v <> "" Then typeOut = UXBStep3TypeCanonical(v) Else typeOut = TYPE_OBJECT
+        If UXBStep3TypeIsBlocked(typeOut) <> 0 Then errText = "type: bad cast target": Return 0
+        errText = "": Return 1
+    Case "SIZEOF_EXPR"
+        typeOut = TYPE_I32: errText = "": Return 1
+    Case "INDEX_EXPR"
+        typeOut = TYPE_OBJECT: errText = "": Return 1
+    Case "FIELD_EXPR", "MEMBER_EXPR"
+        Return UXBStep3ResolveFieldExprType(ps, nodeIdx, typeOut, errText)
+    Case "CALL_EXPR", "CALL_STMT"
+        Dim callName As String
+        callName = Trim(v)
+        If callName = "" Then callName = Trim(ps.ast.nodes(nodeIdx).symbolName)
+
+        If callName = "" Then
+            Dim callCallee As Integer
+            callCallee = ps.ast.nodes(nodeIdx).firstChild
+            If callCallee <> -1 Then
+                Dim ck As String
+                ck = UCase(Trim(ps.ast.nodes(callCallee).kind))
+                If ck = "IDENT" Or ck = "IDENTIFIER" Then callName = Trim(ps.ast.nodes(callCallee).value)
+            End If
+        End If
+
+        Dim scalarCastType As String
+        Dim libOwner As Integer, libTypeName As String, libMember As String
+        If UXBLibraryTypeFindCallOwner(callName, libOwner, libTypeName, libMember) <> 0 Then
+            If UXBLibraryTypeResolveCallName(callName, libOwner, libTypeName, libMember, typeOut) = 0 Then
+                errText = "library type member not declared: " & callName
+                Return 0
+            End If
+            If UCase(gUXBLibraryTypes(libOwner).mirProvider) = "OWNED_TEXT_REFERENCE" Then
+                Dim argNode As Integer = ps.ast.nodes(nodeIdx).firstChild
+                If argNode = -1 Then
+                    errText = "library type call expects one operand: " & callName
+                    Return 0
+                End If
+                If ps.ast.nodes(argNode).nextSibling <> -1 Then
+                    errText = "library type call expects one operand: " & callName
+                    Return 0
+                End If
+                Dim argType As String
+                If UXBStep3InferExprType(ps, argNode, argType, errText) = 0 Then Return 0
+                Dim wantedType As String = libTypeName
+                If libMember = "CONSTRUCT" Then wantedType = TYPE_STRING
+                If UXBStep3TypeCanonical(argType) <> UXBStep3TypeCanonical(wantedType) Then
+                    errText = "library type operand mismatch: " & callName
+                    Return 0
+                End If
+                If libMember = "DROP" Then
+                    Dim argKind As String = UCase(ps.ast.nodes(argNode).kind)
+                    If argKind <> "IDENT" And argKind <> "IDENTIFIER" Then
+                        errText = "library type DROP requires a variable"
+                        Return 0
+                    End If
+                End If
+            End If
+            errText = ""
+            Return 1
+        End If
+        If UXBStep3CoreScalarConstructorType(callName, scalarCastType) <> 0 Then
+            Dim scalarCastCount As Integer
+            Dim scalarCastChild As Integer
+            scalarCastChild = ps.ast.nodes(nodeIdx).firstChild
+            Do While scalarCastChild <> -1
+                scalarCastCount += 1
+                scalarCastChild = ps.ast.nodes(scalarCastChild).nextSibling
+            Loop
+            If scalarCastCount <> 1 Then
+                errText = "type: " & UCase(Trim(callName)) & " conversion expects exactly one argument"
+                Return 0
+            End If
+
+            Dim scalarSourceType As String
+            If UXBStep3InferChild(ps, nodeIdx, 0, scalarSourceType, errText) = 0 Then Return 0
+            If UXBStep3TypeIsNumeric(scalarSourceType) = 0 And UXBStep3TypeIsPointerLike(scalarSourceType) = 0 Then
+                errText = "type: " & UCase(Trim(callName)) & " conversion requires a numeric, Boolean or pointer operand"
+                Return 0
+            End If
+            typeOut = scalarCastType
+            ps.ast.nodes(nodeIdx).typeName = scalarCastType
+            errText = ""
+            Return 1
+        End If
+
+        If UXBStep3InferFfiCallReturnType(ps, nodeIdx, typeOut, errText) <> 0 Then
+            ' S-144: stamp the call node with its declared C return type. The AST engine's condition/loop
+            ' evaluator decides "float involved?" from the operand stamps; an unstamped `CALL(DLL, ..., F64, ...)`
+            ' compared as an integer (`IF strtod("2.5") > 2` was false: 2.5 was rounded to 2 first).
+            ps.ast.nodes(nodeIdx).typeName = typeOut
+            errText = ""
+            Return 1
+        End If
+
+        If InStr(UCase(Trim(callName)), ".") > 0 Then
+            If UXBStep3NamespaceRoutineReturnType(ps, callName, typeOut) <> 0 Then
+                errText = ""
+                Return 1
+            End If
+            If UXBStep3InferMethodCallReturnType(ps, nodeIdx, callName, typeOut, errText) <> 0 Then
+                errText = ""
+                Return 1
+            End If
+        End If
+
+        If UCase(Trim(callName)) = "BIGINIT" Then
+            Return UXBStep3BigInitReturnType43(ps, nodeIdx, typeOut, errText)
+        End If
+
+        If UXBStep3BuiltinReturnType(callName, typeOut) <> 0 Then
+            errText = ""
+            Return 1
+        End If
+
+        Dim resolvedType As String
+        Dim resolveErr As String
+        Dim callScope As Integer
+        callScope = UXBStep3InferScopeForNode(ps, nodeIdx)
+        If UXBStep3ResolveSymbol(callName, "", callScope, resolvedType, resolveErr) <> 0 Then
+            resolvedType = UCase(Trim(resolvedType))
+            If resolvedType <> "" And resolvedType <> "SYM_FUNCTION" And resolvedType <> "SYM_SUB" And resolvedType <> "FUNCTION" And resolvedType <> "SUB" Then
+                resolvedType = UXBStep3TypeCanonical(resolvedType)
+                If Len(resolvedType) > 2 And Right(resolvedType, 2) = "[]" Then
+                    If ps.ast.nodes(nodeIdx).firstChild <> -1 Then
+                        typeOut = UXBStep3TypeCanonical(Left(resolvedType, Len(resolvedType) - 2))
+                        errText = ""
+                        Return 1
+                    End If
+                End If
+                typeOut = resolvedType
+                errText = ""
+                Return 1
+            End If
+        End If
+
+        If UXBStep3DeclaredRoutineReturnTypeFromAst(ps, callName, typeOut) <> 0 Then
+            errText = ""
+            Return 1
+        End If
+
+        typeOut = TYPE_OBJECT
+        errText = ""
+        Return 1
+    Case "NEW_EXPR"
+        If v <> "" Then typeOut = UXBStep3TypeCanonical(v) Else typeOut = TYPE_CLASS
+        errText = "": Return 1
+    Case "SPAWN_EXPR"
+        ' S-030: SPAWN <gorevCagrisi> her zaman bir TASK tutamaci uretir.
+        typeOut = TYPE_TASK
+        errText = "": Return 1
+    Case "RANGE_EXPR", "INCDEC_EXPR"
+        typeOut = TYPE_I32: errText = "": Return 1
+    Case "INIT_EXPR"
+        If ps.ast.nodes(nodeIdx).firstChild <> -1 Then Return UXBStep3InferChild(ps, nodeIdx, 0, typeOut, errText)
+        typeOut = TYPE_OBJECT: errText = "": Return 1
+    Case "PROMPT_EXPR"
+        typeOut = TYPE_STRING: errText = "": Return 1
+    End Select
+    typeOut = TYPE_OBJECT
+    errText = ""
+    Return 1
+End Function
+
+' S-069: the ONE place that decides what AUTO memory mode means. A PEEK/POKE/
+' MEMCOPY/MEMFILL/PEEKS/POKES with no explicit VIRTUAL/NATIVE prefix asks this
+' about its address expression: a POINTER-typed address (VARPTR, SADD, PTR(),
+' CASTPTR(), a PTR variable, p + n ...) is a real process address (NATIVE),
+' anything else -- a plain integer, however large -- is a VIRTUAL-sandbox
+' offset. The decision follows the expression's static TYPE, never the numeric
+' value (the old "< 1 MiB = virtual" heuristic is gone everywhere). An
+' unknown/uninferable type counts as "not a pointer" (VIRTUAL, the safe,
+' bounds-checked side). Every engine (MIR lowering, AST interpreter, legacy
+' AST-x64) calls this so they cannot disagree.
+Function UXBMemoryAddrIsPointer(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    Dim addrType As String
+    Dim addrErr As String
+    If UXBStep3InferExprType(ps, nodeIdx, addrType, addrErr) = 0 Then Return 0
+    Return UXBStep3TypeIsBytePointer(addrType)
+End Function
+
+' S-077: static "is this expression an unsigned 64-bit integer" query for MIR
+' lowering (opcode selection: UIDIV/UMOD/ULT/ULE/UGT/UGE) and the legacy x64
+' code generator. Uses the same inference as the semantic gate, so every engine
+' agrees with the type checker.
+Function UXBExprIsU64(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    Dim exprType As String
+    Dim exprErr As String
+    If UXBStep3InferExprType(ps, nodeIdx, exprType, exprErr) = 0 Then Return 0
+    Return UXBStep3TypeIsU64(exprType)
+End Function
+
+' S-077: I64 or U64 (see UXBStep3TypeIsWide64).
+Function UXBExprIsWide64(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    Dim exprType As String
+    Dim exprErr As String
+    If UXBStep3InferExprType(ps, nodeIdx, exprType, exprErr) = 0 Then Return 0
+    Return UXBStep3TypeIsWide64(exprType)
+End Function
+#endif

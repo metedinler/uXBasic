@@ -1,0 +1,116 @@
+#ifndef UXB_SYMBOL_INDEX_FBS
+#define UXB_SYMBOL_INDEX_FBS
+
+#include once "symbol_key.fbs"
+
+Type UXBSymbolHashSlot
+    used As Integer
+    key As String
+    symbolIdx As Integer
+End Type
+
+Dim Shared gUXBSymHash(Any) As UXBSymbolHashSlot
+Dim Shared gUXBSymHashCap As Integer
+Dim Shared gUXBSymHashCount As Integer
+
+Private Function UXBSymHashOf(ByRef key As String) As UInteger
+    Dim h As UInteger = 2166136261
+    Dim i As Integer
+    For i = 1 To Len(key)
+        h = (h Xor Asc(Mid(key, i, 1))) * 16777619
+    Next i
+    Return h
+End Function
+
+Sub UXBSymHashReset()
+    gUXBSymHashCap = 4096
+    ReDim gUXBSymHash(gUXBSymHashCap - 1)
+    Dim i As Integer
+    For i = 0 To gUXBSymHashCap - 1
+        gUXBSymHash(i).used = 0
+        gUXBSymHash(i).key = ""
+        gUXBSymHash(i).symbolIdx = -1
+    Next i
+    gUXBSymHashCount = 0
+End Sub
+
+Private Function UXBSymHashLoadTooHigh() As Integer
+    If gUXBSymHashCap <= 0 Then Return 1
+    If gUXBSymHashCount * 100 >= gUXBSymHashCap * 70 Then Return 1
+    Return 0
+End Function
+
+Private Sub UXBSymHashInsertRaw(ByRef key As String, ByVal symbolIdx As Integer)
+    If gUXBSymHashCap <= 0 Then UXBSymHashReset
+    Dim baseSlot As UInteger
+    baseSlot = UXBSymHashOf(key) Mod gUXBSymHashCap
+    Dim probe As Integer
+    For probe = 0 To gUXBSymHashCap - 1
+        Dim slotPos As Integer
+        slotPos = (baseSlot + probe) Mod gUXBSymHashCap
+        If gUXBSymHash(slotPos).used = 0 Then
+            gUXBSymHash(slotPos).used = 1
+            gUXBSymHash(slotPos).key = key
+            gUXBSymHash(slotPos).symbolIdx = symbolIdx
+            gUXBSymHashCount += 1
+            Exit Sub
+        End If
+        If gUXBSymHash(slotPos).key = key Then
+            gUXBSymHash(slotPos).symbolIdx = symbolIdx
+            Exit Sub
+        End If
+    Next probe
+End Sub
+
+Private Sub UXBSymHashRebuild(ByVal newCap As Integer)
+    Dim oldCap As Integer = gUXBSymHashCap
+    Dim oldSlots(Any) As UXBSymbolHashSlot
+    If oldCap > 0 Then
+        ReDim oldSlots(oldCap - 1)
+        Dim i As Integer
+        For i = 0 To oldCap - 1
+            oldSlots(i) = gUXBSymHash(i)
+        Next i
+    End If
+
+    gUXBSymHashCap = newCap
+    ReDim gUXBSymHash(gUXBSymHashCap - 1)
+    Dim j As Integer
+    For j = 0 To gUXBSymHashCap - 1
+        gUXBSymHash(j).used = 0
+        gUXBSymHash(j).key = ""
+        gUXBSymHash(j).symbolIdx = -1
+    Next j
+    gUXBSymHashCount = 0
+
+    If oldCap > 0 Then
+        Dim k As Integer
+        For k = 0 To oldCap - 1
+            If oldSlots(k).used <> 0 Then UXBSymHashInsertRaw oldSlots(k).key, oldSlots(k).symbolIdx
+        Next k
+    End If
+End Sub
+
+Sub UXBSymHashInsert(ByVal scopeId As Integer, ByVal nameText As String, ByVal kindText As String, ByVal symbolIdx As Integer)
+    If gUXBSymHashCap <= 0 Then UXBSymHashReset
+    If UXBSymHashLoadTooHigh() <> 0 Then UXBSymHashRebuild gUXBSymHashCap * 2
+    Dim key As String = UXBSymMakeKey(scopeId, nameText, kindText)
+    UXBSymHashInsertRaw key, symbolIdx
+End Sub
+
+Function UXBSymHashLookupExact(ByVal scopeId As Integer, ByVal nameText As String, ByVal kindText As String) As Integer
+    If gUXBSymHashCap <= 0 Then Return -1
+    Dim key As String = UXBSymMakeKey(scopeId, nameText, kindText)
+    Dim baseSlot As UInteger
+    baseSlot = UXBSymHashOf(key) Mod gUXBSymHashCap
+    Dim probe As Integer
+    For probe = 0 To gUXBSymHashCap - 1
+        Dim slotPos As Integer
+        slotPos = (baseSlot + probe) Mod gUXBSymHashCap
+        If gUXBSymHash(slotPos).used = 0 Then Return -1
+        If gUXBSymHash(slotPos).key = key Then Return gUXBSymHash(slotPos).symbolIdx
+    Next probe
+    Return -1
+End Function
+
+#endif

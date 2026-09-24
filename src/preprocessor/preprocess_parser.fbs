@@ -1,0 +1,147 @@
+#ifndef UXB_PREPROCESS_PARSER_FBS
+#define UXB_PREPROCESS_PARSER_FBS
+
+' Preprocess parser helpers for directive head/rest split.
+' This layer parses only %% commands; ordinary BASIC syntax remains parser-owned.
+
+Type PreprocessCommand
+    commandName As String
+    argsText As String
+    normalizedArgs As String
+    sourceFile As String
+    lineNo As Integer
+    colNo As Integer
+    statusText As String
+End Type
+
+Sub UXBPreParseDirective(ByRef directive As String, ByRef head As String, ByRef restText As String)
+    Dim sp As Integer
+    sp = InStr(directive, " ")
+    If sp <= 0 Then
+        head = UCase(Trim(directive))
+        restText = ""
+    Else
+        head = UCase(Trim(Left(directive, sp - 1)))
+        restText = Trim(Mid(directive, sp + 1))
+    End If
+End Sub
+
+Declare Function UXBPreParseIsCanonicalCommand(ByRef headText As String) As Integer
+
+Sub UXBPreParseCommand(ByRef directive As String, ByRef sourceFile As String, ByVal lineNo As Integer, ByVal colNo As Integer, ByRef cmd As PreprocessCommand)
+    UXBPreParseDirective directive, cmd.commandName, cmd.argsText
+    cmd.normalizedArgs = Trim(cmd.argsText)
+    cmd.sourceFile = sourceFile
+    cmd.lineNo = lineNo
+    cmd.colNo = colNo
+    If UXBPreParseIsCanonicalCommand(cmd.commandName) <> 0 Then
+        cmd.statusText = "OK"
+    Else
+        cmd.statusText = "PREPROCESSOR_UNKNOWN_COMMAND"
+    End If
+End Sub
+
+Function UXBPreParseIsCanonicalCommand(ByRef headText As String) As Integer
+    Dim h As String
+    h = UCase(Trim(headText))
+    Select Case h
+    Case "PP"
+        Return 1
+    Case "DEFINE", "MACRO", "UNDEF", "IF", "IFN", "IFC", "ELIF", "ELSE", "ENDIF"
+        Return 1
+    Case "INCLUDE", "ALIAS", "SET", "EVAL", "PROFILE", "CONFIG_FILE", "PATH_ALIAS"
+        Return 1
+    Case "LOCK_META", "DUMP_META", "SOURCE_MAP", "EMITNOTE", "ENV", "DEPRECATED"
+        Return 1
+    Case "TEMPLATE", "TEMPLATE_BEGIN", "TEMPLATE_END", "TEMPLATE_USE"
+        Return 1
+    Case "MINIFY", "FINGERPRINT_ASSETS", "HASHFILE", "COPY_DIR"
+        Return 1
+    Case "EMBEDTEXT", "EMBEDBASE64", "LICENSEFILE", "HTMLIMAGE", "HTMLAUDIO"
+        Return 1
+    Case "CSS_RULE", "CSS_IMPORT", "MD_SAFE", "MD_CSS", "BREAK", "CONTINUE", "INFOMETA"
+        Return 1
+    Case "ALLOW_RAW_JS", "ALLOW_RAW_WAT", "SAFE_PATHS", "REQUIRE_HOST_BINDING", "ASSERT_META", "WARN_META"
+        Return 1
+    Case "TARGET", "OUTDIR", "ASSET_ROOT", "EXPANDLIMIT", "ASSET_COPY", "ASSET_FILE", "ASSET_IMAGE", "ASSET_AUDIO", "ASSET_REQUIRE"
+        Return 1
+    Case "MANIFEST_SET", "MANIFEST_REQUIRE", "WAT_IMPORT", "WAT_EXPORT", "JS_LINE", "HTML_LINE", "CSS_LINE", "JSON_SET"
+        Return 1
+    Case "SECTION", "ENDSECTION", "JS_BEGIN", "JS_END", "WAT_BEGIN", "WAT_END", "WAT_FUNC_BEGIN", "WAT_FUNC_END"
+        Return 1
+    Case "WASM_HOST_JS_BEGIN", "WASM_HOST_JS_END", "HTML_BEGIN", "HTML_END", "CSS_BEGIN", "CSS_END"
+        Return 1
+    Case "JSON_BEGIN", "JSON_END", "JSON_ARRAY_BEGIN", "JSON_ARRAY_END", "MD_BEGIN", "MD_END"
+        Return 1
+    Case "FOR", "FOREACH", "ENDFOR", "ENDFOREACH", "NEXTMETA", "REPEAT", "ENDREPEAT", "UNTILMETA"
+        Return 1
+    Case "PLATFORM", "DESTOS", "NOZEROVARS", "SECSTACK", "ENDCOMP", "ERRORENDCOMP"
+        Return 1
+    ' PreproesssorB manifest/web commands.
+    Case "BUNDLE_NAME", "BUNDLE_VERSION", "BUNDLE_ID", "AUTHOR", "LICENSE", "BUILD_ID"
+        Return 1
+    Case "SANDBOX_ROOT", "BROWSER_ENTRY", "SCRIPT_ENTRY", "STYLE_ENTRY", "DATA_JSON", "CSP", "SECURITY_NOTE"
+        Return 1
+    Case "CAPABILITY", "EXPORT_BASIC", "API_ENDPOINT", "ROUTE", "REQUIRE_ASSET", "HOST_IMPORT", "GEN_FILE", "FEATURE", "TEST_EXPECT", "DOC", "GEN_BLOCK", "GEN_END"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+' PreproesssorB'nin web/manifest komutlari: preprocess_web_manifest_commands.fbs
+' icinde gercek bir Case dali olan, ama yalniz %%PP B aktifken calistirilan komutlar.
+' UXBPreParseIsCanonicalCommand bunlari kosulsuz "kanonik" sayar; asil kume kontrolu
+' preprocess_engine.fbs'de yapilir. Bu liste, kullaniciya "bilinmeyen komut" yerine
+' "bu komut %%PP B gerektirir" diye dogru bir tani vermek icin kullanilir.
+Function UXBPreParseIsWebManifestDirective(ByRef headText As String) As Integer
+    Dim h As String
+    h = UCase(Trim(headText))
+    Select Case h
+    Case "BUNDLE_NAME", "BUNDLE_VERSION", "BUNDLE_ID", "AUTHOR", "LICENSE", "BUILD_ID"
+        Return 1
+    Case "SANDBOX_ROOT", "BROWSER_ENTRY", "SCRIPT_ENTRY", "STYLE_ENTRY", "DATA_JSON", "CSP", "SECURITY_NOTE"
+        Return 1
+    Case "CAPABILITY", "EXPORT_BASIC", "API_ENDPOINT", "ROUTE", "REQUIRE_ASSET", "HOST_IMPORT", "GEN_FILE", "FEATURE", "TEST_EXPECT", "DOC"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+' Kanonik listede kayitli ama ne A ne B kumesinde gercek bir isleyicisi olan komutlar
+' (bkz. rapor I / bulgu C5). Bunlar icin "%%PP B ekleyin" demek yanlis olur; kullanici
+' bunu B'ye gecirse de yine calismaz. Ayri, durust bir mesaj gerekir.
+Function UXBPreParseIsUnimplementedCanonicalDirective(ByRef headText As String) As Integer
+    Dim h As String
+    h = UCase(Trim(headText))
+    Select Case h
+    Case "EMBEDBASE64", "GEN_BLOCK", "GEN_END"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Function UXBPreParseValidateCommand(ByRef cmd As PreprocessCommand, ByRef errText As String) As Integer
+    errText = ""
+    Select Case UCase(Trim(cmd.commandName))
+    Case "PP"
+        Dim v As String
+        v = UCase(Trim(cmd.argsText))
+        If v <> "A" And v <> "B" Then
+            errText = "PREPROCESSOR_PP_INVALID: %%PP expects A or B"
+            Return 0
+        End If
+    Case "INCLUDE"
+        If Trim(cmd.argsText) = "" Then
+            errText = "PREPROCESSOR_INCLUDE_MISSING_PATH"
+            Return 0
+        End If
+    Case "LOCK_META"
+        If Trim(cmd.argsText) = "" Then
+            errText = "PREPROCESSOR_LOCK_META_MISSING_KEY"
+            Return 0
+        End If
+    End Select
+    Return 1
+End Function
+
+#endif

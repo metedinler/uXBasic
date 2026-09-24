@@ -1,0 +1,333 @@
+#ifndef UXB_MIR_X64_BUILTINS_FBS
+#define UXB_MIR_X64_BUILTINS_FBS
+
+' S-064: MIRX64LoadFloatOperandToXmm/MIRX64StoreXmmToVar forward-declares
+' moved to mir_x64_emit_helpers.fbs (included earlier, shared by
+' mir_x64_arrays.fbs too) -- a second identical Declare here would be a
+' "Duplicated definition" error.
+
+Function MIRX64BuiltinRuntimeSymbol(ByRef targetText As String) As String
+    Dim t As String
+    t = UCase(Trim(targetText))
+    Select Case t
+    Case "LEN": Return "__uxb_rt_strlen"
+    Case "VAL": Return "__uxb_rt_val_i64"
+    Case "CHR", "CHR$": Return "__uxb_rt_chr"
+    Case "STR", "STR$": Return "__uxb_rt_str_i64"
+    Case "LEFT", "LEFT$": Return "__uxb_rt_left"
+    Case "RIGHT", "RIGHT$": Return "__uxb_rt_right"
+    Case "MID", "MID$": Return "__uxb_rt_mid"
+    Case "INSTR": Return "__uxb_rt_instr"
+    Case "LCASE", "LCASE$": Return "__uxb_rt_lcase"
+    Case "UCASE", "UCASE$": Return "__uxb_rt_ucase"
+    Case "LTRIM", "LTRIM$": Return "__uxb_rt_ltrim"
+    Case "RTRIM", "RTRIM$": Return "__uxb_rt_rtrim"
+    Case "TRIM", "TRIM$": Return "__uxb_rt_trim"
+    Case "SPACE", "SPACE$": Return "__uxb_rt_space"
+    Case "HEX", "HEX$": Return "__uxb_rt_hex"
+    Case "OCT", "OCT$": Return "__uxb_rt_oct"
+    Case "BIN", "BIN$": Return "__uxb_rt_bin"
+    Case "SQR", "SQRT": Return "__uxb_rt_sqrt_i64"
+    Case "SIN": Return "__uxb_rt_sin_i64"
+    Case "COS": Return "__uxb_rt_cos_i64"
+    Case "TAN": Return "__uxb_rt_tan_i64"
+    Case "ATN": Return "__uxb_rt_atn_i64"
+    Case "LOG": Return "__uxb_rt_log_i64"
+    Case "EXP": Return "__uxb_rt_exp_i64"
+    Case "BIGINIT": Return "__uxb_rt_biginit"
+    End Select
+    Return ""
+End Function
+
+Function MIRX64EmitBuiltinOneArgResult(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+        errText = "MIR x64 builtin requires one argument and a result"
+        Return 0
+    End If
+
+    Dim target As String
+    target = UCase(Trim(ins.operands(0)))
+
+    Select Case target
+    Case "ABS"
+        If MIRX64OperandIsFloat(cg, ins.operands(1)) <> 0 Or MIRX64TypeIsFloat(ins.resultType) <> 0 Then
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(1), "xmm0", errText) = 0 Then Return 0
+            MIRX64Emit cg, "    movq rax, xmm0"
+            MIRX64Emit cg, "    btr rax, 63"
+            MIRX64Emit cg, "    movq xmm0, rax"
+            Return MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText)
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Dim lAbsOk As String
+        lAbsOk = MIRX64NextLabel(cg, "abs_ok")
+        MIRX64Emit cg, "    cmp rax, 0"
+        MIRX64Emit cg, "    jge " & lAbsOk
+        MIRX64Emit cg, "    neg rax"
+        MIRX64Emit cg, lAbsOk & ":"
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "SGN"
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Dim lDone As String
+        Dim lNeg As String
+        lDone = MIRX64NextLabel(cg, "sgn_done")
+        lNeg = MIRX64NextLabel(cg, "sgn_neg")
+        MIRX64Emit cg, "    cmp rax, 0"
+        MIRX64Emit cg, "    jl " & lNeg
+        MIRX64Emit cg, "    setg al"
+        MIRX64Emit cg, "    movzx rax, al"
+        MIRX64Emit cg, "    jmp " & lDone
+        MIRX64Emit cg, lNeg & ":"
+        MIRX64Emit cg, "    mov rax, -1"
+        MIRX64Emit cg, lDone & ":"
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "INT", "FIX", "CINT", "CLNG"
+        ' A floating operand lives in an XMM register.  Loading it into RAX as a
+        ' raw 64-bit word leaks its IEEE representation to PRINT and was the
+        ' source of native-MIR results such as 4613712638259704627 for CLNG(2.9).
+        ' The four conversion names intentionally have distinct semantics.
+        If MIRX64OperandIsFloat(cg, ins.operands(1)) <> 0 Then
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(1), "xmm0", errText) = 0 Then Return 0
+            If target = "CINT" Or target = "CLNG" Then
+                MIRX64Emit cg, "    cvtsd2si rax, xmm0"
+            Else
+                MIRX64Emit cg, "    cvttsd2si rax, xmm0"
+            End If
+            If target = "INT" Then
+                Dim intDone As String
+                intDone = MIRX64NextLabel(cg, "int_floor_done")
+                MIRX64Emit cg, "    cvtsi2sd xmm1, rax"
+                MIRX64Emit cg, "    ucomisd xmm0, xmm1"
+                MIRX64Emit cg, "    jae " & intDone
+                MIRX64Emit cg, "    dec rax"
+                MIRX64Emit cg, intDone & ":"
+            End If
+            Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+
+    Case "CSNG", "CDBL"
+        ' These retain a floating result.  Their width is determined by the MIR
+        ' result type and handled by MIRX64StoreXmmToVar.
+        If MIRX64OperandIsFloat(cg, ins.operands(1)) <> 0 Then
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(1), "xmm0", errText) = 0 Then Return 0
+        Else
+            If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+            MIRX64EmitIntRaxToXmm cg, "xmm0", MIRX64OperandIsU64(cg, ins.operands(1))
+        End If
+        Return MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText)
+
+    Case "ASC"
+        If MIRX64IsQuotedStringLiteral(ins.operands(1)) <> 0 Then
+            Dim raw As String
+            raw = MIRX64Unquote(ins.operands(1))
+            If Len(raw) = 0 Then
+                MIRX64Emit cg, "    xor rax, rax"
+            Else
+                MIRX64Emit cg, "    mov rax, " & MIRX64ToStr(Asc(Left(raw, 1)))
+            End If
+            Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeUnaryI64(cg, "__uxb_rt_asc", "rax", ins.result, errText)
+
+    Case "SQR", "SQRT", "SIN", "COS", "TAN", "ATN", "LOG", "EXP"
+        ' S-142: these were integer helpers (__uxb_rt_sqrt_i64 ...): SQR(2.75) on a float operand returned the
+        ' bits of an integer result (`1.06119e-314`), SIN/COS/EXP/LOG of a float were 0/1/garbage. Real
+        ' floating-point math: the operand (a float, or an integer converted) goes through the C library
+        ' function (msvcrt), and the result is a float.
+        Dim mathSymbol As String
+        Select Case target
+        Case "SQR", "SQRT": mathSymbol = "sqrt"
+        Case "SIN": mathSymbol = "sin"
+        Case "COS": mathSymbol = "cos"
+        Case "TAN": mathSymbol = "tan"
+        Case "ATN": mathSymbol = "atan"
+        Case "LOG": mathSymbol = "log"
+        Case Else: mathSymbol = "exp"
+        End Select
+        If MIRX64OperandIsFloat(cg, ins.operands(1)) <> 0 Then
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(1), "xmm0", errText) = 0 Then Return 0
+        Else
+            If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+            MIRX64EmitIntRaxToXmm cg, "xmm0", MIRX64OperandIsU64(cg, ins.operands(1))
+        End If
+        MIRX64EmitRuntimeExtern cg, mathSymbol
+        MIRX64Emit cg, "    sub rsp, 32"
+        MIRX64Emit cg, "    call " & mathSymbol
+        MIRX64Emit cg, "    add rsp, 32"
+        Return MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText)
+
+    Case "STR", "STR$"
+        ' S-142: STR of a float printed the raw IEEE bits as an integer (`4617878467915022336` for 5.5).
+        If MIRX64OperandIsFloat(cg, ins.operands(1)) <> 0 Then
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(1), "xmm0", errText) = 0 Then Return 0
+            Dim strFloatSymbol As String
+            strFloatSymbol = IIf(MIRX64OperandIsF32(cg, ins.operands(1)) <> 0, "__uxb_rt_str_f32", "__uxb_rt_str_f64")
+            MIRX64EmitRuntimeExtern cg, strFloatSymbol
+            MIRX64Emit cg, "    sub rsp, 32"
+            MIRX64Emit cg, "    call " & strFloatSymbol
+            MIRX64Emit cg, "    add rsp, 32"
+            Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Return MIRX64EmitRuntimeUnaryI64(cg, "__uxb_rt_str_i64", "rax", ins.result, errText)
+    Case "LEN", "VAL", "CHR", "CHR$", "LCASE", "LCASE$", "UCASE", "UCASE$", "LTRIM", "LTRIM$", "RTRIM", "RTRIM$", "TRIM", "TRIM$", "SPACE", "SPACE$", "HEX", "HEX$", "OCT", "OCT$", "BIN", "BIN$", "BIGINIT"
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Dim sym As String
+        sym = MIRX64BuiltinRuntimeSymbol(target)
+        If sym = "" Then
+            errText = "MIR x64 builtin runtime symbol missing: " & target
+            Return 0
+        End If
+        Return MIRX64EmitRuntimeUnaryI64(cg, sym, "rax", ins.result, errText)
+    End Select
+
+    errText = "MIR x64 builtin dispatch failed: " & target
+    Return 0
+End Function
+
+Function MIRX64EmitBuiltinTwoArgResult(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 3 Or Trim(ins.result) = "" Then
+        errText = "MIR x64 builtin requires two arguments and a result"
+        Return 0
+    End If
+
+    Dim target As String
+    target = UCase(Trim(ins.operands(0)))
+    If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+
+    Select Case target
+    Case "CPLEN"
+        ' S-107: bytes of the UTF-8 code point that starts at 0-based byte offset r10 of the string at rax
+        ' (inline, no runtime call): lead 0xxxxxxx / stray continuation -> 1, 110xxxxx -> 2, 1110xxxx -> 3, 11110xxx -> 4
+        Dim cpDone As String
+        cpDone = MIRX64NextLabel(cg, "cplen_done")
+        MIRX64Emit cg, "    movzx eax, byte [rax + r10]"
+        MIRX64Emit cg, "    mov r11d, 1"
+        MIRX64Emit cg, "    cmp eax, 192"
+        MIRX64Emit cg, "    jb " & cpDone
+        MIRX64Emit cg, "    mov r11d, 2"
+        MIRX64Emit cg, "    cmp eax, 224"
+        MIRX64Emit cg, "    jb " & cpDone
+        MIRX64Emit cg, "    mov r11d, 3"
+        MIRX64Emit cg, "    cmp eax, 240"
+        MIRX64Emit cg, "    jb " & cpDone
+        MIRX64Emit cg, "    mov r11d, 4"
+        MIRX64Emit cg, cpDone & ":"
+        MIRX64Emit cg, "    mov rax, r11"
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+    Case "LEFT", "LEFT$"
+        Return MIRX64EmitRuntimeStringLeft(cg, "rax", "r10", ins.result, errText)
+    Case "RIGHT", "RIGHT$"
+        Return MIRX64EmitRuntimeStringRight(cg, "rax", "r10", ins.result, errText)
+    Case "INSTR"
+        MIRX64Emit cg, "    mov r11, 1"
+        Return MIRX64EmitRuntimeStringInstr(cg, "rax", "r10", "r11", ins.result, errText)
+    Case "POW"
+        Return MIRX64EmitRuntimeBinaryI64(cg, "__uxb_rt_pow_i64", "rax", "r10", ins.result, errText)
+    Case "STR_CONCAT"
+        Return MIRX64EmitRuntimeStringConcat(cg, "rax", "r10", ins.result, errText)
+    Case "STR_COMPARE"
+        Return MIRX64EmitRuntimeStringCompare(cg, "rax", "r10", ins.result, errText)
+    End Select
+
+    errText = "MIR x64 two-argument builtin dispatch failed: " & target
+    Return 0
+End Function
+
+Function MIRX64EmitBuiltinThreeArgResult(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 4 Or Trim(ins.result) = "" Then
+        errText = "MIR x64 builtin requires three arguments and a result"
+        Return 0
+    End If
+
+    Dim target As String
+    target = UCase(Trim(ins.operands(0)))
+    If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, ins.operands(2), "r10", errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, ins.operands(3), "r11", errText) = 0 Then Return 0
+
+    Select Case target
+    Case "MID", "MID$"
+        Return MIRX64EmitRuntimeStringMid(cg, "rax", "r10", "r11", ins.result, errText)
+    Case "INSTR"
+        Return MIRX64EmitRuntimeStringInstr(cg, "rax", "r10", "r11", ins.result, errText)
+    End Select
+
+    errText = "MIR x64 three-argument builtin dispatch failed: " & target
+    Return 0
+End Function
+
+Function MIRX64EmitBuiltinNoArgResult(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+        errText = "MIR x64 no-argument builtin requires a result"
+        Return 0
+    End If
+
+    Select Case UCase(Trim(ins.operands(0)))
+    Case "TIMER"
+        Return MIRX64EmitRuntimeNoArgI64(cg, "__uxb_rt_timer_i64", ins.result, errText)
+    Case "RND"
+        Return MIRX64EmitRuntimeNoArgI64(cg, "__uxb_rt_rnd_i64", ins.result, errText)
+    Case "GETKEY", "INKEY"
+        Return MIRX64EmitRuntimeNoArgI64(cg, "__uxb_rt_getkey_i64", ins.result, errText)
+    End Select
+
+    errText = "MIR x64 no-argument builtin dispatch failed: " & ins.operands(0)
+    Return 0
+End Function
+
+Function MIRX64TryEmitBuiltinCall(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    handledOut = 0
+    If ins.operandCount < 1 Then Return 1
+
+    Dim collectionHandled As Integer
+    If MIRX64TryEmitCollectionCall(ins, cg, collectionHandled, errText) = 0 Then Return 0
+    If collectionHandled <> 0 Then handledOut = 1: Return 1
+
+    Dim target As String
+    target = UCase(Trim(ins.operands(0)))
+
+    Select Case target
+    Case "SADD"
+        ' S-076: a native STRING value already IS a pointer to its NUL-terminated
+        ' character data (LEN/ASC/PRINT consume it as such) and strings are immutable
+        ' blocks, so SADD is the identity. Refuse a non-string argument.
+        handledOut = 1
+        If ins.operandCount <> 2 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 SADD requires exactly one string argument and a result"
+            Return 0
+        End If
+        If MIRX64OperandIsString(cg, ins.operands(1)) = 0 Then
+            errText = "MIR x64 SADD requires a STRING argument: " & ins.operands(1)
+            Return 0
+        End If
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+        Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+    Case "ABS", "SGN", "INT", "FIX", "CINT", "CLNG", "CSNG", "CDBL", "LEN", "ASC", "VAL", "CHR", "CHR$", "STR", "STR$", "LCASE", "LCASE$", "UCASE", "UCASE$", "LTRIM", "LTRIM$", "RTRIM", "RTRIM$", "TRIM", "TRIM$", "SPACE", "SPACE$", "HEX", "HEX$", "OCT", "OCT$", "BIN", "BIN$", "SQR", "SQRT", "SIN", "COS", "TAN", "ATN", "LOG", "EXP", "BIGINIT"
+        handledOut = 1
+        Return MIRX64EmitBuiltinOneArgResult(ins, cg, errText)
+    Case "LEFT", "LEFT$", "RIGHT", "RIGHT$", "POW", "STR_CONCAT", "STR_COMPARE", "CPLEN"
+        handledOut = 1
+        Return MIRX64EmitBuiltinTwoArgResult(ins, cg, errText)
+    Case "MID", "MID$"
+        handledOut = 1
+        If ins.operandCount >= 4 Then Return MIRX64EmitBuiltinThreeArgResult(ins, cg, errText)
+        Return MIRX64EmitBuiltinTwoArgResult(ins, cg, errText)
+    Case "INSTR"
+        handledOut = 1
+        If ins.operandCount >= 4 Then Return MIRX64EmitBuiltinThreeArgResult(ins, cg, errText)
+        Return MIRX64EmitBuiltinTwoArgResult(ins, cg, errText)
+    Case "TIMER", "RND", "GETKEY", "INKEY"
+        handledOut = 1
+        Return MIRX64EmitBuiltinNoArgResult(ins, cg, errText)
+    End Select
+
+    Return 1
+End Function
+
+#endif

@@ -1,0 +1,207 @@
+#ifndef UXB_MIR_X64_TYPED_LOCALS_FBS
+#define UXB_MIR_X64_TYPED_LOCALS_FBS
+
+#include once "../../semantic/mir_model.fbs"
+#include once "../../semantic/mir_var_info.fbs"
+#include once "../../semantic/mir_type_layout_bridge.fbs"
+#include once "mir_x64_context.fbs"
+#include once "mir_x64_emit_helpers.fbs"
+#include once "mir_x64_register_allocator.fbs"
+
+Function MIRX64FindTypedLocalInfo(ByRef fn As MIRFunction, ByVal nameText As String) As Integer
+    Dim key As String
+    key = UCase(Trim(nameText))
+
+    Dim i As Integer
+    For i = 0 To fn.localVarCount - 1
+        If UCase(Trim(fn.localVars(i))) = key Then Return i
+    Next i
+
+    For i = 0 To fn.paramVarCount - 1
+        If UCase(Trim(fn.paramVars(i))) = key Then Return -(i + 1)
+    Next i
+
+    Return 999999
+End Function
+
+Function MIRX64TypeNameForVar(ByRef fn As MIRFunction, ByVal nameText As String) As String
+    Dim idx As Integer
+    idx = MIRX64FindTypedLocalInfo(fn, nameText)
+
+    Dim typeName As String
+    If idx >= 0 And idx < fn.localVarCount Then
+        typeName = MIRCanonicalTypeName2(fn.localVarTypes(idx))
+    ElseIf idx < 0 Then
+        Dim paramIndex As Integer
+        paramIndex = -idx - 1
+        If paramIndex >= 0 And paramIndex < fn.paramVarCount Then
+            typeName = MIRCanonicalTypeName2(fn.paramVarTypes(paramIndex))
+        End If
+    End If
+
+    If Left(typeName, 5) = "TYPE_" Then typeName = Mid(typeName, 6)
+    Return UCase(Trim(typeName))
+End Function
+
+Function MIRX64StackSlotBytesForVar(ByRef fn As MIRFunction, ByVal nameText As String) As Integer
+    Dim typeName As String
+    typeName = MIRX64TypeNameForVar(fn, nameText)
+    If typeName = "" Then Return 0
+
+    Dim typeInfo As MIRTypeInfo
+    typeInfo = MIRTypeInfoFromName(typeName)
+    Return MIRStackSlotBytes(typeInfo)
+End Function
+
+Function MIRX64EnsureTypedLocalSlot( _
+    ByRef cg As MIRX64Context, _
+    ByRef fn As MIRFunction, _
+    ByVal nameText As String, _
+    ByRef offsetOut As Integer _
+) As Integer
+
+    Dim key As String
+    key = UCase(Trim(nameText))
+    If key = "" Then Return 0
+
+    If MIRX64FindLocalOffset(cg, key, offsetOut) <> 0 Then Return 1
+
+    Dim idx As Integer
+    idx = cg.localCount
+
+    If cg.localCount = 0 Then
+        ReDim cg.locals(0)
+    Else
+        ReDim Preserve cg.locals(cg.localCount)
+    End If
+    cg.localCount += 1
+
+    cg.locals(idx).nameText = key
+    cg.locals(idx).typeName = MIRX64TypeNameForVar(fn, key)
+    If cg.locals(idx).typeName = "" Then Return 0
+    cg.locals(idx).sizeBytes = MIRX64StackSlotBytesForVar(fn, key)
+    If cg.locals(idx).sizeBytes <= 0 Then Return 0
+    cg.locals(idx).offset = MIRX64LocalSlotOffset(idx)
+
+    offsetOut = cg.locals(idx).offset
+    Return 1
+End Function
+
+Function MIRX64CollectTypedLocals(ByRef fn As MIRFunction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    Dim i As Integer
+    Dim off As Integer
+
+    For i = 0 To fn.paramVarCount - 1
+        If MIRX64EnsureTypedLocalSlot(cg, fn, fn.paramVars(i), off) = 0 Then
+            errText = "MIR x64 typed locals: param slot failed: " & fn.paramVars(i)
+            Return 0
+        End If
+    Next i
+
+    For i = 0 To fn.localVarCount - 1
+        If MIRX64EnsureTypedLocalSlot(cg, fn, fn.localVars(i), off) = 0 Then
+            errText = "MIR x64 typed locals: local slot failed: " & fn.localVars(i)
+            Return 0
+        End If
+    Next i
+
+    cg.stackBytes = MIRX64StackBytesForLocals(cg.localCount)
+    Return 1
+End Function
+
+' A Win64 argument register holds whatever width the caller produced, so a
+' parameter declared narrower than 64 bits must be narrowed before it becomes
+' this frame's local slot.  Without this, "value AS I8" receiving 255 reads back
+' as 255 on this backend while both interpreters yield -1.
+'
+' MIRX64NormalizeRegForType only emits code for rax/r10/r11, so the incoming
+' argument register (rcx/rdx/r8/r9) is routed through rax instead of being
+' normalized in place -- passing it rcx directly would silently emit nothing.
+Private Sub MIRX64StoreNarrowedIntParam( _
+    ByRef cg As MIRX64Context, _
+    ByRef sourceReg As String, _
+    ByVal paramOffset As Integer, _
+    ByRef typeNameRaw As String _
+)
+    Dim normalizeReg As String
+    normalizeReg = "rax"
+    If LCase(Trim(sourceReg)) <> "rax" Then MIRX64Emit cg, "    mov rax, " & sourceReg
+    MIRX64NormalizeRegForType cg, normalizeReg, typeNameRaw
+    MIRX64Emit cg, "    mov qword " & MIRX64RbpRef(paramOffset) & ", rax"
+End Sub
+
+Function MIRX64TypedStoreParamRegister( _
+    ByRef cg As MIRX64Context, _
+    ByRef fn As MIRFunction, _
+    ByVal paramIndex As Integer, _
+    ByVal paramOffset As Integer _
+) As Integer
+
+    If paramIndex < 0 Or paramIndex >= fn.paramVarCount Then Return 0
+
+    Dim typeName As String
+    typeName = MIRX64TypeNameForVar(fn, fn.paramVars(paramIndex))
+    If typeName = "" Then Return 0
+
+    ' A BYREF parameter always arrives as an address (an integer value), never as
+    ' float bits, no matter what its own declared BASIC type is -- the caller
+    ' (MIRX64EmitUserCallInstruction) always places it in the integer/pointer
+    ' argument slot for this position. Reading it from an xmm register here would
+    ' silently pick up garbage.
+    If paramIndex < UBound(fn.paramByRef) + 1 AndAlso fn.paramByRef(paramIndex) <> 0 Then typeName = "I64"
+    ' S-068: an `arr AS T[]` parameter arrives as the address of the array descriptor.
+    If Right(UCase(Trim(typeName)), 2) = "[]" Then typeName = "I64"
+
+    Dim intArgReg As String
+    Select Case paramIndex
+    Case 0
+        If typeName = "F32" Then
+            MIRX64Emit cg, "    movss dword " & MIRX64RbpRef(paramOffset) & ", xmm0"
+        ElseIf typeName = "F64" Then
+            MIRX64Emit cg, "    movsd qword " & MIRX64RbpRef(paramOffset) & ", xmm0"
+        Else
+            intArgReg = "rcx"
+            MIRX64StoreNarrowedIntParam cg, intArgReg, paramOffset, typeName
+        End If
+    Case 1
+        If typeName = "F32" Then
+            MIRX64Emit cg, "    movss dword " & MIRX64RbpRef(paramOffset) & ", xmm1"
+        ElseIf typeName = "F64" Then
+            MIRX64Emit cg, "    movsd qword " & MIRX64RbpRef(paramOffset) & ", xmm1"
+        Else
+            intArgReg = "rdx"
+            MIRX64StoreNarrowedIntParam cg, intArgReg, paramOffset, typeName
+        End If
+    Case 2
+        If typeName = "F32" Then
+            MIRX64Emit cg, "    movss dword " & MIRX64RbpRef(paramOffset) & ", xmm2"
+        ElseIf typeName = "F64" Then
+            MIRX64Emit cg, "    movsd qword " & MIRX64RbpRef(paramOffset) & ", xmm2"
+        Else
+            intArgReg = "r8"
+            MIRX64StoreNarrowedIntParam cg, intArgReg, paramOffset, typeName
+        End If
+    Case 3
+        If typeName = "F32" Then
+            MIRX64Emit cg, "    movss dword " & MIRX64RbpRef(paramOffset) & ", xmm3"
+        ElseIf typeName = "F64" Then
+            MIRX64Emit cg, "    movsd qword " & MIRX64RbpRef(paramOffset) & ", xmm3"
+        Else
+            intArgReg = "r9"
+            MIRX64StoreNarrowedIntParam cg, intArgReg, paramOffset, typeName
+        End If
+    Case Else
+        If typeName = "F32" Then
+            MIRX64Emit cg, "    mov eax, dword [rbp+" & MIRX64ToStr(48 + (paramIndex - 4) * 8) & "]"
+            MIRX64Emit cg, "    mov dword " & MIRX64RbpRef(paramOffset) & ", eax"
+        Else
+            MIRX64Emit cg, "    mov rax, qword [rbp+" & MIRX64ToStr(48 + (paramIndex - 4) * 8) & "]"
+            intArgReg = "rax"
+            MIRX64StoreNarrowedIntParam cg, intArgReg, paramOffset, typeName
+        End If
+    End Select
+
+    Return 1
+End Function
+
+#endif

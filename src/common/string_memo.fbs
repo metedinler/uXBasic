@@ -1,0 +1,70 @@
+#ifndef UXB_STRING_MEMO_FBS
+#define UXB_STRING_MEMO_FBS
+
+' Small open-addressing memo table for PURE string -> string functions (the same
+' text always gives the same answer).
+'
+' Why it exists: the MIR opcode/type registries are long string SELECT chains that
+' also UCase/Trim their argument, and the MIR interpreter verifies and classifies
+' every instruction it executes -- dozens of such lookups per step. Uncached, one
+' interpreter step cost ~250 microseconds (a 5000-iteration FOR loop took ~2
+' minutes); memoized, the same lookup is one hash + one string compare.
+'
+' The table never evicts: once it is 3/4 full it simply stops adding entries (the
+' function then computes the answer every time, still correct). It is only touched
+' from the single compiler/interpreter thread.
+
+Const UXB_STRMEMO_SLOTS As Integer = 4096
+
+Type UXBStringMemo
+    keys(0 To UXB_STRMEMO_SLOTS - 1) As String
+    vals(0 To UXB_STRMEMO_SLOTS - 1) As String
+    used(0 To UXB_STRMEMO_SLOTS - 1) As Byte
+    count As Integer
+End Type
+
+Private Function UXBStringMemoHash(ByRef s As String) As ULong
+    Dim h As ULong = 2166136261UL
+    Dim i As Integer
+    For i = 0 To Len(s) - 1
+        h = (h Xor CULng(s[i])) * 16777619UL
+    Next i
+    Return h
+End Function
+
+Private Function UXBStringMemoSlot(ByRef key As String) As Integer
+    Return CInt(UXBStringMemoHash(key) And CULng(UXB_STRMEMO_SLOTS - 1))
+End Function
+
+' 1 and valueOut filled when key is memoized, else 0.
+Function UXBStringMemoGet(ByRef m As UXBStringMemo, ByRef key As String, ByRef valueOut As String) As Integer
+    Dim slot As Integer = UXBStringMemoSlot(key)
+    Dim probes As Integer = 0
+    Do While m.used(slot) <> 0 And probes < UXB_STRMEMO_SLOTS
+        If m.keys(slot) = key Then
+            valueOut = m.vals(slot)
+            Return 1
+        End If
+        slot = (slot + 1) And (UXB_STRMEMO_SLOTS - 1)
+        probes += 1
+    Loop
+    Return 0
+End Function
+
+Sub UXBStringMemoPut(ByRef m As UXBStringMemo, ByRef key As String, ByRef valueIn As String)
+    If m.count >= (UXB_STRMEMO_SLOTS * 3) \ 4 Then Exit Sub
+    Dim slot As Integer = UXBStringMemoSlot(key)
+    Dim probes As Integer = 0
+    Do While m.used(slot) <> 0 And probes < UXB_STRMEMO_SLOTS
+        If m.keys(slot) = key Then Exit Sub
+        slot = (slot + 1) And (UXB_STRMEMO_SLOTS - 1)
+        probes += 1
+    Loop
+    If m.used(slot) <> 0 Then Exit Sub
+    m.keys(slot) = key
+    m.vals(slot) = valueIn
+    m.used(slot) = 1
+    m.count += 1
+End Sub
+
+#endif

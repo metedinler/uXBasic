@@ -1,0 +1,401 @@
+#ifndef UXB_MIR_INTERP_DISPATCH_FBS
+#define UXB_MIR_INTERP_DISPATCH_FBS
+
+#include once "../../mir/mir_instruction.fbs"
+#include once "../../mir/verify/mir_verify.fbs"
+#include once "../common/interp_context.fbs"
+#include once "mir_interp_state.fbs"
+#include once "mir_interp_registry.fbs"
+#include once "mir_interp_arith.fbs"
+#include once "mir_interp_string.fbs"
+#include once "mir_interp_array_object.fbs"
+#include once "mir_interp_memory.fbs"
+#include once "mir_interp_file.fbs"
+#include once "mir_interp_runtime_call.fbs"
+#include once "mir_interp_call.fbs"
+#include once "mir_interp_ffi.fbs"
+#include once "mir_interp_fail_closed.fbs"
+#include once "../../runtime/runtime_service_dispatch.fbs"
+
+Sub UXBMIRInterpStateInit(ByRef st As UXBMIRInterpState)
+    Dim initFreeIdx As Integer
+    For initFreeIdx = 0 To st.varCount - 1
+        If st.vars(initFreeIdx) <> 0 Then Delete st.vars(initFreeIdx)
+    Next initFreeIdx
+    st.varCount = 0
+    st.labelCount = 0
+    st.gosubDepth = 0
+    st.gosubMaxDepth = 4096
+    st.nextIndex = 0
+    st.jumpRequested = 0
+    st.returnRequested = 0
+    st.returnValue = UXBInterpValueVoid()
+    st.currentScopeDepth = 0
+    st.shellNowait = 0
+    st.shellTimeoutMs = 0
+    st.shellRunPath = ""
+    st.shellOutPath = ""
+    st.shellErrPath = ""
+    st.shellOutVar = ""
+    st.shellErrVar = ""
+    st.shellCodeVar = ""
+    st.filePrintRuntimeHandle = 0
+    st.filePrintBuffer = ""
+    st.filePrintTrailingSep = ""
+    st.filePrintActive = 0
+    Erase st.vars
+    Erase st.labels
+    Erase st.gosubReturns
+End Sub
+
+Private Function UXBMIRInterpNormName(ByVal nameText As String) As String
+    Return UCase(Trim(nameText))
+End Function
+
+Private Function UXBMIRInterpIsReferenceName(ByVal textValue As String) As Integer
+    Dim s As String = Trim(textValue)
+    If s = "" Then Return 0
+    If Left(s, 1) = Chr(34) Then Return 0
+    If UCase(s) = "TRUE" Or UCase(s) = "FALSE" Then Return 0
+    If Asc(Left(s, 1)) >= Asc("0") And Asc(Left(s, 1)) <= Asc("9") Then Return 0
+    If Left(s, 1) = "-" And Len(s) > 1 Then
+        Dim c As String = Mid(s, 2, 1)
+        If Asc(c) >= Asc("0") And Asc(c) <= Asc("9") Then Return 0
+    End If
+    Return 1
+End Function
+
+Function UXBMIRInterpFindVar(ByRef st As UXBMIRInterpState, ByVal nameText As String) As Integer
+    Dim key As String = UXBMIRInterpNormName(nameText)
+    Dim i As Integer
+    For i = st.varCount - 1 To 0 Step -1
+        If st.vars(i)->nameKey = key Then
+            ' S-071: a pinned scalar's truth is its raw cell (a POKE through
+            ' VARPTR may have changed it) -- refresh before anyone reads it.
+            If st.vars(i)->pinned <> 0 Then UXBMIRInterpPinLoad *st.vars(i)
+            Return i
+        End If
+    Next i
+    Return -1
+End Function
+
+Private Function UXBMIRInterpFindCurrentVar(ByRef st As UXBMIRInterpState, ByVal nameText As String) As Integer
+    Dim key As String = UXBMIRInterpNormName(nameText)
+    Dim i As Integer
+    For i = st.varCount - 1 To 0 Step -1
+        If st.vars(i)->scopeDepth = st.currentScopeDepth And st.vars(i)->nameKey = key Then Return i
+    Next i
+    Return -1
+End Function
+
+Sub UXBMIRInterpEnterScope(ByRef st As UXBMIRInterpState)
+    st.currentScopeDepth += 1
+End Sub
+
+Sub UXBMIRInterpLeaveScope(ByRef st As UXBMIRInterpState)
+    If st.currentScopeDepth <= 0 Then Exit Sub
+    If st.libraryHeap <> 0 Then UXBInterpHeapReleaseLibraryScope *st.libraryHeap, st.currentScopeDepth
+    Dim writePos As Integer
+    Dim readPos As Integer
+    writePos = 0
+    For readPos = 0 To st.varCount - 1
+        If st.vars(readPos)->scopeDepth <> st.currentScopeDepth Then
+            If writePos <> readPos Then st.vars(writePos) = st.vars(readPos)
+            writePos += 1
+        Else
+            Delete st.vars(readPos)
+        End If
+    Next readPos
+    st.varCount = writePos
+    If st.varCount <= 0 Then
+        Erase st.vars
+    Else
+        ReDim Preserve st.vars(st.varCount - 1)
+    End If
+    st.currentScopeDepth -= 1
+End Sub
+
+Sub UXBMIRInterpSetVar(ByRef st As UXBMIRInterpState, ByVal nameText As String, ByRef v As UXBInterpValue)
+    If Trim(nameText) = "" Then Exit Sub
+    Dim idx As Integer = UXBMIRInterpFindCurrentVar(st, nameText)
+    If idx < 0 Then
+        If st.varCount = 0 Then
+            ReDim st.vars(0)
+        Else
+            ReDim Preserve st.vars(st.varCount)
+        End If
+        idx = st.varCount
+        st.varCount += 1
+        st.vars(idx) = New UXBMIRInterpVar
+        st.vars(idx)->nameText = Trim(nameText)
+        st.vars(idx)->nameKey = UXBMIRInterpNormName(nameText)
+        st.vars(idx)->scopeDepth = st.currentScopeDepth
+    End If
+    st.vars(idx)->value = v
+    If st.vars(idx)->pinned <> 0 Then UXBMIRInterpPinStore *st.vars(idx)
+End Sub
+
+Sub UXBMIRInterpAssignVar(ByRef st As UXBMIRInterpState, ByVal nameText As String, ByRef v As UXBInterpValue)
+    If Trim(nameText) = "" Then Exit Sub
+    Dim idx As Integer = UXBMIRInterpFindVar(st, nameText)
+    If idx >= 0 Then
+        Dim declaredType As String = st.vars(idx)->value.typeName
+        If declaredType <> "" And declaredType <> "VOID" Then
+            st.vars(idx)->value = UXBInterpApplyDeclaredType(v, declaredType)
+        Else
+            st.vars(idx)->value = v
+        End If
+        If st.vars(idx)->pinned <> 0 Then UXBMIRInterpPinStore *st.vars(idx)
+        Exit Sub
+    End If
+    UXBMIRInterpSetVar st, nameText, v
+End Sub
+
+Function UXBMIRInterpGetOperand(ByRef st As UXBMIRInterpState, ByVal operandText As String) As UXBInterpValue
+    Dim key As String = Trim(operandText)
+    If key = "" Then Return UXBInterpValueVoid()
+    Dim idx As Integer = UXBMIRInterpFindVar(st, key)
+    If idx >= 0 Then Return st.vars(idx)->value
+    If Left(key, 1) = Chr(34) And Right(key, 1) = Chr(34) And Len(key) >= 2 Then Return UXBInterpValueString(Mid(key, 2, Len(key) - 2))
+    Return UXBInterpValueFromLiteral(key)
+End Function
+
+Sub UXBMIRInterpAddLabel(ByRef st As UXBMIRInterpState, ByVal nameText As String, ByVal indexValue As Integer)
+    If Trim(nameText) = "" Then Exit Sub
+    If st.labelCount = 0 Then
+        ReDim st.labels(0)
+    Else
+        ReDim Preserve st.labels(st.labelCount)
+    End If
+    st.labels(st.labelCount).nameText = Trim(nameText)
+    st.labels(st.labelCount).nameKey = UXBMIRInterpNormName(nameText)
+    st.labels(st.labelCount).indexValue = indexValue
+    st.labelCount += 1
+End Sub
+
+Function UXBMIRInterpFindLabel(ByRef st As UXBMIRInterpState, ByVal nameText As String) As Integer
+    Dim key As String = UXBMIRInterpNormName(nameText)
+    Dim i As Integer
+    For i = 0 To st.labelCount - 1
+        If st.labels(i).nameKey = key Then Return st.labels(i).indexValue
+    Next i
+    Return -1
+End Function
+
+Sub UXBMIRInterpBuildLabels(ByRef st As UXBMIRInterpState, instructions() As UXBMIRInstructionRecord, ByVal instructionCount As Integer)
+    Dim i As Integer
+    For i = 0 To instructionCount - 1
+        Dim op As String = UXBMIRStep4CanonicalOpcode(instructions(i).opcode)
+        If op = "MIR_LABEL" Or op = "MIR_LOOP_BEGIN" Or op = "MIR_SELECT_BEGIN" Then
+            Dim labelName As String = instructions(i).resultName
+            If labelName = "" And instructions(i).operandCount > 0 Then labelName = instructions(i).operands(0)
+            UXBMIRInterpAddLabel st, labelName, i
+        End If
+    Next i
+End Sub
+
+Sub UXBMIRInterpBuildArgs(ByRef st As UXBMIRInterpState, ByRef ins As UXBMIRInstructionRecord, ByRef args As UXBRuntimeArgList)
+    UXBRuntimeArgListInit args
+    Dim i As Integer
+    For i = 0 To ins.operandCount - 1
+        Dim v As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(i))
+        UXBRuntimeArgListAdd args, v
+    Next i
+End Sub
+
+
+Private Function UXBMIRInterpCompoundTargetName(ByRef ins As UXBMIRInstructionRecord) As String
+    If ins.resultName <> "" Then Return ins.resultName
+    If ins.operandCount > 0 Then Return ins.operands(0)
+    Return ""
+End Function
+
+Private Function UXBMIRInterpCompoundRightValue(ByRef ins As UXBMIRInstructionRecord, ByRef st As UXBMIRInterpState) As UXBInterpValue
+    If ins.operandCount > 1 Then Return UXBMIRInterpGetOperand(st, ins.operands(1))
+    If ins.operandCount > 0 And ins.resultName <> "" Then Return UXBMIRInterpGetOperand(st, ins.operands(0))
+    Return UXBInterpValueInt(1)
+End Function
+
+Function UXBMIRInterpExecCompoundAssign(ByRef ins As UXBMIRInstructionRecord, ByRef ctx As UXBInterpContext, ByRef st As UXBMIRInterpState) As UXBInterpValue
+    Dim op As String = UXBMIRStep4CanonicalOpcode(ins.opcode)
+    Dim targetName As String = UXBMIRInterpCompoundTargetName(ins)
+    If targetName = "" Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "compound assignment target missing")
+    Dim oldValue As UXBInterpValue = UXBMIRInterpGetOperand(st, targetName)
+    Dim rightValue As UXBInterpValue = UXBMIRInterpCompoundRightValue(ins, st)
+    Dim baseIns As UXBMIRInstructionRecord = ins
+    Select Case op
+    Case "MIR_ADD_ASSIGN": baseIns.opcode = "MIR_ADD"
+    Case "MIR_SUB_ASSIGN": baseIns.opcode = "MIR_SUB"
+    Case "MIR_MUL_ASSIGN": baseIns.opcode = "MIR_MUL"
+    Case "MIR_DIV_ASSIGN": baseIns.opcode = "MIR_DIV"
+    Case "MIR_IDIV_ASSIGN": baseIns.opcode = "MIR_IDIV"
+    Case "MIR_MOD_ASSIGN": baseIns.opcode = "MIR_MOD"
+    Case "MIR_SHL_ASSIGN": baseIns.opcode = "MIR_SHL"
+    Case "MIR_SHR_ASSIGN": baseIns.opcode = "MIR_SHR"
+    Case "MIR_AND_ASSIGN": baseIns.opcode = "MIR_AND"
+    Case "MIR_OR_ASSIGN": baseIns.opcode = "MIR_OR"
+    Case "MIR_XOR_ASSIGN": baseIns.opcode = "MIR_XOR"
+    Case "MIR_POW_ASSIGN": baseIns.opcode = "MIR_POW"
+    Case Else
+        Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "compound assignment opcode not executable: " & ins.opcode)
+    End Select
+    Dim newValue As UXBInterpValue = UXBMIRInterpExecArith(baseIns, ctx, oldValue, rightValue)
+    If UXBInterpIsError(newValue) = 0 Then UXBMIRInterpAssignVar st, targetName, newValue
+    Return newValue
+End Function
+
+Function UXBMIRInterpExecStorage(ByRef ins As UXBMIRInstructionRecord, ByRef ctx As UXBInterpContext, ByRef st As UXBMIRInterpState) As UXBInterpValue
+    Dim op As String = UXBMIRStep4CanonicalOpcode(ins.opcode)
+    Select Case op
+    Case "MIR_CONST", "MIR_LOAD_CONST"
+        Dim sourceText As String = ""
+        If ins.operandCount > 0 Then sourceText = ins.operands(0) Else sourceText = ins.resultName
+        Dim v As UXBInterpValue = UXBInterpValueFromLiteral(sourceText, ins.resultType)
+        If ins.resultName <> "" And UXBMIRInterpIsReferenceName(ins.resultName) <> 0 Then UXBMIRInterpSetVar st, ins.resultName, v
+        Return v
+    Case "MIR_LOCAL_DECL", "MIR_GLOBAL_DECL", "MIR_PARAM_DECL"
+        If ins.resultName = "" And ins.operandCount >= 3 Then
+            Dim arrayName As String = Trim(ins.operands(0))
+            Dim lowerValue As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(1))
+            Dim upperValue As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(2))
+            ' S-033 follow-up: MIR_OP_DIM (mir_lower_stmt_core_split.fbs) emits
+            ' 5 operands (name,lower,upper,elemBytes,typeName) -- the element
+            ' type text lives in operands(4), NOT ins.resultType (which this
+            ' instruction never actually sets). Reading resultType here always
+            ' produced "" (interpreted as native-scalar by coincidence for the
+            ' isNativeScalar check but with elemStride=0, so isNativeScalar
+            ' got forced back off in UXBInterpHeapAlloc) -- meaning canonical-
+            ' MIR arrays never got a real rawData buffer at all until now,
+            ' breaking MIR_MEMORY_REF/VARPTR-on-array/MEMCOPY of a bare array.
+            Dim arrayElemType As String = ins.resultType
+            If ins.operandCount >= 5 Then arrayElemType = ins.operands(4)
+            Dim arrayId As Integer = UXBInterpHeapAlloc(ctx.heap, "ARRAY", arrayElemType)
+            If UXBLibraryTypeNeedsManagedCopy(arrayElemType) <> 0 Then ctx.heap.slots(arrayId).libraryScopeDepth = st.currentScopeDepth
+            ctx.heap.slots(arrayId).ownerName = "array " & arrayName
+            If UXBInterpHeapSetArrayBounds(ctx.heap, arrayId, CInt(lowerValue.intValue), CInt(upperValue.intValue)) = 0 Then
+                Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "invalid array bounds")
+            End If
+            Dim arrayValue As UXBInterpValue = UXBInterpValueHandle("ARRAY", arrayId)
+            UXBMIRInterpSetVar st, arrayName, arrayValue
+            Return UXBInterpValueVoid()
+        End If
+        Dim declValue As UXBInterpValue = UXBInterpValueDefaultForType(ins.resultType)
+        If ins.operandCount > 0 Then declValue = UXBInterpApplyDeclaredType(UXBMIRInterpGetOperand(st, ins.operands(0)), ins.resultType)
+        UXBMIRInterpSetVar st, ins.resultName, declValue
+        Return UXBInterpValueVoid()
+    Case "MIR_LOAD_LOCAL", "MIR_LOAD_GLOBAL", "MIR_LOAD"
+        Dim nameText As String = ""
+        If ins.operandCount > 0 Then nameText = ins.operands(0) Else nameText = ins.resultName
+        Dim v As UXBInterpValue = UXBMIRInterpGetOperand(st, nameText)
+        If ins.resultName <> "" Then UXBMIRInterpSetVar st, ins.resultName, v
+        Return v
+    Case "MIR_STORE_LOCAL", "MIR_STORE_GLOBAL", "MIR_STORE"
+        Dim targetName As String = ins.resultName
+        Dim valueIndex As Integer = 0
+        If targetName = "" And ins.operandCount > 0 Then
+            targetName = ins.operands(0)
+            valueIndex = 1
+        End If
+        Dim v As UXBInterpValue = UXBInterpValueVoid()
+        If ins.operandCount > valueIndex Then v = UXBMIRInterpGetOperand(st, ins.operands(valueIndex))
+        UXBMIRInterpAssignVar st, targetName, v
+        Return UXBInterpValueVoid()
+    End Select
+    Return UXBInterpValueVoid()
+End Function
+
+Function UXBMIRInterpExecRuntimeResolved(ByRef ins As UXBMIRInstructionRecord, ByRef ctx As UXBInterpContext, ByRef st As UXBMIRInterpState) As UXBInterpValue
+    Dim firstOperand As String = ""
+    If ins.operandCount > 0 Then firstOperand = ins.operands(0)
+    Dim sid As String = UXBMIRInterpRuntimeServiceForOpcode(ins.opcode, firstOperand)
+    If sid = "" Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "MIR runtime service not bound: " & ins.opcode)
+    Dim args As UXBRuntimeArgList
+    UXBMIRInterpBuildArgs st, ins, args
+    Dim r As UXBInterpValue = UXBRuntimeDispatch(ctx.runtime, sid, args)
+    ctx.result.runtimeServiceCalls = ctx.runtime.serviceCallCount
+    If UXBInterpIsError(r) = 0 And ins.resultName <> "" Then UXBMIRInterpSetVar st, ins.resultName, r
+    Return r
+End Function
+
+#include once "mir_interp_builtin.fbs"
+
+' S-088: an arithmetic/expression result whose instruction carries the static type U32
+' wraps modulo 2^32 (the temporary too, not only a later store).
+Private Function UXBMIRInterpNarrowU32Result(ByRef ins As UXBMIRInstructionRecord, ByRef v As UXBInterpValue) As UXBInterpValue
+    If UXBInterpIsError(v) <> 0 Then Return v
+    If UXBStep3TypeIsU32(ins.resultType) = 0 Then Return v
+    Return UXBInterpApplyDeclaredType(v, "U32")
+End Function
+
+Function UXBMIRInterpDispatch(ByRef ins As UXBMIRInstructionRecord, ByRef ctx As UXBInterpContext, ByRef st As UXBMIRInterpState) As UXBInterpValue
+    Dim errText As String = ""
+    If UXBMIRStep4VerifyInstructionRecord(ins, errText) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, errText)
+    Dim decisionText As String = UXBMIRInterpDecisionForOpcode(ins.opcode)
+    If decisionText = MIR_EXEC_NATIVE_ONLY Or decisionText = MIR_EXEC_WASM_UNSUPPORTED Or decisionText = MIR_EXEC_MISSING Or decisionText = MIR_EXEC_BROKEN Then Return UXBMIRInterpFailClosed(ctx, ins.opcode, decisionText)
+    Dim groupText As String = UXBMIRStep4OpcodeGroup(ins.opcode)
+    Select Case groupText
+    Case "MIR_ARITH"
+        Dim opCheck As String = UXBMIRStep4CanonicalOpcode(ins.opcode)
+        If Right(opCheck, 7) = "_ASSIGN" Then Return UXBMIRInterpExecCompoundAssign(ins, ctx, st)
+        Dim lv0 As UXBInterpValue = UXBMIRInterpGetOperand(st, IIf(ins.operandCount > 0, ins.operands(0), ""))
+        Dim rv0 As UXBInterpValue = UXBMIRInterpGetOperand(st, IIf(ins.operandCount > 1, ins.operands(1), ""))
+        Dim ar0 As UXBInterpValue = UXBMIRInterpNarrowU32Result(ins, UXBMIRInterpExecArith(ins, ctx, lv0, rv0))
+        If UXBInterpIsError(ar0) = 0 And ins.resultName <> "" Then UXBMIRInterpSetVar st, ins.resultName, ar0
+        Return ar0
+    Case "MIR_STORAGE"
+        Return UXBMIRInterpExecStorage(ins, ctx, st)
+    Case "MIR_EXPR"
+        Dim lv As UXBInterpValue = UXBMIRInterpGetOperand(st, IIf(ins.operandCount > 0, ins.operands(0), ""))
+        Dim rv As UXBInterpValue = UXBMIRInterpGetOperand(st, IIf(ins.operandCount > 1, ins.operands(1), ""))
+        Dim ar As UXBInterpValue = UXBMIRInterpNarrowU32Result(ins, UXBMIRInterpExecArith(ins, ctx, lv, rv))
+        If UXBInterpIsError(ar) = 0 And ins.resultName <> "" Then UXBMIRInterpSetVar st, ins.resultName, ar
+        Return ar
+    Case "MIR_BUILTIN"
+        Dim br As UXBInterpValue = UXBMIRInterpExecBuiltin(ins, ctx, st)
+        If UXBInterpIsError(br) = 0 And ins.resultName <> "" Then UXBMIRInterpSetVar st, ins.resultName, br
+        Return br
+    Case "MIR_STRING"
+        Dim sv As UXBInterpValue = UXBMIRInterpGetOperand(st, IIf(ins.operandCount > 0, ins.operands(0), ""))
+        Dim tv As UXBInterpValue = UXBMIRInterpGetOperand(st, IIf(ins.operandCount > 1, ins.operands(1), ""))
+        Dim sr As UXBInterpValue = UXBMIRInterpExecString(ins, ctx, sv, tv)
+        If UXBInterpIsError(sr) = 0 And ins.resultName <> "" Then UXBMIRInterpSetVar st, ins.resultName, sr
+        Return sr
+    Case "MIR_OBJECT"
+        Dim ov As UXBInterpValue = UXBMIRInterpExecArrayObject(ins, ctx, st)
+        If UXBInterpIsError(ov) = 0 And ins.resultName <> "" Then UXBMIRInterpSetVar st, ins.resultName, ov
+        Return ov
+    Case "MIR_MEMORY"
+        Dim mv As UXBInterpValue = UXBMIRInterpExecMemory(ins, ctx, st)
+        If UXBInterpIsError(mv) = 0 And ins.resultName <> "" Then UXBMIRInterpSetVar st, ins.resultName, mv
+        Return mv
+    Case "MIR_FILE"
+        Dim fv As UXBInterpValue = UXBMIRInterpExecFile(ins, ctx)
+        If UXBInterpIsError(fv) = 0 And ins.resultName <> "" Then UXBMIRInterpSetVar st, ins.resultName, fv
+        Return fv
+    Case "MIR_RUNTIME", "MIR_TARGET"
+        Return UXBMIRInterpExecRuntimeResolved(ins, ctx, st)
+    Case "MIR_CALL"
+        Dim op As String = UXBMIRStep4CanonicalOpcode(ins.opcode)
+        Dim builtinOp As String = UXBMIRInterpBuiltinOpcodeFromCall(ins)
+        If op = "MIR_CALL_BUILTIN" Or builtinOp <> "" Then
+            Dim br As UXBInterpValue = UXBMIRInterpExecBuiltin(ins, ctx, st)
+            If UXBInterpIsError(br) = 0 And ins.resultName <> "" Then UXBMIRInterpSetVar st, ins.resultName, br
+            Return br
+        End If
+        Dim libraryTypeHandled As Integer
+        Dim libraryTypeValue As UXBInterpValue
+        libraryTypeValue = UXBMIRInterpExecLibraryTypeCall(ins, ctx, st, libraryTypeHandled)
+        If libraryTypeHandled <> 0 Then Return libraryTypeValue
+        If UXBMIRInterpIsFfiCall(ins) <> 0 Then Return UXBMIRInterpExecFfi(ins, ctx, st)
+        Return UXBMIRInterpExecRuntimeResolved(ins, ctx, st)
+    Case "MIR_META"
+        UXBRuntimeOutputEventAdd ctx.runtime, "META", UXBMIRStep4CanonicalOpcode(ins.opcode), ins.opcode
+        Return UXBInterpValueVoid()
+    Case "MIR_EXCEPTION"
+        UXBRuntimeOutputEventAdd ctx.runtime, "DIAGNOSTIC", UXBMIRStep4CanonicalOpcode(ins.opcode), ins.opcode
+        Return UXBInterpValueVoid()
+    End Select
+    Return UXBMIRInterpFailClosed(ctx, ins.opcode, decisionText)
+End Function
+
+#endif

@@ -1,0 +1,1109 @@
+Private Sub ExecStateInit(ByRef es As ExecState)
+    es.count = 0
+    es.nextVarAddr = &h1000
+    es.constCount = 0
+    es.defTypeCount = 0
+    es.stringSize = 255
+    es.slotEntryCount = 0
+    es.slotCapEvent = 0
+    es.slotCapThread = 0
+    es.slotCapParalel = 0
+    es.slotCapPipe = 0
+    es.slotCapEventDeclared = 0
+    es.slotCapThreadDeclared = 0
+    es.slotCapParalelDeclared = 0
+    es.slotCapPipeDeclared = 0
+    es.runtime.routineDefCount = 0
+    es.runtime.routineDefCap = 0
+    ExecRoutineIndexReset es
+    es.runtime.callContextDepth = 0
+    Dim frameInit As Integer
+    For frameInit = 0 To 63
+        es.runtime.callFrameBase(frameInit) = 0
+    Next frameInit
+    es.runtime.callReturnValue = 0
+    es.runtime.callReturnValueEx.valueType = "INTEGER"
+    es.runtime.callReturnValueEx.intValue = 0
+    es.runtime.callReturnValueEx.u64Value = 0
+    es.runtime.callReturnValueEx.floatValue = 0.0
+    es.runtime.callReturnValueEx.stringValue = ""
+    es.runtime.callReturnHasValue = 0
+    gExecLastCallValueEx.valueType = "INTEGER"
+    gExecLastCallValueEx.intValue = 0
+    gExecLastCallValueEx.u64Value = 0
+    gExecLastCallValueEx.floatValue = 0.0
+    gExecLastCallValueEx.stringValue = ""
+    gExecLastCallValueExValid = 0
+    es.runtime.exitRequest = ""
+    es.runtime.currentRoutineName = ""
+    es.runtime.currentRoutineNodeIdx = -1
+    Erase es.consts
+    Erase es.defTypes
+    Erase es.slotEntries
+    Erase es.runtime.routineDefs
+    Erase es.runtime.ffiAllowEntries
+    Erase es.runtime.ffiX86ResolverEntries
+    Erase es.runtime.ffiX86ResolvedEntries
+    Erase es.runtime.ffiX86SymptrMapEntries
+    es.runtime.execException.active = 0
+    es.runtime.execException.kindText = ""
+    es.runtime.execException.code = 0
+    es.runtime.execException.messageText = ""
+    es.runtime.execException.lineNo = 0
+    es.runtime.execException.colNo = 0
+    es.runtime.execException.routineName = ""
+    es.runtime.execException.value.valueType = "INTEGER"
+    es.runtime.execException.value.intValue = 0
+    es.runtime.execException.value.u64Value = 0
+    es.runtime.execException.value.floatValue = 0.0
+    es.runtime.execException.value.stringValue = ""
+    es.runtime.ffiAllowEntryCount = 0
+    es.runtime.ffiAllowlistLoaded = 0
+    es.runtime.ffiAllowlistLoadFailed = 0
+    es.runtime.ffiAllowlistLoadFailReason = ""
+    es.runtime.ffiX86ResolverEntryCount = 0
+    es.runtime.ffiX86ResolverLoaded = 0
+    es.runtime.ffiX86ResolverLoadFailed = 0
+    es.runtime.ffiX86ResolverLoadFailReason = ""
+    es.runtime.ffiX86ResolvedEntryCount = 0
+    es.runtime.ffiX86SymptrMapEntryCount = 0
+    es.runtime.ffiX86InvokeCount = 0
+    es.runtime.ffiX86LastInvokeStubId = 0
+    es.runtime.ffiX86LastInvokeConv = ""
+    es.runtime.ffiX86CallerCleanupBytes = 0
+    es.runtime.ffiX86CalleeCleanupBytes = 0
+    es.runtime.ffiX86SymptrWriteCount = 0
+    es.arrayCount = 0
+    ' es.objectCount = 0
+    ' es.collectionCount = 0
+    Erase es.arrays
+    UxbFileInit es.fileIo
+End Sub
+
+Private Sub ExecValueInit(ByRef ev As ExecValue)
+    ev.valueType = "INTEGER"
+    ev.intValue = 0
+    ev.u64Value = 0
+    ev.floatValue = 0.0
+    ev.stringValue = ""
+    ev.externalHandle = 0
+    ev.externalKind = ""
+    ev.externalText = ""
+    ev.externalPrecision = 0
+End Sub
+
+' NATIVE memory support (S-036): returns the real process address of the
+' physical ExecValue field that a variable of declared type declTypeRaw is
+' stored in (see ExecApplyDeclaredType for the same type->field mapping).
+' Because ev is passed ByRef, this is the SAME storage ordinary reads/writes
+' (ExecGetVarValue/ExecSetVarValue) already use for that variable -- there is
+' no second, VM-mirrored copy. Keyed on the DECLARED type rather than the
+' value's current .valueType tag so this also works before a variable's
+' first assignment (freshly ExecValueInit'd values default to "INTEGER"
+' regardless of their real declared type).
+' Class/interface/OBJECT instances and TYPE/STRUCT aggregates are excluded on
+' purpose -- those already have their own working address scheme
+' (es.vars().addr into the object/aggregate VM region) and are out of scope
+' for this NATIVE-scalar fix; ExecDeclTypeIsNativeScalar identifies them.
+Private Function ExecNativeFieldAddrForDeclType(ByRef ev As ExecValue, ByRef declTypeRaw As String, ByRef addrOut As UInteger, ByRef errText As String) As Integer
+    Dim t As String
+    t = UCase(Trim(declTypeRaw))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Select Case t
+    Case "F32", "SINGLE", "F64", "DOUBLE", "F80", "EXTENDED"
+        addrOut = CULngInt(@ev.floatValue)
+        Return 1
+    Case "U32", "UINTEGER", "UINT", "ULONG", "I64", "LONGINT", "U64", "ULONGINT", "PTR", "STRPTR", "WSTRPTR"
+        addrOut = CULngInt(@ev.u64Value)
+        Return 1
+    Case "", "BOOLEAN", "BOOL", "I8", "BYTE", "SBYTE", "U8", "UBYTE", "I16", "SHORT", "U16", "USHORT", "I32", "INTEGER", "LONG"
+        addrOut = CULngInt(@ev.intValue)
+        Return 1
+    End Select
+    errText = "exec: NATIVE memory address unsupported for declared type " & declTypeRaw
+    Return 0
+End Function
+
+' True for declared types that are plain, fixed-width scalars represented
+' directly in ExecValue's intValue/u64Value/floatValue fields (see
+' ExecApplyDeclaredType / ExecNativeFieldAddrForDeclType above). Class/
+' interface/OBJECT instances and TYPE/STRUCT aggregates are excluded on
+' purpose -- those already have their own working address scheme
+' (es.vars().addr into the object/aggregate VM region) and are out of scope
+' for this NATIVE-scalar fix.
+Private Function ExecDeclTypeIsNativeScalar(ByRef declTypeRaw As String) As Integer
+    Dim t As String
+    t = UCase(Trim(declTypeRaw))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Select Case t
+    Case "", "BOOLEAN", "BOOL", _
+         "I8", "BYTE", "SBYTE", "U8", "UBYTE", _
+         "I16", "SHORT", "U16", "USHORT", _
+         "I32", "INTEGER", "LONG", "U32", "UINTEGER", "UINT", "ULONG", _
+         "I64", "LONGINT", "U64", "ULONGINT", _
+         "F32", "SINGLE", "F64", "DOUBLE", "F80", "EXTENDED", _
+         "PTR", "STRPTR", "WSTRPTR"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+' Real byte width of a native-scalar declared type (see
+' ExecDeclTypeIsNativeScalar). Only meaningful when that function returns
+' true; used to size an array's tightly-packed rawData buffer so
+' VARPTR(arr) + i*stride real pointer arithmetic lands on element i.
+Private Function ExecNativeScalarByteWidth(ByRef declTypeRaw As String) As Integer
+    Dim t As String
+    t = UCase(Trim(declTypeRaw))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Select Case t
+    Case "I8", "BYTE", "SBYTE", "U8", "UBYTE"
+        Return 1
+    Case "I16", "SHORT", "U16", "USHORT"
+        Return 2
+    Case "F32", "SINGLE"
+        Return 4
+    Case "", "BOOLEAN", "BOOL", "I32", "INTEGER", "LONG", "U32", "UINTEGER", "UINT", "ULONG"
+        Return 4
+    Case "I64", "LONGINT", "U64", "ULONGINT", "F64", "DOUBLE", "F80", "EXTENDED", "PTR", "STRPTR", "WSTRPTR"
+        Return 8
+    End Select
+    Return 0
+End Function
+
+' --- NATIVE memory (S-036): raw access to real process addresses, used only
+' when a statement/expression is explicitly prefixed with the NATIVE
+' keyword. Widths mirror VMemPeek*/VMemPoke*/VMemCopy*/VMemFill*'s own
+' truncation/zero-extend conventions exactly, just backed by real memory
+' instead of g_vmem.
+'
+' SAFETY: a uXBasic program can hand NATIVE PEEK/POKE/MEMCOPY/MEMFILL any
+' address it likes, including a stale non-real one (e.g. VARPTR on a
+' class/TYPE-aggregate target still returns the legacy small VM-bookkeeping
+' number, not a real pointer -- see ExecDeclTypeIsNativeScalar). Lifting the
+' old blanket "NATIVE unavailable" rejection must never let such a value
+' reach a raw CPU dereference and segfault the whole interpreter process, so
+' every access here is range-checked with the real Win32 IsBadReadPtr/
+' IsBadWritePtr first and fails closed (a normal uXBasic-level "out of
+' range" error, exactly like VMemPeek*/VMemPoke* already report) instead.
+' (Declared in src/runtime/memory/runtime_memory.fbs, which the canonical-MIR
+' runtime service now also uses for its own NATIVE-mode support and which
+' this combined build includes earlier than this file -- FreeBASIC's
+' duplicate-Declare check does not allow the same extern to be declared twice.)
+
+Private Function ExecNativeAddrReadable(ByVal addr As UInteger, ByVal byteCount As UInteger) As Integer
+    If addr = 0 Or byteCount = 0 Then Return 0
+    ' S-056: uXBasic-owned buffers are bounds/lifetime checked first (MemoryRef).
+    If UXBMemRefCheck(CULngInt(addr), CULngInt(byteCount)) = 0 Then Return 0
+    Return IIf(IsBadReadPtr(CPtr(Any Ptr, addr), byteCount) = 0, 1, 0)
+End Function
+
+Private Function ExecNativeAddrWritable(ByVal addr As UInteger, ByVal byteCount As UInteger) As Integer
+    If addr = 0 Or byteCount = 0 Then Return 0
+    If UXBMemRefCheck(CULngInt(addr), CULngInt(byteCount)) = 0 Then Return 0
+    Return IIf(IsBadWritePtr(CPtr(Any Ptr, addr), byteCount) = 0, 1, 0)
+End Function
+
+Private Function ExecNativePeekB(ByVal addr As UInteger) As Integer
+    If ExecNativeAddrReadable(addr, 1) = 0 Then Return -1
+    Return *CPtr(UByte Ptr, addr)
+End Function
+
+Private Function ExecNativePeekW(ByVal addr As UInteger) As Integer
+    If ExecNativeAddrReadable(addr, 2) = 0 Then Return -1
+    Return *CPtr(UShort Ptr, addr)
+End Function
+
+Private Function ExecNativePeekD(ByVal addr As UInteger) As Integer
+    If ExecNativeAddrReadable(addr, 4) = 0 Then Return -1
+    Return CLngInt(*CPtr(ULong Ptr, addr))
+End Function
+
+' S-055: Q (64-bit) memory family, parallel to ExecNativePeekB/W/D above.
+' Returned as LongInt (signed 64-bit), same representable-range convention
+' already established by VMemPeekQ (memory_vm.fbs) -- there is no wider
+' "unsigned 65-bit" container available, so a genuinely huge (>2^63) value
+' cannot display as positive; this matches the existing Q convention
+' exactly rather than inventing a different one for the NATIVE side.
+Private Function ExecNativePeekQ(ByVal addr As UInteger) As LongInt
+    If ExecNativeAddrReadable(addr, 8) = 0 Then Return -1
+    Return *CPtr(LongInt Ptr, addr)
+End Function
+
+Private Function ExecNativePokeB(ByVal addr As UInteger, ByVal value As Integer) As Integer
+    If ExecNativeAddrWritable(addr, 1) = 0 Then Return 0
+    *CPtr(UByte Ptr, addr) = CUByte(value And &hFF)
+    Return 1
+End Function
+
+Private Function ExecNativePokeW(ByVal addr As UInteger, ByVal value As Integer) As Integer
+    If ExecNativeAddrWritable(addr, 2) = 0 Then Return 0
+    *CPtr(UShort Ptr, addr) = CUShort(value And &hFFFF)
+    Return 1
+End Function
+
+Private Function ExecNativePokeD(ByVal addr As UInteger, ByVal value As Integer) As Integer
+    If ExecNativeAddrWritable(addr, 4) = 0 Then Return 0
+    *CPtr(ULong Ptr, addr) = CULng(value And &hFFFFFFFFLL)
+    Return 1
+End Function
+
+' S-055: Q (64-bit) memory family, parallel to ExecNativePokeB/W/D above.
+Private Function ExecNativePokeQ(ByVal addr As UInteger, ByVal value As LongInt) As Integer
+    If ExecNativeAddrWritable(addr, 8) = 0 Then Return 0
+    *CPtr(LongInt Ptr, addr) = value
+    Return 1
+End Function
+
+' Overlap-safe byte copy between two real addresses (matches memmove). Uses
+' Do/Loop rather than a descending UInteger For loop, since decrementing an
+' unsigned counter past zero wraps instead of going negative.
+Private Function ExecNativeMemCopyBytes(ByVal dstAddr As UInteger, ByVal srcAddr As UInteger, ByVal byteCount As UInteger) As Integer
+    If byteCount = 0 Then Return 1
+    If ExecNativeAddrReadable(srcAddr, byteCount) = 0 Then Return 0
+    If ExecNativeAddrWritable(dstAddr, byteCount) = 0 Then Return 0
+    Dim s As UByte Ptr = CPtr(UByte Ptr, srcAddr)
+    Dim d As UByte Ptr = CPtr(UByte Ptr, dstAddr)
+    If d = s Then Return 1
+    Dim i As UInteger
+    If d < s Then
+        For i = 0 To byteCount - 1
+            d[i] = s[i]
+        Next i
+    Else
+        i = byteCount
+        Do While i > 0
+            i -= 1
+            d[i] = s[i]
+        Loop
+    End If
+    Return 1
+End Function
+
+Private Function ExecNativeMemFillBBytes(ByVal addr As UInteger, ByVal value As Integer, ByVal n As UInteger) As Integer
+    If n = 0 Then Return 1
+    If ExecNativeAddrWritable(addr, n) = 0 Then Return 0
+    Dim b As UByte = CUByte(value And &hFF)
+    Dim p As UByte Ptr = CPtr(UByte Ptr, addr)
+    Dim i As UInteger
+    For i = 0 To n - 1
+        p[i] = b
+    Next i
+    Return 1
+End Function
+
+Private Function ExecNativeMemFillWWords(ByVal addr As UInteger, ByVal value As Integer, ByVal nWords As UInteger) As Integer
+    If nWords = 0 Then Return 1
+    If ExecNativeAddrWritable(addr, nWords * 2) = 0 Then Return 0
+    Dim w As UShort = CUShort(value And &hFFFF)
+    Dim p As UShort Ptr = CPtr(UShort Ptr, addr)
+    Dim i As UInteger
+    For i = 0 To nWords - 1
+        p[i] = w
+    Next i
+    Return 1
+End Function
+
+Private Function ExecNativeMemFillDDWords(ByVal addr As UInteger, ByVal value As Integer, ByVal nDWords As UInteger) As Integer
+    If nDWords = 0 Then Return 1
+    If ExecNativeAddrWritable(addr, nDWords * 4) = 0 Then Return 0
+    Dim dw As ULong = CULng(value And &hFFFFFFFFLL)
+    Dim p As ULong Ptr = CPtr(ULong Ptr, addr)
+    Dim i As UInteger
+    For i = 0 To nDWords - 1
+        p[i] = dw
+    Next i
+    Return 1
+End Function
+
+' S-055: Q (64-bit) memory family, parallel to ExecNativeMemFillWWords/DDWords above.
+Private Function ExecNativeMemFillQQWords(ByVal addr As UInteger, ByVal value As LongInt, ByVal nQWords As UInteger) As Integer
+    If nQWords = 0 Then Return 1
+    If ExecNativeAddrWritable(addr, nQWords * 8) = 0 Then Return 0
+    Dim p As LongInt Ptr = CPtr(LongInt Ptr, addr)
+    Dim i As UInteger
+    For i = 0 To nQWords - 1
+        p[i] = value
+    Next i
+    Return 1
+End Function
+
+Private Sub ExecValueSetInteger(ByRef ev As ExecValue, ByVal value As Integer)
+    ExecValueInit ev
+    ev.valueType = "INTEGER"
+    ev.intValue = value
+End Sub
+
+Private Sub ExecValueSetU64(ByRef ev As ExecValue, ByVal value As ULongInt)
+    ExecValueInit ev
+    ev.valueType = "U64_PTR"
+    ev.u64Value = value
+End Sub
+
+Private Sub ExecValueSetI64(ByRef ev As ExecValue, ByVal value As LongInt)
+    ExecValueInit ev
+    ev.valueType = "I64_VALUE"
+    ev.u64Value = CULngInt(value)
+End Sub
+
+Private Sub ExecValueSetFloat(ByRef ev As ExecValue, ByVal value As Double)
+    ExecValueInit ev
+    ev.valueType = "FLOAT"
+    ev.floatValue = value
+End Sub
+
+Private Sub ExecValueSetString(ByRef ev As ExecValue, ByRef value As String)
+    ExecValueInit ev
+    ev.valueType = "STRING"
+    ev.stringValue = value
+End Sub
+
+Private Function ExecValueToInteger(ByRef ev As ExecValue) As Integer
+    Select Case ev.valueType
+    Case "INTEGER"
+        Return ev.intValue
+    Case "U64_PTR", "I64_VALUE"
+        ' S-077: the host Integer is 64-bit, so a 64-bit value converts LOSSLESSLY.
+        ' This used to saturate at the 32-bit range, which silently corrupted every
+        ' consumer that read a wide value back (an I64 FOR counter stalled at
+        ' 2147483647 and hit the iteration guard; `x = big64 + 1` read 2147483647).
+        ' A U64 above I64 max yields its two's-complement bit pattern, the same
+        ' 64 bits the compiled engines hold in a register.
+        Return CInt(CLngInt(ev.u64Value))
+    Case "FLOAT"
+        Return CInt(ev.floatValue)
+    Case "STRING"
+        Return ValInt(ev.stringValue)
+    Case "EXTERNAL_BIG"
+        Return 0
+    Case Else
+        Return 0
+    End Select
+End Function
+
+Private Function ExecValueToU64(ByRef ev As ExecValue) As ULongInt
+    Select Case ev.valueType
+    Case "INTEGER"
+        Return CULngInt(ev.intValue)
+    Case "U64_PTR"
+        Return ev.u64Value
+    Case "I64_VALUE"
+        Return ev.u64Value
+    Case "FLOAT"
+        Return CULngInt(CLngInt(ev.floatValue))
+    Case "STRING"
+        Return CULngInt(ValInt(ev.stringValue))
+    Case "EXTERNAL_BIG"
+        Return 0
+    Case Else
+        Return 0
+    End Select
+End Function
+
+Private Function ExecValueToFloat(ByRef ev As ExecValue) As Double
+    Select Case ev.valueType
+    Case "INTEGER"
+        Return CDbl(ev.intValue)
+    Case "FLOAT"
+        Return ev.floatValue
+    Case "U64_PTR"
+        Return CDbl(ev.u64Value)
+    Case "I64_VALUE"
+        Return CDbl(CLngInt(ev.u64Value))
+    Case "STRING"
+        Return Val(ev.stringValue)
+    Case "EXTERNAL_BIG"
+        Return Val(ev.externalText)
+    Case Else
+        Return 0.0
+    End Select
+End Function
+
+' Reads/writes one element of a native-scalar array's tightly-packed
+' rawData buffer, converting to/from the general ExecValue representation
+' at the boundary. declType is the array's element type (ExecVar.declType).
+Private Sub ExecArrayRawGet(ByRef arr As ExecArray, ByVal elemIndex As Integer, ByRef declType As String, ByRef valueOut As ExecValue)
+    Dim t As String
+    t = UCase(Trim(declType))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Dim baseAddr As UByte Ptr
+    baseAddr = @arr.rawData(elemIndex * arr.elemStride)
+    Select Case t
+    Case "F32", "SINGLE"
+        ExecValueSetFloat valueOut, CDbl(*CPtr(Single Ptr, baseAddr))
+    Case "F64", "DOUBLE", "F80", "EXTENDED"
+        ExecValueSetFloat valueOut, *CPtr(Double Ptr, baseAddr)
+    Case "I64", "LONGINT"
+        ExecValueSetI64 valueOut, *CPtr(LongInt Ptr, baseAddr)
+    Case "U64", "ULONGINT", "PTR", "STRPTR", "WSTRPTR"
+        ExecValueSetU64 valueOut, *CPtr(ULongInt Ptr, baseAddr)
+    Case "U32", "UINTEGER", "UINT", "ULONG"
+        ExecValueSetU64 valueOut, CULngInt(*CPtr(ULong Ptr, baseAddr))
+    Case "I8", "BYTE", "SBYTE"
+        ExecValueSetInteger valueOut, *CPtr(Byte Ptr, baseAddr)
+    Case "U8", "UBYTE"
+        ExecValueSetInteger valueOut, *CPtr(UByte Ptr, baseAddr)
+    Case "I16", "SHORT"
+        ExecValueSetInteger valueOut, *CPtr(Short Ptr, baseAddr)
+    Case "U16", "USHORT"
+        ExecValueSetInteger valueOut, *CPtr(UShort Ptr, baseAddr)
+    Case Else
+        ExecValueSetInteger valueOut, *CPtr(Long Ptr, baseAddr)
+    End Select
+End Sub
+
+Private Sub ExecArrayRawSet(ByRef arr As ExecArray, ByVal elemIndex As Integer, ByRef declType As String, ByRef valueIn As ExecValue)
+    Dim t As String
+    t = UCase(Trim(declType))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Dim baseAddr As UByte Ptr
+    baseAddr = @arr.rawData(elemIndex * arr.elemStride)
+    Select Case t
+    Case "F32", "SINGLE"
+        *CPtr(Single Ptr, baseAddr) = CSng(ExecValueToFloat(valueIn))
+    Case "F64", "DOUBLE", "F80", "EXTENDED"
+        *CPtr(Double Ptr, baseAddr) = ExecValueToFloat(valueIn)
+    Case "I64", "LONGINT"
+        *CPtr(LongInt Ptr, baseAddr) = CLngInt(ExecValueToU64(valueIn))
+    Case "U64", "ULONGINT", "PTR", "STRPTR", "WSTRPTR"
+        *CPtr(ULongInt Ptr, baseAddr) = ExecValueToU64(valueIn)
+    Case "U32", "UINTEGER", "UINT", "ULONG"
+        *CPtr(ULong Ptr, baseAddr) = CULng(ExecValueToU64(valueIn) And &hFFFFFFFFULL)
+    Case "I8", "BYTE", "SBYTE"
+        *CPtr(Byte Ptr, baseAddr) = CByte(ExecValueToInteger(valueIn))
+    Case "U8", "UBYTE"
+        *CPtr(UByte Ptr, baseAddr) = CUByte(ExecValueToInteger(valueIn) And &hFF)
+    Case "I16", "SHORT"
+        *CPtr(Short Ptr, baseAddr) = CShort(ExecValueToInteger(valueIn))
+    Case "U16", "USHORT"
+        *CPtr(UShort Ptr, baseAddr) = CUShort(ExecValueToInteger(valueIn) And &hFFFF)
+    Case Else
+        *CPtr(Long Ptr, baseAddr) = CLng(ExecValueToInteger(valueIn))
+    End Select
+End Sub
+
+Private Function ExecApplyDeclaredType(ByRef sourceValue As ExecValue, ByRef declaredTypeRaw As String, ByRef convertedOut As ExecValue, ByRef errText As String) As Integer
+    Dim declaredType As String
+    declaredType = UCase(Trim(declaredTypeRaw))
+    If Left(declaredType, 5) = "TYPE_" Then declaredType = Mid(declaredType, 6)
+
+    Select Case declaredType
+    Case "", "VARIANT", "ANY"
+        convertedOut = sourceValue
+    Case "BOOLEAN", "BOOL"
+        ExecValueSetInteger convertedOut, IIf(ExecValueToInteger(sourceValue) <> 0, -1, 0)
+    Case "I8", "BYTE", "SBYTE"
+        Dim i8Value As Integer
+        i8Value = ExecValueToInteger(sourceValue) And &hFF
+        If (i8Value And &h80) <> 0 Then i8Value -= &h100
+        ExecValueSetInteger convertedOut, i8Value
+    Case "U8", "UBYTE"
+        ExecValueSetInteger convertedOut, ExecValueToInteger(sourceValue) And &hFF
+    Case "I16", "SHORT"
+        Dim i16Value As Integer
+        i16Value = ExecValueToInteger(sourceValue) And &hFFFF
+        If (i16Value And &h8000) <> 0 Then i16Value -= &h10000
+        ExecValueSetInteger convertedOut, i16Value
+    Case "U16", "USHORT"
+        ExecValueSetInteger convertedOut, ExecValueToInteger(sourceValue) And &hFFFF
+    Case "I32", "INTEGER", "LONG"
+        ' Do not pass through ExecValueToInteger here: that helper correctly
+        ' saturates a general integer consumer, while an explicit I32 cast must
+        ' retain the low 32 bits and interpret them as signed two's complement.
+        Dim i32Bits As ULongInt
+        i32Bits = ExecValueToU64(sourceValue) And &hFFFFFFFFULL
+        Dim i32Signed As LongInt
+        If i32Bits >= &h80000000ULL Then
+            i32Signed = CLngInt(i32Bits - &h100000000ULL)
+        Else
+            i32Signed = CLngInt(i32Bits)
+        End If
+        ExecValueSetInteger convertedOut, CInt(i32Signed)
+    Case "U32", "UINTEGER", "UINT", "ULONG"
+        ExecValueSetU64 convertedOut, ExecValueToU64(sourceValue) And &hFFFFFFFFULL
+    Case "I64", "LONGINT"
+        ExecValueSetI64 convertedOut, CLngInt(ExecValueToU64(sourceValue))
+    Case "U64", "ULONGINT"
+        ExecValueSetU64 convertedOut, ExecValueToU64(sourceValue)
+    Case "F32", "SINGLE"
+        ExecValueSetFloat convertedOut, CDbl(CSng(ExecValueToFloat(sourceValue)))
+    Case "F64", "DOUBLE", "F80", "EXTENDED"
+        ExecValueSetFloat convertedOut, ExecValueToFloat(sourceValue)
+    Case "PTR", "STRPTR", "WSTRPTR"
+        ExecValueSetU64 convertedOut, ExecValueToU64(sourceValue)
+    Case "STRING", "ZSTRING", "WSTRING"
+        Select Case sourceValue.valueType
+        Case "STRING"
+            ExecValueSetString convertedOut, sourceValue.stringValue
+        Case "FLOAT"
+            Dim floatText As String
+            floatText = UXBFloatToText(sourceValue.floatValue)
+            ExecValueSetString convertedOut, floatText
+        Case "U64_PTR"
+            Dim u64Text As String
+            u64Text = LTrim(Str(sourceValue.u64Value))
+            ExecValueSetString convertedOut, u64Text
+        Case "I64_VALUE"
+            Dim i64Text As String
+            i64Text = LTrim(Str(CLngInt(sourceValue.u64Value)))
+            ExecValueSetString convertedOut, i64Text
+        Case Else
+            Dim intText As String
+            intText = LTrim(Str(sourceValue.intValue))
+            ExecValueSetString convertedOut, intText
+        End Select
+    Case Else
+        ' Class, TYPE, array, collection and opaque external values retain
+        ' their rich ExecValue representation.  Semantic/type binding decides
+        ' whether the declared user type is compatible; runtime never narrows
+        ' these values to Integer merely because they cross a task boundary.
+        convertedOut = sourceValue
+    End Select
+
+    Return 1
+End Function
+
+Private Function ExecValueToString(ByRef ev As ExecValue) As String
+    Select Case ev.valueType
+    Case "INTEGER"
+        Return LTrim(Str(ev.intValue))
+    Case "FLOAT"
+        Return UXBFloatToText(ev.floatValue)
+    Case "STRING"
+        Return ev.stringValue
+    Case "U64_PTR"
+        Return LTrim(Str(ev.u64Value))
+    Case "I64_VALUE"
+        Return LTrim(Str(CLngInt(ev.u64Value)))
+    Case "EXTERNAL_BIG"
+        Return ev.externalText
+    Case Else
+        Return ""
+    End Select
+End Function
+
+' S-142b: an F32 expression prints with 7 significant digits (single precision), an F64 one with 16.
+' The AST value carries no width, so the type pass's stamp on the expression node decides.
+Private Function ExecNodeIsSingleFloat(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    Dim stampedType As String
+    stampedType = UCase(Trim(ps.ast.nodes(nodeIdx).typeName))
+    If Left(stampedType, 5) = "TYPE_" Then stampedType = Mid(stampedType, 6)
+    Return IIf(stampedType = "F32" Or stampedType = "SINGLE", 1, 0)
+End Function
+
+Private Function ExecValueToStringForNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef ev As ExecValue) As String
+    If ev.valueType = "FLOAT" Then Return UXBFloatToText(ev.floatValue, ExecNodeIsSingleFloat(ps, nodeIdx))
+    Return ExecValueToString(ev)
+End Function
+
+' S-140: 1 when the running routine's own frame (parameter or local) declares `nameText`. A module-level
+' constant of the same name must not win over it (`FUNCTION F(BASE AS I32)` with `CONST BASE = 10` read 10).
+' Only the current frame counts -- a CALLER's local is not visible to a routine, so it never shadows a constant.
+Private Function ExecCurrentFrameHasVar(ByRef es As ExecState, ByRef nameUpper As String) As Integer
+    Dim depth As Integer
+    depth = es.runtime.callContextDepth
+    If depth > 63 Then depth = 63
+    If depth <= 0 Then Return 0
+    Dim frameBase As Integer
+    frameBase = es.runtime.callFrameBase(depth)
+    If frameBase < 0 Then frameBase = 0
+    Dim i As Integer
+    For i = es.count - 1 To frameBase Step -1
+        If UCase(es.vars(i).nameText) = nameUpper Then Return 1
+    Next i
+    Return 0
+End Function
+
+Private Function ExecFindVarRaw(ByRef es As ExecState, ByRef nameText As String) As Integer
+    Dim u As String
+    u = UCase(nameText)
+    Dim i As Integer
+
+    ' A routine call appends its locals after callFrameBase(depth).  Search
+    ' newest activation first so a local may legally shadow a caller/global
+    ' variable while reads and writes remain frame-local.
+    Dim depth As Integer
+    depth = es.runtime.callContextDepth
+    If depth > 63 Then depth = 63
+    If depth > 0 Then
+        Dim frameBase As Integer
+        frameBase = es.runtime.callFrameBase(depth)
+        If frameBase < 0 Then frameBase = 0
+        For i = es.count - 1 To frameBase Step -1
+            If UCase(es.vars(i).nameText) = u Then Return i
+        Next i
+
+        Dim d As Integer
+        Dim outerStart As Integer
+        Dim outerEnd As Integer
+        For d = depth - 1 To 1 Step -1
+            outerStart = es.runtime.callFrameBase(d)
+            If d = depth - 1 Then
+                outerEnd = frameBase - 1
+            Else
+                outerEnd = es.runtime.callFrameBase(d + 1) - 1
+            End If
+            If outerStart < 0 Then outerStart = 0
+            If outerEnd >= es.count Then outerEnd = es.count - 1
+            For i = outerEnd To outerStart Step -1
+                If UCase(es.vars(i).nameText) = u Then Return i
+            Next i
+        Next d
+
+        outerStart = 0
+        outerEnd = es.runtime.callFrameBase(1) - 1
+        If outerEnd >= es.count Then outerEnd = es.count - 1
+        For i = outerEnd To outerStart Step -1
+            If UCase(es.vars(i).nameText) = u Then Return i
+        Next i
+        Return -1
+    End If
+
+    For i = 0 To es.count - 1
+        If UCase(es.vars(i).nameText) = u Then Return i
+    Next i
+    Return -1
+End Function
+
+' S-071: raw, declared-width cell for scalars whose address escaped through
+' VARPTR (see ExecVar.pinCell). Width 0 = no native scalar layout.
+Private Function ExecPinWidth(ByVal typeText As String) As Integer
+    Select Case typeText
+    Case "I8", "BYTE", "SBYTE", "U8", "UBYTE", "BOOL", "BOOLEAN"
+        Return 1
+    Case "I16", "SHORT", "U16", "USHORT"
+        Return 2
+    Case "I32", "INTEGER", "INT", "LONG", "U32", "UINTEGER", "UINT", "ULONG", "F32", "SINGLE"
+        Return 4
+    Case "I64", "LONGINT", "U64", "ULONGINT", "F64", "DOUBLE", "PTR", "STRPTR", "WSTRPTR", "POINTER"
+        Return 8
+    End Select
+    Return 0
+End Function
+
+Private Sub ExecVarPinStore(ByRef es As ExecState, ByVal idx As Integer)
+    Dim cellPtr As UByte Ptr = @es.vars(idx).pinCell(0)
+    Select Case es.vars(idx).pinType
+    Case "F32", "SINGLE"
+        *CPtr(Single Ptr, cellPtr) = CSng(ExecValueToFloat(es.vars(idx).value))
+    Case "F64", "DOUBLE"
+        *CPtr(Double Ptr, cellPtr) = ExecValueToFloat(es.vars(idx).value)
+    Case Else
+        Dim storeBits As ULongInt = ExecValueToU64(es.vars(idx).value)
+        Select Case es.vars(idx).pinWidth
+        Case 1
+            cellPtr[0] = CUByte(storeBits And &hFFULL)
+        Case 2
+            *CPtr(UShort Ptr, cellPtr) = CUShort(storeBits And &hFFFFULL)
+        Case 4
+            *CPtr(ULong Ptr, cellPtr) = CULng(storeBits And &hFFFFFFFFULL)
+        Case Else
+            *CPtr(ULongInt Ptr, cellPtr) = storeBits
+        End Select
+    End Select
+End Sub
+
+Private Sub ExecVarPinLoad(ByRef es As ExecState, ByVal idx As Integer)
+    Dim cellPtr As UByte Ptr = @es.vars(idx).pinCell(0)
+    Dim loaded As ExecValue
+    Select Case es.vars(idx).pinType
+    Case "F32", "SINGLE"
+        ExecValueSetFloat loaded, CDbl(*CPtr(Single Ptr, cellPtr))
+    Case "F64", "DOUBLE"
+        ExecValueSetFloat loaded, *CPtr(Double Ptr, cellPtr)
+    Case Else
+        Dim loadBits As ULongInt
+        Select Case es.vars(idx).pinWidth
+        Case 1
+            loadBits = cellPtr[0]
+        Case 2
+            loadBits = *CPtr(UShort Ptr, cellPtr)
+        Case 4
+            loadBits = *CPtr(ULong Ptr, cellPtr)
+        Case Else
+            loadBits = *CPtr(ULongInt Ptr, cellPtr)
+        End Select
+        ExecValueSetU64 loaded, loadBits
+    End Select
+    Dim converted As ExecValue
+    Dim pinErr As String
+    If ExecApplyDeclaredType(loaded, es.vars(idx).pinType, converted, pinErr) <> 0 Then es.vars(idx).value = converted
+End Sub
+
+Private Function ExecFindVar(ByRef es As ExecState, ByRef nameText As String) As Integer
+    Dim fvIdx As Integer = ExecFindVarRaw(es, nameText)
+    If fvIdx >= 0 Then
+        ' A pinned scalar's truth is its raw cell (a POKE through VARPTR may
+        ' have changed it) -- refresh the value before anyone reads it.
+        If es.vars(fvIdx).pinned <> 0 Then ExecVarPinLoad es, fvIdx
+    End If
+    Return fvIdx
+End Function
+' Append a variable to the current activation record even when an enclosing
+' frame already contains the same name.  This is used for routine parameters,
+' return slots, receiver aliases and DIM locals that shadow outer variables.
+Function ExecAppendFrameVar(ByRef es As ExecState, ByRef nameText As String) As Integer
+    If es.count >= 256 Then Return -1
+    Dim idx As Integer
+    idx = es.count
+    es.vars(idx).nameText = Trim(nameText)
+    ExecValueInit es.vars(idx).value
+    es.vars(idx).addr = es.nextVarAddr
+    es.vars(idx).declType = ""
+    es.vars(idx).runtimeClassType = ""
+    es.vars(idx).isArray = 0
+    es.vars(idx).arrayId = -1
+    es.vars(idx).arrayDims = 0
+    es.vars(idx).arrayLower = 0
+    es.vars(idx).arrayUpper = 0
+    es.vars(idx).arrayBytes = 0
+    es.vars(idx).pinned = 0
+    es.nextVarAddr += 4
+    es.count += 1
+    Return idx
+End Function
+
+Private Function ExecGetVar(ByRef es As ExecState, ByRef nameText As String) As Integer
+    Dim idx As Integer
+    idx = ExecFindVar(es, nameText)
+    If idx = -1 Then Return 0
+    Return ExecValueToInteger(es.vars(idx).value)
+End Function
+
+Private Function ExecGetVarValue(ByRef es As ExecState, ByRef nameText As String, ByRef valueOut As ExecValue) As Integer
+    Dim idx As Integer
+    idx = ExecFindVar(es, nameText)
+    If idx = -1 Then
+        ExecValueInit valueOut
+        Return 0
+    End If
+    valueOut = es.vars(idx).value
+    Return 1
+End Function
+
+Private Function ExecArrayExtent(ByVal lowerBound As Integer, ByVal upperBound As Integer) As Integer
+    Return (upperBound - lowerBound) + 1
+End Function
+
+Private Function ExecArrayResizeVar(ByRef es As ExecState, ByRef nameText As String, ByVal lowerBound As Integer, ByVal upperBound As Integer, ByVal preserveMode As Integer) As Integer
+    Dim idx As Integer
+    idx = ExecEnsureVar(es, nameText)
+    If idx = -1 Then Return 0
+
+    If es.vars(idx).arrayId < 0 Then
+        If es.arrayCount = 0 Then
+            ReDim es.arrays(0)
+        Else
+            ReDim Preserve es.arrays(es.arrayCount)
+        End If
+        es.vars(idx).arrayId = es.arrayCount
+        es.arrayCount += 1
+    End If
+
+    Dim arrId As Integer
+    arrId = es.vars(idx).arrayId
+    Dim arrPtr As ExecArray Ptr
+    arrPtr = @es.arrays(arrId)
+
+    Dim newCount As Integer
+    newCount = ExecArrayExtent(lowerBound, upperBound)
+    If newCount < 0 Then Return 0
+
+    ' S-036: arrays of a plain native-scalar element type get a tightly-packed
+    ' rawData buffer (real elemStride = the type's real SIZEOF) instead of
+    ' relying solely on `elements()` -- see ExecArrayRawGet/Set and VARPTR's
+    ' array handling in exec_eval_builtin_categories.fbs.
+    Dim isNativeScalar As Integer
+    Dim elemStride As Integer
+    isNativeScalar = ExecDeclTypeIsNativeScalar(es.vars(idx).declType)
+    elemStride = ExecNativeScalarByteWidth(es.vars(idx).declType)
+    If elemStride <= 0 Then isNativeScalar = 0
+
+    Dim oldLower As Integer
+    Dim oldCount As Integer
+    Dim oldElements(Any) As ExecValue
+    Dim oldRawData(Any) As UByte
+    Dim oldWasNativeScalar As Integer
+    Dim oldElemStride As Integer
+    oldLower = es.vars(idx).arrayLower
+    oldCount = arrPtr->totalElements
+    oldWasNativeScalar = arrPtr->isNativeScalar
+    oldElemStride = arrPtr->elemStride
+
+    If preserveMode <> 0 And oldCount > 0 Then
+        ReDim oldElements(oldCount - 1)
+        Dim oldPos As Integer
+        For oldPos = 0 To oldCount - 1
+            oldElements(oldPos) = arrPtr->elements(oldPos)
+        Next oldPos
+        If oldWasNativeScalar <> 0 And oldElemStride > 0 Then
+            ReDim oldRawData(oldCount * oldElemStride - 1)
+            Dim oldByte As Integer
+            For oldByte = 0 To oldCount * oldElemStride - 1
+                oldRawData(oldByte) = arrPtr->rawData(oldByte)
+            Next oldByte
+        End If
+    End If
+
+    ' S-056: the old backing store is about to disappear -- pointers into it go stale.
+    If oldWasNativeScalar <> 0 And oldCount > 0 Then UXBMemRefRelease CULngInt(@arrPtr->rawData(0))
+    Erase arrPtr->elements
+    Erase arrPtr->rawData
+    arrPtr->dims = 1
+    arrPtr->totalElements = 0
+    arrPtr->isNativeScalar = isNativeScalar
+    arrPtr->elemStride = elemStride
+    ReDim arrPtr->bounds(1)
+    arrPtr->bounds(0) = lowerBound
+    arrPtr->bounds(1) = upperBound
+
+    If newCount > 0 Then
+        ReDim arrPtr->elements(newCount - 1)
+        arrPtr->totalElements = newCount
+        Dim initPos As Integer
+        For initPos = 0 To newCount - 1
+            ExecValueInit arrPtr->elements(initPos)
+        Next initPos
+        If isNativeScalar <> 0 Then
+            ReDim arrPtr->rawData(newCount * elemStride - 1)
+            Dim initByte As Integer
+            For initByte = 0 To newCount * elemStride - 1
+                arrPtr->rawData(initByte) = 0
+            Next initByte
+            UXBMemRefRegister UXB_MEMREF_KIND_ARRAY, CULngInt(@arrPtr->rawData(0)), CULngInt(newCount * elemStride), "array " & es.vars(idx).nameText
+        End If
+    End If
+
+    If preserveMode <> 0 And oldCount > 0 And newCount > 0 Then
+        Dim oldUpper As Integer
+        Dim overlapLower As Integer
+        Dim overlapUpper As Integer
+        oldUpper = oldLower + oldCount - 1
+        overlapLower = IIf(lowerBound > oldLower, lowerBound, oldLower)
+        overlapUpper = IIf(upperBound < oldUpper, upperBound, oldUpper)
+        If overlapUpper >= overlapLower Then
+            Dim keepIdx As Integer
+            For keepIdx = overlapLower To overlapUpper
+                arrPtr->elements(keepIdx - lowerBound) = oldElements(keepIdx - oldLower)
+            Next keepIdx
+            If isNativeScalar <> 0 And oldWasNativeScalar <> 0 And oldElemStride = elemStride Then
+                Dim keepByteIdx As Integer
+                Dim srcBase As Integer
+                Dim dstBase As Integer
+                Dim b As Integer
+                For keepByteIdx = overlapLower To overlapUpper
+                    srcBase = (keepByteIdx - oldLower) * elemStride
+                    dstBase = (keepByteIdx - lowerBound) * elemStride
+                    For b = 0 To elemStride - 1
+                        arrPtr->rawData(dstBase + b) = oldRawData(srcBase + b)
+                    Next b
+                Next keepByteIdx
+            End If
+        End If
+    End If
+
+    Return 1
+End Function
+
+Private Function ExecTryResolveArrayAccess(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef varIdxOut As Integer, ByRef elemIndexOut As Integer, ByRef errText As String) As Integer
+    ' S-097: returns 1 = resolved, 0 = not an array access, -1 = an array access that
+    ' FAILED (errText set: out of bounds, wrong dimension count, ...). Most callers test
+    ' `<> 0`, so -1 counted as success and they went on with the STALE indices left in
+    ' their locals: an out-of-range write like `a(9) = 7` wrote to some other element (or
+    ' nowhere) and an out-of-range read returned an old value. The outputs are now
+    ' invalid on every path but success, so the following element get/set fails.
+    varIdxOut = -1
+    elemIndexOut = -1
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    Dim n As ASTNode
+    n = ps.ast.nodes(nodeIdx)
+    If UCase(n.kind) <> "CALL_EXPR" Then Return 0
+    If InStr(n.value, ".") > 0 Then Return 0
+
+    Dim firstChild As Integer
+    firstChild = n.firstChild
+    If firstChild = -1 Then Return 0
+
+    Dim varIdx As Integer
+    varIdx = ExecFindVar(es, n.value)
+
+    ' FIX11_FULL_RECOVERY_20260611:
+    ' FreeBasic Or short-circuit yapmaz. Eski ifade:
+    '   If varIdx = -1 Or es.vars(varIdx).isArray = 0 Then Return 0
+    ' varIdx = -1 iken es.vars(-1) okuyor ve runtime error 6 üretiyordu.
+    ' Normal fonksiyon çağrıları (UCASE(...), ADD(...), GEN_ADD(...)) önce array erişimi mi diye
+    ' yoklandığı için bu hata string/namespace/include testlerini çalışmadan çökertiyordu.
+    If varIdx < 0 Or varIdx >= es.count Then Return 0
+    If es.vars(varIdx).isArray = 0 Then Return 0
+
+    Dim childCount As Integer
+    childCount = ExecNodeChildCount(ps, nodeIdx)
+
+    Dim normalized As Integer
+
+    If childCount = 1 Then
+        If es.vars(varIdx).arrayDims <> 1 Then
+            errText = "exec: " & UCase(Trim(n.value)) & " was declared with " & es.vars(varIdx).arrayDims & " dimension(s) but indexed with 1"
+            Return -1
+        End If
+
+        Dim indexNode As Integer
+        indexNode = firstChild
+
+        Dim rawIndex As Integer
+        rawIndex = ExecEvalNode(ps, es, indexNode, errText)
+        If errText <> "" Then Return -1
+
+        normalized = rawIndex - es.vars(varIdx).arrayLower
+    ElseIf childCount > 1 Then
+        ' Multi-dimensional access: fold all indices into one flat offset.
+        ' See exec_array_dim.fbs -- consistent with the MIR backend's flattening.
+        If ExecResolveFlatArrayIndex(ps, es, nodeIdx, n.value, normalized, errText) = 0 Then
+            If errText = "" Then errText = "exec: multi-dimensional array access failed for " & UCase(Trim(n.value))
+            Return -1
+        End If
+    Else
+        Return 0
+    End If
+
+    If es.vars(varIdx).arrayId < 0 Or es.vars(varIdx).arrayId >= es.arrayCount Then
+        errText = "exec: array storage missing"
+        Return -1
+    End If
+    If normalized < 0 Or normalized >= es.arrays(es.vars(varIdx).arrayId).totalElements Then
+        errText = "exec: array index out of bounds " & UCase(Trim(n.value))
+        Return -1
+    End If
+
+    varIdxOut = varIdx
+    elemIndexOut = normalized
+    Return 1
+End Function
+
+Private Function ExecGetArrayElement(ByRef es As ExecState, ByVal varIdx As Integer, ByVal elemIndex As Integer, ByRef valueOut As ExecValue) As Integer
+    If varIdx < 0 Or varIdx >= es.count Then Return 0
+    If es.vars(varIdx).arrayId < 0 Or es.vars(varIdx).arrayId >= es.arrayCount Then Return 0
+    If elemIndex < 0 Or elemIndex >= es.arrays(es.vars(varIdx).arrayId).totalElements Then Return 0
+    ' S-036: native-scalar arrays are backed by rawData (real, tightly-packed
+    ' storage that VARPTR/PEEK/POKE/MEMCOPY also read/write) instead of elements().
+    If es.arrays(es.vars(varIdx).arrayId).isNativeScalar <> 0 Then
+        ExecArrayRawGet es.arrays(es.vars(varIdx).arrayId), elemIndex, es.vars(varIdx).declType, valueOut
+        Return 1
+    End If
+    valueOut = es.arrays(es.vars(varIdx).arrayId).elements(elemIndex)
+    Return 1
+End Function
+
+Private Function ExecSetArrayElement(ByRef es As ExecState, ByVal varIdx As Integer, ByVal elemIndex As Integer, ByRef valueIn As ExecValue) As Integer
+    If varIdx < 0 Or varIdx >= es.count Then Return 0
+    If es.vars(varIdx).arrayId < 0 Or es.vars(varIdx).arrayId >= es.arrayCount Then Return 0
+    If elemIndex < 0 Or elemIndex >= es.arrays(es.vars(varIdx).arrayId).totalElements Then Return 0
+    If es.arrays(es.vars(varIdx).arrayId).isNativeScalar <> 0 Then
+        ExecArrayRawSet es.arrays(es.vars(varIdx).arrayId), elemIndex, es.vars(varIdx).declType, valueIn
+        Return 1
+    End If
+    es.arrays(es.vars(varIdx).arrayId).elements(elemIndex) = valueIn
+    Return 1
+End Function
+
+' S-077: declared integer types whose stored value must be normalized to the
+' declared width and signedness on every assignment (wrap-around), exactly as
+' the compiled engines do on STORE. Floats, strings, pointers and objects are
+' deliberately excluded (F32 rounding would change how AST prints 0.1).
+Private Function ExecDeclTypeIsWrappedInteger(ByRef declTypeRaw As String) As Integer
+    Dim t As String
+    t = UCase(Trim(declTypeRaw))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Select Case t
+    Case "I8", "BYTE", "SBYTE", "U8", "UBYTE", "I16", "SHORT", "U16", "USHORT", _
+         "I32", "INTEGER", "LONG", "U32", "UINTEGER", "UINT", "ULONG", "I64", "LONGINT", "U64", "ULONGINT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Sub ExecNormalizeVarToDeclaredInteger(ByRef es As ExecState, ByVal idx As Integer)
+    If es.vars(idx).isArray <> 0 Then Exit Sub
+    ' A machine integer stored into an F64 variable becomes a floating value
+    ' (an unsigned 2^64-1 must read back as 1.8446744073709552e19, not as the
+    ' integer digits). F32 is left alone: rounding to single would change how
+    ' the AST engine prints values the other engines print via %g.
+    Dim floatDeclType As String
+    floatDeclType = UCase(Trim(es.vars(idx).declType))
+    If Left(floatDeclType, 5) = "TYPE_" Then floatDeclType = Mid(floatDeclType, 6)
+    If floatDeclType = "F64" Or floatDeclType = "DOUBLE" Then
+        Select Case es.vars(idx).value.valueType
+        Case "INTEGER", "I64_VALUE", "U64_PTR"
+            Dim asFloatValue As ExecValue
+            ExecValueSetFloat asFloatValue, ExecValueToFloat(es.vars(idx).value)
+            es.vars(idx).value = asFloatValue
+        End Select
+        Exit Sub
+    End If
+    If ExecDeclTypeIsWrappedInteger(es.vars(idx).declType) = 0 Then Exit Sub
+    Select Case es.vars(idx).value.valueType
+    Case "INTEGER", "I64_VALUE", "U64_PTR", "FLOAT"
+        Dim wrappedValue As ExecValue
+        Dim wrapErr As String
+        If ExecApplyDeclaredType(es.vars(idx).value, es.vars(idx).declType, wrappedValue, wrapErr) <> 0 Then es.vars(idx).value = wrappedValue
+    End Select
+End Sub
+
+Private Sub ExecSetVarValue(ByRef es As ExecState, ByRef nameText As String, ByRef value As ExecValue)
+    Dim idx As Integer
+    idx = ExecEnsureVar(es, nameText)
+    es.vars(idx).value = value
+    ExecNormalizeVarToDeclaredInteger es, idx
+    If es.vars(idx).pinned <> 0 Then ExecVarPinStore es, idx
+End Sub
+
+Private Function ExecEnsureVar(ByRef es As ExecState, ByRef nameText As String) As Integer
+    Dim idx As Integer
+    idx = ExecFindVar(es, nameText)
+
+    If idx <> -1 Then Return idx
+
+    If es.count >= 256 Then
+        ' overflow
+        Return -1
+    End If
+
+    idx = es.count
+    es.vars(idx).nameText = nameText
+    ExecValueInit es.vars(idx).value
+    es.vars(idx).addr = es.nextVarAddr
+    es.vars(idx).declType = ""
+    es.vars(idx).isArray = 0
+    es.vars(idx).arrayId = -1
+    es.vars(idx).arrayDims = 0
+    es.vars(idx).arrayLower = 0
+    es.vars(idx).arrayUpper = 0
+    es.vars(idx).arrayBytes = 0
+    es.vars(idx).pinned = 0
+    es.nextVarAddr += 4
+    es.count += 1
+
+    Return idx
+End Function
+
+Private Function ExecGetVarAddr(ByRef es As ExecState, ByRef nameText As String) As UInteger
+    Dim idx As Integer
+    idx = ExecEnsureVar(es, nameText)
+    Return es.vars(idx).addr
+End Function
+
+Private Sub ExecSetVarAddr(ByRef es As ExecState, ByRef nameText As String, ByVal addr As UInteger)
+    Dim idx As Integer
+    idx = ExecEnsureVar(es, nameText)
+    es.vars(idx).addr = addr
+End Sub
+
+Private Sub ExecSetVar(ByRef es As ExecState, ByRef nameText As String, ByVal value As Integer)
+    Dim idx As Integer
+    idx = ExecEnsureVar(es, nameText)
+    ExecValueSetInteger es.vars(idx).value, value
+    ExecNormalizeVarToDeclaredInteger es, idx
+    If es.vars(idx).pinned <> 0 Then ExecVarPinStore es, idx
+End Sub

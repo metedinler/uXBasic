@@ -1,0 +1,240 @@
+#ifndef UXB_PREPROCESS_BLOCK_SCANNER_FBS
+#define UXB_PREPROCESS_BLOCK_SCANNER_FBS
+
+' General table-driven preprocessor block scanner.
+' This is the first step of moving raw HTML/CSS/JS/WAT/JSON/MD/TEMPLATE blocks
+' out of parser/lexer/lexer_preprocess.fbs.
+'
+' Return values:
+'   0  = head is not a known block begin; caller continues normal directive dispatch.
+'   1  = block consumed; caller must Continue Do.
+'  -1  = fatal preprocess error; caller must Exit Do.
+
+Private Sub UXBPreSplitDirective(ByRef directive As String, ByRef head As String, ByRef restText As String)
+    Dim sp As Integer
+    sp = InStr(directive, " ")
+    If sp <= 0 Then
+        head = UCase(Trim(directive))
+        restText = ""
+    Else
+        head = UCase(Trim(Left(directive, sp - 1)))
+        restText = Trim(Mid(directive, sp + 1))
+    End If
+End Sub
+
+Private Function UXBPreBlockTarget(ByRef beginHead As String) As String
+    Select Case UCase(Trim(beginHead))
+    Case "HTML_BEGIN": Return "HTML"
+    Case "CSS_BEGIN": Return "CSS"
+    Case "JS_BEGIN": Return "JS"
+    Case "WAT_BEGIN": Return "WAT"
+    Case "WAT_FUNC_BEGIN": Return "WAT_FUNC"
+    Case "WASM_HOST_JS_BEGIN": Return "WASM_HOST_JS"
+    Case "JSON_BEGIN": Return "JSON"
+    Case "JSON_ARRAY_BEGIN": Return "JSON_ARRAY"
+    Case "MD_BEGIN": Return "MD"
+    Case "TEMPLATE_BEGIN": Return "TEMPLATE"
+    Case "SECTION": Return "SECTION"
+    Case "GEN_BLOCK": Return "GEN"
+    Case Else: Return ""
+    End Select
+End Function
+
+Private Function UXBPreBlockEndHead(ByRef beginHead As String) As String
+    Select Case UCase(Trim(beginHead))
+    Case "HTML_BEGIN": Return "HTML_END"
+    Case "CSS_BEGIN": Return "CSS_END"
+    Case "JS_BEGIN": Return "JS_END"
+    Case "WAT_BEGIN": Return "WAT_END"
+    Case "WAT_FUNC_BEGIN": Return "WAT_FUNC_END"
+    Case "WASM_HOST_JS_BEGIN": Return "WASM_HOST_JS_END"
+    Case "JSON_BEGIN": Return "JSON_END"
+    Case "JSON_ARRAY_BEGIN": Return "JSON_ARRAY_END"
+    Case "MD_BEGIN": Return "MD_END"
+    Case "TEMPLATE_BEGIN": Return "TEMPLATE_END"
+    Case "SECTION": Return "ENDSECTION"
+    Case "GEN_BLOCK": Return "GEN_END"
+    Case Else: Return ""
+    End Select
+End Function
+
+Private Function UXBPreDefaultSection(ByRef targetText As String) As String
+    Select Case UCase(Trim(targetText))
+    Case "HTML": Return "BODY"
+    Case "JS": Return "RAW"
+    Case "CSS": Return "RAW"
+    Case "WAT", "WAT_FUNC": Return "RAW"
+    Case "WASM_HOST_JS": Return "RAW"
+    Case "JSON", "JSON_ARRAY": Return "RAW"
+    Case "MD": Return "RAW"
+    Case "TEMPLATE": Return "RAW"
+    Case "SECTION": Return "RAW"
+    Case Else: Return "DEFAULT"
+    End Select
+End Function
+
+Private Function UXBPreLooksLikeSection(ByRef targetText As String, ByRef argText As String) As Integer
+    Dim u As String
+    u = UCase(Trim(UXBPreStripQuotes(argText)))
+    If u = "" Then Return 0
+    Select Case u
+    Case "HEAD", "BODY", "RUNTIME", "IMPORTS", "MAIN_PRE", "RAW", "DEFAULT", "MODULE", "BOOT", "AFTER_LOAD"
+        Return 1
+    End Select
+    If UCase(Trim(targetText)) = "SECTION" Then Return 1
+    Return 0
+End Function
+
+' Consume one shell-free directive argument, preserving spaces inside quotes.
+Private Function UXBPreTakeArg(ByRef textIn As String, ByRef argOut As String, ByRef restOut As String) As Integer
+    Dim t As String = LTrim(textIn)
+    argOut = "": restOut = ""
+    If t = "" Then Return 0
+    Dim quoted As Integer = 0
+    Dim startPos As Integer = 1
+    If Left(t, 1) = Chr(34) Then
+        quoted = 1: startPos = 2
+        Dim closePos As Integer = InStr(startPos, t, Chr(34))
+        If closePos <= 0 Then Return 0
+        argOut = Mid(t, startPos, closePos - startPos)
+        restOut = LTrim(Mid(t, closePos + 1))
+    Else
+        Dim i As Integer
+        For i = 1 To Len(t)
+            If Mid(t, i, 1) = " " Or Mid(t, i, 1) = Chr(9) Then Exit For
+        Next i
+        If i > Len(t) Then argOut = t Else argOut = Left(t, i - 1): restOut = LTrim(Mid(t, i))
+    End If
+    Return IIf(argOut <> "", 1, 0)
+End Function
+
+Private Sub UXBPreParseBlockArgs(ByRef targetText As String, ByRef restText As String, ByRef sectionOut As String, ByRef outFileRawOut As String)
+    Dim arg As String
+    arg = Trim(restText)
+    sectionOut = UXBPreDefaultSection(targetText)
+    outFileRawOut = ""
+    If arg = "" Then Exit Sub
+
+    Dim firstArg As String, tail As String, secondArg As String, tail2 As String, thirdArg As String, tail3 As String
+    If UXBPreTakeArg(arg, firstArg, tail) = 0 Then Exit Sub
+    If tail = "" Then
+        If UXBPreLooksLikeSection(targetText, firstArg) <> 0 Then sectionOut = UCase(firstArg) Else outFileRawOut = firstArg
+        Exit Sub
+    End If
+    If UXBPreTakeArg(tail, secondArg, tail2) = 0 Then Exit Sub
+    If tail2 <> "" Then
+        If UXBPreTakeArg(tail2, thirdArg, tail3) = 0 Or tail3 <> "" Then Exit Sub
+        ' Explicit marker form: file SECTION name, or SECTION name file.
+        If UCase(firstArg) = "SECTION" Then
+            sectionOut = UCase(secondArg): outFileRawOut = thirdArg
+        ElseIf UCase(secondArg) = "SECTION" Then
+            outFileRawOut = firstArg: sectionOut = UCase(thirdArg)
+        Else
+            Exit Sub
+        End If
+        Exit Sub
+    End If
+    ' Canonical two-argument form: %%GEN_BLOCK "file" SECTION.
+    ' Also accept SECTION "file" for compatibility with early B examples.
+    If UXBPreLooksLikeSection(targetText, firstArg) <> 0 Or InStr(secondArg, "/") > 0 Or InStr(secondArg, "\\") > 0 Or InStr(secondArg, ".") > 0 Then
+        ' SECTION "file" and arbitrary section "file" compatibility forms.
+        If InStr(firstArg, "/") > 0 Or InStr(firstArg, "\\") > 0 Or InStr(firstArg, ".") > 0 Then
+            outFileRawOut = firstArg: sectionOut = UCase(secondArg)
+        Else
+            sectionOut = UCase(firstArg): outFileRawOut = secondArg
+        End If
+    Else
+        outFileRawOut = firstArg: sectionOut = UCase(secondArg)
+    End If
+End Sub
+
+Private Function UXBPreBlockRawAllowed(ByRef targetText As String, ByRef r As PreprocessResult, ByRef errOut As String) As Integer
+    errOut = ""
+    Select Case UCase(Trim(targetText))
+    Case "JS", "WASM_HOST_JS"
+        If r.allowRawJs = 0 Then
+            errOut = "RAW_JS_PAYLOAD_NOT_ALLOWED_FOR_TARGET"
+            Return 0
+        End If
+    Case "WAT", "WAT_FUNC"
+        If r.allowRawWat = 0 Then
+            errOut = "RAW_WAT_PAYLOAD_NOT_ALLOWED_FOR_TARGET"
+            Return 0
+        End If
+    End Select
+    Return 1
+End Function
+
+Function UXBPreTryScanKnownBlock(ByRef src As String, ByRef cursor As Integer, ByRef lineNo As Integer, ByRef head As String, ByRef restText As String, ByRef sourcePath As String, ByRef result As PreprocessResult) As Integer
+    Dim targetText As String
+    targetText = UXBPreBlockTarget(head)
+    If targetText = "" Then Return 0
+
+    Dim rawErr As String
+    If UXBPreBlockRawAllowed(targetText, result, rawErr) = 0 Then
+        PreprocessResultAddDiagnostic result, rawErr & " at " & sourcePath & ":" & LTrim(Str(lineNo))
+        Return -1
+    End If
+
+    Dim endHead As String
+    endHead = UXBPreBlockEndHead(head)
+    If endHead = "" Then Return 0
+
+    Dim sectionText As String
+    Dim outFileRaw As String
+    UXBPreParseBlockArgs targetText, restText, sectionText, outFileRaw
+
+    Dim outFile As String
+    If UXBPreNormalizeBlockOutFile(targetText, outFileRaw, sourcePath, lineNo, result, outFile) = 0 Then Return -1
+
+    Dim payload As String
+    payload = ""
+    Dim startLine As Integer
+    startLine = lineNo
+    Dim endLine As Integer
+    endLine = lineNo
+    Dim foundEnd As Integer
+    foundEnd = 0
+
+    Do While cursor <= Len(src)
+        Dim lfPos As Integer
+        lfPos = InStr(cursor, src, Chr(10))
+        Dim rawLine As String
+        If lfPos = 0 Then
+            rawLine = Mid(src, cursor)
+            cursor = Len(src) + 1
+        Else
+            rawLine = Mid(src, cursor, lfPos - cursor)
+            cursor = lfPos + 1
+        End If
+        If Right(rawLine, 1) = Chr(13) Then rawLine = Left(rawLine, Len(rawLine) - 1)
+        lineNo += 1
+        endLine = lineNo
+
+        Dim trimLine As String
+        trimLine = LTrim(rawLine)
+        If Left(trimLine, 2) = "%%" Then
+            Dim d As String
+            Dim h As String
+            Dim rr As String
+            d = Trim(Mid(trimLine, 3))
+            UXBPreSplitDirective d, h, rr
+            If UCase(h) = endHead Then
+                foundEnd = 1
+                Exit Do
+            End If
+        End If
+        payload &= rawLine & Chr(10)
+    Loop
+
+    If foundEnd = 0 Then
+        PreprocessResultAddDiagnostic result, "META_BLOCK_END_MISSING: %%" & UCase(head) & " expects %%" & endHead & " at " & sourcePath & ":" & LTrim(Str(startLine))
+        Return -1
+    End If
+
+    PreprocessResultAddBlock result, targetText, sectionText, outFile, payload, sourcePath, startLine, endLine
+    PreprocessResultAddManifest result, "files." & LCase(targetText) & ".out", outFile
+    Return 1
+End Function
+
+#endif

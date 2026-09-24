@@ -1,0 +1,130 @@
+#ifndef UXB_SEMANTIC_GATE_ORCHESTRATOR_FBS
+#define UXB_SEMANTIC_GATE_ORCHESTRATOR_FBS
+
+#include once "../common/active_bind_plan.fbs"
+#include once "semantic_pass.fbs"
+#include once "hir_builder.fbs"
+#include once "hir_mir_bridge.fbs"
+#include once "layout/layout_type_table.fbs"
+#include once "layout/layout_intrinsic_validation.fbs"
+#include once "ast_contract_step2_semantic_bridge.fbs"
+#include once "layout_ast_contract_bridge.fbs"
+#include once "library_module_contract.fbs"
+#include once "library_type_contract.fbs"
+#include once "mir_emit_api.fbs"
+#include once "mir_runtime_bridge.fbs"
+#include once "mir_type_layout_bridge.fbs"
+#include once "type_binding_ast_contract_bridge.fbs"
+
+Type UXBSemanticGateResult
+    ok As Integer
+    semanticOk As Integer
+    hirSemanticOk As Integer
+    hirBridgeOk As Integer
+    mirLoweringReadyOk As Integer
+    layoutTableOk As Integer
+    layoutIntrinsicOk As Integer
+    errorText As String
+End Type
+
+Sub UXBSemanticGateResultInit(ByRef r As UXBSemanticGateResult)
+    r.ok = 0
+    r.semanticOk = 0
+    r.hirSemanticOk = 0
+    r.hirBridgeOk = 0
+    r.mirLoweringReadyOk = 0
+    r.layoutTableOk = 0
+    r.layoutIntrinsicOk = 0
+    r.errorText = ""
+End Sub
+
+Private Sub UXBSemanticGatePlanAdd(ByRef plan As UXBActiveBindPlan, ByRef gateText As String, ByRef fnText As String, ByVal okValue As Integer, ByRef noteText As String)
+    Dim st As String
+    If okValue <> 0 Then st = "PASS" Else st = "FAIL"
+    UXBActiveBindPlanAdd plan, "SEMANTIC", gateText, fnText, st, noteText
+End Sub
+
+Function UXBSemanticRunAllGates(ByRef ps As ParseState, ByRef r As UXBSemanticGateResult, ByRef plan As UXBActiveBindPlan, ByRef errText As String) As Integer
+    UXBSemanticGateResultInit r
+    errText = ""
+
+    UXBActiveBindPlanAdd plan, "SEMANTIC", "ast_contract_step2_semantic_bridge", "SemStep2ContractStatus/SemStep2*Contract", "BOUND", "AST node layer status is available to semantic gates."
+    UXBActiveBindPlanAdd plan, "SEMANTIC", "layout_ast_contract_bridge", "LayoutStep2Contract", "BOUND", "Layout bridge is present; concrete layout table build runs below."
+    UXBActiveBindPlanAdd plan, "SEMANTIC", "library_module_contract", "UXBLibraryModuleStatusName", "BOUND", "Library module vocabulary is loaded for import/library policy decisions."
+    UXBActiveBindPlanAdd plan, "SEMANTIC", "library_type_contract", "UXBLibraryTypeContract/UXBLibraryTypeRegistryRegister", "BOUND", "First-class library type manifests can be registered without adding primitive compiler types."
+    UXBActiveBindPlanAdd plan, "SEMANTIC", "mir_emit_api", "MIRCommitInstruction/MIREmit*", "BOUND", "Semantic MIR emit API is loaded for lowering and later MIR build."
+    UXBActiveBindPlanAdd plan, "SEMANTIC", "mir_runtime_bridge", "UXBMIRRuntime*", "BOUND", "MIR runtime bridge is loaded for runtime-backed opcodes."
+    UXBActiveBindPlanAdd plan, "SEMANTIC", "mir_type_layout_bridge", "MIRTypeInfoFromName/MIRStackSlotBytes", "BOUND", "Type-layout bridge is loaded for backend stack/layout route."
+    UXBActiveBindPlanAdd plan, "SEMANTIC", "type_binding_ast_contract_bridge", "TypeBindingStep2*Contract", "BOUND", "Type binding AST contract bridge is loaded."
+
+    Dim semanticErr As String
+    If SemanticAnalyze(ps, semanticErr) = 0 Then
+        r.semanticOk = 0
+        r.errorText = semanticErr
+        UXBSemanticGatePlanAdd plan, "semantic_pass", "SemanticAnalyze", 0, semanticErr
+        errText = semanticErr
+        Return 0
+    End If
+    r.semanticOk = 1
+    UXBSemanticGatePlanAdd plan, "semantic_pass", "SemanticAnalyze", 1, "Core semantic analysis completed."
+
+    Dim hirSemanticErr As String
+    If HIRSemanticAnalyze(ps, hirSemanticErr) = 0 Then
+        r.hirSemanticOk = 0
+        r.errorText = hirSemanticErr
+        UXBSemanticGatePlanAdd plan, "hir_semantic_pass", "HIRSemanticAnalyze", 0, hirSemanticErr
+        errText = hirSemanticErr
+        Return 0
+    End If
+    r.hirSemanticOk = 1
+    UXBSemanticGatePlanAdd plan, "hir_semantic_pass", "HIRSemanticAnalyze", 1, "HIR semantic analysis completed."
+
+    Dim hirErr As String
+    If HIRBuildBridgeAfterSemantic(ps, gHIRBridge, hirErr) = 0 Then
+        r.hirBridgeOk = 0
+        r.errorText = hirErr
+        UXBSemanticGatePlanAdd plan, "hir_bridge", "HIRBuildBridgeAfterSemantic", 0, hirErr
+        errText = hirErr
+        Return 0
+    End If
+    r.hirBridgeOk = 1
+    UXBSemanticGatePlanAdd plan, "hir_bridge", "HIRBuildBridgeAfterSemantic", 1, "AST/HIR scope, symbol and type facts were built."
+
+    Dim mirPrepErr As String
+    If HIRPrepareMirLowering(ps, gHIRBridge, mirPrepErr) = 0 Then
+        r.mirLoweringReadyOk = 0
+        r.errorText = mirPrepErr
+        UXBSemanticGatePlanAdd plan, "hir_to_mir_bridge", "HIRPrepareMirLowering", 0, mirPrepErr
+        errText = mirPrepErr
+        Return 0
+    End If
+    r.mirLoweringReadyOk = 1
+    UXBSemanticGatePlanAdd plan, "hir_to_mir_bridge", "HIRPrepareMirLowering", 1, "HIR facts are ready for MIR lowering."
+
+    If BuildTypeLayoutTable(ps) = 0 Then
+        r.layoutTableOk = 0
+        r.errorText = "semantic/layout: BuildTypeLayoutTable failed"
+        UXBSemanticGatePlanAdd plan, "layout_table", "BuildTypeLayoutTable", 0, r.errorText
+        errText = r.errorText
+        Return 0
+    End If
+    TypeBindingRefreshUserLayouts
+    r.layoutTableOk = 1
+    UXBSemanticGatePlanAdd plan, "layout_table", "BuildTypeLayoutTable", 1, "TYPE/STRUCT/UNION/CLASS layout table was built and type bindings were refreshed."
+
+    If ValidateLayoutIntrinsicSemantics(ps) = 0 Then
+        r.layoutIntrinsicOk = 0
+        r.errorText = "semantic/layout: intrinsic validation failed"
+        UXBSemanticGatePlanAdd plan, "layout_intrinsic", "ValidateLayoutIntrinsicSemantics", 0, r.errorText
+        errText = r.errorText
+        Return 0
+    End If
+    r.layoutIntrinsicOk = 1
+    UXBSemanticGatePlanAdd plan, "layout_intrinsic", "ValidateLayoutIntrinsicSemantics", 1, "SIZEOF/OFFSETOF/layout intrinsics validated."
+
+    r.ok = 1
+    Return 1
+End Function
+
+#endif
+

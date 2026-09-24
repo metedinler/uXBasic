@@ -1,0 +1,73 @@
+#ifndef UXB_FLOAT_TEXT_FBS
+#define UXB_FLOAT_TEXT_FBS
+
+' Shared floating-point -> text rule (S-142b, Mete's decision 2026-09-24).
+'
+' Every engine prints a floating value with as many significant digits as the
+' type can carry -- F64: 16, F32: 7 -- and adds NO padding zeros: the shortest
+' "%g"-style text of that many digits is used (0.1 -> "0.1", 1/3 -> 0.3333333333333333,
+' 100.0 -> "100", 0.1+0.2 -> "0.3"). Large/small magnitudes switch to a scientific
+' form whose exponent always has at least two digits ("1e+20", "1e-07"); infinities
+' and NaN read "inf", "-inf", "nan"; negative zero reads "0".
+'
+' FreeBASIC's Str() already produces the digit rule (it is "%.16g" for Double and
+' "%.7g" for Single) but the Windows C runtime it is linked to writes three-digit
+' exponents ("1e+020"), so this function only normalizes the exponent and the
+' non-finite spellings. The native runtime (native/uxb_runtime), the legacy x64
+' backend and the JS/WASM runtimes implement the same rule.
+Function UXBFloatToText(ByVal value As Double, ByVal isSingle As Integer = 0) As String
+    If value = 0 Then Return "0"
+
+    Dim s As String
+    If isSingle <> 0 Then
+        s = LTrim(Str(CSng(value)))
+    Else
+        s = LTrim(Str(value))
+    End If
+
+    If InStr(s, "#") > 0 Then
+        If InStr(s, "INF") > 0 Then
+            If Left(s, 1) = "-" Then Return "-inf"
+            Return "inf"
+        End If
+        Return "nan"
+    End If
+
+    Dim expPos As Integer
+    expPos = InStr(s, "e")
+    If expPos > 0 Then
+        Dim mantissaPart As String
+        Dim signPart As String
+        Dim digitPart As String
+        mantissaPart = Left(s, expPos)
+        signPart = Mid(s, expPos + 1, 1)
+        digitPart = Mid(s, expPos + 2)
+        Do While Len(digitPart) > 2 And Left(digitPart, 1) = "0"
+            digitPart = Mid(digitPart, 2)
+        Loop
+        s = mantissaPart & signPart & digitPart
+    End If
+    Return s
+End Function
+
+' Lossless text of a double, for constant folding: the shortest "%.15g" / "%.16g" / "%.17g" text
+' that reads back to exactly the same double. Str() is not enough here -- it keeps 16 digits, so
+' folding `0.1 + 0.2` through it wrote the literal 0.3 and every engine compared/computed with
+' a different number than the one the program would have computed at run time.
+Declare Function UXBCrtSprintfDouble Cdecl Alias "sprintf" (ByVal buffer As ZString Ptr, ByVal formatText As ZString Ptr, ...) As Long
+Declare Function UXBCrtStrtod Cdecl Alias "strtod" (ByVal text As ZString Ptr, ByVal endPtr As ZString Ptr Ptr) As Double
+
+Function UXBFloatToExactText(ByVal value As Double) As String
+    If value = 0 Then Return "0"
+    If value <> value Or value > 1.7976931348623157e308 Or value < -1.7976931348623157e308 Then Return UXBFloatToText(value)
+
+    Dim buffer As ZString * 64
+    UXBCrtSprintfDouble(@buffer, "%.15g", value)
+    If UXBCrtStrtod(@buffer, 0) <> value Then
+        UXBCrtSprintfDouble(@buffer, "%.16g", value)
+        If UXBCrtStrtod(@buffer, 0) <> value Then UXBCrtSprintfDouble(@buffer, "%.17g", value)
+    End If
+    Return buffer
+End Function
+
+#endif

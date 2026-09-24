@@ -1,0 +1,67 @@
+#ifndef UXB_WASM_TYPE_EMIT_FBS
+#define UXB_WASM_TYPE_EMIT_FBS
+
+Public Function UXBWasmSafeName(ByVal rawName As String) As String
+    Dim outText As String
+    Dim i As Integer
+    Dim c As String
+
+    outText = ""
+    For i = 1 To Len(rawName)
+        c = Mid(rawName, i, 1)
+        If (c >= "A" And c <= "Z") Or (c >= "a" And c <= "z") Or (c >= "0" And c <= "9") Or c = "_" Then
+            outText &= c
+        Else
+            outText &= "_"
+        End If
+    Next i
+
+    If outText = "" Then outText = "UXB_FN"
+    ' BASIC identifiers are case-insensitive, while WAT identifiers are not.
+    ' Canonicalize every declaration and use through the same function.
+    Return UCase(outText)
+End Function
+
+' ---- module-level variables (S-120) --------------------------------------------
+' Every WASM function used to declare ITS OWN local for every variable name it touched,
+' so a module-level DIM (a scalar or an array handle) was a different, zero-initialised
+' local in each SUB/FUNCTION: a function reading a global got 0 and a function writing
+' it changed nothing the caller could see (arrays even produced invalid WAT:
+' `undefined local variable`). Module globals now live in WASM globals; a function
+' addresses a name as global unless it declares that name itself (parameter or local).
+Dim Shared gUxbWasmGlobalNames As String  ' "|NAME|NAME2|" (safe, upper-cased)
+Dim Shared gUxbWasmLocalNames As String   ' "|NAME|" params/locals of the function being emitted
+
+Public Function UXBWasmNameIsModuleGlobal(ByVal safeName As String) As Integer
+    If InStr(gUxbWasmLocalNames, "|" & safeName & "|") > 0 Then Return 0
+    Return IIf(InStr(gUxbWasmGlobalNames, "|" & safeName & "|") > 0, 1, 0)
+End Function
+
+Public Function UXBWasmEmitVarGet(ByRef rawName As String) As String
+    Dim n As String
+    n = UXBWasmSafeName(rawName)
+    If UXBWasmNameIsModuleGlobal(n) <> 0 Then Return "      global.get $__G_" & n & Chr(10)
+    Return "      local.get $" & n & Chr(10)
+End Function
+
+Public Function UXBWasmEmitVarSet(ByRef rawName As String) As String
+    Dim n As String
+    n = UXBWasmSafeName(rawName)
+    If UXBWasmNameIsModuleGlobal(n) <> 0 Then Return "      global.set $__G_" & n & Chr(10)
+    Return "      local.set $" & n & Chr(10)
+End Function
+
+Public Function UXBWasmType(ByVal uxbType As String) As String
+    Select Case UCase(Trim(uxbType))
+    Case "I64", "U64"
+        Return "i64"
+    Case "F32"
+        Return "f32"
+    Case "F64"
+        Return "f64"
+    Case Else
+        Return "i32"
+    End Select
+End Function
+
+#endif

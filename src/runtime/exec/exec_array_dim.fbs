@@ -1,0 +1,176 @@
+#ifndef UXB_EXEC_ARRAY_DIM_FBS
+#define UXB_EXEC_ARRAY_DIM_FBS
+
+' Multi-dimensional array support for the AST ("exec") interpreter -- the mirror
+' image of src/semantic/mir_lower_array_dim.fbs, kept deliberately consistent with
+' it: a multi-dimensional uXBasic array is a single flat array under the hood, and
+' dimension bounds must be compile-time integer constants (same scope decision,
+' so `uxb run` and `uxb x64`/`uxb mir` behave identically for the same program).
+'
+' Walks firstChild/nextSibling directly rather than via the ExecChildCount/ExecChildAt
+' helpers, which are only defined later in the include order (exec_eval_support_helpers.fbs);
+' this file is included early (right where DIM handling needs it), matching the style
+' ExecTryResolveArrayAccess itself already uses for the same reason.
+
+Private Function ExecArrayDeclBoundsNode(ByRef ps As ParseState, ByRef arrayName As String) As Integer
+    Dim target As String
+    target = UCase(Trim(arrayName))
+    Dim i As Integer
+    Dim foundBounds As Integer
+    foundBounds = -1
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+        If k <> "DIM_DECL" And k <> "REDIM_DECL" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> target Then Continue For
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(Trim(ps.ast.nodes(ch).kind)) = "DIM_BOUNDS" Then
+                foundBounds = ch
+                Exit Do
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+    Return foundBounds
+End Function
+
+Private Function ExecArrayDimConstBound(ByRef ps As ParseState, ByVal boundNode As Integer, ByRef lowerOut As Integer, ByRef upperOut As Integer, ByRef errText As String) As Integer
+    If boundNode = -1 Then errText = "exec: array bound missing": Return 0
+    If UCase(Trim(ps.ast.nodes(boundNode).kind)) = "RANGE_EXPR" Then
+        Dim loNode As Integer, hiNode As Integer
+        loNode = ps.ast.nodes(boundNode).left
+        hiNode = ps.ast.nodes(boundNode).right
+        If loNode = -1 Or hiNode = -1 Then errText = "exec: array range bound missing": Return 0
+        If UCase(ps.ast.nodes(loNode).kind) <> "NUMBER" Or UCase(ps.ast.nodes(hiNode).kind) <> "NUMBER" Then
+            errText = "exec: multi-dimensional array bounds must be compile-time integer constants"
+            Return 0
+        End If
+        lowerOut = ValInt(Trim(ps.ast.nodes(loNode).value))
+        upperOut = ValInt(Trim(ps.ast.nodes(hiNode).value))
+    Else
+        If UCase(ps.ast.nodes(boundNode).kind) <> "NUMBER" Then
+            errText = "exec: multi-dimensional array bounds must be compile-time integer constants"
+            Return 0
+        End If
+        lowerOut = 0
+        upperOut = ValInt(Trim(ps.ast.nodes(boundNode).value))
+    End If
+    If upperOut < lowerOut Then errText = "exec: array upper bound is smaller than lower bound": Return 0
+    Return 1
+End Function
+
+' Not a language limit -- real memory is the limit, not this number. This is just the
+' size of a fixed stack buffer used while computing strides; comfortably larger than
+' any array anyone will realistically declare, without resorting to dynamic arrays.
+Const UXB_EXEC_ARRAY_MAX_DIMS As Integer = 255
+
+' Public: how many index children does a DIM_BOUNDS (or a CALL_EXPR argument list)
+' node have. Manual sibling walk -- see file header for why.
+Function ExecNodeChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    Dim c As Integer
+    c = 0
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        c += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return c
+End Function
+
+Private Function ExecComputeArrayDimLayout(ByRef ps As ParseState, ByVal boundsNode As Integer, lowerArr() As Integer, strideArr() As Integer, ByRef dimCountOut As Integer, ByRef totalCountOut As Integer, ByRef errText As String) As Integer
+    dimCountOut = ExecNodeChildCount(ps, boundsNode)
+    If dimCountOut < 1 Then errText = "exec: empty array bounds": Return 0
+    If dimCountOut > UXB_EXEC_ARRAY_MAX_DIMS Then
+        errText = "exec: array has more than " & UXB_EXEC_ARRAY_MAX_DIMS & " dimensions"
+        Return 0
+    End If
+
+    Dim extentArr(UXB_EXEC_ARRAY_MAX_DIMS - 1) As Integer
+    Dim bNode As Integer
+    bNode = ps.ast.nodes(boundsNode).firstChild
+    Dim k As Integer
+    k = 0
+    Do While bNode <> -1
+        Dim lo As Integer, hi As Integer
+        If ExecArrayDimConstBound(ps, bNode, lo, hi, errText) = 0 Then Return 0
+        lowerArr(k) = lo
+        extentArr(k) = hi - lo + 1
+        If extentArr(k) <= 0 Then errText = "exec: invalid array bounds": Return 0
+        k += 1
+        bNode = ps.ast.nodes(bNode).nextSibling
+    Loop
+
+    strideArr(dimCountOut - 1) = 1
+    Dim si As Integer
+    For si = dimCountOut - 2 To 0 Step -1
+        If strideArr(si + 1) > 0 And extentArr(si + 1) > 2147483647 \ strideArr(si + 1) Then
+            errText = "exec: array size overflow"
+            Return 0
+        End If
+        strideArr(si) = strideArr(si + 1) * extentArr(si + 1)
+    Next si
+
+    If strideArr(0) > 0 And extentArr(0) > 2147483647 \ strideArr(0) Then
+        errText = "exec: array size overflow"
+        Return 0
+    End If
+    totalCountOut = strideArr(0) * extentArr(0)
+    Return 1
+End Function
+
+' Public: total flat element count for a (possibly multi-dimensional) DIM_BOUNDS node.
+Function ExecArrayFlatElementCount(ByRef ps As ParseState, ByVal boundsNode As Integer, ByRef totalCountOut As Integer, ByRef errText As String) As Integer
+    Dim lowerArr(UXB_EXEC_ARRAY_MAX_DIMS - 1) As Integer
+    Dim strideArr(UXB_EXEC_ARRAY_MAX_DIMS - 1) As Integer
+    Dim dimCount As Integer
+    Return ExecComputeArrayDimLayout(ps, boundsNode, lowerArr(), strideArr(), dimCount, totalCountOut, errText)
+End Function
+
+' Public: given a CALL_EXPR node with N>1 index children indexing arrayName, evaluate
+' every index and fold them into ONE flat element offset (already normalized: caller
+' does NOT additionally subtract arrayLower).
+Function ExecResolveFlatArrayIndex(ByRef ps As ParseState, ByRef es As ExecState, ByVal callNode As Integer, ByRef arrayName As String, ByRef flatIndexOut As Integer, ByRef errText As String) As Integer
+    Dim boundsNode As Integer
+    boundsNode = ExecArrayDeclBoundsNode(ps, arrayName)
+    If boundsNode = -1 Then
+        errText = "exec: multi-dimensional index used on an array with no matching DIM declaration: " & arrayName
+        Return 0
+    End If
+
+    Dim lowerArr(UXB_EXEC_ARRAY_MAX_DIMS - 1) As Integer
+    Dim strideArr(UXB_EXEC_ARRAY_MAX_DIMS - 1) As Integer
+    Dim dimCount As Integer
+    Dim totalCount As Integer
+    If ExecComputeArrayDimLayout(ps, boundsNode, lowerArr(), strideArr(), dimCount, totalCount, errText) = 0 Then Return 0
+
+    Dim n As Integer
+    n = ExecNodeChildCount(ps, callNode)
+    If dimCount <> n Then
+        errText = "exec: " & arrayName & " was declared with " & dimCount & " dimension(s) but indexed with " & n
+        Return 0
+    End If
+
+    Dim flat As Integer
+    flat = 0
+    Dim idx As Integer
+    Dim idxNode As Integer
+    idxNode = ps.ast.nodes(callNode).firstChild
+    idx = 0
+    Do While idxNode <> -1
+        Dim rawIndex As Integer
+        rawIndex = ExecEvalNode(ps, es, idxNode, errText)
+        If errText <> "" Then Return 0
+        flat += (rawIndex - lowerArr(idx)) * strideArr(idx)
+        idx += 1
+        idxNode = ps.ast.nodes(idxNode).nextSibling
+    Loop
+
+    flatIndexOut = flat
+    Return 1
+End Function
+
+#endif

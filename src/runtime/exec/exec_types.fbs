@@ -1,0 +1,292 @@
+Type ExecValue
+    valueType As String  ' INTEGER, I64_VALUE, FLOAT, STRING, EXTERNAL_BIG, U64_PTR
+    intValue As Integer
+    u64Value As ULongInt
+    floatValue As Double
+    stringValue As String
+    externalHandle As Any Ptr
+    externalKind As String
+    externalText As String
+    externalPrecision As Integer
+End Type
+
+' ABI10 / typed CALL result side channel.
+' Existing evaluator APIs return Integer. This value preserves F64 and pointer-token
+' results across CALL_EXPR and user wrapper FUNCTION boundaries without breaking the
+' legacy integer API.
+Dim Shared gExecLastCallValueEx As ExecValue
+Dim Shared gExecLastCallValueExValid As Integer
+
+Type ExecVar
+    nameText As String
+    value As ExecValue
+    addr As UInteger
+    declType As String
+    runtimeClassType As String
+    isArray As Integer
+    arrayId As Integer
+    arrayDims As Integer
+    arrayLower As Integer
+    arrayUpper As Integer
+    arrayBytes As LongInt
+    ' S-071: raw, declared-width storage for a scalar whose address escaped
+    ' through VARPTR (es.vars is a fixed array, so this cell's address is
+    ' stable). ExecValue keeps separate int/u64/float fields and which one is
+    ' "live" depends on the RUNTIME value type of the last assignment -- a
+    ' declared-I64 variable holding a small literal lives in intValue while
+    ' VARPTR used to point at u64Value -- so the value's own fields are not
+    ' the variable's typed storage. See ExecVarPinStore/PinLoad.
+    pinned As Integer
+    pinWidth As Integer
+    pinType As String
+    pinCell(0 To 15) As UByte
+    ' typeBinding As TypeBinding
+End Type
+
+Type ExecArray
+    dims As Integer
+    bounds(Any) As Integer  ' lower/upper pairs
+    elements(Any) As ExecValue
+    totalElements As Integer
+    ' S-036: for arrays whose element type is a plain native scalar (I8..U64,
+    ' F32/F64, PTR/BOOL -- see ExecDeclTypeIsNativeScalar), indexed reads/
+    ' writes AND VARPTR/PEEK/POKE/MEMCOPY/MEMFILL all go through this one
+    ' tightly-packed raw byte buffer instead of `elements()`, so real
+    ' byte-based pointer arithmetic (VARPTR(arr) + i*elemStride) lands on the
+    ' same storage ordinary array access uses -- no second, VM-mirrored copy.
+    ' `elements()` stays untouched/unused for such arrays. Aggregate/class
+    ' element arrays keep using `elements()` exactly as before (isNativeScalar=0).
+    isNativeScalar As Integer
+    elemStride As Integer
+    rawData(Any) As UByte
+End Type
+
+Type ExecObject
+    typeName As String
+    fields(Any) As ExecValue
+    fieldNames(Any) As String
+    fieldCount As Integer
+End Type
+
+Type ExecCollection
+    kind As String  ' LIST, DICT, SET
+    listItems(Any) As ExecValue
+    dictKeys(Any) As String
+    dictValues(Any) As ExecValue
+    setItems(Any) As String
+    count As Integer
+End Type
+
+Type ExecExceptionState
+    active As Integer
+    kindText As String
+    code As Integer
+    messageText As String
+    lineNo As Integer
+    colNo As Integer
+    routineName As String
+    value As ExecValue
+End Type
+
+Type ExecConstEntry
+    nameText As String
+    value As ExecValue
+End Type
+
+Type ExecDefTypeEntry
+    typeChar As String
+    typeName As String
+End Type
+
+Type ExecTaskEntry
+    kindText As String
+    nameText As String
+    qualifiedName As String
+    nodeIdx As Integer
+    active As Integer
+    loaded As Integer
+    parentName As String
+End Type
+
+Type ExecSlotEntry
+    kindText As String
+    nameText As String
+    slotId As Integer
+    nodeIdx As Integer
+    active As Integer
+    loaded As Integer
+    targetName As String
+    targetQualifiedName As String
+    targetKind As String
+    targetNodeIdx As Integer
+End Type
+
+Type ExecFfiAllowEntry
+    dllName As String
+    symbolName As String
+    signatureText As String
+    callingConventionText As String
+    hashText As String
+    signerText As String
+End Type
+
+' Open-addressing hash slot indexing ffiAllowEntries by dll|symbol|signature key.
+' headIdx/tailIdx point into ffiChainNext so every entry sharing a key (e.g. the
+' same symbol allowlisted under multiple calling conventions) is still visited,
+' in original append order, without rescanning the whole entries array.
+Type ExecFfiIndexSlot
+    used As Integer
+    key As String
+    headIdx As Integer
+    tailIdx As Integer
+End Type
+
+Type ExecFfiX86ResolverEntry
+    stubId As Integer
+    dllName As String
+    symbolName As String
+    signatureText As String
+    callingConventionText As String
+    argCount As Integer
+    argStackBytes As Integer
+    cleanupType As String
+    symptrLabel As String
+End Type
+
+Type ExecFfiX86ResolvedEntry
+    stubId As Integer
+    procAddr As Any Ptr
+End Type
+
+Type ExecFfiX86SymptrMapEntry
+    symptrLabel As String
+    stubId As Integer
+    procAddr As Any Ptr
+End Type
+
+Type ExecRoutineDef
+    nameText As String
+    nodeIdx As Integer
+    routineKind As String
+End Type
+
+' Open-addressing name -> routineDefs index. Registration already rejects
+' duplicate names (case-insensitive, dot/underscore-normalized), so a single
+' slot per key (no chaining) is enough.
+Type ExecRoutineIndexSlot
+    used As Integer
+    key As String
+    idx As Integer
+End Type
+
+Type ExecRuntimeContext
+    exitRequest As String
+    execException As ExecExceptionState
+    routineDefs(Any) As ExecRoutineDef
+    routineDefCount As Integer
+    routineDefCap As Integer
+    routineIndexSlots(Any) As ExecRoutineIndexSlot
+    routineIndexCap As Integer
+    routineIndexCount As Integer
+    callContextDepth As Integer
+    ' Activation-record boundaries for the legacy ExecState interpreter.
+    ' Each routine call appends locals after its frame base; lookup searches
+    ' the newest frame first, then enclosing frames/globals.
+    callFrameBase(0 To 63) As Integer
+    callReturnValue As Integer
+    callReturnValueEx As ExecValue
+    callReturnHasValue As Integer
+    currentRoutineName As String
+    currentRoutineNodeIdx As Integer
+    ffiPolicyEnforce As Integer
+    ffiPolicyPath As String
+    ffiAllowEntries(Any) As ExecFfiAllowEntry
+    ffiAllowEntryCount As Integer
+    ffiAllowEntryCap As Integer
+    ffiAllowlistLoaded As Integer
+    ffiAllowlistLoadFailed As Integer
+    ffiAllowlistLoadFailReason As String
+    ffiIndexBuilt As Integer
+    ffiIndexCap As Integer
+    ffiIndexSlots(Any) As ExecFfiIndexSlot
+    ffiChainNext(Any) As Integer
+    ffiResolverPath As String
+    ffiResolverEnforce As Integer
+    ffiX86ResolverEntries(Any) As ExecFfiX86ResolverEntry
+    ffiX86ResolverEntryCount As Integer
+    ffiX86ResolverLoaded As Integer
+    ffiX86ResolverLoadFailed As Integer
+    ffiX86ResolverLoadFailReason As String
+    ffiX86ResolvedEntries(Any) As ExecFfiX86ResolvedEntry
+    ffiX86ResolvedEntryCount As Integer
+    ffiX86SymptrMapEntries(Any) As ExecFfiX86SymptrMapEntry
+    ffiX86SymptrMapEntryCount As Integer
+    ffiX86InvokeCount As Integer
+    ffiX86LastInvokeStubId As Integer
+    ffiX86LastInvokeConv As String
+    ffiX86CallerCleanupBytes As Integer
+    ffiX86CalleeCleanupBytes As Integer
+    ffiX86SymptrWriteCount As Integer
+    ' VTable runtime mapping
+    vtableClassNames(Any) As String
+    vtableClassSlotCounts(Any) As Integer
+    vtableClassSlotStart(Any) As Integer
+    vtableClassCount As Integer
+    vtableClassHandles(Any) As UInteger
+    vtableNextHandle As UInteger
+    vtableEntryKeys(Any) As String
+    vtableEntrySlots(Any) As Integer
+    vtableEntryClassIndex(Any) As Integer
+    vtableEntryRoutineIdx(Any) As Integer
+    vtableEntryCount As Integer
+End Type
+
+Type ExecState
+    vars(0 to 255) As ExecVar
+    count As Integer
+    nextVarAddr As UInteger
+    fileIo As UxbFileRuntime
+    consts(Any) As ExecConstEntry
+    constCount As Integer
+    defTypes(Any) As ExecDefTypeEntry
+    defTypeCount As Integer
+    stringSize As Integer
+    slotEntries(Any) As ExecSlotEntry
+    slotEntryCount As Integer
+    slotTable(0 To 255) As ExecSlotEntry
+    slotCapEvent As Integer
+    slotCapThread As Integer
+    slotCapParalel As Integer
+    slotCapPipe As Integer
+    slotCapEventDeclared As Integer
+    slotCapThreadDeclared As Integer
+    slotCapParalelDeclared As Integer
+    slotCapPipeDeclared As Integer
+    taskEntries(Any) As ExecTaskEntry
+    taskEntryCount As Integer
+    runtime As ExecRuntimeContext
+    arrays(Any) As ExecArray
+    arrayCount As Integer
+    ' objects(Any) As ExecObject
+    ' objectCount As Integer
+    ' collections(Any) As ExecCollection
+    ' collectionCount As Integer
+End Type
+
+Type MIRInstruction
+    opcode As String
+    operand1 As String
+    operand2 As String
+    operand3 As String
+End Type
+
+Type MIRBlock
+    instructions(Any) As MIRInstruction
+    count As Integer
+End Type
+
+Type MIREvaluator
+    blocks(Any) As MIRBlock
+    blockCount As Integer
+    currentBlock As Integer
+End Type

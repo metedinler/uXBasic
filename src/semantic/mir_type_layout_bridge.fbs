@@ -1,0 +1,77 @@
+#ifndef UXB_MIR_TYPE_LAYOUT_BRIDGE_FBS
+#define UXB_MIR_TYPE_LAYOUT_BRIDGE_FBS
+
+#include once "mir_var_info.fbs"
+#include once "layout/layout_type_table.fbs"
+
+Function MIRCanonicalTypeName2(ByVal typeText As String) As String
+    Dim t As String
+    t = UCase(Trim(typeText))
+    If t = "" Then Return "I64"
+    Select Case t
+    Case "INTEGER", "INT": Return "I32"
+    ' LONG is the 32-bit BASIC/C-compatible integer; LONGINT is the explicit
+    ' 64-bit type.  Keep this bridge aligned with type_binding and x64 array
+    ' layout so a LONG parameter cannot silently receive an 8-byte ABI shape.
+    Case "LONG": Return "I32"
+    Case "LONGINT": Return "I64"
+    Case "SINGLE", "CSNG": Return "F32"
+    Case "DOUBLE", "CDBL": Return "F64"
+    Case "BOOLEAN", "BOOL": Return "BOOLEAN"
+    Case "ZSTRING PTR", "ANY PTR", "CODEPTR", "STRPTR", "LPTR": Return "PTR"
+    End Select
+    Return t
+End Function
+
+Function MIRTypeInfoFromName(ByVal typeText As String) As MIRTypeInfo
+    Dim ti As MIRTypeInfo
+    ti.typeName = MIRCanonicalTypeName2(typeText)
+    ti.sizeBytes = 8
+    ti.alignBytes = 8
+    ti.abiClass = MIR_ABI_INT
+    ti.isSigned = 1
+    ti.isFloat = 0
+    ti.isString = 0
+    ti.isPointer = 0
+
+    Select Case ti.typeName
+    Case "I8", "U8", "BYTE", "BOOLEAN"
+        ti.sizeBytes = 1: ti.alignBytes = 1: ti.abiClass = MIR_ABI_INT
+    Case "I16", "U16"
+        ti.sizeBytes = 2: ti.alignBytes = 2: ti.abiClass = MIR_ABI_INT
+    Case "I32", "U32"
+        ti.sizeBytes = 4: ti.alignBytes = 4: ti.abiClass = MIR_ABI_INT
+    Case "I64", "U64"
+        ti.sizeBytes = 8: ti.alignBytes = 8: ti.abiClass = MIR_ABI_INT
+    Case "F32"
+        ti.sizeBytes = 4: ti.alignBytes = 4: ti.abiClass = MIR_ABI_FLOAT: ti.isFloat = 1
+    Case "F64"
+        ti.sizeBytes = 8: ti.alignBytes = 8: ti.abiClass = MIR_ABI_FLOAT: ti.isFloat = 1
+    Case "PTR", "OBJECT", "HANDLE"
+        ti.sizeBytes = 8: ti.alignBytes = 8: ti.abiClass = MIR_ABI_PTR: ti.isPointer = 1
+    Case "STRING", "WSTRING"
+        ti.sizeBytes = 8: ti.alignBytes = 8: ti.abiClass = MIR_ABI_STRING: ti.isString = 1: ti.isPointer = 1
+    Case "F80", "F128", "BIGF", "BIGD", "BALL", "BIGI", "BIGINT"
+        ti.sizeBytes = 8: ti.alignBytes = 8: ti.abiClass = MIR_ABI_PTR: ti.isPointer = 1
+    Case Else
+        Dim recordKind As String
+        Dim abiKind As String
+        Dim packBytes As Integer
+        Dim explicitAlign As Integer
+        If TypeLayoutDescribeGlobal(ti.typeName, ti.sizeBytes, ti.alignBytes, recordKind, abiKind, packBytes, explicitAlign) <> 0 Then
+            ti.abiClass = MIR_ABI_AGGREGATE
+            ti.isPointer = 0
+        Else
+            ti.sizeBytes = 8: ti.alignBytes = 8: ti.abiClass = MIR_ABI_AGGREGATE
+        End If
+    End Select
+
+    Return ti
+End Function
+
+Function MIRStackSlotBytes(ByRef ti As MIRTypeInfo) As Integer
+    If ti.sizeBytes <= 8 Then Return 8
+    Return ((ti.sizeBytes + 7) \ 8) * 8
+End Function
+
+#endif

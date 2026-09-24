@@ -1,0 +1,128 @@
+#ifndef UXB_LIBRARY_PAYLOAD_FBS
+#define UXB_LIBRARY_PAYLOAD_FBS
+
+Type UXBLibraryCloneFn As Function(ByVal payload As Any Ptr) As Any Ptr
+Type UXBLibraryDropFn As Sub(ByVal payload As Any Ptr)
+Type UXBLibraryTextFn As Function(ByVal payload As Any Ptr) As String
+
+Type UXBLibraryPayload
+    refs As Integer
+    dataPtr As Any Ptr
+    cloneFn As UXBLibraryCloneFn
+    dropFn As UXBLibraryDropFn
+    textFn As UXBLibraryTextFn
+End Type
+
+Dim Shared gUXBLibraryPayloadAllocations As LongInt
+Dim Shared gUXBLibraryPayloadClones As LongInt
+Dim Shared gUXBLibraryPayloadDrops As LongInt
+Dim Shared gUXBLibraryPayloadLive As LongInt
+
+Sub UXBLibraryPayloadResetCounters()
+    If gUXBLibraryPayloadLive <> 0 Then Exit Sub
+    gUXBLibraryPayloadAllocations = 0
+    gUXBLibraryPayloadClones = 0
+    gUXBLibraryPayloadDrops = 0
+End Sub
+
+Function UXBLibraryPayloadStatsJson() As String
+    Return "{""allocations"":" & LTrim(Str(gUXBLibraryPayloadAllocations)) & _
+        ",""clones"":" & LTrim(Str(gUXBLibraryPayloadClones)) & _
+        ",""drops"":" & LTrim(Str(gUXBLibraryPayloadDrops)) & _
+        ",""live"":" & LTrim(Str(gUXBLibraryPayloadLive)) & "}"
+End Function
+
+' Physical interpreter copies keep a payload alive. Language-level COPY chooses
+' CLONE or RETAIN separately, so a temporary never duplicates resource ownership.
+Type UXBLibraryPayloadRef
+    node As UXBLibraryPayload Ptr = 0
+    Declare Constructor()
+    Declare Constructor(ByRef rhs As UXBLibraryPayloadRef)
+    Declare Operator Let(ByRef rhs As UXBLibraryPayloadRef)
+    Declare Destructor()
+    Declare Sub Clear()
+End Type
+
+Constructor UXBLibraryPayloadRef()
+End Constructor
+
+Constructor UXBLibraryPayloadRef(ByRef rhs As UXBLibraryPayloadRef)
+    node = rhs.node
+    If node <> 0 Then node->refs += 1
+End Constructor
+
+Sub UXBLibraryPayloadRef.Clear()
+    Dim oldNode As UXBLibraryPayload Ptr = node
+    node = 0
+    If oldNode = 0 Then Exit Sub
+    oldNode->refs -= 1
+    If oldNode->refs = 0 Then
+        If oldNode->dropFn <> 0 Then oldNode->dropFn(oldNode->dataPtr)
+        Delete oldNode
+        gUXBLibraryPayloadDrops += 1
+        gUXBLibraryPayloadLive -= 1
+    End If
+End Sub
+
+Operator UXBLibraryPayloadRef.Let(ByRef rhs As UXBLibraryPayloadRef)
+    If node = rhs.node Then Exit Operator
+    Dim newNode As UXBLibraryPayload Ptr = rhs.node
+    If newNode <> 0 Then newNode->refs += 1
+    Clear()
+    node = newNode
+End Operator
+
+Destructor UXBLibraryPayloadRef()
+    Clear()
+End Destructor
+
+Function UXBLibraryPayloadOwn(ByVal dataPtr As Any Ptr, ByVal cloneFn As UXBLibraryCloneFn, ByVal dropFn As UXBLibraryDropFn, ByVal textFn As UXBLibraryTextFn) As UXBLibraryPayloadRef
+    Dim result As UXBLibraryPayloadRef
+    If dataPtr = 0 Then Return result
+    result.node = New UXBLibraryPayload
+    result.node->refs = 1
+    result.node->dataPtr = dataPtr
+    result.node->cloneFn = cloneFn
+    result.node->dropFn = dropFn
+    result.node->textFn = textFn
+    gUXBLibraryPayloadAllocations += 1
+    gUXBLibraryPayloadLive += 1
+    Return result
+End Function
+
+Function UXBLibraryPayloadClone(ByRef source As UXBLibraryPayloadRef) As UXBLibraryPayloadRef
+    Dim result As UXBLibraryPayloadRef
+    If source.node = 0 Then Return result
+    If source.node->cloneFn = 0 Then Return result
+    Dim cloned As Any Ptr = source.node->cloneFn(source.node->dataPtr)
+    If cloned = 0 Then Return result
+    result = UXBLibraryPayloadOwn(cloned, source.node->cloneFn, source.node->dropFn, source.node->textFn)
+    gUXBLibraryPayloadClones += 1
+    Return result
+End Function
+
+Type UXBLibraryTextPayload
+    textValue As String
+End Type
+
+Private Function UXBLibraryTextClone(ByVal payload As Any Ptr) As Any Ptr
+    Dim result As UXBLibraryTextPayload Ptr = New UXBLibraryTextPayload
+    result->textValue = CPtr(UXBLibraryTextPayload Ptr, payload)->textValue
+    Return result
+End Function
+
+Private Sub UXBLibraryTextDrop(ByVal payload As Any Ptr)
+    Delete CPtr(UXBLibraryTextPayload Ptr, payload)
+End Sub
+
+Private Function UXBLibraryTextRead(ByVal payload As Any Ptr) As String
+    Return CPtr(UXBLibraryTextPayload Ptr, payload)->textValue
+End Function
+
+Function UXBLibraryTextCreate(ByVal textValue As String) As UXBLibraryPayloadRef
+    Dim dataPtr As UXBLibraryTextPayload Ptr = New UXBLibraryTextPayload
+    dataPtr->textValue = textValue
+    Return UXBLibraryPayloadOwn(dataPtr, @UXBLibraryTextClone, @UXBLibraryTextDrop, @UXBLibraryTextRead)
+End Function
+
+#endif

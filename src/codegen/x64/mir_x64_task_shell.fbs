@@ -1,0 +1,598 @@
+#ifndef UXB_MIR_X64_TASK_SHELL_FBS
+#define UXB_MIR_X64_TASK_SHELL_FBS
+
+Private Function MIRX64NativeTaskType(ByRef kindRaw As String) As Integer
+    Select Case UCase(Trim(kindRaw))
+    Case "EVENT": Return 1
+    Case "PIPE": Return 2
+    Case "THREAD": Return 3
+    Case "PARALEL": Return 4
+    End Select
+    Return 0
+End Function
+
+Private Function MIRX64NativeTriggerSymbol(ByRef kindRaw As String) As String
+    Select Case UCase(Trim(kindRaw))
+    Case "EVENT": Return "uxb_task_trigger"
+    Case "PIPE": Return "uxb_pipe_run"
+    Case "THREAD": Return "uxb_thread_start"
+    Case "PARALEL": Return "uxb_parallel_run"
+    End Select
+    Return ""
+End Function
+
+Private Function MIRX64UnquoteConst(ByRef valueRaw As String) As String
+    Dim valueText As String
+    valueText = Trim(valueRaw)
+    If Len(valueText) >= 2 And Left(valueText, 1) = Chr(34) And Right(valueText, 1) = Chr(34) Then
+        Return Mid(valueText, 2, Len(valueText) - 2)
+    End If
+    Return valueText
+End Function
+
+Private Function MIRX64ResolveConstInFunction(ByRef cg As MIRX64Context, ByVal fnIdx As Integer, ByRef tokenRaw As String, ByRef valueOut As String) As Integer
+    valueOut = ""
+    If cg.modulePtr = 0 Or fnIdx < 0 Or fnIdx >= cg.modulePtr->functionCount Then Return 0
+
+    Dim tokenText As String
+    tokenText = UCase(Trim(tokenRaw))
+    If tokenText = "" Then Return 0
+    If MIRX64IsQuotedStringLiteral(tokenRaw) <> 0 Then
+        valueOut = MIRX64UnquoteConst(tokenRaw)
+        Return 1
+    End If
+
+    Dim bi As Integer
+    For bi = 0 To cg.modulePtr->functions(fnIdx).blockCount - 1
+        Dim ii As Integer
+        For ii = 0 To cg.modulePtr->functions(fnIdx).blocks(bi).instructionCount - 1
+            Dim candidate As MIRIRInstruction
+            candidate = cg.modulePtr->functions(fnIdx).blocks(bi).instructions(ii)
+            If MIRX64CanonicalEmitterOpcode(candidate.opcode) <> "LOAD_CONST" Then Continue For
+            If UCase(Trim(candidate.result)) <> tokenText Or candidate.operandCount < 1 Then Continue For
+            valueOut = MIRX64UnquoteConst(candidate.operands(0))
+            Return 1
+        Next ii
+    Next bi
+    Return 0
+End Function
+
+Private Function MIRX64ResolveIntConstInFunction(ByRef cg As MIRX64Context, ByVal fnIdx As Integer, ByRef tokenRaw As String, ByRef valueOut As Integer) As Integer
+    Dim textValue As String
+    If MIRX64ResolveConstInFunction(cg, fnIdx, tokenRaw, textValue) = 0 Then textValue = Trim(tokenRaw)
+    If Trim(textValue) = "" Then Return 0
+
+    Dim parsedValue As LongInt
+    parsedValue = ValLng(textValue)
+    If LTrim(Str(parsedValue)) <> Trim(textValue) Then Return 0
+    If parsedValue < -2147483648LL Or parsedValue > 2147483647LL Then Return 0
+    valueOut = CInt(parsedValue)
+    Return 1
+End Function
+
+Private Function MIRX64SlotCallbackLabel(ByVal slotId As Integer) As String
+    Return "__uxb_mir_slot_cb_" & MIRX64ToStr(slotId)
+End Function
+
+Private Function MIRX64SlotActiveLabel(ByVal slotId As Integer) As String
+    Return "__uxb_mir_slot_active_" & MIRX64ToStr(slotId)
+End Function
+
+Private Function MIRX64ResolveSlotBinding( _
+    ByRef cg As MIRX64Context, _
+    ByVal fnIdx As Integer, _
+    ByRef ins As MIRIRInstruction, _
+    ByRef slotIdOut As Integer, _
+    ByRef kindOut As String, _
+    ByRef opOut As String, _
+    ByRef targetOut As String, _
+    ByRef errText As String _
+) As Integer
+    If ins.operandCount < 6 Then
+        errText = "MIR x64 SLOT_BIND requires slot name, id, state, kind and target"
+        Return 0
+    End If
+    If MIRX64ResolveIntConstInFunction(cg, fnIdx, ins.operands(2), slotIdOut) = 0 Then
+        errText = "MIR x64 SLOT_BIND id must be a constant integer"
+        Return 0
+    End If
+    If slotIdOut < 0 Or slotIdOut > 255 Then
+        errText = "MIR x64 SLOT_BIND id must be in 0..255"
+        Return 0
+    End If
+    If MIRX64ResolveConstInFunction(cg, fnIdx, ins.operands(4), kindOut) = 0 Then
+        errText = "MIR x64 SLOT_BIND kind must be constant"
+        Return 0
+    End If
+    kindOut = UCase(Trim(kindOut))
+    If MIRX64NativeTaskType(kindOut) = 0 Then
+        errText = "MIR x64 SLOT_BIND invalid task kind " & kindOut
+        Return 0
+    End If
+    If MIRX64ResolveConstInFunction(cg, fnIdx, ins.operands(3), opOut) = 0 Then
+        errText = "MIR x64 SLOT_BIND state must be constant"
+        Return 0
+    End If
+    opOut = UCase(Trim(opOut))
+    If opOut <> "ON" And opOut <> "OFF" Then
+        errText = "MIR x64 SLOT_BIND state must be ON or OFF"
+        Return 0
+    End If
+    targetOut = Trim(ins.operands(5))
+    If targetOut = "" Then
+        errText = "MIR x64 SLOT_BIND target is empty"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function MIRX64FindSlotBindingForTarget( _
+    ByRef cg As MIRX64Context, _
+    ByRef targetRaw As String, _
+    ByRef slotIdOut As Integer, _
+    ByRef kindOut As String, _
+    ByRef opOut As String, _
+    ByRef errText As String _
+) As Integer
+    If cg.modulePtr = 0 Then Return 0
+    Dim wanted As String
+    wanted = UCase(Trim(targetRaw))
+    Dim foundCount As Integer
+
+    Dim fi As Integer
+    For fi = 0 To cg.modulePtr->functionCount - 1
+        Dim bi As Integer
+        For bi = 0 To cg.modulePtr->functions(fi).blockCount - 1
+            Dim ii As Integer
+            For ii = 0 To cg.modulePtr->functions(fi).blocks(bi).instructionCount - 1
+                Dim candidate As MIRIRInstruction
+                candidate = cg.modulePtr->functions(fi).blocks(bi).instructions(ii)
+                If MIRX64CanonicalEmitterOpcode(candidate.opcode) <> "CALL" Or candidate.operandCount < 1 Then Continue For
+                If UCase(Trim(candidate.operands(0))) <> "SLOT_BIND" Then Continue For
+
+                Dim candidateId As Integer
+                Dim candidateKind As String
+                Dim candidateOp As String
+                Dim candidateTarget As String
+                Dim candidateErr As String
+                If MIRX64ResolveSlotBinding(cg, fi, candidate, candidateId, candidateKind, candidateOp, candidateTarget, candidateErr) = 0 Then
+                    errText = candidateErr
+                    Return 0
+                End If
+                If UCase(Trim(candidateTarget)) <> wanted Then Continue For
+                slotIdOut = candidateId
+                kindOut = candidateKind
+                opOut = candidateOp
+                foundCount += 1
+            Next ii
+        Next bi
+    Next fi
+
+    If foundCount = 1 Then Return 1
+    If foundCount > 1 Then
+        errText = "MIR x64 task target has multiple SLOT bindings: " & targetRaw
+    Else
+        errText = "MIR x64 task target has no SLOT binding: " & targetRaw
+    End If
+    Return 0
+End Function
+
+Private Function MIRX64ModuleUsesNativeTaskShell(ByRef m As MIRModule) As Integer
+    Dim fi As Integer
+    For fi = 0 To m.functionCount - 1
+        Dim bi As Integer
+        For bi = 0 To m.functions(fi).blockCount - 1
+            Dim ii As Integer
+            For ii = 0 To m.functions(fi).blocks(bi).instructionCount - 1
+                Dim ins As MIRIRInstruction
+                ins = m.functions(fi).blocks(bi).instructions(ii)
+                If MIRX64CanonicalEmitterOpcode(ins.opcode) <> "CALL" Or ins.operandCount < 1 Then Continue For
+                Dim target As String
+                target = UCase(Trim(ins.operands(0)))
+                If target = "SLOT_BIND" Or target = "SLOT_ON" Or target = "SLOT_OFF" Or target = "TASK_TRIGGER" Or Left(target, 6) = "SHELL" Then Return 1
+            Next ii
+        Next bi
+    Next fi
+    Return 0
+End Function
+
+Private Sub MIRX64EmitNativeRuntimeExterns(ByRef cg As MIRX64Context)
+    MIRX64EmitRuntimeExtern cg, "uxb_rt_init"
+    MIRX64EmitRuntimeExtern cg, "uxb_rt_shutdown"
+    MIRX64EmitRuntimeExtern cg, "uxb_task_register"
+    MIRX64EmitRuntimeExtern cg, "uxb_slot_bind"
+    MIRX64EmitRuntimeExtern cg, "uxb_task_set_callback"
+    MIRX64EmitRuntimeExtern cg, "uxb_slot_control"
+    MIRX64EmitRuntimeExtern cg, "uxb_task_trigger"
+    MIRX64EmitRuntimeExtern cg, "uxb_thread_start"
+    MIRX64EmitRuntimeExtern cg, "uxb_pipe_run"
+    MIRX64EmitRuntimeExtern cg, "uxb_parallel_run"
+    MIRX64EmitRuntimeExtern cg, "uxb_shell_run"
+    MIRX64EmitRuntimeExtern cg, "uxb_shell_start"
+    MIRX64EmitRuntimeExtern cg, "uxb_text_file_write"
+End Sub
+
+Private Sub MIRX64EmitNativeAbort(ByRef cg As MIRX64Context)
+    MIRX64EmitRuntimeExtern cg, "exit"
+    MIRX64Emit cg, "    mov ecx, 1"
+    MIRX64EmitRuntimeCall0 cg, "exit"
+    MIRX64Emit cg, "    ud2"
+End Sub
+
+Private Sub MIRX64EmitNativeCheckEax(ByRef cg As MIRX64Context)
+    Dim okLabel As String
+    okLabel = MIRX64NextLabel(cg, "native_ok")
+    MIRX64Emit cg, "    test eax, eax"
+    MIRX64Emit cg, "    jne " & okLabel
+    MIRX64EmitNativeAbort cg
+    MIRX64Emit cg, okLabel & ":"
+End Sub
+
+Private Function MIRX64EnsureRawStringLabel(ByRef cg As MIRX64Context, ByRef rawText As String, ByRef labelOut As String) As Integer
+    Dim literalText As String
+    literalText = Chr(34) & rawText & Chr(34)
+    Return MIRX64EnsureStringLiteralLabel(cg, literalText, labelOut)
+End Function
+
+Private Function MIRX64EmitSlotBindCall(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    Dim slotId As Integer
+    Dim laneKind As String
+    Dim stateText As String
+    Dim targetName As String
+    If MIRX64ResolveSlotBinding(cg, cg.currentFunctionIndex, ins, slotId, laneKind, stateText, targetName, errText) = 0 Then Return 0
+
+    Dim laneFunctionName As String
+    laneFunctionName = "__SLOTLANE_" & laneKind & "_" & targetName
+    If MIRX64FindUserFunctionIndex(cg, laneFunctionName) < 0 Then
+        errText = "MIR x64 SLOT_BIND lane function missing: " & laneFunctionName
+        Return 0
+    End If
+
+    MIRX64EmitNativeRuntimeExterns cg
+    Dim targetLabel As String
+    If MIRX64EnsureRawStringLabel(cg, targetName, targetLabel) = 0 Then
+        errText = "MIR x64 SLOT_BIND target label failed"
+        Return 0
+    End If
+
+    Dim activeLabel As String
+    activeLabel = MIRX64SlotActiveLabel(slotId)
+    If InStr(cg.dataText, activeLabel & ":") = 0 Then MIRX64EmitData cg, activeLabel & ": dd 0"
+
+    MIRX64Emit cg, "    mov ecx, " & MIRX64ToStr(slotId)
+    MIRX64Emit cg, "    mov edx, " & MIRX64ToStr(MIRX64NativeTaskType(laneKind))
+    MIRX64Emit cg, "    lea r8, [rel " & targetLabel & "]"
+    MIRX64EmitRuntimeCall0 cg, "uxb_task_register"
+    MIRX64EmitNativeCheckEax cg
+
+    If MIRX64LoadOperandToReg(cg, ins.operands(1), "r8", errText) = 0 Then Return 0
+    MIRX64Emit cg, "    mov ecx, " & MIRX64ToStr(slotId)
+    MIRX64Emit cg, "    mov edx, " & MIRX64ToStr(MIRX64NativeTaskType(laneKind))
+    MIRX64EmitRuntimeCall0 cg, "uxb_slot_bind"
+    MIRX64EmitNativeCheckEax cg
+
+    MIRX64Emit cg, "    mov ecx, " & MIRX64ToStr(slotId)
+    MIRX64Emit cg, "    lea rdx, [rel " & MIRX64SlotCallbackLabel(slotId) & "]"
+    MIRX64Emit cg, "    xor r8d, r8d"
+    MIRX64EmitRuntimeCall0 cg, "uxb_task_set_callback"
+    MIRX64EmitNativeCheckEax cg
+
+    Dim activeValue As Integer
+    activeValue = IIf(stateText = "ON", 1, 0)
+    MIRX64Emit cg, "    mov ecx, " & MIRX64ToStr(slotId)
+    MIRX64Emit cg, "    mov edx, " & MIRX64ToStr(activeValue)
+    MIRX64EmitRuntimeCall0 cg, "uxb_slot_control"
+    MIRX64EmitNativeCheckEax cg
+    MIRX64Emit cg, "    mov dword [rel " & activeLabel & "], " & MIRX64ToStr(activeValue)
+    Return 1
+End Function
+
+Private Function MIRX64EmitSlotControlCall(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByVal activeValue As Integer, ByRef errText As String) As Integer
+    If ins.operandCount < 3 Then
+        errText = "MIR x64 SLOT_ON/OFF target missing"
+        Return 0
+    End If
+    Dim targetName As String
+    targetName = Trim(ins.operands(2))
+    Dim slotId As Integer
+    Dim laneKind As String
+    Dim initialState As String
+    If MIRX64FindSlotBindingForTarget(cg, targetName, slotId, laneKind, initialState, errText) = 0 Then Return 0
+    If ins.operandCount >= 4 And Trim(ins.operands(3)) <> "" Then
+        If MIRX64ResolveIntConstInFunction(cg, cg.currentFunctionIndex, ins.operands(3), slotId) = 0 Then
+            errText = "MIR x64 SLOT_ON/OFF explicit id must be constant"
+            Return 0
+        End If
+    End If
+    MIRX64EmitNativeRuntimeExterns cg
+    MIRX64Emit cg, "    mov ecx, " & MIRX64ToStr(slotId)
+    MIRX64Emit cg, "    mov edx, " & MIRX64ToStr(IIf(activeValue <> 0, 1, 0))
+    MIRX64EmitRuntimeCall0 cg, "uxb_slot_control"
+    MIRX64EmitNativeCheckEax cg
+    MIRX64Emit cg, "    mov dword [rel " & MIRX64SlotActiveLabel(slotId) & "], " & MIRX64ToStr(IIf(activeValue <> 0, 1, 0))
+    Return 1
+End Function
+
+Private Function MIRX64EmitTaskTriggerCall(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 3 Then
+        errText = "MIR x64 TASK_TRIGGER target missing"
+        Return 0
+    End If
+    Dim targetName As String
+    targetName = Trim(ins.operands(2))
+    Dim slotId As Integer
+    Dim laneKind As String
+    Dim initialState As String
+    If MIRX64FindSlotBindingForTarget(cg, targetName, slotId, laneKind, initialState, errText) = 0 Then Return 0
+
+    Dim invokeSymbol As String
+    invokeSymbol = MIRX64NativeTriggerSymbol(laneKind)
+    If invokeSymbol = "" Then
+        errText = "MIR x64 TASK_TRIGGER invalid task kind " & laneKind
+        Return 0
+    End If
+    MIRX64EmitNativeRuntimeExterns cg
+
+    Dim skipLabel As String
+    skipLabel = MIRX64NextLabel(cg, "task_off")
+    MIRX64Emit cg, "    cmp dword [rel " & MIRX64SlotActiveLabel(slotId) & "], 0"
+    MIRX64Emit cg, "    je " & skipLabel
+    MIRX64Emit cg, "    mov ecx, " & MIRX64ToStr(slotId)
+    MIRX64Emit cg, "    mov edx, dword [rel " & MIRX64GlobalLabel(UXB_TASK_INPUT_NAME) & "]"
+    MIRX64Emit cg, "    lea r8, [rel " & MIRX64GlobalLabel(UXB_TASK_RESULT_NAME) & "]"
+    MIRX64EmitRuntimeCall0 cg, invokeSymbol
+    MIRX64EmitNativeCheckEax cg
+    MIRX64Emit cg, skipLabel & ":"
+    Return 1
+End Function
+
+Private Sub MIRX64ResetShellOptions(ByRef cg As MIRX64Context)
+    cg.shellNowait = 0
+    cg.shellTimeoutOperand = ""
+    cg.shellRunPathOperand = ""
+    cg.shellOutPathOperand = ""
+    cg.shellErrPathOperand = ""
+    cg.shellOutVar = ""
+    cg.shellErrVar = ""
+    cg.shellCodeVar = ""
+End Sub
+
+Private Function MIRX64EmitShellFinalCall(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 2 Then
+        errText = "MIR x64 SHELL command missing"
+        Return 0
+    End If
+    If cg.shellNowait <> 0 And (cg.shellOutVar <> "" Or cg.shellErrVar <> "") Then
+        errText = "MIR x64 SHELL NOWAIT cannot use OUTVAR/ERRVAR; use OUTPATH/ERRPATH"
+        Return 0
+    End If
+    If cg.shellNowait <> 0 And cg.shellTimeoutOperand <> "" Then
+        errText = "MIR x64 SHELL NOWAIT cannot use TIMEOUT"
+        Return 0
+    End If
+
+    MIRX64EmitNativeRuntimeExterns cg
+    cg.labelCounter += 1
+    Dim baseLabel As String
+    baseLabel = "__uxb_mir_shell_" & MIRX64ToStr(cg.labelCounter)
+    Dim cmdLabel As String: cmdLabel = baseLabel & "_cmd"
+    Dim runLabel As String: runLabel = baseLabel & "_run"
+    Dim outPathLabel As String: outPathLabel = baseLabel & "_out_path"
+    Dim errPathLabel As String: errPathLabel = baseLabel & "_err_path"
+    Dim timeoutLabel As String: timeoutLabel = baseLabel & "_timeout"
+    Dim exitLabel As String: exitLabel = baseLabel & "_exit"
+    Dim stdoutLabel As String: stdoutLabel = baseLabel & "_stdout"
+    Dim stderrLabel As String: stderrLabel = baseLabel & "_stderr"
+    MIRX64EmitBss cg, "align 8"
+    MIRX64EmitBss cg, cmdLabel & ": resq 1"
+    MIRX64EmitBss cg, runLabel & ": resq 1"
+    MIRX64EmitBss cg, outPathLabel & ": resq 1"
+    MIRX64EmitBss cg, errPathLabel & ": resq 1"
+    MIRX64EmitBss cg, timeoutLabel & ": resd 1"
+    MIRX64EmitBss cg, exitLabel & ": resd 1"
+    MIRX64EmitBss cg, stdoutLabel & ": resb 65536"
+    MIRX64EmitBss cg, stderrLabel & ": resb 65536"
+
+    Dim emptyLabel As String
+    Dim emptyText As String
+    emptyText = ""
+    If MIRX64EnsureRawStringLabel(cg, emptyText, emptyLabel) = 0 Then
+        errText = "MIR x64 SHELL empty string label failed"
+        Return 0
+    End If
+
+    If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+    MIRX64Emit cg, "    mov [rel " & cmdLabel & "], rax"
+    If cg.shellRunPathOperand <> "" Then
+        If MIRX64LoadOperandToReg(cg, cg.shellRunPathOperand, "rax", errText) = 0 Then Return 0
+    Else
+        MIRX64Emit cg, "    lea rax, [rel " & emptyLabel & "]"
+    End If
+    MIRX64Emit cg, "    mov [rel " & runLabel & "], rax"
+    If cg.shellOutPathOperand <> "" Then
+        If MIRX64LoadOperandToReg(cg, cg.shellOutPathOperand, "rax", errText) = 0 Then Return 0
+    Else
+        MIRX64Emit cg, "    lea rax, [rel " & emptyLabel & "]"
+    End If
+    MIRX64Emit cg, "    mov [rel " & outPathLabel & "], rax"
+    If cg.shellErrPathOperand <> "" Then
+        If MIRX64LoadOperandToReg(cg, cg.shellErrPathOperand, "rax", errText) = 0 Then Return 0
+    Else
+        MIRX64Emit cg, "    lea rax, [rel " & emptyLabel & "]"
+    End If
+    MIRX64Emit cg, "    mov [rel " & errPathLabel & "], rax"
+    If cg.shellTimeoutOperand <> "" Then
+        If MIRX64LoadOperandToReg(cg, cg.shellTimeoutOperand, "rax", errText) = 0 Then Return 0
+        MIRX64Emit cg, "    mov dword [rel " & timeoutLabel & "], eax"
+    Else
+        MIRX64Emit cg, "    mov dword [rel " & timeoutLabel & "], 0"
+    End If
+    MIRX64Emit cg, "    mov dword [rel " & exitLabel & "], 0"
+
+    If cg.shellNowait <> 0 Then
+        MIRX64Emit cg, "    mov rcx, [rel " & cmdLabel & "]"
+        MIRX64Emit cg, "    mov rdx, [rel " & runLabel & "]"
+        MIRX64Emit cg, "    mov r8, [rel " & outPathLabel & "]"
+        MIRX64Emit cg, "    mov r9, [rel " & errPathLabel & "]"
+        MIRX64Emit cg, "    sub rsp, 48"
+        MIRX64Emit cg, "    lea rax, [rel " & exitLabel & "]"
+        MIRX64Emit cg, "    mov [rsp + 32], rax"
+        MIRX64Emit cg, "    call uxb_shell_start"
+        MIRX64Emit cg, "    add rsp, 48"
+        MIRX64EmitNativeCheckEax cg
+    Else
+        MIRX64Emit cg, "    mov rcx, [rel " & cmdLabel & "]"
+        MIRX64Emit cg, "    mov rdx, [rel " & runLabel & "]"
+        MIRX64Emit cg, "    mov r8d, dword [rel " & timeoutLabel & "]"
+        MIRX64Emit cg, "    lea r9, [rel " & stdoutLabel & "]"
+        MIRX64Emit cg, "    sub rsp, 64"
+        MIRX64Emit cg, "    mov qword [rsp + 32], 65536"
+        MIRX64Emit cg, "    lea rax, [rel " & stderrLabel & "]"
+        MIRX64Emit cg, "    mov [rsp + 40], rax"
+        MIRX64Emit cg, "    mov qword [rsp + 48], 65536"
+        MIRX64Emit cg, "    lea rax, [rel " & exitLabel & "]"
+        MIRX64Emit cg, "    mov [rsp + 56], rax"
+        MIRX64Emit cg, "    call uxb_shell_run"
+        MIRX64Emit cg, "    add rsp, 64"
+        Dim shellOkLabel As String
+        shellOkLabel = MIRX64NextLabel(cg, "shell_ok")
+        MIRX64Emit cg, "    test eax, eax"
+        MIRX64Emit cg, "    jne " & shellOkLabel
+        MIRX64Emit cg, "    cmp dword [rel " & exitLabel & "], 124"
+        MIRX64Emit cg, "    je " & shellOkLabel
+        MIRX64EmitNativeAbort cg
+        MIRX64Emit cg, shellOkLabel & ":"
+
+        If cg.shellOutPathOperand <> "" Then
+            MIRX64Emit cg, "    mov rcx, [rel " & outPathLabel & "]"
+            MIRX64Emit cg, "    lea rdx, [rel " & stdoutLabel & "]"
+            MIRX64EmitRuntimeCall0 cg, "uxb_text_file_write"
+            MIRX64EmitNativeCheckEax cg
+        End If
+        If cg.shellErrPathOperand <> "" Then
+            MIRX64Emit cg, "    mov rcx, [rel " & errPathLabel & "]"
+            MIRX64Emit cg, "    lea rdx, [rel " & stderrLabel & "]"
+            MIRX64EmitRuntimeCall0 cg, "uxb_text_file_write"
+            MIRX64EmitNativeCheckEax cg
+        End If
+        If cg.shellOutVar <> "" Then
+            MIRX64Emit cg, "    lea rax, [rel " & stdoutLabel & "]"
+            If MIRX64StoreRegToVar(cg, "rax", cg.shellOutVar, errText) = 0 Then Return 0
+        End If
+        If cg.shellErrVar <> "" Then
+            MIRX64Emit cg, "    lea rax, [rel " & stderrLabel & "]"
+            If MIRX64StoreRegToVar(cg, "rax", cg.shellErrVar, errText) = 0 Then Return 0
+        End If
+    End If
+    If cg.shellCodeVar <> "" Then
+        MIRX64Emit cg, "    movsxd rax, dword [rel " & exitLabel & "]"
+        If MIRX64StoreRegToVar(cg, "rax", cg.shellCodeVar, errText) = 0 Then Return 0
+    End If
+    MIRX64ResetShellOptions cg
+    Return 1
+End Function
+
+Private Function MIRX64TryEmitTaskShellCall(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    handledOut = 1
+    Dim target As String
+    target = UCase(Trim(ins.operands(0)))
+    Select Case target
+    Case "SLOT_DEF", "SLOT_CAP"
+        Return 1
+    Case "SLOT_BIND"
+        Return MIRX64EmitSlotBindCall(ins, cg, errText)
+    Case "SLOT_ON"
+        Return MIRX64EmitSlotControlCall(ins, cg, 1, errText)
+    Case "SLOT_OFF"
+        Return MIRX64EmitSlotControlCall(ins, cg, 0, errText)
+    Case "TASK_TRIGGER"
+        Return MIRX64EmitTaskTriggerCall(ins, cg, errText)
+    Case "SHELL_NOWAIT"
+        cg.shellNowait = 1
+        Return 1
+    Case "SHELL_TIMEOUT"
+        If ins.operandCount >= 2 Then cg.shellTimeoutOperand = ins.operands(1)
+        Return 1
+    Case "SHELL_RUNPATH"
+        If ins.operandCount >= 2 Then cg.shellRunPathOperand = ins.operands(1)
+        Return 1
+    Case "SHELL_OUTPATH"
+        If ins.operandCount >= 2 Then cg.shellOutPathOperand = ins.operands(1)
+        Return 1
+    Case "SHELL_ERRPATH"
+        If ins.operandCount >= 2 Then cg.shellErrPathOperand = ins.operands(1)
+        Return 1
+    Case "SHELL_OUTVAR"
+        If ins.operandCount >= 2 Then cg.shellOutVar = Trim(ins.operands(1))
+        Return 1
+    Case "SHELL_ERRVAR"
+        If ins.operandCount >= 2 Then cg.shellErrVar = Trim(ins.operands(1))
+        Return 1
+    Case "SHELL_CODEVAR"
+        If ins.operandCount >= 2 Then cg.shellCodeVar = Trim(ins.operands(1))
+        Return 1
+    Case "SHELL"
+        Return MIRX64EmitShellFinalCall(ins, cg, errText)
+    End Select
+    handledOut = 0
+    Return 1
+End Function
+
+Private Function MIRX64EmitTaskCallbacks(ByRef m As MIRModule, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    Dim fi As Integer
+    For fi = 0 To m.functionCount - 1
+        Dim bi As Integer
+        For bi = 0 To m.functions(fi).blockCount - 1
+            Dim ii As Integer
+            For ii = 0 To m.functions(fi).blocks(bi).instructionCount - 1
+                Dim ins As MIRIRInstruction
+                ins = m.functions(fi).blocks(bi).instructions(ii)
+                If MIRX64CanonicalEmitterOpcode(ins.opcode) <> "CALL" Or ins.operandCount < 1 Then Continue For
+                If UCase(Trim(ins.operands(0))) <> "SLOT_BIND" Then Continue For
+
+                Dim slotId As Integer
+                Dim laneKind As String
+                Dim stateText As String
+                Dim targetName As String
+                If MIRX64ResolveSlotBinding(cg, fi, ins, slotId, laneKind, stateText, targetName, errText) = 0 Then Return 0
+                Dim callbackLabel As String
+                callbackLabel = MIRX64SlotCallbackLabel(slotId)
+                If InStr(cg.asmText, Chr(10) & callbackLabel & ":" & Chr(10)) <> 0 Then Continue For
+
+                Dim laneFunctionName As String
+                laneFunctionName = "__SLOTLANE_" & laneKind & "_" & targetName
+                If MIRX64FindUserFunctionIndex(cg, laneFunctionName) < 0 Then
+                    errText = "MIR x64 callback lane function missing: " & laneFunctionName
+                    Return 0
+                End If
+
+                MIRX64Emit cg, callbackLabel & ":"
+                MIRX64Emit cg, "    push rbp"
+                MIRX64Emit cg, "    mov rbp, rsp"
+                MIRX64Emit cg, "    sub rsp, 48"
+                MIRX64Emit cg, "    mov [rbp - 8], r8"
+                MIRX64Emit cg, "    movsxd rax, edx"
+                MIRX64Emit cg, "    mov [rel " & MIRX64GlobalLabel(UXB_TASK_INPUT_NAME) & "], rax"
+                MIRX64Emit cg, "    mov qword [rel " & MIRX64GlobalLabel(UXB_TASK_RESULT_NAME) & "], 0"
+                MIRX64Emit cg, "    sub rsp, 32"
+                MIRX64Emit cg, "    call " & MIRX64FunctionLabel(laneFunctionName)
+                MIRX64Emit cg, "    add rsp, 32"
+                MIRX64Emit cg, "    mov [rbp - 16], eax"
+                MIRX64Emit cg, "    mov r10, [rbp - 8]"
+                MIRX64Emit cg, "    test r10, r10"
+                Dim noOutputLabel As String
+                noOutputLabel = MIRX64NextLabel(cg, "callback_no_output")
+                MIRX64Emit cg, "    je " & noOutputLabel
+                MIRX64Emit cg, "    mov eax, [rbp - 16]"
+                MIRX64Emit cg, "    mov [r10], eax"
+                MIRX64Emit cg, noOutputLabel & ":"
+                MIRX64Emit cg, "    mov eax, 1"
+                MIRX64Emit cg, "    leave"
+                MIRX64Emit cg, "    ret"
+            Next ii
+        Next bi
+    Next fi
+    Return 1
+End Function
+
+#endif

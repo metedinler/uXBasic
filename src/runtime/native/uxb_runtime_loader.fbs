@@ -1,0 +1,101 @@
+#ifndef UXB_RUNTIME_NATIVE_LOADER_FBS
+#define UXB_RUNTIME_NATIVE_LOADER_FBS
+#include once "uxb_runtime_abi.fbs"
+#ifndef UXB_WIN32_LOADER_DECLARED
+#define UXB_WIN32_LOADER_DECLARED
+Declare Function LoadLibraryA Lib "kernel32" Alias "LoadLibraryA" (ByVal lpLibFileName As ZString Ptr) As Any Ptr
+Declare Function GetProcAddress Lib "kernel32" Alias "GetProcAddress" (ByVal hModule As Any Ptr, ByVal lpProcName As ZString Ptr) As Any Ptr
+Declare Function FreeLibrary Lib "kernel32" Alias "FreeLibrary" (ByVal hLibModule As Any Ptr) As Long
+#endif
+
+Private Function UXBNativeRuntimeResolve(ByVal hModule As Any Ptr, ByVal symbolName As String) As Any Ptr
+    If hModule = 0 Then Return 0
+    Return GetProcAddress(hModule, StrPtr(symbolName))
+End Function
+
+Private Sub UXBNativeRuntimeResetSymbols(ByRef rt As UXBNativeRuntime)
+    rt.symbols.rtInit=0: rt.symbols.rtShutdown=0: rt.symbols.rtBackend=0
+    rt.symbols.taskRegister=0: rt.symbols.slotBind=0: rt.symbols.taskSetCallback=0
+    rt.symbols.slotControl=0: rt.symbols.taskOn=0: rt.symbols.taskOff=0
+    rt.symbols.slotOn=0: rt.symbols.slotOff=0: rt.symbols.taskTrigger=0
+    rt.symbols.shellRun=0: rt.symbols.threadStart=0: rt.symbols.pipeRun=0
+    rt.symbols.parallelRun=0: rt.symbols.lastError=0
+End Sub
+
+Sub UXBNativeRuntimeReset(ByRef rt As UXBNativeRuntime)
+    rt.dllPath="": rt.hModule=0: rt.loaded=0: rt.initialized=0: rt.lastError=""
+    UXBNativeRuntimeResetSymbols rt
+End Sub
+
+Private Function UXBNativeRuntimeResolveAll(ByRef rt As UXBNativeRuntime) As Integer
+    rt.symbols.rtInit=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_INIT)
+    rt.symbols.rtShutdown=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_SHUTDOWN)
+    rt.symbols.rtBackend=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_BACKEND)
+    rt.symbols.taskRegister=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_TASK_REGISTER)
+    rt.symbols.slotBind=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_SLOT_BIND)
+    rt.symbols.taskSetCallback=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_TASK_SET_CALLBACK)
+    rt.symbols.slotControl=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_SLOT_CONTROL)
+    rt.symbols.taskOn=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_TASK_ON)
+    rt.symbols.taskOff=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_TASK_OFF)
+    rt.symbols.slotOn=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_SLOT_ON)
+    rt.symbols.slotOff=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_SLOT_OFF)
+    rt.symbols.taskTrigger=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_TASK_TRIGGER)
+    rt.symbols.shellRun=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_SHELL_RUN)
+    rt.symbols.threadStart=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_THREAD_START)
+    rt.symbols.pipeRun=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_PIPE_RUN)
+    rt.symbols.parallelRun=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_PARALLEL_RUN)
+    rt.symbols.lastError=UXBNativeRuntimeResolve(rt.hModule,UXB_RT_SYMBOL_LAST_ERROR)
+    If rt.symbols.rtInit=0 Or rt.symbols.rtShutdown=0 Or rt.symbols.taskRegister=0 Or _
+       rt.symbols.slotBind=0 Or rt.symbols.taskSetCallback=0 Or rt.symbols.slotControl=0 Or _
+       rt.symbols.taskTrigger=0 Or rt.symbols.shellRun=0 Or rt.symbols.threadStart=0 Or _
+       rt.symbols.pipeRun=0 Or rt.symbols.parallelRun=0 Or rt.symbols.lastError=0 Then Return 0
+    Return 1
+End Function
+
+Function UXBNativeRuntimeLoad(ByRef rt As UXBNativeRuntime, ByVal dllPath As String) As Integer
+    UXBNativeRuntimeReset rt
+    rt.dllPath=Trim(dllPath)
+    If rt.dllPath="" Then Return 0
+    rt.hModule=LoadLibraryA(StrPtr(rt.dllPath))
+    If rt.hModule=0 Then rt.lastError="LoadLibraryA failed: " & rt.dllPath: Return 0
+    If UXBNativeRuntimeResolveAll(rt)=0 Then
+        rt.lastError="uxb_runtime.dll mandatory C ABI export missing"
+        FreeLibrary rt.hModule: rt.hModule=0: UXBNativeRuntimeResetSymbols rt: Return 0
+    End If
+    rt.loaded=1: Return 1
+End Function
+
+Sub UXBNativeRuntimeUnload(ByRef rt As UXBNativeRuntime)
+    If rt.hModule<>0 Then FreeLibrary rt.hModule
+    UXBNativeRuntimeReset rt
+End Sub
+
+Function UXBNativeRuntimeIsLoaded(ByRef rt As UXBNativeRuntime) As Integer
+    Return IIf(rt.loaded<>0 And rt.hModule<>0,1,0)
+End Function
+
+Dim Shared __uxb_native_runtime_state As UXBNativeRuntime
+
+Function uxb_runtime_load(ByVal dllPath As String="") As Integer
+    If UXBNativeRuntimeIsLoaded(__uxb_native_runtime_state) Then Return 1
+    Dim candidates(0 To 3) As String
+    If Trim(dllPath)<>"" Then candidates(0)=Trim(dllPath) Else candidates(0)="native\uxb_runtime\build\uxb_runtime.dll"
+    candidates(1)="bin\uxb_runtime.dll"
+    candidates(2)=".\bin\uxb_runtime.dll"
+    candidates(3)="uxb_runtime.dll"
+    Dim i As Integer
+    For i=0 To 3
+        If UXBNativeRuntimeLoad(__uxb_native_runtime_state,candidates(i)) Then Return 1
+    Next i
+    Return 0
+End Function
+Function uxb_runtime_is_loaded() As Integer
+    Return UXBNativeRuntimeIsLoaded(__uxb_native_runtime_state)
+End Function
+Function uxb_runtime_last_error() As String
+    Return __uxb_native_runtime_state.lastError
+End Function
+Sub uxb_runtime_unload()
+    UXBNativeRuntimeUnload __uxb_native_runtime_state
+End Sub
+#endif

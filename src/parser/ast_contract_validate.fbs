@@ -1,0 +1,156 @@
+' uXBasic AST contract tree validation.
+' 2026-05-26 19:32 +03:00 - Codex: Step 2 contract dışı AST node geçişini parser sonrası kapatır.
+#ifndef UXBASIC_AST_CONTRACT_VALIDATE_FBS
+#define UXBASIC_AST_CONTRACT_VALIDATE_FBS
+
+#include once "ast_contract.fbs"
+
+Declare Function UXBAstValidateContract(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef errText As String) As Integer
+Declare Function UXBAstWriteContractReportJson(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef outPath As String, ByRef errText As String) As Integer
+
+Private Function AstContractIsValidIndex(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Then Return 0
+    If nodeIdx >= p.count Then Return 0
+    Return 1
+End Function
+
+Private Function AstContract_ListContainsRole(ByRef listText As String, ByRef roleName As String) As Integer
+    Dim listU As String = UCase(Trim(listText))
+    Dim roleU As String = UCase(Trim(roleName))
+    If roleU = "" Then Return 1
+    If listU = "*" Then Return 1
+    If InStr("," & listU & ",", "," & roleU & ",") > 0 Then Return 1
+    Return 0
+End Function
+
+Function AstContract_ValidateRequiredFields(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+    If AstContractIsValidIndex(p, nodeIdx) = 0 Then
+        errText = "invalid node index"
+        Return 0
+    End If
+    If Trim(p.nodes(nodeIdx).kind) = "" Then
+        errText = "node kind is empty"
+        Return 0
+    End If
+    If p.nodes(nodeIdx).lineNo < 0 Or p.nodes(nodeIdx).colNo < 0 Then
+        errText = "node source location is invalid for " & p.nodes(nodeIdx).kind
+        Return 0
+    End If
+    Return 1
+End Function
+
+Function AstContract_ValidateChildRoles(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+    If AstContractIsValidIndex(p, nodeIdx) = 0 Then Return 1
+    Dim roles As String = AstContract_GetAllowedRoles(p.nodes(nodeIdx).kind)
+    Dim safety As Integer = 0
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While AstContractIsValidIndex(p, ch)
+        If AstContract_ListContainsRole(roles, p.nodes(ch).role) = 0 Then
+            errText = "child role " & p.nodes(ch).role & " is not allowed under " & p.nodes(nodeIdx).kind
+            Return 0
+        End If
+        ch = p.nodes(ch).nextSibling
+        safety += 1
+        If safety > p.count Then
+            errText = "child sibling loop under " & p.nodes(nodeIdx).kind
+            Return 0
+        End If
+    Loop
+    Return 1
+End Function
+
+Function AstContract_ValidateTargetSupport(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef targetName As String, ByRef errText As String) As Integer
+    If AstContractIsValidIndex(p, nodeIdx) = 0 Then Return 1
+    Dim binding As String = AstContract_GetLayerBinding(p.nodes(nodeIdx).kind, targetName)
+    If binding = AST_CONTRACT_STATUS_MISSING Or binding = AST_CONTRACT_STATUS_BROKEN Or binding = AST_CONTRACT_STATUS_REMOVED Or binding = AST_CONTRACT_STATUS_RESERVED Then
+        errText = targetName & " has no valid contract binding for " & p.nodes(nodeIdx).kind
+        Return 0
+    End If
+    Return 1
+End Function
+
+Function AstContract_ValidateNode(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+    If AstContractIsValidIndex(p, nodeIdx) = 0 Then
+        errText = "invalid node index"
+        Return 0
+    End If
+    If AstContract_HasNode(p.nodes(nodeIdx).kind) = 0 Then
+        errText = "AST node is not registered in contract: " & p.nodes(nodeIdx).kind
+        Return 0
+    End If
+    If AstContract_ValidateRequiredFields(p, nodeIdx, errText) = 0 Then Return 0
+    If AstContract_ValidateChildRoles(p, nodeIdx, errText) = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function AstContract_ValidateTreeNode(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+    If AstContractIsValidIndex(p, nodeIdx) = 0 Then Return 1
+    If AstContract_ValidateNode(p, nodeIdx, errText) = 0 Then Return 0
+    If p.nodes(nodeIdx).left <> AST_NULL Then
+        If AstContract_ValidateTreeNode(p, p.nodes(nodeIdx).left, errText) = 0 Then Return 0
+    End If
+    If p.nodes(nodeIdx).right <> AST_NULL Then
+        If AstContract_ValidateTreeNode(p, p.nodes(nodeIdx).right, errText) = 0 Then Return 0
+    End If
+    Dim safety As Integer = 0
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While AstContractIsValidIndex(p, ch)
+        If AstContract_ValidateTreeNode(p, ch, errText) = 0 Then Return 0
+        ch = p.nodes(ch).nextSibling
+        safety += 1
+        If safety > p.count Then
+            errText = "child sibling loop under " & p.nodes(nodeIdx).kind
+            Return 0
+        End If
+    Loop
+    Return 1
+End Function
+
+Function AstContract_ValidateTree(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef errText As String) As Integer
+    AstContract_Init
+    errText = ""
+    If UXBAstValidateContract(p, rootIdx, errText) = 0 Then Return 0
+    If AstContract_ValidateTreeNode(p, rootIdx, errText) = 0 Then Return 0
+    Dim i As Integer
+    For i = 0 To p.count - 1
+        If AstContract_HasNode(p.nodes(i).kind) = 0 Then
+            errText = "AST node is not registered in contract: " & p.nodes(i).kind
+            Return 0
+        End If
+    Next i
+    Return 1
+End Function
+
+Function AstContract_ReportMissingBindings(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef reportText As String) As Integer
+    AstContract_Init
+    reportText = ""
+    Dim i As Integer
+    For i = 0 To p.count - 1
+        If AstContract_HasNode(p.nodes(i).kind) = 0 Then
+            reportText &= p.nodes(i).kind & ",MISSING" & Chr(10)
+        End If
+    Next i
+    Return 1
+End Function
+
+Function AstContract_WriteJsonReport(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef outPath As String, ByRef errText As String) As Integer
+    Return UXBAstWriteContractReportJson(p, rootIdx, outPath, errText)
+End Function
+
+Function AstContract_WriteCsvReport(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef outPath As String, ByRef errText As String) As Integer
+    Dim f As Integer = FreeFile
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errText = "ast contract csv open failed: " & outPath
+        Return 0
+    End If
+    Print #f, "node_name,node_group,node_kind,final_decision"
+    Dim i As Integer
+    For i = 0 To p.count - 1
+        Print #f, p.nodes(i).kind & "," & AstContract_GetNodeGroup(p.nodes(i).kind) & "," & AstContract_GetLayerBinding(p.nodes(i).kind, "SEMANTIC") & "," & AstContract_NodeFinalDecision(p.nodes(i).kind)
+    Next i
+    Close #f
+    Return 1
+End Function
+
+#endif

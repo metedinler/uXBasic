@@ -1,0 +1,442 @@
+#ifndef UXB_MIR_X64_FIELD_SYNTHETIC_FBS
+#define UXB_MIR_X64_FIELD_SYNTHETIC_FBS
+
+Declare Function MIRX64EmitCallInstruction(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+' Found 2026-09-06, blocking a from-scratch build: MIRX64EmitMethodCallSynthetic is
+' defined further down in this same file but used earlier; MIRX64FindUserFunctionIndex
+' lives in mir_x64_codegen.fbs, whose include-order relative to this file isn't
+' guaranteed. Forward declare both.
+Declare Function MIRX64EmitMethodCallSynthetic(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+Declare Function MIRX64FindUserFunctionIndex(ByRef cg As MIRX64Context, ByRef functionName As String) As Integer
+
+' S-108: `test reg, reg` + a clean runtime error (__uxb_rt_runtime_error_exit) when a class
+' reference is NULL. Field access through NULL used to load 0 and silently DROP the store.
+Private Function MIRX64EmitNullObjectCheck(ByRef cg As MIRX64Context, ByRef regName As String, ByRef messageText As String, ByRef errText As String) As Integer
+    Dim okLabel As String
+    okLabel = MIRX64NextLabel(cg, "obj_ok")
+    Dim msgLabel As String
+    If MIRX64EnsureStringLiteralLabel(cg, Chr(34) & messageText & Chr(34), msgLabel) = 0 Then
+        errText = "MIR x64 field: null-object message label creation failed"
+        Return 0
+    End If
+    MIRX64EmitRuntimeExtern cg, "__uxb_rt_runtime_error_exit"
+    MIRX64Emit cg, "    test " & regName & ", " & regName
+    MIRX64Emit cg, "    jnz " & okLabel
+    MIRX64Emit cg, "    lea rcx, [rel " & msgLabel & "]"
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call __uxb_rt_runtime_error_exit"
+    MIRX64Emit cg, "    add rsp, 32"
+    MIRX64Emit cg, okLabel & ":"
+    Return 1
+End Function
+
+Function MIRX64FieldKey(ByRef objectName As String, ByRef fieldName As String) As String
+    Return MIRX64NormalizeVarName(objectName) & "__FIELD__" & MIRX64NormalizeVarName(fieldName)
+End Function
+
+' S-131: the per-object class field cell as the instruction's type metadata (the field's declared type,
+' stamped by the lowering) describes it: width in bytes, signedness (for the widening load) and F32.
+' Unknown / unstamped type -> the historical 8-byte cell. Native class fields used to be read and written
+' as 8-byte cells whatever their type: `c.total = 10 : c.n = 1` (two I32 fields) zeroed `total`, and a
+' negative store filled the neighbour with ones.
+Private Sub MIRX64ClassFieldCell(ByRef typeRaw As String, ByRef widthOut As Integer, ByRef signedOut As Integer, ByRef isF32Out As Integer)
+    widthOut = 8
+    signedOut = 1
+    isF32Out = 0
+    Dim t As String
+    t = UCase(Trim(typeRaw))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    If t = "" Then Exit Sub
+    Dim abiPayload As Integer
+    Dim abiAlign As Integer
+    Dim abiStride As Integer
+    If UXBTypeAbi(t, abiPayload, abiAlign, abiStride) = 0 Then Exit Sub
+    If abiPayload = 1 Or abiPayload = 2 Or abiPayload = 4 Or abiPayload = 8 Then widthOut = abiPayload
+    Select Case t
+    Case "U8", "UBYTE", "BOOLEAN", "BOOL", "U16", "USHORT", "U32", "ULONG", "UINTEGER", "UINT", "U64", "ULONGINT"
+        signedOut = 0
+    Case "F32", "SINGLE"
+        isF32Out = 1
+    End Select
+End Sub
+
+Function MIRX64EmitLoadFieldSynthetic(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 3 Or Trim(ins.result) = "" Then
+        errText = "MIR x64 field: LOAD_FIELD requires object, field, offset, result"
+        Return 0
+    End If
+
+    Dim offsetValue As Integer
+    offsetValue = Val(ins.operands(2))
+    If offsetValue < 0 Then
+        errText = "MIR x64 field: invalid class field offset"
+        Return 0
+    End If
+
+    If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
+    If MIRX64EmitNullObjectCheck(cg, "rax", "field access on a null object reference: " & UCase(Trim(ins.operands(1))), errText) = 0 Then Return 0
+
+    Dim cellWidth As Integer
+    Dim cellSigned As Integer
+    Dim cellF32 As Integer
+    MIRX64ClassFieldCell ins.resultType, cellWidth, cellSigned, cellF32
+    Dim cellAddr As String
+    cellAddr = IIf(offsetValue = 0, "[rax]", "[rax + " & MIRX64ToStr(offsetValue) & "]")
+
+    If cellF32 <> 0 Then
+        MIRX64Emit cg, "    movss xmm0, dword " & cellAddr
+        MIRX64Emit cg, "    cvtss2sd xmm0, xmm0"
+        Return MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText)
+    End If
+    Select Case cellWidth
+    Case 1
+        MIRX64Emit cg, IIf(cellSigned <> 0, "    movsx rax, byte ", "    movzx eax, byte ") & cellAddr
+    Case 2
+        MIRX64Emit cg, IIf(cellSigned <> 0, "    movsx rax, word ", "    movzx eax, word ") & cellAddr
+    Case 4
+        MIRX64Emit cg, IIf(cellSigned <> 0, "    movsxd rax, dword ", "    mov eax, dword ") & cellAddr
+    Case Else
+        MIRX64Emit cg, "    mov rax, " & cellAddr
+    End Select
+    Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
+End Function
+
+Function MIRX64EmitStoreFieldSynthetic(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 4 Then
+        errText = "MIR x64 field: STORE_FIELD requires object, field, value, offset"
+        Return 0
+    End If
+
+    Dim offsetValue As Integer
+    offsetValue = Val(ins.operands(3))
+    If offsetValue < 0 Then
+        errText = "MIR x64 field: invalid class field offset"
+        Return 0
+    End If
+
+    Dim storeWidth As Integer
+    Dim storeSigned As Integer
+    Dim storeF32 As Integer
+    MIRX64ClassFieldCell ins.resultType, storeWidth, storeSigned, storeF32
+    Dim storeAddr As String
+    storeAddr = IIf(offsetValue = 0, "[r10]", "[r10 + " & MIRX64ToStr(offsetValue) & "]")
+
+    If MIRX64LoadOperandToReg(cg, ins.operands(0), "r10", errText) = 0 Then Return 0
+    If storeF32 <> 0 Then
+        If MIRX64LoadFloatOperandToXmm(cg, ins.operands(2), "xmm0", errText) = 0 Then Return 0
+    Else
+        If MIRX64LoadOperandToReg(cg, ins.operands(2), "rax", errText) = 0 Then Return 0
+    End If
+    If MIRX64EmitNullObjectCheck(cg, "r10", "field access on a null object reference: " & UCase(Trim(ins.operands(1))), errText) = 0 Then Return 0
+    If storeF32 <> 0 Then
+        MIRX64Emit cg, "    cvtsd2ss xmm0, xmm0"
+        MIRX64Emit cg, "    movss dword " & storeAddr & ", xmm0"
+        Return 1
+    End If
+    Select Case storeWidth
+    Case 1
+        MIRX64Emit cg, "    mov byte " & storeAddr & ", al"
+    Case 2
+        MIRX64Emit cg, "    mov word " & storeAddr & ", ax"
+    Case 4
+        MIRX64Emit cg, "    mov dword " & storeAddr & ", eax"
+    Case Else
+        MIRX64Emit cg, "    mov qword " & storeAddr & ", rax"
+    End Select
+    Return 1
+End Function
+
+
+Function MIRX64FindVTableFunctionIndex(ByRef cg As MIRX64Context, ByRef className As String, ByVal slotIndex As Integer) As Integer
+    If cg.modulePtr = 0 Then Return -1
+    Dim ci As Integer
+    For ci = 0 To cg.modulePtr->vtableClassCount - 1
+        If UCase(Trim(cg.modulePtr->vtableClassNames(ci))) = UCase(Trim(className)) Then
+            Dim ei As Integer
+            For ei = cg.modulePtr->vtableClassSlotStart(ci) To cg.modulePtr->vtableClassSlotStart(ci) + cg.modulePtr->vtableClassSlotCounts(ci) - 1
+                If ei >= 0 And ei < cg.modulePtr->vtableEntryCount Then
+                    If cg.modulePtr->vtableEntrySlots(ei) = slotIndex Then Return cg.modulePtr->vtableEntryFunctionIndex(ei)
+                End If
+            Next ei
+        End If
+    Next ci
+
+    ' Interface VIRTUAL_CALL targets carry the interface name rather than a
+    ' concrete class.  The slot is globally stable, so any concrete
+    ' implementation supplies the ABI signature required by the native call.
+    For ci = 0 To cg.modulePtr->vtableClassCount - 1
+        Dim scanStart As Integer
+        scanStart = cg.modulePtr->vtableClassSlotStart(ci)
+        Dim scanEnd As Integer
+        scanEnd = scanStart + cg.modulePtr->vtableClassSlotCounts(ci) - 1
+        Dim sei As Integer
+        For sei = scanStart To scanEnd
+            If sei >= 0 And sei < cg.modulePtr->vtableEntryCount Then
+                If cg.modulePtr->vtableEntrySlots(sei) = slotIndex Then
+                    If cg.modulePtr->vtableEntryFunctionIndex(sei) >= 0 Then Return cg.modulePtr->vtableEntryFunctionIndex(sei)
+                End If
+            End If
+        Next sei
+    Next ci
+    Return -1
+End Function
+
+Private Function MIRX64ParseVTableTarget(ByRef targetName As String, ByRef classNameOut As String, ByRef slotOut As Integer) As Integer
+    classNameOut = ""
+    slotOut = -1
+    Dim t As String
+    t = UCase(Trim(targetName))
+    If Left(t, 12) <> "__VT_SLOT__:" Then Return 0
+    Dim p As Integer
+    p = InStrRev(t, ":")
+    If p <= 12 Then Return 0
+    classNameOut = Mid(t, 13, p - 12)
+    slotOut = Val(Mid(t, p + 1))
+    If classNameOut = "" Or slotOut < 0 Then Return 0
+    Return 1
+End Function
+
+Function MIRX64EmitVirtualMethodCallSynthetic(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 4 Then
+        errText = "MIR x64 virtual method: VIRTUAL_CALL requires target, receiver, method, receiver_type"
+        Return 0
+    End If
+    If Left(UCase(Trim(ins.operands(0))), 12) <> "__VT_SLOT__:" Then
+        errText = "MIR x64 virtual method: VIRTUAL_CALL target is not a vtable slot"
+        Return 0
+    End If
+    Return MIRX64EmitMethodCallSynthetic(ins, cg, errText)
+End Function
+
+Private Function MIRX64EmitStaticMethodCallSynthetic(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    Dim targetName As String
+    targetName = UCase(Trim(ins.operands(0)))
+    Dim fnIdx As Integer
+    fnIdx = MIRX64FindUserFunctionIndex(cg, targetName)
+    If fnIdx < 0 Or cg.modulePtr = 0 Or fnIdx >= cg.modulePtr->functionCount Then
+        errText = "MIR x64 static method: target is not a MIR function " & targetName
+        Return 0
+    End If
+
+    Dim argCount As Integer
+    argCount = ins.operandCount - 4
+    If argCount < 0 Then argCount = 0
+    If cg.modulePtr->functions(fnIdx).paramVarCount <> argCount Then
+        errText = "MIR x64 static method ABI parameter count mismatch for " & targetName
+        Return 0
+    End If
+
+    Dim extraCount As Integer
+    extraCount = argCount - 4
+    If extraCount < 0 Then extraCount = 0
+    Dim callBytes As Integer
+    callBytes = UXBWin64AlignStackBytes(UXB_WIN64_SHADOW_SPACE_BYTES + extraCount * 8)
+    MIRX64Emit cg, "    sub rsp, " & MIRX64ToStr(callBytes)
+
+    Dim ai As Integer
+    For ai = 4 To argCount - 1
+        Dim stackType As String
+        stackType = UCase(Trim(cg.modulePtr->functions(fnIdx).paramVarTypes(ai)))
+        If MIRX64TypeIsFloat(stackType) <> 0 Then
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(ai + 4), "xmm0", errText) = 0 Then Return 0
+            If stackType = "F32" Then
+                MIRX64Emit cg, "    cvtsd2ss xmm0, xmm0"
+                MIRX64Emit cg, "    movd eax, xmm0"
+            Else
+                MIRX64Emit cg, "    movq rax, xmm0"
+            End If
+        Else
+            If MIRX64LoadOperandToReg(cg, ins.operands(ai + 4), "rax", errText) = 0 Then Return 0
+        End If
+        MIRX64Emit cg, "    mov qword [rsp+" & MIRX64ToStr(UXB_WIN64_SHADOW_SPACE_BYTES + (ai - 4) * 8) & "], rax"
+    Next ai
+
+    Dim regCount As Integer
+    regCount = argCount
+    If regCount > 4 Then regCount = 4
+    For ai = 0 To regCount - 1
+        Dim paramType As String
+        paramType = UCase(Trim(cg.modulePtr->functions(fnIdx).paramVarTypes(ai)))
+        If MIRX64TypeIsFloat(paramType) <> 0 Then
+            Dim xmmReg As String
+            xmmReg = UXBWin64FloatArgReg(ai)
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(ai + 4), xmmReg, errText) = 0 Then Return 0
+            If paramType = "F32" Then MIRX64Emit cg, "    cvtsd2ss " & xmmReg & ", " & xmmReg
+        Else
+            Dim intReg As String
+            intReg = UXBWin64IntegerArgReg(ai)
+            If MIRX64LoadOperandToReg(cg, ins.operands(ai + 4), intReg, errText) = 0 Then Return 0
+        End If
+    Next ai
+
+    MIRX64Emit cg, "    call " & MIRX64FunctionLabel(cg.modulePtr->functions(fnIdx).name)
+    MIRX64Emit cg, "    add rsp, " & MIRX64ToStr(callBytes)
+    If Trim(ins.result) <> "" Then
+        If MIRX64TypeIsFloat(cg.modulePtr->functions(fnIdx).returnType) <> 0 Then
+            If UCase(Trim(cg.modulePtr->functions(fnIdx).returnType)) = "F32" Then MIRX64Emit cg, "    cvtss2sd xmm0, xmm0"
+            If MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText) = 0 Then Return 0
+        Else
+            If MIRX64StoreRegToVar(cg, "rax", ins.result, errText) = 0 Then Return 0
+        End If
+    End If
+    Return 1
+End Function
+
+' S-037: `test reg, reg` + a clean runtime error when the receiver is null. Before this the
+' virtual path read [rcx] of a null object (access violation) and the direct path called the
+' method with THIS = 0.
+Private Function MIRX64EmitNullReceiverCheck(ByRef cg As MIRX64Context, ByRef regName As String, ByRef methodName As String, ByRef errText As String) As Integer
+    Dim okLabel As String
+    okLabel = MIRX64NextLabel(cg, "recv_ok")
+    Dim msgLabel As String
+    If MIRX64EnsureStringLiteralLabel(cg, Chr(34) & "method call on a null object reference: " & UCase(Trim(methodName)) & Chr(34), msgLabel) = 0 Then
+        errText = "MIR x64 method: null-receiver message label creation failed"
+        Return 0
+    End If
+    MIRX64EmitRuntimeExtern cg, "__uxb_rt_runtime_error_exit"
+    MIRX64Emit cg, "    test " & regName & ", " & regName
+    MIRX64Emit cg, "    jnz " & okLabel
+    MIRX64Emit cg, "    lea rcx, [rel " & msgLabel & "]"
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call __uxb_rt_runtime_error_exit"
+    MIRX64Emit cg, "    add rsp, 32"
+    MIRX64Emit cg, okLabel & ":"
+    Return 1
+End Function
+
+Function MIRX64EmitMethodCallSynthetic(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    ' operands: target, receiver, method, receiver_type, arg1...
+    If ins.operandCount < 4 Then
+        errText = "MIR x64 method: METHOD_CALL requires target, receiver, method, receiver_type"
+        Return 0
+    End If
+
+    Dim targetName As String
+    targetName = UCase(Trim(ins.operands(0)))
+    If targetName = "" Or Left(targetName, 16) = "__METHOD_CALL__:" Then
+        errText = "MIR x64 method: unresolved receiver method target " & targetName
+        Return 0
+    End If
+
+    If Trim(ins.operands(1)) = "" Then
+        Return MIRX64EmitStaticMethodCallSynthetic(ins, cg, errText)
+    End If
+
+    Dim vtClass As String
+    Dim vtSlot As Integer
+    If MIRX64ParseVTableTarget(targetName, vtClass, vtSlot) <> 0 Then
+        Dim fnIdx As Integer
+        fnIdx = MIRX64FindVTableFunctionIndex(cg, vtClass, vtSlot)
+        If fnIdx < 0 Or cg.modulePtr = 0 Or fnIdx >= cg.modulePtr->functionCount Then
+            errText = "MIR x64 method: vtable slot has no native function " & vtClass & ":" & MIRX64ToStr(vtSlot)
+            Return 0
+        End If
+
+        Dim argCount As Integer
+        argCount = ins.operandCount - 4
+        If argCount < 0 Then argCount = 0
+        Dim fnParamCount As Integer
+        fnParamCount = cg.modulePtr->functions(fnIdx).paramVarCount
+        If fnParamCount <> argCount + 1 Then
+            errText = "MIR x64 method: virtual method ABI parameter count mismatch for " & cg.modulePtr->functions(fnIdx).name
+            Return 0
+        End If
+
+        Dim extraCount As Integer
+        extraCount = argCount - 3
+        If extraCount < 0 Then extraCount = 0
+        Dim callBytes As Integer
+        callBytes = UXBWin64AlignStackBytes(32 + extraCount * 8)
+        MIRX64Emit cg, "    sub rsp, " & MIRX64ToStr(callBytes)
+
+        If MIRX64LoadOperandToReg(cg, ins.operands(1), "rcx", errText) = 0 Then Return 0
+        If MIRX64EmitNullReceiverCheck(cg, "rcx", ins.operands(2), errText) = 0 Then Return 0
+
+        Dim ai As Integer
+        For ai = 3 To argCount - 1
+            Dim stackType As String
+            stackType = UCase(Trim(cg.modulePtr->functions(fnIdx).paramVarTypes(ai + 1)))
+            If MIRX64TypeIsFloat(stackType) <> 0 Then
+                If MIRX64LoadFloatOperandToXmm(cg, ins.operands(ai + 4), "xmm0", errText) = 0 Then Return 0
+                If stackType = "F32" Then
+                    MIRX64Emit cg, "    cvtsd2ss xmm0, xmm0"
+                    MIRX64Emit cg, "    movd eax, xmm0"
+                Else
+                    MIRX64Emit cg, "    movq rax, xmm0"
+                End If
+            Else
+                If MIRX64LoadOperandToReg(cg, ins.operands(ai + 4), "rax", errText) = 0 Then Return 0
+            End If
+            MIRX64Emit cg, "    mov qword [rsp+" & MIRX64ToStr(32 + (ai - 3) * 8) & "], rax"
+        Next ai
+
+        Dim regCount As Integer
+        regCount = argCount
+        If regCount > 3 Then regCount = 3
+        For ai = 0 To regCount - 1
+            Dim ptype As String
+            ptype = UCase(Trim(cg.modulePtr->functions(fnIdx).paramVarTypes(ai + 1)))
+            If MIRX64TypeIsFloat(ptype) <> 0 Then
+                Dim xmm As String
+                xmm = UXBWin64FloatArgReg(ai + 1)
+                If MIRX64LoadFloatOperandToXmm(cg, ins.operands(ai + 4), xmm, errText) = 0 Then Return 0
+                If ptype = "F32" Then MIRX64Emit cg, "    cvtsd2ss " & xmm & ", " & xmm
+            Else
+                Dim ireg As String
+                ireg = UXBWin64IntegerArgReg(ai + 1)
+                If MIRX64LoadOperandToReg(cg, ins.operands(ai + 4), ireg, errText) = 0 Then Return 0
+            End If
+        Next ai
+
+        MIRX64Emit cg, "    mov r11, [rcx]"
+        MIRX64Emit cg, "    test r11, r11"
+        Dim nullVtbl As String
+        Dim nullSlot As String
+        Dim afterCall As String
+        nullVtbl = MIRX64NextLabel(cg, "vcall_null_vtbl")
+        nullSlot = MIRX64NextLabel(cg, "vcall_null_slot")
+        afterCall = MIRX64NextLabel(cg, "vcall_after")
+        MIRX64Emit cg, "    jz " & nullVtbl
+        MIRX64Emit cg, "    mov r11, [r11 + " & MIRX64ToStr(vtSlot * 8) & "]"
+        MIRX64Emit cg, "    test r11, r11"
+        MIRX64Emit cg, "    jz " & nullSlot
+        MIRX64Emit cg, "    call r11"
+        MIRX64Emit cg, "    jmp " & afterCall
+        MIRX64Emit cg, nullVtbl & ":"
+        MIRX64Emit cg, "    xor eax, eax"
+        MIRX64Emit cg, "    jmp " & afterCall
+        MIRX64Emit cg, nullSlot & ":"
+        MIRX64Emit cg, "    xor eax, eax"
+        MIRX64Emit cg, afterCall & ":"
+        MIRX64Emit cg, "    add rsp, " & MIRX64ToStr(callBytes)
+
+        If Trim(ins.result) <> "" Then
+            If MIRX64TypeIsFloat(cg.modulePtr->functions(fnIdx).returnType) <> 0 Then
+                If UCase(Trim(cg.modulePtr->functions(fnIdx).returnType)) = "F32" Then MIRX64Emit cg, "    cvtss2sd xmm0, xmm0"
+                If MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText) = 0 Then Return 0
+            Else
+                If MIRX64StoreRegToVar(cg, "rax", ins.result, errText) = 0 Then Return 0
+            End If
+        End If
+        Return 1
+    End If
+
+    ' direct (non-virtual) instance call: the receiver is the first argument
+    If MIRX64LoadOperandToReg(cg, ins.operands(1), "rax", errText) = 0 Then Return 0
+    If MIRX64EmitNullReceiverCheck(cg, "rax", ins.operands(2), errText) = 0 Then Return 0
+    Dim callIns As MIRIRInstruction
+    callIns = ins
+    callIns.opcode = "CALL"
+    callIns.result = ins.result
+    callIns.operandCount = ins.operandCount - 2
+    callIns.operands(0) = targetName
+    callIns.operands(1) = ins.operands(1)
+    Dim i As Integer
+    For i = 4 To ins.operandCount - 1
+        callIns.operands(i - 2) = ins.operands(i)
+    Next i
+    Return MIRX64EmitCallInstruction(callIns, cg, errText)
+End Function
+
+
+#endif

@@ -1,0 +1,70 @@
+#ifndef UXB_STEP4_MIR_VERIFY_MEMORY_FBS
+#define UXB_STEP4_MIR_VERIFY_MEMORY_FBS
+
+Private Function UXBMIRVerifyMemoryMode(ByRef modeText As String) As Integer
+    Dim m As String = UCase(Trim(modeText))
+    Return IIf(m = "AUTO" Or m = "VIRTUAL" Or m = "NATIVE", 1, 0)
+End Function
+
+Function UXBMIRStep4VerifyMemory(ByRef m As MIRModule, ByRef errText As String) As Integer
+    errText = ""
+
+    Dim fi As Integer
+    For fi = 0 To m.functionCount - 1
+        Dim bi As Integer
+        For bi = 0 To m.functions(fi).blockCount - 1
+            Dim ii As Integer
+            For ii = 0 To m.functions(fi).blocks(bi).instructionCount - 1
+                Dim inst As MIRIRInstruction Ptr
+                inst = @m.functions(fi).blocks(bi).instructions(ii)
+
+                Dim op As String
+                op = UXBMIRStep4NormalizeOpcode(inst->opcode)
+                Select Case op
+                Case "MIR_VIRTUAL_INIT"
+                    If inst->operandCount <> 2 Then errText = "step4 verify memory: VIRTUAL_INIT requires ram,disk": Return 0
+                Case "MIR_MEMORY_LOAD", "MIR_MEM_LOAD", "MIR_PEEK"
+                    If inst->operandCount <> 3 Then errText = "step4 verify memory: MEMORY_LOAD requires mode,address,width": Return 0
+                    If UCase(Trim(inst->operands(0))) <> "AUTO" And UCase(Trim(inst->operands(0))) <> "VIRTUAL" And UCase(Trim(inst->operands(0))) <> "NATIVE" Then
+                        errText = "step4 verify memory: invalid memory mode": Return 0
+                    End If
+                    Dim loadWidth As Integer
+                    loadWidth = Val(Trim(inst->operands(2)))
+                    If loadWidth <> 1 And loadWidth <> 2 And loadWidth <> 4 And loadWidth <> 8 Then errText = "step4 verify memory: invalid load width": Return 0
+                Case "MIR_MEMORY_STORE", "MIR_MEM_STORE", "MIR_POKE"
+                    If inst->operandCount <> 4 Then errText = "step4 verify memory: MEMORY_STORE requires mode,address,value,width": Return 0
+                    If UXBMIRVerifyMemoryMode(inst->operands(0)) = 0 Then errText = "step4 verify memory: invalid memory mode": Return 0
+                Case "MIR_MEMORY_COPY", "MIR_MEM_COPY"
+                    If inst->operandCount <> 5 Then errText = "step4 verify memory: MEMORY_COPY requires mode,src,dst,count,width": Return 0
+                    If UXBMIRVerifyMemoryMode(inst->operands(0)) = 0 Then errText = "step4 verify memory: invalid memory mode": Return 0
+                    Dim copyWidth As Integer
+                    copyWidth = Val(Trim(inst->operands(4)))
+                    ' S-060: was missing 8 here even though MEMORY_LOAD/STORE
+                    ' both accept it and the real x64 emitter
+                    ' (MIRX64EmitCanonicalMemoryCopy) already handles it --
+                    ' this verifier is currently dead code (S-034), but keep
+                    ' it consistent with what actually runs so wiring it in
+                    ' later doesn't reintroduce a false rejection.
+                    If copyWidth <> 1 And copyWidth <> 2 And copyWidth <> 4 And copyWidth <> 8 Then errText = "step4 verify memory: invalid copy width": Return 0
+                Case "MIR_MEMORY_FILL", "MIR_MEM_FILL"
+                    If inst->operandCount <> 5 Then errText = "step4 verify memory: MEMORY_FILL requires mode,dst,value,count,width": Return 0
+                    If UXBMIRVerifyMemoryMode(inst->operands(0)) = 0 Then errText = "step4 verify memory: invalid memory mode": Return 0
+                    Dim fillWidth As Integer
+                    fillWidth = Val(Trim(inst->operands(4)))
+                    ' S-060: same fix as copyWidth above.
+                    If fillWidth <> 1 And fillWidth <> 2 And fillWidth <> 4 And fillWidth <> 8 Then errText = "step4 verify memory: invalid fill width": Return 0
+                Case "MIR_MEMORY_READ_SEQUENCE"
+                    If inst->operandCount <> 3 Then errText = "step4 verify memory: MEMORY_READ_SEQUENCE requires mode,address,length": Return 0
+                    If UXBMIRVerifyMemoryMode(inst->operands(0)) = 0 Then errText = "step4 verify memory: invalid memory mode": Return 0
+                    If Trim(inst->result) = "" Then errText = "step4 verify memory: MEMORY_READ_SEQUENCE requires result": Return 0
+                Case "MIR_MEMORY_WRITE_SEQUENCE"
+                    If inst->operandCount <> 4 Then errText = "step4 verify memory: MEMORY_WRITE_SEQUENCE requires mode,dst,source,length": Return 0
+                    If UXBMIRVerifyMemoryMode(inst->operands(0)) = 0 Then errText = "step4 verify memory: invalid memory mode": Return 0
+                End Select
+            Next ii
+        Next bi
+    Next fi
+    Return 1
+End Function
+
+#endif

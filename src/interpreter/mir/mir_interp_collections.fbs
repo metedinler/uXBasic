@@ -1,0 +1,274 @@
+#ifndef UXB_MIR_INTERP_COLLECTIONS_FBS
+#define UXB_MIR_INTERP_COLLECTIONS_FBS
+
+#include once "../../mir/mir_instruction.fbs"
+#include once "../common/interp_context.fbs"
+#include once "mir_interp_state.fbs"
+
+Private Function UXBMIRInterpCollectionSlot( _
+    ByRef ctx As UXBInterpContext, _
+    ByRef handleValue As UXBInterpValue, _
+    ByVal expectedKind As String, _
+    ByRef slotOut As Integer, _
+    ByRef errText As String _
+) As Integer
+    slotOut = handleValue.arrayId
+    If handleValue.kind <> UXB_VAL_ARRAY Then slotOut = handleValue.handleId
+    If slotOut < 0 Or slotOut >= ctx.heap.slotCount Then
+        errText = "MIR: invalid " & expectedKind & " handle"
+        Return 0
+    End If
+    If ctx.heap.slots(slotOut).active = 0 Or UCase(ctx.heap.slots(slotOut).slotKind) <> UCase(expectedKind) Then
+        errText = "MIR: collection kind mismatch, expected " & expectedKind
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Sub UXBMIRInterpCollectionStoreResult(ByRef st As UXBMIRInterpState, ByRef ins As UXBMIRInstructionRecord, ByRef valueOut As UXBInterpValue)
+    If Trim(ins.resultName) <> "" Then UXBMIRInterpSetVar st, ins.resultName, valueOut
+End Sub
+
+Private Function UXBMIRInterpCollectionRequireArgs(ByRef ins As UXBMIRInstructionRecord, ByVal expectedArgs As Integer, ByVal callName As String) As UXBInterpValue
+    If ins.operandCount = expectedArgs + 1 Then Return UXBInterpValueVoid()
+    Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR: " & callName & " expects " & LTrim(Str(expectedArgs)) & " argument(s)")
+End Function
+
+Private Function UXBMIRInterpCollectionKey(ByRef st As UXBMIRInterpState, ByRef ins As UXBMIRInstructionRecord, ByVal operandIndex As Integer) As String
+    Dim keyValue As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(operandIndex))
+    Return UXBInterpValueToString(keyValue)
+End Function
+
+Function UXBMIRInterpExecCollectionCall( _
+    ByRef ins As UXBMIRInstructionRecord, _
+    ByRef ctx As UXBInterpContext, _
+    ByRef st As UXBMIRInterpState, _
+    ByRef handledOut As Integer _
+) As UXBInterpValue
+    handledOut = 0
+    If UXBMIRStep4CanonicalOpcode(ins.opcode) <> "MIR_CALL" Or ins.operandCount < 1 Then Return UXBInterpValueVoid()
+
+    Dim callName As String = UCase(Trim(ins.operands(0)))
+    Select Case callName
+    Case "LIST_NEW", "DICT_NEW", "SET_NEW"
+        handledOut = 1
+        Dim constructorArityError As UXBInterpValue = UXBMIRInterpCollectionRequireArgs(ins, 0, callName)
+        If UXBInterpIsError(constructorArityError) <> 0 Then Return constructorArityError
+        Dim kindName As String
+        If callName = "LIST_NEW" Then kindName = "LIST"
+        If callName = "DICT_NEW" Then kindName = "DICT"
+        If callName = "SET_NEW" Then kindName = "SET"
+        Dim newId As Integer = UXBInterpHeapAlloc(ctx.heap, kindName, kindName)
+        Dim newValue As UXBInterpValue = UXBInterpValueHandle(kindName, newId)
+        UXBMIRInterpCollectionStoreResult st, ins, newValue
+        Return newValue
+
+    Case "LISTLEN", "LISTGET", "LISTSET", "LISTADD", "LISTREMOVE", "LISTCLEAR", _
+         "DICTLEN", "DICTHAS", "DICTGET", "DICTSET", "DICTCLEAR", _
+         "SETLEN", "SETHAS", "SETADD", "SETREMOVE", "SETCLEAR", _
+         "DICTKEYAT", "DICTVALUEAT", "SETMEMBERAT"
+        handledOut = 1
+    Case Else
+        Return UXBInterpValueVoid()
+    End Select
+
+    Dim expectedArgs As Integer
+    Select Case callName
+    Case "LISTLEN", "LISTCLEAR", "DICTLEN", "DICTCLEAR", "SETLEN", "SETCLEAR"
+        expectedArgs = 1
+    Case "LISTGET", "LISTADD", "LISTREMOVE", "DICTHAS", "DICTGET", "SETHAS", "SETADD", "SETREMOVE", _
+         "DICTKEYAT", "DICTVALUEAT", "SETMEMBERAT"
+        expectedArgs = 2
+    Case "LISTSET", "DICTSET"
+        expectedArgs = 3
+    End Select
+    Dim arityError As UXBInterpValue = UXBMIRInterpCollectionRequireArgs(ins, expectedArgs, callName)
+    If UXBInterpIsError(arityError) <> 0 Then Return arityError
+
+    Dim expectedKind As String
+    If Left(callName, 4) = "LIST" Then expectedKind = "LIST"
+    If Left(callName, 4) = "DICT" Then expectedKind = "DICT"
+    If Left(callName, 3) = "SET" Then expectedKind = "SET"
+
+    Dim handleValue As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(1))
+    Dim slotId As Integer
+    Dim collectionError As String
+    If UXBMIRInterpCollectionSlot(ctx, handleValue, expectedKind, slotId, collectionError) = 0 Then
+        Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, collectionError)
+    End If
+
+    Dim resultValue As UXBInterpValue
+    Select Case callName
+    Case "LISTLEN", "DICTLEN", "SETLEN"
+        resultValue = UXBInterpValueInt(ctx.heap.slots(slotId).count)
+
+    Case "LISTGET"
+        Dim getIndex As Integer = CInt(UXBMIRInterpGetOperand(st, ins.operands(2)).intValue)
+        If getIndex < 0 Or getIndex >= ctx.heap.slots(slotId).count Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR: LIST index out of range")
+        End If
+        resultValue = ctx.heap.slots(slotId).values(getIndex)
+
+    Case "LISTSET"
+        Dim listSetIndex As Integer = CInt(UXBMIRInterpGetOperand(st, ins.operands(2)).intValue)
+        If listSetIndex < 0 Or listSetIndex >= ctx.heap.slots(slotId).count Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR: LIST index out of range")
+        End If
+        ctx.heap.slots(slotId).values(listSetIndex) = UXBMIRInterpGetOperand(st, ins.operands(3))
+        resultValue = UXBInterpValueBool(1)
+
+    Case "LISTADD"
+        Dim appendIndex As Integer = ctx.heap.slots(slotId).count
+        With ctx.heap.slots(slotId)
+            If appendIndex = 0 Then
+                ReDim .values(0)
+                ReDim .names(0)
+            Else
+                ReDim Preserve .values(appendIndex)
+                ReDim Preserve .names(appendIndex)
+            End If
+            .values(appendIndex) = UXBMIRInterpGetOperand(st, ins.operands(2))
+            .names(appendIndex) = LTrim(Str(appendIndex))
+            .count = appendIndex + 1
+        End With
+        resultValue = UXBInterpValueBool(1)
+
+    Case "LISTREMOVE"
+        Dim removeIndex As Integer = CInt(UXBMIRInterpGetOperand(st, ins.operands(2)).intValue)
+        Dim listCount As Integer = ctx.heap.slots(slotId).count
+        If removeIndex < 0 Or removeIndex >= listCount Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR: LIST index out of range")
+        End If
+        Dim listMoveIndex As Integer
+        For listMoveIndex = removeIndex To listCount - 2
+            ctx.heap.slots(slotId).values(listMoveIndex) = ctx.heap.slots(slotId).values(listMoveIndex + 1)
+            ctx.heap.slots(slotId).names(listMoveIndex) = LTrim(Str(listMoveIndex))
+        Next listMoveIndex
+        listCount -= 1
+        With ctx.heap.slots(slotId)
+            .count = listCount
+            If listCount = 0 Then
+                Erase .values
+                Erase .names
+            Else
+                ReDim Preserve .values(listCount - 1)
+                ReDim Preserve .names(listCount - 1)
+            End If
+        End With
+        resultValue = UXBInterpValueBool(1)
+
+    Case "DICTKEYAT"
+        Dim dictKeyAtPos As Integer = CInt(UXBMIRInterpGetOperand(st, ins.operands(2)).intValue)
+        If dictKeyAtPos < 0 Or dictKeyAtPos >= ctx.heap.slots(slotId).count Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR: DICT position out of range")
+        End If
+        resultValue = UXBInterpValueString(ctx.heap.slots(slotId).names(dictKeyAtPos))
+
+    Case "DICTVALUEAT"
+        Dim dictValueAtPos As Integer = CInt(UXBMIRInterpGetOperand(st, ins.operands(2)).intValue)
+        If dictValueAtPos < 0 Or dictValueAtPos >= ctx.heap.slots(slotId).count Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR: DICT position out of range")
+        End If
+        resultValue = ctx.heap.slots(slotId).values(dictValueAtPos)
+
+    Case "SETMEMBERAT"
+        Dim setMemberAtPos As Integer = CInt(UXBMIRInterpGetOperand(st, ins.operands(2)).intValue)
+        If setMemberAtPos < 0 Or setMemberAtPos >= ctx.heap.slots(slotId).count Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR: SET position out of range")
+        End If
+        resultValue = UXBInterpValueString(ctx.heap.slots(slotId).names(setMemberAtPos))
+
+    Case "LISTCLEAR", "DICTCLEAR", "SETCLEAR"
+        With ctx.heap.slots(slotId)
+            .count = 0
+            Erase .values
+            Erase .names
+        End With
+        resultValue = UXBInterpValueBool(1)
+
+    Case "DICTHAS", "DICTGET", "DICTSET"
+        Dim dictKey As String = UXBMIRInterpCollectionKey(st, ins, 2)
+        Dim dictIndex As Integer = -1
+        Dim dictScanIndex As Integer
+        For dictScanIndex = 0 To ctx.heap.slots(slotId).count - 1
+            If ctx.heap.slots(slotId).names(dictScanIndex) = dictKey Then dictIndex = dictScanIndex: Exit For
+        Next dictScanIndex
+        If callName = "DICTHAS" Then
+            resultValue = UXBInterpValueBool(IIf(dictIndex >= 0, 1, 0))
+        ElseIf callName = "DICTGET" Then
+            If dictIndex < 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR: DICT key not found")
+            resultValue = ctx.heap.slots(slotId).values(dictIndex)
+        Else
+            If dictIndex < 0 Then
+                dictIndex = ctx.heap.slots(slotId).count
+                With ctx.heap.slots(slotId)
+                    If dictIndex = 0 Then
+                        ReDim .values(0)
+                        ReDim .names(0)
+                    Else
+                        ReDim Preserve .values(dictIndex)
+                        ReDim Preserve .names(dictIndex)
+                    End If
+                    .names(dictIndex) = dictKey
+                    .count = dictIndex + 1
+                End With
+            End If
+            ctx.heap.slots(slotId).values(dictIndex) = UXBMIRInterpGetOperand(st, ins.operands(3))
+            resultValue = UXBInterpValueBool(1)
+        End If
+
+    Case "SETHAS", "SETADD", "SETREMOVE"
+        Dim setKey As String = UXBMIRInterpCollectionKey(st, ins, 2)
+        Dim setMemberIndex As Integer = -1
+        Dim setScanIndex As Integer
+        For setScanIndex = 0 To ctx.heap.slots(slotId).count - 1
+            If ctx.heap.slots(slotId).names(setScanIndex) = setKey Then setMemberIndex = setScanIndex: Exit For
+        Next setScanIndex
+        If callName = "SETHAS" Then
+            resultValue = UXBInterpValueBool(IIf(setMemberIndex >= 0, 1, 0))
+        ElseIf callName = "SETADD" Then
+            If setMemberIndex < 0 Then
+                setMemberIndex = ctx.heap.slots(slotId).count
+                With ctx.heap.slots(slotId)
+                    If setMemberIndex = 0 Then
+                        ReDim .values(0)
+                        ReDim .names(0)
+                    Else
+                        ReDim Preserve .values(setMemberIndex)
+                        ReDim Preserve .names(setMemberIndex)
+                    End If
+                    .names(setMemberIndex) = setKey
+                    .values(setMemberIndex) = UXBInterpValueString(setKey)
+                    .count = setMemberIndex + 1
+                End With
+            End If
+            resultValue = UXBInterpValueBool(1)
+        Else
+            If setMemberIndex >= 0 Then
+                Dim setCount As Integer = ctx.heap.slots(slotId).count
+                Dim setMoveIndex As Integer
+                For setMoveIndex = setMemberIndex To setCount - 2
+                    ctx.heap.slots(slotId).names(setMoveIndex) = ctx.heap.slots(slotId).names(setMoveIndex + 1)
+                    ctx.heap.slots(slotId).values(setMoveIndex) = ctx.heap.slots(slotId).values(setMoveIndex + 1)
+                Next setMoveIndex
+                setCount -= 1
+                With ctx.heap.slots(slotId)
+                    .count = setCount
+                    If setCount = 0 Then
+                        Erase .values
+                        Erase .names
+                    Else
+                        ReDim Preserve .values(setCount - 1)
+                        ReDim Preserve .names(setCount - 1)
+                    End If
+                End With
+            End If
+            resultValue = UXBInterpValueBool(1)
+        End If
+    End Select
+
+    UXBMIRInterpCollectionStoreResult st, ins, resultValue
+    Return resultValue
+End Function
+
+#endif

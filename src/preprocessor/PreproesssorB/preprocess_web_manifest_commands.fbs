@@ -1,0 +1,166 @@
+#ifndef UXB_PREPROCESS_WEB_MANIFEST_COMMANDS_FBS
+#define UXB_PREPROCESS_WEB_MANIFEST_COMMANDS_FBS
+
+' Manifest-oriented preprocessor commands.
+' These commands do not change BASIC syntax. They only fill PreprocessResult.manifest
+' and tell browser/backend wrappers what to produce.
+
+Private Function UXBPreFirstWord(ByRef s As String, ByRef firstOut As String, ByRef restOut As String) As Integer
+    Dim t As String
+    t = Trim(s)
+    firstOut = ""
+    restOut = ""
+    If t = "" Then Return 0
+    Dim sp As Integer
+    sp = InStr(t, " ")
+    If sp <= 0 Then
+        firstOut = t
+        restOut = ""
+    Else
+        firstOut = Left(t, sp - 1)
+        restOut = Trim(Mid(t, sp + 1))
+    End If
+    Return 1
+End Function
+
+Private Function UXBPreSplitAsWord(ByRef s As String, ByRef leftOut As String, ByRef rightOut As String) As Integer
+    Dim u As String
+    u = UCase(s)
+    Dim p As Integer
+    p = InStr(u, " AS ")
+    If p <= 0 Then Return 0
+    leftOut = Trim(Left(s, p - 1))
+    rightOut = Trim(Mid(s, p + 4))
+    Return IIf(leftOut <> "" And rightOut <> "", 1, 0)
+End Function
+
+Private Function UXBPreParseSigTail(ByRef s As String, ByRef beforeSigOut As String, ByRef sigOut As String) As Integer
+    Dim u As String
+    u = UCase(s)
+    Dim p As Integer
+    p = InStr(u, " SIG ")
+    If p <= 0 Then Return 0
+    beforeSigOut = Trim(Left(s, p - 1))
+    sigOut = UXBPreStripQuotes(Trim(Mid(s, p + 5)))
+    Return IIf(beforeSigOut <> "" And sigOut <> "", 1, 0)
+End Function
+
+Function UXBPreHandleWebManifestDirective(ByRef head As String, ByRef restText As String, ByRef sourcePath As String, ByVal lineNo As Integer, ByVal active As Integer, ByRef result As PreprocessResult) As Integer
+    If active = 0 Then Return 1
+
+    Select Case UCase(Trim(head))
+    Case "BUNDLE_NAME"
+        UXBPreManifestSet result, "bundle.name", UXBPreStripQuotes(restText)
+    Case "BUNDLE_VERSION"
+        UXBPreManifestSet result, "bundle.version", UXBPreStripQuotes(restText)
+    Case "BUNDLE_ID"
+        UXBPreManifestSet result, "bundle.id", UXBPreStripQuotes(restText)
+    Case "AUTHOR"
+        UXBPreManifestSet result, "bundle.author", UXBPreStripQuotes(restText)
+    Case "LICENSE"
+        UXBPreManifestSet result, "bundle.license", UXBPreStripQuotes(restText)
+    Case "BUILD_ID"
+        UXBPreManifestSet result, "bundle.buildId", UXBPreStripQuotes(restText)
+
+    Case "SANDBOX_ROOT"
+        Dim sb As String
+        If UXBPreNormalizePath(restText, "sandbox.root", sourcePath, lineNo, result, sb) = 0 Then Return -1
+        UXBPreManifestSet result, "sandbox.root", sb
+
+    Case "BROWSER_ENTRY"
+        Dim h As String
+        If UXBPreNormalizePath(restText, "entries.html", sourcePath, lineNo, result, h) = 0 Then Return -1
+        UXBPreManifestSet result, "entries.html", h
+    Case "SCRIPT_ENTRY"
+        Dim j As String
+        If UXBPreNormalizePath(restText, "entries.js", sourcePath, lineNo, result, j) = 0 Then Return -1
+        UXBPreManifestSet result, "entries.js", j
+    Case "STYLE_ENTRY"
+        Dim c As String
+        If UXBPreNormalizePath(restText, "entries.css", sourcePath, lineNo, result, c) = 0 Then Return -1
+        UXBPreManifestSet result, "entries.css", c
+    Case "DATA_JSON"
+        Dim d As String
+        If UXBPreNormalizePath(restText, "files.dataJson", sourcePath, lineNo, result, d) = 0 Then Return -1
+        UXBPreManifestSet result, "files.dataJson", d
+
+    Case "CSP"
+        UXBPreManifestSet result, "security.csp", UXBPreStripQuotes(restText)
+    Case "SECURITY_NOTE"
+        UXBPreManifestAddSecurityNote result, restText
+
+    Case "CAPABILITY"
+        Dim cap As String, valueText As String
+        If UXBPreFirstWord(restText, cap, valueText) = 0 Then
+            PreprocessResultAddDiagnostic result, "%%CAPABILITY syntax: %%CAPABILITY name ON/OFF"
+            Return -1
+        End If
+        UXBPreAddCapability result, cap, valueText
+
+    Case "EXPORT_BASIC"
+        Dim leftPart As String, sigPart As String
+        If UXBPreSplitAsWord(restText, leftPart, sigPart) = 0 Then
+            PreprocessResultAddDiagnostic result, "%%EXPORT_BASIC syntax: %%EXPORT_BASIC FunctionName AS " & Chr(34) & "I32(I32,I32)" & Chr(34)
+            Return -1
+        End If
+        UXBPreAddExportBasic result, leftPart, sigPart
+
+    Case "API_ENDPOINT"
+        Dim apiName As String, remain1 As String, methodText As String, urlText As String
+        If UXBPreFirstWord(restText, apiName, remain1) = 0 Then Return -1
+        If UXBPreFirstWord(remain1, methodText, urlText) = 0 Then Return -1
+        If urlText = "" Then Return -1
+        UXBPreAddApiEndpoint result, apiName, methodText, urlText
+
+    Case "ROUTE"
+        Dim routeName As String, routePath As String
+        If UXBPreFirstWord(restText, routeName, routePath) = 0 Then Return -1
+        UXBPreManifestSet result, "routes." & routeName, UXBPreStripQuotes(routePath)
+
+    Case "REQUIRE_ASSET"
+        Dim srcA As String, dstA As String
+        If UXBPreSplitAsWord(restText, srcA, dstA) = 0 Then
+            srcA = restText
+            dstA = restText
+        End If
+        Dim cleanSrc As String, cleanDst As String
+        If UXBPreNormalizePath(srcA, "asset.required.source", sourcePath, lineNo, result, cleanSrc) = 0 Then Return -1
+        If UXBPreNormalizePath(dstA, "asset.required.target", sourcePath, lineNo, result, cleanDst) = 0 Then Return -1
+        PreprocessResultAddAsset result, "FILE", cleanSrc, cleanDst, "", 1
+
+    Case "HOST_IMPORT"
+        Dim beforeSig As String, sig As String, leftHost As String, aliasHost As String
+        If UXBPreParseSigTail(restText, beforeSig, sig) = 0 Then
+            PreprocessResultAddDiagnostic result, "%%HOST_IMPORT syntax: %%HOST_IMPORT module.name AS alias SIG signature"
+            Return -1
+        End If
+        If UXBPreSplitAsWord(beforeSig, leftHost, aliasHost) = 0 Then Return -1
+        UXBPreAddHostImport result, leftHost, aliasHost, sig
+
+    Case "GEN_FILE"
+        Dim genPath As String, genKind As String
+        If UXBPreFirstWord(restText, genPath, genKind) = 0 Then Return -1
+        Dim cleanGen As String
+        If UXBPreNormalizePath(genPath, "files.generated", sourcePath, lineNo, result, cleanGen) = 0 Then Return -1
+        UXBPreManifestSet result, "files.generated." & cleanGen & ".kind", UCase(UXBPreStripQuotes(genKind))
+
+    Case "FEATURE"
+        UXBPreManifestSet result, "features." & UXBPreStripQuotes(restText), "true"
+
+    Case "TEST_EXPECT"
+        UXBPreManifestSet result, "tests.expect." & LTrim(Str(result.manifestCount)), restText
+
+    Case "DOC"
+        Dim docKey As String, docVal As String
+        If UXBPreFirstWord(restText, docKey, docVal) = 0 Then Return -1
+        UXBPreManifestSet result, "docs." & docKey, UXBPreStripQuotes(docVal)
+
+    Case Else
+        Return 0
+    End Select
+
+    UXBPreSecuritySnapshot result
+    Return 1
+End Function
+
+#endif

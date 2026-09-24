@@ -1,0 +1,1044 @@
+#ifndef UXB_SEMANTIC_STEP3_GATE_FBS
+#define UXB_SEMANTIC_STEP3_GATE_FBS
+#include once "semantic_diagnostics.fbs"
+#include once "semantic_context.fbs"
+#include once "semantic_registry.fbs"
+#include once "semantic_contract_bridge.fbs"
+#include once "semantic_targets.fbs"
+#include once "../parser/ast_contract_layer_bindings.fbs"
+#include once "../symbols/symbol_kind.fbs"
+#include once "../symbols/symbol_table.fbs"
+#include once "../symbols/symbol_resolver.fbs"
+#include once "../scope/scope_stack.fbs"
+#include once "../scope/scope_rules.fbs"
+#include once "../type_binding/type_registry.fbs"
+#include once "../type_binding/type_infer_expr.fbs"
+#include once "../type_binding/type_check_stmt.fbs"
+#include once "../type_binding/type_check_assign.fbs"
+#include once "../type_binding/type_check_call.fbs"
+#include once "../type_binding/type_check_return.fbs"
+#include once "../type_binding/type_ffi_signature.fbs"
+#include once "../layout/layout_engine.fbs"
+#include once "../layout/layout_type.fbs"
+#include once "../layout/layout_class.fbs"
+#include once "../layout/layout_array.fbs"
+#include once "../layout/layout_string.fbs"
+#include once "../layout/layout_abi_x64_win64.fbs"
+#include once "../layout/layout_abi_wasm.fbs"
+#include once "../layout/layout_js_runtime.fbs"
+#include once "semantic_hir_layout_bridge.fbs"
+#include once "semantic_step5_gate.fbs"
+#include once "semantic_step5_json.fbs"
+
+Declare Function Step3NodeDeclaredType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String) As Integer
+
+Private Function Step3NodeKind(ByRef ps As ParseState, ByVal nodeIdx As Integer) As String
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return ""
+    Return UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+End Function
+
+Private Function Step3ParentKind(ByRef ps As ParseState, ByVal nodeIdx As Integer) As String
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return ""
+    Dim p As Integer = ps.ast.nodes(nodeIdx).parent
+    If p < 0 Or p >= ps.ast.count Then Return ""
+    Return Step3NodeKind(ps, p)
+End Function
+
+Private Function Step3ChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+    Dim i As Integer = 0
+    Dim ch As Integer = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return -1
+End Function
+
+Private Function Step3FindChildByKind(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal kindText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+    Dim targetKind As String = UCase(Trim(kindText))
+    Dim ch As Integer = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If Step3NodeKind(ps, ch) = targetKind Then Return ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return -1
+End Function
+
+Private Function Step3HasNamedNode(ByRef ps As ParseState, ByRef kindText As String, ByRef nameText As String) As Integer
+    Dim targetKind As String
+    targetKind = UCase(Trim(kindText))
+    Dim targetName As String
+    targetName = UCase(Trim(nameText))
+    If targetName = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If Step3NodeKind(ps, i) = targetKind Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = targetName Then Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+Private Function Step3ValidateSlotControlTarget(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+    Dim laneKind As String
+    laneKind = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+    Dim targetExpr As Integer
+    targetExpr = Step3ChildAt(ps, nodeIdx, 0)
+    If targetExpr = -1 Then Return UXBSemanticFail(SEM_E_INVALID_CALL, "slot target missing", errText)
+
+    If Step3NodeKind(ps, targetExpr) <> "IDENT" And Step3NodeKind(ps, targetExpr) <> "IDENTIFIER" Then
+        Return UXBSemanticFail(SEM_E_INVALID_CALL, "slot target must be ident", errText)
+    End If
+
+    Dim targetName As String
+    targetName = Trim(ps.ast.nodes(targetExpr).value)
+
+    Select Case laneKind
+    Case "THREAD"
+        If Step3HasNamedNode(ps, "THREAD_STMT", targetName) = 0 Then Return UXBSemanticFail(SEM_E_INVALID_CALL, "unknown thread target: " & targetName, errText)
+    Case "EVENT"
+        If Step3HasNamedNode(ps, "EVENT_STMT", targetName) = 0 Then Return UXBSemanticFail(SEM_E_INVALID_CALL, "unknown event target: " & targetName, errText)
+    Case "PIPE"
+        If Step3HasNamedNode(ps, "PIPE_STMT", targetName) = 0 Then Return UXBSemanticFail(SEM_E_INVALID_CALL, "unknown pipe target: " & targetName, errText)
+    Case "PARALEL"
+        If Step3HasNamedNode(ps, "PARALEL_STMT", targetName) = 0 Then Return UXBSemanticFail(SEM_E_INVALID_CALL, "unknown paralel target: " & targetName, errText)
+    End Select
+
+    Dim slotExpr As Integer
+    slotExpr = Step3ChildAt(ps, nodeIdx, 1)
+    If slotExpr <> -1 Then
+        If Step3NodeKind(ps, slotExpr) = "NUMBER" Then
+            Dim slotNo As Integer
+            slotNo = ValInt(ps.ast.nodes(slotExpr).value)
+            If slotNo < 0 Or slotNo > 255 Then Return UXBSemanticFail(SEM_E_INVALID_CALL, "slot index out of range: " & ps.ast.nodes(slotExpr).value, errText)
+        End If
+    End If
+
+    Return 1
+End Function
+
+Private Function Step3ScopeForNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim p As Integer = nodeIdx
+    Do While p >= 0 And p < ps.ast.count
+        Dim k As String = Step3NodeKind(ps, p)
+        Select Case k
+        Case "FUNCTION_STMT", "SUB_STMT", "CLASS_STMT", "TYPE_STMT", "ENUM_STMT", "INTERFACE_STMT", "MODULE_STMT", "NAMESPACE_STMT"
+            Return p + 1
+        End Select
+        p = ps.ast.nodes(p).parent
+    Loop
+    Return 0
+End Function
+
+Private Function Step3FindOwnerNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If ps.ast.nodes(i).left = nodeIdx Or ps.ast.nodes(i).right = nodeIdx Then Return i
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If ch = nodeIdx Then Return i
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+    Return -1
+End Function
+
+Private Function Step3FindAncestorClassNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim p As Integer
+    p = nodeIdx
+    Dim guard As Integer
+    guard = 0
+    Do While p >= 0 And p < ps.ast.count
+        If ps.ast.nodes(p).parent <> -1 Then Exit Do
+        Dim owner As Integer
+        owner = Step3FindOwnerNode(ps, p)
+        If owner = -1 Or owner = p Then Exit Do
+        p = owner
+        guard += 1
+        If guard > ps.ast.count Then Exit Do
+    Loop
+    Do While p >= 0 And p < ps.ast.count
+        If Step3NodeKind(ps, p) = "CLASS_STMT" Then Return p
+        p = ps.ast.nodes(p).parent
+    Loop
+    Return -1
+End Function
+
+Private Function Step3ImplicitClassFieldExists(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef fieldName As String) As Integer
+    Dim classNode As Integer
+    classNode = Step3FindAncestorClassNode(ps, nodeIdx)
+    If classNode = -1 Then Return 0
+
+    Dim target As String
+    target = UCase(Trim(fieldName))
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        Dim ck As String
+        ck = Step3NodeKind(ps, ch)
+        If ck = "CLASS_FIELD" Or ck = "CLASS_PROPERTY_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = target Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 0
+End Function
+
+Private Function Step3ImplicitClassFieldType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef fieldName As String, ByRef typeOut As String) As Integer
+    typeOut = ""
+    Dim classNode As Integer
+    classNode = Step3FindAncestorClassNode(ps, nodeIdx)
+    If classNode = -1 Then Return 0
+
+    Dim target As String
+    target = UCase(Trim(fieldName))
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        Dim ck As String
+        ck = Step3NodeKind(ps, ch)
+        If ck = "CLASS_FIELD" Or ck = "CLASS_PROPERTY_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = target Then
+                If Step3NodeDeclaredType(ps, ch, typeOut) <> 0 Then Return 1
+                typeOut = TYPE_OBJECT
+                Return 1
+            End If
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 0
+End Function
+
+Private Function Step3NodeDeclaredType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    If Trim(ps.ast.nodes(nodeIdx).typeName) <> "" Then typeOut = UXBStep3TypeCanonical(ps.ast.nodes(nodeIdx).typeName): Return 1
+    Dim tNode As Integer = Step3FindChildByKind(ps, nodeIdx, "TYPE_REF")
+    If tNode <> -1 Then
+        typeOut = UXBStep3TypeCanonical(ps.ast.nodes(tNode).value)
+        Return IIf(Trim(typeOut) <> "", 1, 0)
+    End If
+    Return 0
+End Function
+
+Private Function Step3InferNodeDeclaredOrInitializerType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String, ByRef errText As String) As Integer
+    If Step3NodeDeclaredType(ps, nodeIdx, typeOut) <> 0 Then errText = "": Return 1
+    Dim initIdx As Integer = Step3FindChildByKind(ps, nodeIdx, "INIT_EXPR")
+    If initIdx = -1 Then initIdx = Step3ChildAt(ps, nodeIdx, 0)
+    If initIdx <> -1 Then
+        If UXBAstContractIsExpressionNode(Step3NodeKind(ps, initIdx)) <> 0 Then Return UXBStep3InferExprType(ps, initIdx, typeOut, errText)
+    End If
+    typeOut = TYPE_OBJECT
+    errText = ""
+    Return 1
+End Function
+
+Private Function Step3AstNodeIsRuntimeExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim k As String = Step3NodeKind(ps, nodeIdx)
+    ' ADIM36+: declaration/container nodes must never flow into expression inference.
+    If InStr(k, "_STMT") > 0 Then Return 0
+    Select Case k
+    Case "DIM_DECL", "CONST_DECL", "PARAM_DECL", "CLASS_FIELD_DECL", "CLASS_METHOD_DECL", "TYPE_REF", "RETURN_TYPE", "MODE_REF", "USING_ITEM", "ALIAS_TARGET"
+        Return 0
+    End Select
+    If UXBAstContractIsExpressionNode(k) = 0 Then Return 0
+    If UXBAstContractIsCompileTimeNode(k) <> 0 Then Return 0
+    Dim pk As String = Step3ParentKind(ps, nodeIdx)
+    Select Case pk
+    Case "TYPE_REF", "RETURN_TYPE", "DIM_BOUNDS", "ALIAS_TARGET", "USING_ITEM", "CLASS_FLAG", "CLASS_FIELD_FLAG", "CLASS_METHOD_FLAG", "CLASS_PROPERTY_FLAG", "MODE_REF", _
+         "EVENT_STMT", "THREAD_STMT", "PARALEL_STMT", "PIPE_STMT", "SLOT_STMT", "SLOT_TABLE_STMT", "SLOT_BIND_ENTRY", "SLOT_CONTROL_STMT", "TRIGGER_STMT", "SLOT_HEADER_ARGS"
+        Return 0
+    End Select
+    Return 1
+End Function
+
+Private Function Step3RegisterDeclaredTypes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = Step3NodeKind(ps, i)
+        Select Case k
+        Case "TYPE_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                If UXBStep3RegisterTypeName("TYPE", ps.ast.nodes(i).value, errText) = -1 Then Return 0
+                If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_TYPE, 0) = -1 Then If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_TYPE, ps.ast.nodes(i).value, 0, i, errText) = -1 Then Return 0
+            End If
+        Case "CLASS_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                If UXBStep3RegisterTypeName("CLASS", ps.ast.nodes(i).value, errText) = -1 Then Return 0
+                If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_CLASS, 0) = -1 Then If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_CLASS, ps.ast.nodes(i).value, 0, i, errText) = -1 Then Return 0
+            End If
+        Case "INTERFACE_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                If UXBStep3RegisterTypeName("INTERFACE", ps.ast.nodes(i).value, errText) = -1 Then Return 0
+                If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_INTERFACE, 0) = -1 Then If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_INTERFACE, ps.ast.nodes(i).value, 0, i, errText) = -1 Then Return 0
+            End If
+        Case "ENUM_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                If UXBStep3RegisterTypeName("ENUM", ps.ast.nodes(i).value, errText) = -1 Then Return 0
+                If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_ENUM, 0) = -1 Then If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_ENUM, ps.ast.nodes(i).value, 0, i, errText) = -1 Then Return 0
+            End If
+        End Select
+    Next i
+    Return 1
+End Function
+
+Private Function Step3BindRoutineSymbol(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal kindText As String, ByRef errText As String) As Integer
+    If Trim(ps.ast.nodes(nodeIdx).value) = "" Then Return 1
+    If UXBStep3SymbolFindExact(ps.ast.nodes(nodeIdx).value, kindText, 0) <> -1 Then Return 1
+    Return IIf(UXBStep3SymbolAdd(ps.ast.nodes(nodeIdx).value, kindText, kindText, 0, nodeIdx, errText) <> -1, 1, 0)
+End Function
+
+Private Function Step3EnumBaseTypeOk(ByRef baseTypeText As String) As Integer
+    Dim c As String
+    c = UXBStep3TypeCanonical(baseTypeText)
+    Select Case c
+    Case TYPE_BOOL, TYPE_I8, TYPE_U8, TYPE_I16, TYPE_U16, TYPE_I32, TYPE_U32, TYPE_I64, TYPE_U64
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function Step3EnumDigitValue(ByRef ch As String) As Integer
+    Dim u As String
+    u = UCase(ch)
+    If u >= "0" And u <= "9" Then Return Asc(u) - Asc("0")
+    If u >= "A" And u <= "F" Then Return 10 + Asc(u) - Asc("A")
+    Return -1
+End Function
+
+Private Function Step3EnumParseIntegerLiteral(ByRef rawText As String, ByRef outValue As LongInt) As Integer
+    Dim t As String
+    t = UCase(Trim(rawText))
+    If t = "" Then Return 0
+
+    Dim signValue As LongInt
+    signValue = 1
+    If Left(t, 1) = "-" Then
+        signValue = -1
+        t = Mid(t, 2)
+    ElseIf Left(t, 1) = "+" Then
+        t = Mid(t, 2)
+    End If
+    If t = "" Then Return 0
+    If InStr(t, ".") > 0 Or InStr(t, "E") > 0 Then Return 0
+
+    Dim baseValue As Integer
+    baseValue = 10
+    If Left(t, 2) = "&H" Then
+        baseValue = 16
+        t = Mid(t, 3)
+    ElseIf Left(t, 2) = "0X" Then
+        baseValue = 16
+        t = Mid(t, 3)
+    ElseIf Left(t, 2) = "&O" Then
+        baseValue = 8
+        t = Mid(t, 3)
+    ElseIf Left(t, 2) = "0O" Then
+        baseValue = 8
+        t = Mid(t, 3)
+    ElseIf Left(t, 2) = "%B" Then
+        baseValue = 2
+        t = Mid(t, 3)
+    ElseIf Left(t, 2) = "0B" Then
+        baseValue = 2
+        t = Mid(t, 3)
+    End If
+    If t = "" Then Return 0
+
+    Dim acc As LongInt
+    acc = 0
+    Dim i As Integer
+    For i = 1 To Len(t)
+        Dim d As Integer
+        d = Step3EnumDigitValue(Mid(t, i, 1))
+        If d < 0 Or d >= baseValue Then
+            If Mid(t, i, 1) = "_" Then
+                ' Numeric separators are ignored for enum constant validation.
+            Else
+                Return 0
+            End If
+        Else
+            acc = acc * baseValue + d
+        End If
+    Next i
+    outValue = acc * signValue
+    Return 1
+End Function
+
+Private Function Step3EnumConstExprToInt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef outValue As LongInt) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    Dim k As String
+    k = Step3NodeKind(ps, nodeIdx)
+    If k = "NUMBER" Then
+        Return Step3EnumParseIntegerLiteral(ps.ast.nodes(nodeIdx).value, outValue)
+    End If
+    If k = "UNARY" Or k = "UNARY_EXPR" Then
+        If Trim(ps.ast.nodes(nodeIdx).op) = "-" Or Trim(ps.ast.nodes(nodeIdx).value) = "-" Then
+            Dim ch As Integer
+            ch = Step3ChildAt(ps, nodeIdx, 0)
+            If ch = -1 Then ch = ps.ast.nodes(nodeIdx).left
+            If Step3EnumConstExprToInt(ps, ch, outValue) <> 0 Then
+                outValue = -outValue
+                Return 1
+            End If
+        End If
+    End If
+    Return 0
+End Function
+
+Private Function Step3EnumItemExplicitValue(ByRef ps As ParseState, ByVal itemNode As Integer) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(itemNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).role)) = "VALUE" Then Return ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return -1
+End Function
+
+Private Function Step3ValidateEnums(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim enumNode As Integer
+    For enumNode = 0 To ps.ast.count - 1
+        If Step3NodeKind(ps, enumNode) = "ENUM_STMT" Then
+            Dim enumName As String
+            enumName = Trim(ps.ast.nodes(enumNode).value)
+            If enumName = "" Then Return UXBSemanticFail(SEM_E_UNKNOWN_SYMBOL, "enum: name missing", errText)
+
+            Dim baseNode As Integer
+            baseNode = Step3FindChildByKind(ps, enumNode, "ENUM_BASE_TYPE")
+            If baseNode <> -1 Then
+                If Step3EnumBaseTypeOk(ps.ast.nodes(baseNode).value) = 0 Then
+                    Return UXBSemanticFail(SEM_E_TYPE_MISMATCH, "enum: integer base type required for " & enumName, errText)
+                End If
+            End If
+
+            Dim nextValue As LongInt
+            nextValue = 0
+            Dim itemNode As Integer
+            itemNode = ps.ast.nodes(enumNode).firstChild
+            Do While itemNode <> -1
+                If Step3NodeKind(ps, itemNode) = "ENUM_ITEM" Then
+                    Dim itemName As String
+                    itemName = Trim(ps.ast.nodes(itemNode).value)
+                    If itemName = "" Then Return UXBSemanticFail(SEM_E_UNKNOWN_SYMBOL, "enum: item name missing in " & enumName, errText)
+
+                    Dim compareNode As Integer
+                    compareNode = ps.ast.nodes(enumNode).firstChild
+                    Do While compareNode <> itemNode And compareNode <> -1
+                        If Step3NodeKind(ps, compareNode) = "ENUM_ITEM" Then
+                            If UCase(Trim(ps.ast.nodes(compareNode).value)) = UCase(itemName) Then
+                                Return UXBSemanticFail(SEM_E_DUPLICATE_SYMBOL, "enum: duplicate item " & enumName & "." & itemName, errText)
+                            End If
+                        End If
+                        compareNode = ps.ast.nodes(compareNode).nextSibling
+                    Loop
+
+                    Dim effectiveValue As LongInt
+                    effectiveValue = nextValue
+                    Dim valueNode As Integer
+                    valueNode = Step3EnumItemExplicitValue(ps, itemNode)
+                    If valueNode <> -1 Then
+                        If Step3EnumConstExprToInt(ps, valueNode, effectiveValue) = 0 Then
+                            Return UXBSemanticFail(SEM_E_TYPE_MISMATCH, "enum: numeric constant value required for " & enumName & "." & itemName, errText)
+                        End If
+                    End If
+
+                    compareNode = ps.ast.nodes(enumNode).firstChild
+                    Dim compareNextValue As LongInt
+                    compareNextValue = 0
+                    Do While compareNode <> itemNode And compareNode <> -1
+                        If Step3NodeKind(ps, compareNode) = "ENUM_ITEM" Then
+                            Dim compareValue As LongInt
+                            compareValue = compareNextValue
+                            Dim compareValueNode As Integer
+                            compareValueNode = Step3EnumItemExplicitValue(ps, compareNode)
+                            If compareValueNode <> -1 Then
+                                If Step3EnumConstExprToInt(ps, compareValueNode, compareValue) = 0 Then
+                                    Return UXBSemanticFail(SEM_E_TYPE_MISMATCH, "enum: numeric constant value required", errText)
+                                End If
+                            End If
+                            If compareValue = effectiveValue Then
+                                Return UXBSemanticFail(SEM_E_DUPLICATE_SYMBOL, "enum: duplicate value in " & enumName & " = " & LTrim(Str(effectiveValue)), errText)
+                            End If
+                            compareNextValue = compareValue + 1
+                        End If
+                        compareNode = ps.ast.nodes(compareNode).nextSibling
+                    Loop
+
+                    ps.ast.nodes(itemNode).op = LTrim(Str(effectiveValue))
+                    ps.ast.nodes(itemNode).typeName = TYPE_I32
+                    nextValue = effectiveValue + 1
+                End If
+                itemNode = ps.ast.nodes(itemNode).nextSibling
+            Loop
+        End If
+    Next enumNode
+    Return 1
+End Function
+
+Private Function Step3BindDeclarations(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = Step3NodeKind(ps, i)
+        Select Case k
+        Case "TYPE_REF", "RETURN_TYPE"
+            If Trim(ps.ast.nodes(i).value) = "" Then Return UXBSemanticFail(SEM_E_UNKNOWN_TYPE, "empty type reference", errText)
+            Dim c As String
+            If UXBStep3TypeRegistryResolve(ps.ast.nodes(i).value, c, errText) = 0 Then Return 0
+        Case "PARAM_DECL", "DIM_DECL", "DIM_STMT", "REDIM_DECL", "REDIM_STMT"
+            Dim declType As String
+            If Step3InferNodeDeclaredOrInitializerType(ps, i, declType, errText) = 0 Then Return 0
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                If UXBStep3DeclareVariable(ps.ast.nodes(i).value, declType, 0, "", errText) = -1 Then Return 0
+                Dim symKind As String = IIf(k = "PARAM_DECL", SYM_PARAM, SYM_VAR)
+                Dim scopeId As Integer = Step3ScopeForNode(ps, i)
+                If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, symKind, scopeId) = -1 Then
+                    If UXBStep3SymbolAdd(ps.ast.nodes(i).value, symKind, UXBStep3TypeCanonical(declType), scopeId, i, errText) = -1 Then Return 0
+                End If
+            End If
+        Case "TYPE_FIELD", "CLASS_FIELD", "CLASS_PROPERTY_DECL"
+            Dim fType As String
+            If Step3InferNodeDeclaredOrInitializerType(ps, i, fType, errText) = 0 Then Return 0
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                Dim fieldKind As String = IIf(k = "TYPE_FIELD", SYM_TYPE_FIELD, SYM_CLASS_FIELD)
+                Dim fieldScope As Integer = Step3ScopeForNode(ps, i)
+                If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, fieldKind, fieldScope) = -1 Then
+                    If UXBStep3SymbolAdd(ps.ast.nodes(i).value, fieldKind, UXBStep3TypeCanonical(fType), fieldScope, i, errText) = -1 Then Return 0
+                End If
+            End If
+        Case "CONST_DECL", "CONST_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                Dim constType As String
+                If Step3InferNodeDeclaredOrInitializerType(ps, i, constType, errText) = 0 Then Return 0
+                If UXBStep3DeclareVariable(ps.ast.nodes(i).value, constType, 1, "", errText) = -1 Then Return 0
+                If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_CONST, Step3ScopeForNode(ps, i)) = -1 Then
+                    If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_CONST, UXBStep3TypeCanonical(constType), Step3ScopeForNode(ps, i), i, errText) = -1 Then Return 0
+                End If
+            End If
+        Case "FUNCTION_STMT", "DECLARE_FUNCTION_STMT"
+            If Step3BindRoutineSymbol(ps, i, SYM_FUNCTION, errText) = 0 Then Return 0
+        Case "SUB_STMT", "DECLARE_SUB_STMT"
+            If Step3BindRoutineSymbol(ps, i, SYM_SUB, errText) = 0 Then Return 0
+        Case "CLASS_METHOD_DECL", "INTERFACE_METHOD_DECL", "CLASS_CONSTRUCTOR_DECL", "CLASS_DESTRUCTOR_DECL", "CLASS_OPERATOR_DECL"
+            If Trim(ps.ast.nodes(i).value) <> "" Then If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_CLASS_METHOD, Step3ScopeForNode(ps, i)) = -1 Then If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_CLASS_METHOD, "METHOD", Step3ScopeForNode(ps, i), i, errText) = -1 Then Return 0
+        Case "ENUM_ITEM"
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                Dim enumScope As Integer
+                enumScope = Step3ScopeForNode(ps, i)
+                If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_CONST, enumScope) <> -1 Then
+                    Return UXBSemanticFail(SEM_E_DUPLICATE_SYMBOL, "enum: symbol collision " & ps.ast.nodes(i).value, errText)
+                End If
+                If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_CONST, TYPE_I32, enumScope, i, errText) = -1 Then Return 0
+            End If
+        Case "LABEL_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_LABEL, Step3ScopeForNode(ps, i)) = -1 Then If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_LABEL, "LABEL", Step3ScopeForNode(ps, i), i, errText) = -1 Then Return 0
+        Case "MODULE_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_MODULE, 0) = -1 Then If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_MODULE, "MODULE", 0, i, errText) = -1 Then Return 0
+        Case "NAMESPACE_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_NAMESPACE, 0) = -1 Then If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_NAMESPACE, "NAMESPACE", 0, i, errText) = -1 Then Return 0
+        Case "IMPORT_STMT"
+            If Trim(ps.ast.nodes(i).value) <> "" Then If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_IMPORT, 0) = -1 Then If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_IMPORT, "IMPORT", 0, i, errText) = -1 Then Return 0
+        Case "ASSIGN_STMT"
+            ' ADIM44 compatibility: implicit variable declaration on first assignment.
+            Dim lhsNode As Integer
+            lhsNode = Step3ChildAt(ps, i, 0)
+            If lhsNode = -1 Then lhsNode = ps.ast.nodes(i).left
+            If lhsNode <> -1 Then
+                Dim lhsKind As String
+                lhsKind = Step3NodeKind(ps, lhsNode)
+                If lhsKind = "IDENT" Or lhsKind = "IDENTIFIER" Then
+                    Dim lhsName As String
+                    lhsName = Trim(ps.ast.nodes(lhsNode).value)
+                    If lhsName <> "" Then
+                        Dim existingAssignType As String
+                        Dim existingAssignErr As String
+                        If UXBStep3VarTypeName(lhsName, existingAssignType, existingAssignErr) = 0 Then
+                            Dim rhsNode As Integer
+                            rhsNode = Step3ChildAt(ps, i, 1)
+                            If rhsNode = -1 Then rhsNode = ps.ast.nodes(i).right
+                            Dim inferredAssignType As String
+                            inferredAssignType = TYPE_OBJECT
+                            If rhsNode <> -1 Then
+                                Dim inferErr As String
+                                If UXBStep3InferExprType(ps, rhsNode, inferredAssignType, inferErr) = 0 Then inferredAssignType = TYPE_OBJECT
+                            End If
+                            If UXBStep3DeclareVariable(lhsName, inferredAssignType, 0, "", errText) = -1 Then Return 0
+                        End If
+                    End If
+                End If
+            End If
+        Case "INPUT_FILE_STMT", "INPUTF_STMT", "INPUT_STMT"
+            ' ADIM44 compatibility: INPUT targets can introduce implicit string vars.
+            Dim inputStartPos As Integer
+            inputStartPos = 0
+            If k = "INPUT_FILE_STMT" Or k = "INPUTF_STMT" Then inputStartPos = 1
+            Dim tPos As Integer
+            tPos = inputStartPos
+            Do
+                Dim tNode As Integer
+                tNode = Step3ChildAt(ps, i, tPos)
+                If tNode = -1 Then Exit Do
+                Dim tk As String
+                tk = Step3NodeKind(ps, tNode)
+                If tk = "IDENT" Or tk = "IDENTIFIER" Then
+                    Dim targetName As String
+                    targetName = Trim(ps.ast.nodes(tNode).value)
+                    If targetName <> "" Then
+                        Dim existingInputType As String
+                        Dim existingInputErr As String
+                        If UXBStep3VarTypeName(targetName, existingInputType, existingInputErr) = 0 Then
+                            If UXBStep3DeclareVariable(targetName, TYPE_STRING, 0, "", errText) = -1 Then Return 0
+                        End If
+                        If UXBStep3SymbolFindExact(targetName, SYM_VAR, Step3ScopeForNode(ps, tNode)) = -1 Then
+                            If UXBStep3SymbolAdd(targetName, SYM_VAR, TYPE_STRING, Step3ScopeForNode(ps, tNode), tNode, errText) = -1 Then Return 0
+                        End If
+                    End If
+                End If
+                tPos += 1
+            Loop
+        End Select
+    Next i
+    Return 1
+End Function
+
+Private Function Step3ValidateExpressions(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If Step3AstNodeIsRuntimeExpression(ps, i) <> 0 Then
+            Dim exprKind As String
+            exprKind = Step3NodeKind(ps, i)
+            If exprKind = "IDENT" Or exprKind = "IDENTIFIER" Or exprKind = "KEYWORD_REF" Then
+                Dim exprName As String
+                exprName = UCase(Trim(ps.ast.nodes(i).value))
+                If exprName = "BIGI" Or exprName = "BIGINT" Or exprName = "BIG_INTEGER" Then
+                    GoTo Step3ExprNext
+                End If
+            End If
+            Dim t As String
+            If UXBStep3InferExprType(ps, i, t, errText) = 0 Then Return 0
+            If UXBStep3TypeIsBlocked(t) <> 0 Then Return UXBSemanticFail(SEM_E_TYPE_UNKNOWN_LEAK, "blocked inferred type", errText)
+        End If
+Step3ExprNext:
+    Next i
+    Return 1
+End Function
+
+Private Function Step3ValidateStatements(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = Step3NodeKind(ps, i)
+        If InStr(k, "_STMT") > 0 Then
+            If UXBStep3CheckStatementType(k, errText) = 0 Then Return 0
+        End If
+
+        If k = "SLOT_CONTROL_STMT" Then
+            If Step3ValidateSlotControlTarget(ps, i, errText) = 0 Then Return 0
+        End If
+
+        If k = "PRINT_STMT" Or k = "PRINT_FILE_STMT" Then
+            Dim ch As Integer = ps.ast.nodes(i).firstChild
+            Do While ch <> -1
+                Dim ck As String = Step3NodeKind(ps, ch)
+                If ck = "PRINT_ITEM" Then
+                    Dim exprIdx As Integer = Step3ChildAt(ps, ch, 0)
+                    If exprIdx = -1 Then exprIdx = ps.ast.nodes(ch).left
+                    If exprIdx <> -1 Then
+                        Dim ek As String = Step3NodeKind(ps, exprIdx)
+                        If ek = "IDENT" Or ek = "IDENTIFIER" Then
+                            Dim symName As String = Trim(ps.ast.nodes(exprIdx).value)
+                            If symName = "" Then symName = Trim(ps.ast.nodes(exprIdx).symbolName)
+                            If symName <> "" Then
+                                Dim symNameUpper As String
+                                symNameUpper = UCase(Trim(symName))
+                                If Not (symNameUpper = "INPUT" Or symNameUpper = "OUTPUT" Or symNameUpper = "THIS" Or symNameUpper = "ME" Or symNameUpper = "SUPER") Then
+                                    Dim rr As UXBSymbolResolveResult
+                                    If UXBSymbolResolveAnyKindLexical(Step3ScopeForNode(ps, exprIdx), symName, rr) = 0 Then
+                                        If Step3ImplicitClassFieldExists(ps, exprIdx, symName) = 0 Then
+                                            Return UXBSemanticFail(SEM_E_UNKNOWN_SYMBOL, "unknown symbol: " & symName, errText)
+                                        End If
+                                    End If
+                                End If
+                            End If
+                        End If
+                        Dim t As String
+                        If UXBStep3InferExprType(ps, exprIdx, t, errText) = 0 Then Return 0
+                    End If
+                End If
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+        End If
+
+        If k = "TRIGGER_STMT" Then
+            Dim triggerKind As String
+            triggerKind = UCase(Trim(ps.ast.nodes(i).value))
+            If triggerKind = "EVENT" Then
+                Dim trgNode As Integer
+                trgNode = Step3ChildAt(ps, i, 0)
+                If trgNode <> -1 Then
+                    Dim trgName As String
+                    trgName = Trim(ps.ast.nodes(trgNode).value)
+                    If trgName <> "" Then
+                        If Step3HasNamedNode(ps, "EVENT_STMT", trgName) = 0 Then
+                            Return UXBSemanticFail(SEM_E_INVALID_CALL, "unknown event target: " & trgName, errText)
+                        End If
+                    End If
+                End If
+            End If
+        End If
+
+        If k = "POKEB_STMT" Or k = "POKEW_STMT" Or k = "POKED_STMT" Or k = "POKES_STMT" Then
+            Dim addrNode As Integer
+            addrNode = Step3ChildAt(ps, i, 0)
+            If addrNode <> -1 Then
+                If Step3NodeKind(ps, addrNode) = "NUMBER" Then
+                    If Val(ps.ast.nodes(addrNode).value) < 0 Then
+                        Return UXBSemanticFail(SEM_E_INVALID_CALL, "poke address must be non-negative", errText)
+                    End If
+                End If
+            End If
+        End If
+
+        If k = "PRINT_FILE_STMT" Or (k = "PRINT_STMT" And UCase(Trim(ps.ast.nodes(i).op)) = "FILE") Then
+            Dim hNode As Integer
+            hNode = Step3ChildAt(ps, i, 0)
+            If hNode <> -1 And Step3NodeKind(ps, hNode) = "NUMBER" Then
+                Dim hNo As Integer
+                hNo = ValInt(ps.ast.nodes(hNode).value)
+                Dim openFound As Integer
+                openFound = 0
+                Dim j As Integer
+                For j = 0 To ps.ast.count - 1
+                    If Step3NodeKind(ps, j) = "OPEN_STMT" Then
+                        Dim oh As Integer
+                        oh = Step3ChildAt(ps, j, 2)
+                        If oh <> -1 And Step3NodeKind(ps, oh) = "NUMBER" Then
+                            If ValInt(ps.ast.nodes(oh).value) = hNo Then
+                                openFound = 1
+                                Exit For
+                            End If
+                        End If
+                    End If
+                Next j
+                If openFound = 0 Then
+                    Return UXBSemanticFail(SEM_E_INVALID_CALL, "print file handle not opened: #" & LTrim(Str(hNo)), errText)
+                End If
+            End If
+        End If
+    Next i
+    Return 1
+End Function
+
+Private Function Step3ValidateAssignments(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If Step3NodeKind(ps, i) = "ASSIGN_STMT" Then
+            Dim lhs As Integer = Step3ChildAt(ps, i, 0)
+            Dim rhs As Integer = Step3ChildAt(ps, i, 1)
+            If lhs = -1 Then lhs = ps.ast.nodes(i).left
+            If rhs = -1 Then rhs = ps.ast.nodes(i).right
+            If lhs <> -1 And rhs <> -1 Then
+                Dim lhsKind As String
+                lhsKind = Step3NodeKind(ps, lhs)
+                If lhsKind = "CALL_EXPR" Then
+                    Dim callName As String
+                    callName = UCase(Trim(ps.ast.nodes(lhs).value))
+                    If callName = "" Then callName = UCase(Trim(ps.ast.nodes(lhs).symbolName))
+                    If callName = "" Then
+                        errText = "assign: left side is not writable: CALL_EXPR"
+                        Return 0
+                    End If
+
+                    Dim rr As UXBSymbolResolveResult
+                    Dim scopeId As Integer
+                    scopeId = Step3ScopeForNode(ps, lhs)
+                    If UXBSymbolResolveAnyKindLexical(scopeId, callName, rr) = 0 Then
+                        errText = "assign: left side is not writable: CALL_EXPR"
+                        Return 0
+                    End If
+
+                    Select Case UCase(Trim(rr.kind))
+                    Case SYM_VAR, SYM_PARAM, SYM_TYPE_FIELD, SYM_CLASS_FIELD
+                        ' CALL_EXPR array-index form (A(i)) writable.
+                    Case Else
+                        errText = "assign: left side is not writable: CALL_EXPR"
+                        Return 0
+                    End Select
+                Else
+                    If UXBStep3CheckAssignableNodeKind(lhsKind, errText) = 0 Then Return 0
+                End If
+                Dim lt As String, rt As String
+                If UXBStep3InferExprType(ps, lhs, lt, errText) = 0 Then Return 0
+                If UXBStep3InferExprType(ps, rhs, rt, errText) = 0 Then Return 0
+                If UXBStep3TypeCanonical(lt) = TYPE_OBJECT Then
+                    Dim lk As String
+                    lk = Step3NodeKind(ps, lhs)
+                    If lk = "IDENT" Or lk = "IDENTIFIER" Then
+                        Dim lFieldType As String
+                        If Step3ImplicitClassFieldType(ps, lhs, ps.ast.nodes(lhs).value, lFieldType) <> 0 Then
+                            lt = UXBStep3TypeCanonical(lFieldType)
+                        End If
+                    End If
+                End If
+                If UXBStep3CheckAssignment(lt, rt, errText) = 0 Then Return 0
+            End If
+        End If
+    Next i
+    Return 1
+End Function
+
+Private Function Step3ValidateCallsAndReturns(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = Step3NodeKind(ps, i)
+        If k = "CALL_STMT" Or k = "CALL_EXPR" Then
+            If Trim(ps.ast.nodes(i).value) = "" Then Return UXBSemanticFail(SEM_E_INVALID_CALL, "empty call target", errText)
+
+            Dim callName As String
+            callName = UCase(Trim(ps.ast.nodes(i).value))
+            If callName = "" Then callName = UCase(Trim(ps.ast.nodes(i).symbolName))
+            If callName = "BIGINIT" Then
+                Dim kNode As Integer
+                kNode = Step3ChildAt(ps, i, 0)
+                Dim vNode As Integer
+                vNode = Step3ChildAt(ps, i, 1)
+                If kNode <> -1 And vNode <> -1 Then
+                    Dim kText As String
+                    Dim vText As String
+                    kText = UCase(Trim(ps.ast.nodes(kNode).value))
+                    vText = Trim(ps.ast.nodes(vNode).value)
+                    If kText = "BIGI" Or kText = "BIGINT" Or kText = "BIG_INTEGER" Then
+                        If InStr(vText, ".") > 0 Then
+                            Return UXBSemanticFail(SEM_E_INVALID_CALL, "BIGINT decimal string not allowed: " & vText, errText)
+                        End If
+                    End If
+                End If
+            End If
+        ElseIf k = "RETURN_STMT" Then
+            Dim child As Integer = Step3ChildAt(ps, i, 0)
+            If child <> -1 Then
+                Dim rt As String
+                If UXBStep3InferExprType(ps, child, rt, errText) = 0 Then Return 0
+            End If
+        End If
+    Next i
+    Return 1
+End Function
+
+Private Function Step3ValidateFFI(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = Step3NodeKind(ps, i)
+        If k = "INLINE_STMT" Then
+            If SemStep3TargetAllowsNode(k, "X64", errText) = 0 Then Return UXBSemanticFail(SEM_E_NATIVE_ONLY_TARGET, errText, errText)
+        End If
+        If k = "CALL_STMT" Or k = "CALL_EXPR" Then
+            Dim callName As String = UCase(Trim(ps.ast.nodes(i).value))
+            If Left(callName, 4) = "DLL:" Or Left(callName, 4) = "API:" Then
+                Dim sig As String = ps.ast.nodes(i).typeName
+                If sig = "" Then sig = "I32"
+                If UXBStep3CheckFFISignature(sig, errText) = 0 Then Return 0
+            End If
+        End If
+    Next i
+    Return 1
+End Function
+
+Private Function Step3ValidateTypeLeak(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = Step3NodeKind(ps, i)
+        Dim v As String = UCase(Trim(ps.ast.nodes(i).value))
+        Dim tn As String = UCase(Trim(ps.ast.nodes(i).typeName))
+        If UXBStep3TypeIsBlocked(tn) <> 0 Then Return UXBSemanticFail(SEM_E_TYPE_ERROR_LEAK, "blocked node type", errText)
+        If (k = "TYPE_REF" Or k = "RETURN_TYPE") And UXBStep3TypeIsBlocked(v) <> 0 Then Return UXBSemanticFail(SEM_E_TYPE_ERROR_LEAK, "blocked type reference", errText)
+    Next i
+    Return 1
+End Function
+
+Private Function Step3ValidateLayoutCoverage(ByRef ps As ParseState, ByRef errText As String) As Integer
+    If UXBStep3LayoutBuild(ps, errText) = 0 Then Return 0
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String = Step3NodeKind(ps, i)
+        If UXBAstContractIsLayoutNode(k) <> 0 Then
+            If UXBStep3LayoutCheckNode(ps, i, errText) = 0 Then Return UXBSemanticFail(SEM_E_MISSING_LAYOUT, errText, errText)
+        End If
+    Next i
+    Return 1
+End Function
+
+Private Function Step3ValidateContractCoverage(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If SemStep3ContractAllowsNode(Step3NodeKind(ps, i), errText) = 0 Then Return 0
+    Next i
+    Return 1
+End Function
+
+Private Function Step3ValidateTargetCoverage(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If SemStep3TargetDecisionExists(Step3NodeKind(ps, i), errText) = 0 Then Return 0
+    Next i
+    Return 1
+End Function
+
+Private Function Step3JsonEscape(ByRef s As String) As String
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    For i = 1 To Len(s)
+        Dim ch As String
+        ch = Mid(s, i, 1)
+        Select Case ch
+        Case "\"
+            outText &= "\\"
+        Case Chr(34)
+            outText &= "\" & Chr(34)
+        Case Chr(13)
+            outText &= "\r"
+        Case Chr(10)
+            outText &= "\n"
+        Case Chr(9)
+            outText &= "\t"
+        Case Else
+            outText &= ch
+        End Select
+    Next i
+    Return outText
+End Function
+
+Private Sub Step3AppendEnumItemsJson(ByRef ps As ParseState, ByVal enumNode As Integer, ByRef jsonOut As String)
+    jsonOut &= Chr(34) & "items" & Chr(34) & ":["
+    Dim firstItem As Integer
+    firstItem = 1
+    Dim ch As Integer
+    ch = ps.ast.nodes(enumNode).firstChild
+    Do While ch <> -1
+        Dim ck As String
+        ck = Step3NodeKind(ps, ch)
+        If ck = "ENUM_ITEM" Then
+            If firstItem = 0 Then jsonOut &= ","
+            firstItem = 0
+            jsonOut &= "{"
+            jsonOut &= Chr(34) & "name" & Chr(34) & ":" & Chr(34) & Step3JsonEscape(ps.ast.nodes(ch).value) & Chr(34)
+            Dim valNode As Integer
+            valNode = Step3ChildAt(ps, ch, 0)
+            If valNode <> -1 Then
+                jsonOut &= "," & Chr(34) & "value_expr_kind" & Chr(34) & ":" & Chr(34) & Step3JsonEscape(ps.ast.nodes(valNode).kind) & Chr(34)
+                jsonOut &= "," & Chr(34) & "value_expr_text" & Chr(34) & ":" & Chr(34) & Step3JsonEscape(ps.ast.nodes(valNode).value) & Chr(34)
+            End If
+            If Trim(ps.ast.nodes(ch).op) <> "" Then
+                jsonOut &= "," & Chr(34) & "effective_value" & Chr(34) & ":" & Chr(34) & Step3JsonEscape(ps.ast.nodes(ch).op) & Chr(34)
+            End If
+            jsonOut &= "}"
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    jsonOut &= "]"
+End Sub
+
+Private Function Step3WriteEnumJson(ByRef ps As ParseState, ByRef outPath As String, ByRef errText As String) As Integer
+    errText = ""
+    Dim enumCount As Integer
+    enumCount = 0
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If Step3NodeKind(ps, i) = "ENUM_STMT" Then enumCount += 1
+    Next i
+
+    Dim jsonOut As String
+    jsonOut = "{"
+    jsonOut &= Chr(34) & "schema_version" & Chr(34) & ":" & Chr(34) & "uxb.semantic.enums.v1" & Chr(34) & ","
+    jsonOut &= Chr(34) & "layer_name" & Chr(34) & ":" & Chr(34) & "semantic" & Chr(34) & ","
+    jsonOut &= Chr(34) & "status" & Chr(34) & ":" & Chr(34) & "ok" & Chr(34) & ","
+    jsonOut &= Chr(34) & "enum_count" & Chr(34) & ":" & LTrim(Str(enumCount)) & ","
+    jsonOut &= Chr(34) & "enums" & Chr(34) & ":["
+
+    Dim firstEnum As Integer
+    firstEnum = 1
+    For i = 0 To ps.ast.count - 1
+        If Step3NodeKind(ps, i) = "ENUM_STMT" Then
+            If firstEnum = 0 Then jsonOut &= ","
+            firstEnum = 0
+            jsonOut &= "{"
+            jsonOut &= Chr(34) & "name" & Chr(34) & ":" & Chr(34) & Step3JsonEscape(ps.ast.nodes(i).value) & Chr(34)
+            Dim baseNode As Integer
+            baseNode = Step3FindChildByKind(ps, i, "ENUM_BASE_TYPE")
+            If baseNode <> -1 Then
+                jsonOut &= "," & Chr(34) & "base_type" & Chr(34) & ":" & Chr(34) & Step3JsonEscape(ps.ast.nodes(baseNode).value) & Chr(34)
+            End If
+            jsonOut &= ","
+            Step3AppendEnumItemsJson ps, i, jsonOut
+            jsonOut &= "}"
+        End If
+    Next i
+
+    jsonOut &= "]}"
+
+    Dim f As Integer
+    f = FreeFile
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errText = "semantic: enum json open failed " & outPath
+        Return 0
+    End If
+    Print #f, jsonOut;
+    Close #f
+    Return 1
+End Function
+
+Function UXBSemanticWriteEnumsJson(ByRef ps As ParseState, ByRef outPath As String, ByRef errText As String) As Integer
+    Return Step3WriteEnumJson(ps, outPath, errText)
+End Function
+
+Function SemStep3SemanticTypeLayoutGate(ByRef ps As ParseState, ByRef errText As String) As Integer
+    errText = ""
+    TypeBindingInit
+    UXBStep3SymbolReset
+    UXBStep3ScopeReset
+    Dim ctx As UXBSemanticContext
+    UXBSemanticContextInit(ctx, "X64")
+    If Step3ValidateContractCoverage(ps, errText) = 0 Then Return 0
+    If Step3RegisterDeclaredTypes(ps, errText) = 0 Then Return 0
+    If Step3ValidateEnums(ps, errText) = 0 Then Return 0
+    If Step3BindDeclarations(ps, errText) = 0 Then Return 0
+    If Step3ValidateExpressions(ps, errText) = 0 Then Return 0
+    If Step3ValidateStatements(ps, errText) = 0 Then Return 0
+    If Step3ValidateAssignments(ps, errText) = 0 Then Return 0
+    If Step3ValidateCallsAndReturns(ps, errText) = 0 Then Return 0
+    If Step3ValidateFFI(ps, errText) = 0 Then Return 0
+    If Step3ValidateTypeLeak(ps, errText) = 0 Then Return 0
+    If Step3ValidateLayoutCoverage(ps, errText) = 0 Then Return 0
+    If Step3ValidateTargetCoverage(ps, errText) = 0 Then Return 0
+
+    Dim step5 As UXBSemanticStep5Result
+    Dim step5Gate As UXBSemanticStep5GateResult
+    Dim step5Err As String
+
+    If UXBSemanticStep5Run(ps, step5, step5Err) = 0 Then
+        errText = step5Err
+        Return 0
+    End If
+
+    If UXBSemanticStep5GateCheck(step5, step5Gate) = 0 Then
+        errText = step5Gate.errorsText
+        Return 0
+    End If
+
+    Dim writeErr As String
+    UXBSemanticStep5WriteGateJson step5, step5Gate, "build/manual/logs/adim5_gate.json", writeErr
+    UXBSemanticStep5WriteGateMarkdown step5, step5Gate, "build/manual/logs/adim5_gate.md", writeErr
+    UXBSemanticStep5WriteTypeCsv step5, "build/manual/logs/adim5_type_table.csv", writeErr
+    UXBSemanticStep5WriteLayoutCsv step5, "build/manual/logs/adim5_layout_report.csv", writeErr
+    ' semantic_enums.json artik UXBOutputContractAfterSemantic tarafindan build/<run_id>/json/semantic/enums.json altina yazilir.
+
+    Return 1
+End Function
+#endif
+

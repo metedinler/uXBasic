@@ -1,0 +1,128 @@
+
+Private Function LexerAtRemCommentStartFix14(ByRef st As LexerState) As Integer
+    ' FIX14_REM_COMMENT_20260611:
+    ' BASIC REM satir yorumudur. Daha once lexer yalniz tek tirnak yorumunu
+    ' atliyordu; "REM PACKAGE: ..." satirlari tokenlere bolunup parser
+    ' hatasina dusuyordu. REM sadece satir/statement basinda ve arkasindan
+    ' bosluk/EOL gelirse yorum kabul edilir. Boylece degisken adi "remote"
+    ' veya "remarkValue" yanlislikla yorum olmaz.
+    If UCase(PeekCh(st)) <> "R" Then Return 0
+    If UCase(PeekChEx(st, 1)) <> "E" Then Return 0
+    If UCase(PeekChEx(st, 2)) <> "M" Then Return 0
+
+    Dim afterRem As String
+    afterRem = PeekChEx(st, 3)
+    If afterRem <> "" And afterRem <> " " And afterRem <> Chr(9) And afterRem <> Chr(10) And afterRem <> Chr(13) Then Return 0
+
+    Dim p As Integer
+    p = st.cursor - 1
+    Do While p >= 1
+        Dim prevCh As String
+        prevCh = Mid(st.sourceText, p, 1)
+        If prevCh = Chr(10) Or prevCh = Chr(13) Then Return 1
+        If prevCh = ":" Then Return 1
+        If prevCh <> " " And prevCh <> Chr(9) Then Return 0
+        p -= 1
+    Loop
+
+    Return 1
+End Function
+
+Private Sub LexSource(ByRef st As LexerState)
+    Dim ch As String
+    Do While Not AtEnd(st)
+        ch = PeekCh(st)
+
+        If ch = Chr(13) Then
+            If PeekChEx(st, 1) = Chr(10) Then
+                st.cursor += 1
+            Else
+                AdvanceCh st, ch
+            End If
+            Continue Do
+        End If
+
+        If ch = "_" Then
+            If TryConsumeLineContinuation(st) <> 0 Then
+                Continue Do
+            End If
+        End If
+
+        If ch = Chr(10) Then
+            PushTok st, "EOL", "", st.lineNo, st.colNo
+            AdvanceCh st, ch
+            Continue Do
+        End If
+
+        If ch = " " Or ch = Chr(9) Then
+            AdvanceCh st, ch
+            Continue Do
+        End If
+
+        If ch = "'" Then
+            SkipComment st
+            Continue Do
+        End If
+
+        If LexerAtRemCommentStartFix14(st) <> 0 Then
+            SkipComment st
+            Continue Do
+        End If
+
+        If ch = Chr(34) Then
+            ReadStringLiteral st
+            Continue Do
+        End If
+
+        If IsDigit(ch) Or (ch = "&" And (UCase(PeekChEx(st, 1)) = "H" Or UCase(PeekChEx(st, 1)) = "O")) Or (ch = "%" And UCase(PeekChEx(st, 1)) = "B") Then
+            ReadNumber st
+            Continue Do
+        End If
+
+        If IsIdentStart(ch) Then
+            ReadIdentifier st
+            Continue Do
+        End If
+
+        ReadOperatorOrPunct st
+    Loop
+
+    PushTok st, "EOF", "", st.lineNo, st.colNo
+End Sub
+
+Sub LexerInitFromPreprocessed(ByRef st As LexerState, ByRef src As String, ByVal sourcePath As String = "")
+    st.sourceFile = sourcePath
+    st.sourceText = src
+    st.preprocessFailed = 0
+    st.preprocessError = ""
+    st.cursor = 1
+    st.lineNo = 1
+    st.colNo = 1
+    TokenListInit st.tokens
+    LexerDiagnosticListInit st.diagnostics
+    LexSource st
+End Sub
+
+Sub LexerInit(ByRef st As LexerState, ByRef src As String, ByVal sourcePath As String = "")
+    ' Katman ayrimi: LexerInit artik preprocessor calistirmaz.
+    ' Ham veya zaten hazir kaynak metni tokenlere ayirir.
+    ' Ana yol: PreprocessRun() -> LexerInitFromPreprocessed().
+    LexerInitFromPreprocessed st, src, sourcePath
+End Sub
+
+Sub LexerInitWithLegacyPreprocess(ByRef st As LexerState, ByRef src As String, ByVal sourcePath As String = "")
+    ' Geriye uyumluluk yolu. Yeni kod bu fonksiyonu kullanmamalidir.
+    Dim pp As PreprocessResult
+    If LexerPreprocessSourceEx(src, sourcePath, pp) = 0 Then
+        LexerInitFromPreprocessed st, pp.expandedSource, sourcePath
+        st.preprocessFailed = 1
+        st.preprocessError = LexerPreprocessGetError()
+        If Trim(st.preprocessError) = "" Then st.preprocessError = "preprocess failed"
+        LexerAddDiagnostic st, "LEX_PREPROCESS_LEGACY_DEPRECATED", "LexerInitWithLegacyPreprocess deprecated; use PreprocessRun before lexer", 1, 1
+        LexerAddDiagnostic st, "LEX_PREPROCESS_FAILED", st.preprocessError, 1, 1
+        Exit Sub
+    End If
+
+    LexerInitFromPreprocessed st, pp.expandedSource, sourcePath
+    LexerAddDiagnostic st, "LEX_PREPROCESS_LEGACY_DEPRECATED", "LexerInitWithLegacyPreprocess deprecated; use PreprocessRun before lexer", 1, 1
+End Sub

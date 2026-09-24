@@ -1,0 +1,386 @@
+#ifndef UXB_COMMON_ERROR_SYSTEM_ADIM45_FBS
+#define UXB_COMMON_ERROR_SYSTEM_ADIM45_FBS
+
+Const UXB_ERROR45_MAX_CATALOG As Integer = 300
+Const UXB_ERROR45_MAX_LOG_BYTES As LongInt = 60 * 1024
+
+Type UXBErrorCatalogEntry45
+    codeText As String
+    classText As String
+    messageEn As String
+    messageTr As String
+End Type
+
+Type UXBErrorSystemState45
+    initialized As Integer
+    language As String
+    errorLogPath As String
+    catalogPath As String
+    mirrorToTerminal As Integer
+    sourcePath As String
+    catalogCount As Integer
+    catalog(0 To UXB_ERROR45_MAX_CATALOG - 1) As UXBErrorCatalogEntry45
+End Type
+
+Dim Shared gUXBError45 As UXBErrorSystemState45
+
+Private Function UXBErr45Ts() As String
+    Return Date$ & " " & Time$
+End Function
+
+Private Function UXBErr45Lang(ByVal langText As String) As String
+    Dim l As String
+    l = LCase(Trim(langText))
+    If l = "tr" Or l = "turkish" Then Return "tr"
+    Return "en"
+End Function
+
+Private Function UXBErr45DirName(ByVal p As String) As String
+    Dim i As Integer
+    For i = Len(p) To 1 Step -1
+        If Mid(p, i, 1) = "\" Or Mid(p, i, 1) = "/" Then Return Left(p, i - 1)
+    Next i
+    Return "."
+End Function
+
+Private Sub UXBErr45EnsureDir(ByVal pathText As String)
+    If Trim(pathText) = "" Then Exit Sub
+    Dim d As String
+    d = UXBErr45DirName(pathText)
+    If d = "." Or d = "" Then Exit Sub
+    If Dir(d) <> "" Then Exit Sub
+
+    Dim norm As String
+    norm = ""
+    Dim j As Integer
+    For j = 1 To Len(d)
+        Dim chj As String
+        chj = Mid(d, j, 1)
+        If chj = "/" Then
+            norm &= "\"
+        Else
+            norm &= chj
+        End If
+    Next j
+
+    Dim i As Integer
+    Dim cur As String
+    cur = ""
+    For i = 1 To Len(norm)
+        Dim ch As String
+        ch = Mid(norm, i, 1)
+        cur &= ch
+        If ch = "\" Then
+            If Len(cur) > 0 And Right(cur, 1) = "\" And Len(cur) > 3 Then
+                Dim partial As String
+                partial = Left(cur, Len(cur) - 1)
+                If partial <> "" And Dir(partial) = "" Then MkDir partial
+            End If
+        End If
+    Next i
+    If Dir(norm) = "" Then MkDir norm
+End Sub
+
+Private Function UXBErr45BaseNameNoExt(ByVal p As String) As String
+    Dim f As String
+    f = p
+    Dim i As Integer
+    For i = Len(f) To 1 Step -1
+        If Mid(f, i, 1) = "\" Or Mid(f, i, 1) = "/" Then
+            f = Mid(f, i + 1)
+            Exit For
+        End If
+    Next i
+    For i = Len(f) To 1 Step -1
+        If Mid(f, i, 1) = "." Then
+            Return Left(f, i - 1)
+        End If
+    Next i
+    Return f
+End Function
+
+Private Sub UXBErr45RotateIfNeeded(ByVal pathText As String)
+    If Trim(pathText) = "" Then Exit Sub
+    If Dir(pathText) = "" Then Exit Sub
+    Dim sz As LongInt
+    Dim f As Integer
+    f = FreeFile
+    On Error GoTo _rotErr
+    Open pathText For Binary Access Read As #f
+    sz = LOF(f)
+    Close #f
+    On Error GoTo 0
+    If sz < UXB_ERROR45_MAX_LOG_BYTES Then Exit Sub
+    Dim bak As String
+    bak = pathText & ".bak"
+    On Error GoTo _rotErr
+    If Dir(bak) <> "" Then Kill bak
+    Name pathText As bak
+    On Error GoTo 0
+    Exit Sub
+_rotErr:
+    On Error GoTo 0
+End Sub
+
+Private Sub UXBErr45Append(ByVal pathText As String, ByVal lineText As String)
+    If Trim(pathText) = "" Then Exit Sub
+    UXBErr45EnsureDir pathText
+    UXBErr45RotateIfNeeded pathText
+    Dim f As Integer
+    f = FreeFile
+    On Error GoTo _aerr
+    Open pathText For Append As #f
+    Print #f, lineText
+    Close #f
+    On Error GoTo 0
+    Exit Sub
+_aerr:
+    On Error GoTo 0
+End Sub
+
+Private Sub UXBErr45CatalogClear()
+    gUXBError45.catalogCount = 0
+End Sub
+
+Private Sub UXBErr45CatalogAdd(ByVal codeText As String, ByVal classText As String, ByVal messageEn As String, ByVal messageTr As String = "")
+    If gUXBError45.catalogCount >= UXB_ERROR45_MAX_CATALOG Then Exit Sub
+    Dim i As Integer
+    i = gUXBError45.catalogCount
+    gUXBError45.catalog(i).codeText = Trim(codeText)
+    gUXBError45.catalog(i).classText = Trim(classText)
+    gUXBError45.catalog(i).messageEn = Trim(messageEn)
+    gUXBError45.catalog(i).messageTr = Trim(messageTr)
+    gUXBError45.catalogCount += 1
+End Sub
+
+Private Sub UXBErr45CatalogBuiltin()
+    UXBErr45CatalogClear
+    ' Range spread: E.0001 - E.0299
+    UXBErr45CatalogAdd "E.0001", "General", "General compiler message", "Genel derleyici bildirimi"
+    UXBErr45CatalogAdd "E.0010", "CLI", "Command line argument error", "Komut satiri arguman hatasi"
+    UXBErr45CatalogAdd "E.0020", "I18N", "Language file or message localization error", "Dil dosyasi veya mesaj yerellestirme hatasi"
+    UXBErr45CatalogAdd "E.0030", "Path", "File path or output path validation error", "Dosya veya cikti yolu dogrulama hatasi"
+    UXBErr45CatalogAdd "E.0040", "Report", "Report or JSON writing error", "Rapor veya JSON yazma hatasi"
+    UXBErr45CatalogAdd "E.0100", "Lexer", "Lexer/tokenization error", "Lexer/tokenlestirme hatasi"
+    UXBErr45CatalogAdd "E.0110", "Preprocessor", "Preprocessor/meta command error", "Onislemci/meta komut hatasi"
+    UXBErr45CatalogAdd "E.0120", "Include", "Include processing error", "Include isleme hatasi"
+    UXBErr45CatalogAdd "E.0200", "Parser", "Parser/syntax error", "Parser/sozdizimi hatasi"
+    UXBErr45CatalogAdd "E.0210", "AST", "AST contract or AST structure error", "AST sozlesme veya yapi hatasi"
+    UXBErr45CatalogAdd "E.0300", "Semantic", "Semantic analysis error", "Semantik analiz hatasi"
+    UXBErr45CatalogAdd "E.0310", "Type", "Type inference or type mismatch error", "Tip cikarimi veya tip uyusmazligi"
+    UXBErr45CatalogAdd "E.0320", "Layout", "Layout or memory model error", "Yerlesim veya bellek modeli hatasi"
+    UXBErr45CatalogAdd "E.0400", "MIR", "MIR lowering or verification error", "MIR indirgeme veya dogrulama hatasi"
+    UXBErr45CatalogAdd "E.0410", "Interpreter", "Interpreter execution error", "Yorumlayici calistirma hatasi"
+    UXBErr45CatalogAdd "E.0500", "Backend", "Backend/code generation error", "Backend/kod uretim hatasi"
+    UXBErr45CatalogAdd "E.0510", "X64", "x64 code generation error", "x64 kod uretim hatasi"
+    UXBErr45CatalogAdd "E.0520", "X86", "x86 code generation error", "x86 kod uretim hatasi"
+    UXBErr45CatalogAdd "E.0530", "JS", "JavaScript backend error", "JavaScript backend hatasi"
+    UXBErr45CatalogAdd "E.0540", "WAT", "WAT/WASM backend error", "WAT/WASM backend hatasi"
+    UXBErr45CatalogAdd "E.0550", "Browser", "Browser artifact generation error", "Tarayici artifact uretim hatasi"
+    UXBErr45CatalogAdd "E.0600", "Runtime", "Runtime or service error", "Runtime veya servis hatasi"
+    UXBErr45CatalogAdd "E.0610", "FFI", "DLL/API/FFI error", "DLL/API/FFI hatasi"
+    UXBErr45CatalogAdd "E.0620", "BIG", "BIG number runtime/type error", "BIG sayi runtime/tip hatasi"
+    UXBErr45CatalogAdd "E.0700", "Test", "Gate/test runner error", "Kapi/test kosucu hatasi"
+    UXBErr45CatalogAdd "E.0800", "Internal", "Internal consistency error", "Dahili tutarlilik hatasi"
+End Sub
+
+Private Function UXBErr45CsvField(ByVal lineText As String, ByVal idxWant As Integer) As String
+    Dim cur As String
+    cur = ""
+    Dim idx As Integer
+    idx = 0
+    Dim i As Integer
+    For i = 1 To Len(lineText)
+        Dim ch As String
+        ch = Mid(lineText, i, 1)
+        If ch = ";" Then
+            If idx = idxWant Then Return Trim(cur)
+            idx += 1
+            cur = ""
+        Else
+            cur &= ch
+        End If
+    Next i
+    If idx = idxWant Then Return Trim(cur)
+    Return ""
+End Function
+
+Private Sub UXBErr45CatalogOverlay(ByVal csvPath As String)
+    If Trim(csvPath) = "" Then Exit Sub
+    If Dir(csvPath) = "" Then Exit Sub
+    Dim f As Integer
+    f = FreeFile
+    On Error GoTo _cerr
+    Open csvPath For Input As #f
+    Do While Not Eof(f)
+        Dim lineText As String
+        Line Input #f, lineText
+        lineText = Trim(lineText)
+        If lineText = "" Then Continue Do
+        If Left(lineText, 1) = "#" Then Continue Do
+        If LCase(Left(lineText, 4)) = "code" Then Continue Do
+        Dim c As String, className As String, msgEn As String, msgTr As String
+        c = UXBErr45CsvField(lineText, 0)
+        className = UXBErr45CsvField(lineText, 1)
+        msgEn = UXBErr45CsvField(lineText, 2)
+        msgTr = UXBErr45CsvField(lineText, 3)
+        If c = "" Then Continue Do
+        UXBErr45CatalogAdd c, className, msgEn, msgTr
+    Loop
+    Close #f
+    On Error GoTo 0
+    Exit Sub
+_cerr:
+    On Error GoTo 0
+End Sub
+
+Private Function UXBErr45GetClass(ByVal codeText As String, ByVal fallbackClass As String) As String
+    Dim i As Integer
+    For i = 0 To gUXBError45.catalogCount - 1
+        If UCase(gUXBError45.catalog(i).codeText) = UCase(Trim(codeText)) Then
+            If Trim(gUXBError45.catalog(i).classText) <> "" Then Return gUXBError45.catalog(i).classText
+        End If
+    Next i
+    Return fallbackClass
+End Function
+
+Private Function UXBErr45GetMsg(ByVal codeText As String, ByVal fallbackMsg As String) As String
+    Dim i As Integer
+    For i = 0 To gUXBError45.catalogCount - 1
+        If UCase(gUXBError45.catalog(i).codeText) = UCase(Trim(codeText)) Then
+            If gUXBError45.language = "tr" Then
+                If Trim(gUXBError45.catalog(i).messageTr) <> "" Then Return gUXBError45.catalog(i).messageTr
+            Else
+                If Trim(gUXBError45.catalog(i).messageEn) <> "" Then Return gUXBError45.catalog(i).messageEn
+            End If
+        End If
+    Next i
+    Return fallbackMsg
+End Function
+
+Private Sub UXBErr45Infer(ByVal msgText As String, ByRef codeOut As String, ByRef classOut As String)
+    Dim m As String
+    m = LCase(msgText)
+    codeOut = "E.0001"
+    classOut = "General"
+    If InStr(m, "cli") > 0 Or InStr(m, "arg") > 0 Then codeOut = "E.0010": classOut = "CLI": Exit Sub
+    If InStr(m, "lang") > 0 Or InStr(m, "i18n") > 0 Then codeOut = "E.0020": classOut = "I18N": Exit Sub
+    If InStr(m, "path") > 0 Or InStr(m, "dosya") > 0 Then codeOut = "E.0030": classOut = "Path": Exit Sub
+    If InStr(m, "json") > 0 Or InStr(m, "report") > 0 Then codeOut = "E.0040": classOut = "Report": Exit Sub
+    If InStr(m, "lexer") > 0 Or InStr(m, "token") > 0 Then codeOut = "E.0100": classOut = "Lexer": Exit Sub
+    If InStr(m, "preprocess") > 0 Or InStr(m, "meta") > 0 Then codeOut = "E.0110": classOut = "Preprocessor": Exit Sub
+    If InStr(m, "include") > 0 Then codeOut = "E.0120": classOut = "Include": Exit Sub
+    If InStr(m, "parser") > 0 Or InStr(m, "parse") > 0 Or InStr(m, "ayristirma") > 0 Then codeOut = "E.0200": classOut = "Parser": Exit Sub
+    If InStr(m, "ast") > 0 Then codeOut = "E.0210": classOut = "AST": Exit Sub
+    If InStr(m, "semantic") > 0 Or InStr(m, "anlamsal") > 0 Then codeOut = "E.0300": classOut = "Semantic": Exit Sub
+    If InStr(m, "type") > 0 Or InStr(m, "tip") > 0 Then codeOut = "E.0310": classOut = "Type": Exit Sub
+    If InStr(m, "layout") > 0 Then codeOut = "E.0320": classOut = "Layout": Exit Sub
+    If InStr(m, "mir") > 0 Then codeOut = "E.0400": classOut = "MIR": Exit Sub
+    If InStr(m, "interpreter") > 0 Or InStr(m, "exec") > 0 Or InStr(m, "runtime") > 0 Then codeOut = "E.0410": classOut = "Interpreter": Exit Sub
+    If InStr(m, "x64") > 0 Then codeOut = "E.0510": classOut = "X64": Exit Sub
+    If InStr(m, "x86") > 0 Then codeOut = "E.0520": classOut = "X86": Exit Sub
+    If InStr(m, "js") > 0 Then codeOut = "E.0530": classOut = "JS": Exit Sub
+    If InStr(m, "wat") > 0 Or InStr(m, "wasm") > 0 Then codeOut = "E.0540": classOut = "WAT": Exit Sub
+    If InStr(m, "browser") > 0 Or InStr(m, "html") > 0 Then codeOut = "E.0550": classOut = "Browser": Exit Sub
+    If InStr(m, "ffi") > 0 Or InStr(m, "dll") > 0 Or InStr(m, "api") > 0 Then codeOut = "E.0610": classOut = "FFI": Exit Sub
+    If InStr(m, "big") > 0 Then codeOut = "E.0620": classOut = "BIG": Exit Sub
+    If InStr(m, "gate") > 0 Or InStr(m, "test") > 0 Then codeOut = "E.0700": classOut = "Test": Exit Sub
+End Sub
+
+Private Sub UXBErr45ExtractSrcPos(ByVal msgText As String, ByRef srcLineOut As Integer, ByRef srcColOut As Integer)
+    srcLineOut = 0
+    srcColOut = 0
+    Dim atPos As Integer
+    atPos = InStr(msgText, "@")
+    If atPos <= 0 Then Exit Sub
+    Dim frag As String
+    frag = Mid(msgText, atPos + 1)
+    Dim colon As Integer
+    colon = InStr(frag, ":")
+    If colon <= 0 Then Exit Sub
+    srcLineOut = ValInt(Left(frag, colon - 1))
+    srcColOut = ValInt(Mid(frag, colon + 1))
+End Sub
+
+Sub UXBErrorSystemConfigure45(ByVal errorLogPathText As String, ByVal langText As String, ByVal catalogPathText As String, ByVal mirrorTerminal As Integer)
+    gUXBError45.language = UXBErr45Lang(langText)
+    gUXBError45.catalogPath = Trim(catalogPathText)
+    gUXBError45.mirrorToTerminal = IIf(mirrorTerminal <> 0, 1, 0)
+
+    If Trim(errorLogPathText) <> "" Then
+        gUXBError45.errorLogPath = errorLogPathText
+    Else
+        gUXBError45.errorLogPath = "build\manual\logs\uxbasic.hata.log"
+    End If
+
+    UXBErr45CatalogBuiltin
+    If Trim(gUXBError45.catalogPath) <> "" Then UXBErr45CatalogOverlay gUXBError45.catalogPath
+    gUXBError45.initialized = 1
+    UXBErr45Append gUXBError45.errorLogPath, "[" & UXBErr45Ts() & "] [INFO] [E.0001] class=General module=common/error_system_adim45.fbs module_line=0 module_col=0 source_file= source_line=0 source_col=0 msg=error system initialized"
+End Sub
+
+Sub UXBErrorSetSourcePath45(ByVal sourcePathText As String)
+    gUXBError45.sourcePath = Trim(sourcePathText)
+    If Trim(gUXBError45.errorLogPath) = "" Then Exit Sub
+    Dim fixedName As String
+    fixedName = UXBErr45BaseNameNoExt(gUXBError45.sourcePath)
+    If fixedName = "" Then Exit Sub
+    Dim d As String
+    d = UXBErr45DirName(gUXBError45.errorLogPath)
+    If d = "." Then d = "build\manual\logs"
+    gUXBError45.errorLogPath = d & "\" & fixedName & ".hata.log"
+End Sub
+
+Private Sub UXBErr45EnsureInit()
+    If gUXBError45.initialized <> 0 Then Exit Sub
+    UXBErrorSystemConfigure45 "", "en", "", 0
+End Sub
+
+Function UXBErrorLanguage45() As String
+    UXBErr45EnsureInit
+    Return gUXBError45.language
+End Function
+
+Function UXBErrorFormat45(ByVal severityText As String, ByVal codeText As String, ByVal classText As String, ByVal msgText As String, ByVal moduleText As String, ByVal detailsText As String) As String
+    UXBErr45EnsureInit
+    Dim codeUse As String
+    codeUse = Trim(codeText)
+    If codeUse = "" Then codeUse = "E.0001"
+    Dim classUse As String
+    classUse = UXBErr45GetClass(codeUse, classText)
+    If Trim(classUse) = "" Then classUse = "General"
+    Dim msgUse As String
+    msgUse = UXBErr45GetMsg(codeUse, msgText)
+    Dim srcL As Integer, srcC As Integer
+    UXBErr45ExtractSrcPos msgText, srcL, srcC
+    Dim outText As String
+    outText = "[" & UXBErr45Ts() & "] [" & UCase(Trim(severityText)) & "] [" & codeUse & "] class=" & classUse
+    outText &= " module=" & moduleText & " module_line=0 module_col=0"
+    outText &= " source_file=" & gUXBError45.sourcePath & " source_line=" & LTrim(Str(srcL)) & " source_col=" & LTrim(Str(srcC))
+    outText &= " msg=" & msgUse
+    If Trim(detailsText) <> "" Then outText &= " details=" & detailsText
+    If msgUse <> msgText And Trim(msgText) <> "" Then outText &= " raw=" & msgText
+    Return outText
+End Function
+
+Sub UXBErrorEmit45(ByVal severityText As String, ByVal codeText As String, ByVal classText As String, ByVal msgText As String, ByVal moduleText As String, ByVal detailsText As String)
+    UXBErr45EnsureInit
+    Dim lineText As String
+    lineText = UXBErrorFormat45(severityText, codeText, classText, msgText, moduleText, detailsText)
+    UXBErr45Append gUXBError45.errorLogPath, lineText
+    If gUXBError45.mirrorToTerminal <> 0 Then Print lineText
+End Sub
+
+Sub UXBErrorEmitInferred45(ByVal severityText As String, ByVal msgText As String, ByVal moduleText As String, ByVal detailsText As String)
+    Dim c As String, className As String
+    UXBErr45Infer msgText, c, className
+    UXBErrorEmit45 severityText, c, className, msgText, moduleText, detailsText
+End Sub
+
+Sub UXBErrorEmitLegacy45(ByVal msgText As String, ByVal moduleText As String, ByVal detailsText As String)
+    Dim severityText As String
+    severityText = IIf(gUXBError45.language = "tr", "HATA", "ERROR")
+    UXBErrorEmitInferred45 severityText, msgText, moduleText, detailsText
+End Sub
+
+#endif

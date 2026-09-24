@@ -1,0 +1,153 @@
+#ifndef UXB_AST_INTERP_CALL_FBS
+#define UXB_AST_INTERP_CALL_FBS
+
+#include once "../../parser/ast.fbs"
+#include once "../common/interp_context.fbs"
+#include once "../../runtime/runtime_service_dispatch.fbs"
+#include once "ast_interp_helpers.fbs"
+#include once "ast_interp_expr.fbs"
+
+Declare Function UXBAstInterpExecStmt(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+Declare Function UXBAstInterpExecSequenceChildren(ByRef ast As ASTPool, ByVal containerIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+
+Private Function UXBAstInterpRunRoutineOffset(ByRef ast As ASTPool, ByVal routineIdx As Integer, ByVal callIdx As Integer, ByVal firstArgOffset As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    If routineIdx < 0 Or routineIdx >= ast.count Then Return UXBInterpValueError(UXB_INTERP_ERR_SYMBOL_NOT_FOUND, "routine not found")
+    Dim rnode As ASTNode = ast.nodes(routineIdx)
+
+    Dim expectedArgCount As Integer
+    Dim countNode As Integer
+    countNode = rnode.firstChild
+    Do While countNode <> AST_NULL
+        If UCase(Trim(ast.nodes(countNode).kind)) = ASTK_PARAM_DECL Then expectedArgCount += 1
+        countNode = ast.nodes(countNode).nextSibling
+    Loop
+    Dim actualArgCount As Integer
+    If callIdx >= 0 And callIdx < ast.count Then
+        countNode = ast.nodes(callIdx).firstChild
+        Do While countNode <> AST_NULL
+            actualArgCount += 1
+            countNode = ast.nodes(countNode).nextSibling
+        Loop
+    End If
+    actualArgCount -= firstArgOffset
+    If actualArgCount < 0 Then actualArgCount = 0
+    If actualArgCount <> expectedArgCount Then
+        Return UXBInterpValueError(UXB_INTERP_ERR_NODE_NOT_EXECUTABLE, "routine arity mismatch " & rnode.value & " expected=" & LTrim(Str(expectedArgCount)) & " actual=" & LTrim(Str(actualArgCount)))
+    End If
+
+    Dim frame As UXBInterpFrame
+    UXBInterpFrameInit frame, rnode.value, rnode.kind, routineIdx
+    Dim errText As String = ""
+    If UXBInterpStackPush(ctx.stack, frame, errText) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_LIMIT, errText)
+    Dim argNode As Integer = ast.nodes(callIdx).firstChild
+    Dim skippedArg As Integer
+    For skippedArg = 1 To firstArgOffset
+        If argNode <> AST_NULL Then argNode = ast.nodes(argNode).nextSibling
+    Next skippedArg
+
+    Dim firstBoundArg As UXBInterpValue = UXBInterpValueVoid()
+    Dim firstBoundSet As Integer
+    Dim paramNode As Integer = rnode.firstChild
+    Do While paramNode <> AST_NULL
+        If UCase(Trim(ast.nodes(paramNode).kind)) = ASTK_PARAM_DECL Then
+            Dim pv As UXBInterpValue = UXBInterpValueDefaultForType(ast.nodes(paramNode).typeName)
+            If argNode <> AST_NULL Then
+                pv = UXBAstInterpEvalExpr(ast, argNode, ctx)
+                If UXBInterpIsError(pv) <> 0 Then Return pv
+                If firstBoundSet = 0 Then firstBoundArg = UXBInterpApplyDeclaredType(pv, ast.nodes(paramNode).typeName): firstBoundSet = 1
+                argNode = ast.nodes(argNode).nextSibling
+            End If
+            Dim topFrame As UXBInterpFrame Ptr = UXBInterpStackTop(ctx.stack)
+            If topFrame <> 0 Then UXBInterpFrameSetLocal *topFrame, ast.nodes(paramNode).value, pv, ast.nodes(paramNode).typeName
+        End If
+        paramNode = ast.nodes(paramNode).nextSibling
+    Loop
+
+    ' Class methods have an implicit receiver in the member-call AST rather
+    ' than an explicit PARAM_DECL.  Publish all receiver aliases in the new
+    ' frame so THIS, ME and SUPER resolve to the same object at runtime.
+    If UCase(Trim(rnode.kind)) = ASTK_CLASS_METHOD_DECL Or UCase(Trim(rnode.kind)) = ASTK_INTERFACE_METHOD_DECL Then
+        Dim receiverNode As Integer = ast.nodes(callIdx).firstChild
+        If receiverNode <> AST_NULL Then
+            Dim receiverValue As UXBInterpValue = UXBAstInterpEvalExpr(ast, receiverNode, ctx)
+            If UXBInterpIsError(receiverValue) = 0 Then
+                Dim receiverFrame As UXBInterpFrame Ptr = UXBInterpStackTop(ctx.stack)
+                If receiverFrame <> 0 Then
+                    UXBInterpFrameSetLocal *receiverFrame, "THIS", receiverValue
+                    UXBInterpFrameSetLocal *receiverFrame, "ME", receiverValue
+                    UXBInterpFrameSetLocal *receiverFrame, "SUPER", receiverValue
+                End If
+            End If
+        End If
+    End If
+
+    Dim routineKind As String
+    routineKind = UCase(Trim(rnode.kind))
+    Dim isTaskRoutine As Integer
+    isTaskRoutine = IIf(routineKind = ASTK_EVENT_STMT Or routineKind = ASTK_PIPE_STMT Or routineKind = ASTK_THREAD_STMT Or routineKind = ASTK_PARALEL_STMT, 1, 0)
+    If isTaskRoutine <> 0 Then
+        Dim taskFrame As UXBInterpFrame Ptr = UXBInterpStackTop(ctx.stack)
+        If taskFrame <> 0 Then
+            Dim inputAlias As UXBInterpValue = UXBInterpValueVoid()
+            If firstBoundSet <> 0 Then inputAlias = firstBoundArg
+            UXBInterpFrameSetLocal *taskFrame, "INPUT", inputAlias
+            Dim outputAlias As UXBInterpValue = UXBInterpValueDefaultForType(rnode.typeName)
+            UXBInterpFrameSetLocal *taskFrame, "OUTPUT", outputAlias, rnode.typeName
+            If routineKind = ASTK_PIPE_STMT Then UXBInterpFrameSetLocal *taskFrame, rnode.value, outputAlias, rnode.typeName
+        End If
+    End If
+
+    Dim ret As UXBInterpValue = UXBInterpValueVoid()
+    ' Task parsers tag each body statement individually.  Execute the complete
+    ' routine child sequence and let the sequence runner skip metadata.
+    ret = UXBAstInterpExecSequenceChildren(ast, routineIdx, ctx)
+    If ctx.result.statusText = "RETURN" Then
+        ret = ctx.result.returnValue
+        ctx.result.statusText = "PASS"
+    ElseIf routineKind = ASTK_PIPE_STMT Then
+        Dim resultFrame As UXBInterpFrame Ptr = UXBInterpStackTop(ctx.stack)
+        If resultFrame <> 0 Then
+            If UXBInterpFrameGetLocal(*resultFrame, rnode.value, ret) = 0 Then
+                UXBInterpFrameGetLocal *resultFrame, "OUTPUT", ret
+            End If
+        End If
+        ret = UXBInterpApplyDeclaredType(ret, rnode.typeName)
+    End If
+
+    Dim popped As UXBInterpFrame
+    UXBInterpStackPop ctx.stack, popped, errText
+    Return ret
+End Function
+
+Private Function UXBAstInterpRunRoutine(ByRef ast As ASTPool, ByVal routineIdx As Integer, ByVal callIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    Return UXBAstInterpRunRoutineOffset(ast, routineIdx, callIdx, 0, ctx)
+End Function
+
+Function UXBAstInterpRunTaskRoutine(ByRef ast As ASTPool, ByVal routineIdx As Integer, ByVal triggerIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    Return UXBAstInterpRunRoutineOffset(ast, routineIdx, triggerIdx, 1, ctx)
+End Function
+
+Function UXBAstInterpExecCall(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    If nodeIdx < 0 Or nodeIdx >= ast.count Then Return UXBInterpValueVoid()
+    Dim n As ASTNode = ast.nodes(nodeIdx)
+    Dim nameText As String = UCase(Trim(n.value))
+    Dim routineIdx As Integer = UXBInterpContextFindRoutine(ctx, nameText)
+    If routineIdx >= 0 Then Return UXBAstInterpRunRoutine(ast, routineIdx, nodeIdx, ctx)
+    Dim sid As String = UXBAstInterpServiceForCallName(nameText)
+    ' UXB_FIX: unknown call target must fail closed with stable diagnostic label.
+    ' UXB_REASON: avoid crash/ambiguous generic errors for unresolved function calls.
+    ' UXB_TEST: AST interpreter negative unknown-function family.
+    If sid = "" Then Return UXBInterpValueError(UXB_INTERP_ERR_NODE_NOT_EXECUTABLE, "AST_INTERP_UNKNOWN_FUNCTION: " & n.value)
+    Dim args As UXBRuntimeArgList
+    UXBRuntimeArgListInit args
+    Dim ch As Integer = n.firstChild
+    Do While ch <> AST_NULL
+        Dim av As UXBInterpValue = UXBAstInterpEvalExpr(ast, ch, ctx)
+        If UXBInterpIsError(av) <> 0 Then Return av
+        UXBRuntimeArgListAdd args, av
+        ch = ast.nodes(ch).nextSibling
+    Loop
+    Return UXBRuntimeDispatch(ctx.runtime, sid, args)
+End Function
+
+#endif

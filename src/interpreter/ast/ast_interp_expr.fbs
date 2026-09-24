@@ -1,0 +1,384 @@
+#ifndef UXB_AST_INTERP_EXPR_FBS
+#define UXB_AST_INTERP_EXPR_FBS
+
+#include once "../../parser/ast.fbs"
+#include once "../../parser/ast_namespace_const_lookup.fbs"
+#include once "../common/interp_context.fbs"
+#include once "../../runtime/runtime_service_dispatch.fbs"
+#include once "ast_interp_helpers.fbs"
+#include once "ast_interp_fail_closed.fbs"
+
+Declare Function UXBAstInterpExecCall(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+Declare Function UXBAstInterpEvalExpr(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+
+Private Function UXBAstInterpAsFloat(ByRef v As UXBInterpValue) As Double
+    If v.kind = UXB_VAL_F32 Or v.kind = UXB_VAL_F64 Then Return v.floatValue
+    If v.kind = UXB_VAL_STRING Then Return Val(v.stringValue)
+    Return CDbl(v.intValue)
+End Function
+
+Private Function UXBAstInterpAsIntMask(ByRef v As UXBInterpValue) As LongInt
+    If v.kind = UXB_VAL_BOOL Then Return IIf(v.boolValue <> 0, -1, 0)
+    If v.kind = UXB_VAL_STRING Or v.kind = UXB_VAL_WSTRING Then Return ValInt(v.stringValue)
+    If v.intValue <> 0 Then Return v.intValue
+    Return CLngInt(v.floatValue)
+End Function
+
+Private Function UXBAstInterpLogic16(ByVal op As String, ByRef leftValue As UXBInterpValue, ByRef rightValue As UXBInterpValue) As UXBInterpValue
+    Dim A As LongInt = UXBAstInterpAsIntMask(leftValue)
+    Dim B As LongInt = UXBAstInterpAsIntMask(rightValue)
+    Select Case UCase(Trim(op))
+    Case "NAND": Return UXBInterpValueInt(Not (A And B))
+    Case "NOR": Return UXBInterpValueInt(Not (A Or B))
+    Case "XNOR", "NXOR", "EQV", "EQA", "IFF": Return UXBInterpValueInt(Not (A Xor B))
+    Case "IMP": Return UXBInterpValueInt((Not A) Or B)
+    Case "CIMP": Return UXBInterpValueInt(A Or (Not B))
+    Case "NIMP": Return UXBInterpValueInt(A And (Not B))
+    Case "NCIMP": Return UXBInterpValueInt((Not A) And B)
+    Case "IDA": Return UXBInterpValueInt(A)
+    Case "IDB": Return UXBInterpValueInt(B)
+    Case "NOTA": Return UXBInterpValueInt(Not A)
+    Case "NOTB": Return UXBInterpValueInt(Not B)
+    End Select
+    Return UXBInterpValueError(UXB_INTERP_ERR_NODE_NOT_EXECUTABLE, "Logic16 operator not executable: " & op)
+End Function
+
+Private Function UXBAstInterpIsUnsignedInteger(ByRef v As UXBInterpValue) As Integer
+    Dim t As String = UCase(Trim(v.typeName))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    If v.kind = UXB_VAL_U32 Or v.kind = UXB_VAL_U64 Then Return 1
+    Select Case t
+    Case "U8", "U16", "U32", "U64", "UBYTE", "USHORT", "UINTEGER", "ULONG", "ULONGINT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function UXBAstInterpArithmeticShr64(ByVal value As LongInt, ByVal countValue As LongInt) As LongInt
+    Dim shiftBits As Integer = countValue And 63
+    If shiftBits = 0 Then Return value
+    If value >= 0 Then Return CLngInt(CULngInt(value) Shr shiftBits)
+    Return Not CLngInt(CULngInt(Not value) Shr shiftBits)
+End Function
+
+Private Function UXBAstInterpRol64(ByVal value As ULongInt, ByVal countValue As LongInt) As ULongInt
+    Dim shiftBits As Integer = countValue And 63
+    If shiftBits = 0 Then Return value
+    Return (value Shl shiftBits) Or (value Shr (64 - shiftBits))
+End Function
+
+Private Function UXBAstInterpRor64(ByVal value As ULongInt, ByVal countValue As LongInt) As ULongInt
+    Dim shiftBits As Integer = countValue And 63
+    If shiftBits = 0 Then Return value
+    Return (value Shr shiftBits) Or (value Shl (64 - shiftBits))
+End Function
+
+Private Function UXBAstInterpIntegerPow(ByVal baseValue As LongInt, ByVal exponentValue As LongInt) As UXBInterpValue
+    If exponentValue < 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_NODE_NOT_EXECUTABLE, "integer exponent cannot be negative")
+    Dim baseWork As LongInt = baseValue
+    Dim exponentWork As ULongInt = CULngInt(exponentValue)
+    Dim resultValue As LongInt = 1
+    Do While exponentWork <> 0
+        If (exponentWork And 1) <> 0 Then resultValue *= baseWork
+        exponentWork = exponentWork Shr 1
+        If exponentWork <> 0 Then baseWork *= baseWork
+    Loop
+    Return UXBInterpValueInt(resultValue)
+End Function
+
+Private Function UXBAstInterpBinary(ByVal opText As String, ByRef l As UXBInterpValue, ByRef r As UXBInterpValue) As UXBInterpValue
+    Dim op As String = UCase(Trim(opText))
+    If op = "" Then op = "+"
+    If op = "==" Then op = "="
+    If op = "!=" Then op = "<>"
+    If op = "NXOR" Or op = "EQV" Or op = "EQA" Or op = "IFF" Then op = "XNOR"
+    If ((l.kind = UXB_VAL_STRING Or r.kind = UXB_VAL_STRING) And op = "+") Then Return UXBInterpValueString(UXBInterpValueToString(l) & UXBInterpValueToString(r))
+    Select Case op
+    Case "=": Return UXBInterpValueBool(UXBInterpValuesEqual(l, r))
+    Case "<>": Return UXBInterpValueBool(UXBInterpValuesEqual(l, r) = 0)
+    Case "<": Return UXBInterpValueBool(UXBAstInterpAsFloat(l) < UXBAstInterpAsFloat(r))
+    Case "<=": Return UXBInterpValueBool(UXBAstInterpAsFloat(l) <= UXBAstInterpAsFloat(r))
+    Case ">": Return UXBInterpValueBool(UXBAstInterpAsFloat(l) > UXBAstInterpAsFloat(r))
+    Case ">=": Return UXBInterpValueBool(UXBAstInterpAsFloat(l) >= UXBAstInterpAsFloat(r))
+    Case "ANDALSO", "&&": Return UXBInterpValueBool(UXBInterpTruth(l) <> 0 And UXBInterpTruth(r) <> 0)
+    Case "ORELSE", "||": Return UXBInterpValueBool(UXBInterpTruth(l) <> 0 Or UXBInterpTruth(r) <> 0)
+    Case "AND": Return UXBInterpValueInt(UXBAstInterpAsIntMask(l) And UXBAstInterpAsIntMask(r))
+    Case "OR": Return UXBInterpValueInt(UXBAstInterpAsIntMask(l) Or UXBAstInterpAsIntMask(r))
+    Case "XOR": Return UXBInterpValueInt(UXBAstInterpAsIntMask(l) Xor UXBAstInterpAsIntMask(r))
+    Case "NAND", "NOR", "XNOR", "IMP", "CIMP", "NIMP", "NCIMP", "IDA", "IDB", "NOTA", "NOTB"
+        Return UXBAstInterpLogic16(op, l, r)
+    End Select
+    If l.kind = UXB_VAL_F64 Or r.kind = UXB_VAL_F64 Or l.kind = UXB_VAL_F32 Or r.kind = UXB_VAL_F32 Then
+        Select Case op
+        Case "+": Return UXBInterpValueFloat(UXBAstInterpAsFloat(l) + UXBAstInterpAsFloat(r))
+        Case "-": Return UXBInterpValueFloat(UXBAstInterpAsFloat(l) - UXBAstInterpAsFloat(r))
+        Case "*": Return UXBInterpValueFloat(UXBAstInterpAsFloat(l) * UXBAstInterpAsFloat(r))
+        Case "/"
+            If UXBAstInterpAsFloat(r) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_DIV_ZERO, "division by zero")
+            Return UXBInterpValueFloat(UXBAstInterpAsFloat(l) / UXBAstInterpAsFloat(r))
+        Case "**", "POW"
+            Return UXBInterpValueFloat(UXBAstInterpAsFloat(l) ^ UXBAstInterpAsFloat(r))
+        End Select
+    End If
+    Select Case op
+    Case "+": Return UXBInterpValueInt(l.intValue + r.intValue)
+    Case "-": Return UXBInterpValueInt(l.intValue - r.intValue)
+    Case "*": Return UXBInterpValueInt(l.intValue * r.intValue)
+    Case "/"
+        If r.intValue = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_DIV_ZERO, "division by zero")
+        Return UXBInterpValueFloat(CDbl(l.intValue) / CDbl(r.intValue))
+    Case "\"
+        If r.intValue = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_DIV_ZERO, "division by zero")
+        Return UXBInterpValueInt(l.intValue \ r.intValue)
+    Case "MOD", "%"
+        If r.intValue = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_DIV_ZERO, "modulo by zero")
+        Return UXBInterpValueInt(l.intValue Mod r.intValue)
+    Case "**", "POW": Return UXBAstInterpIntegerPow(l.intValue, r.intValue)
+    Case "&": Return UXBInterpValueInt(l.intValue And r.intValue)
+    Case "|": Return UXBInterpValueInt(l.intValue Or r.intValue)
+    Case "^": Return UXBInterpValueInt(l.intValue Xor r.intValue)
+    Case "SHL", "<<": Return UXBInterpValueInt(CLngInt(CULngInt(l.intValue) Shl (r.intValue And 63)))
+    Case "SHR", ">>"
+        If UXBAstInterpIsUnsignedInteger(l) <> 0 Then Return UXBInterpValueUInt(l.uintValue Shr (r.intValue And 63))
+        Return UXBInterpValueInt(UXBAstInterpArithmeticShr64(l.intValue, r.intValue))
+    Case "ROL": Return UXBInterpValueInt(CLngInt(UXBAstInterpRol64(CULngInt(l.intValue), r.intValue)))
+    Case "ROR": Return UXBInterpValueInt(CLngInt(UXBAstInterpRor64(CULngInt(l.intValue), r.intValue)))
+    End Select
+    Return UXBInterpValueError(UXB_INTERP_ERR_NODE_NOT_EXECUTABLE, "binary operator not executable: " & opText)
+End Function
+
+Private Function UXBAstInterpEvalCallExpression(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    Dim n As ASTNode = ast.nodes(nodeIdx)
+    Dim argc As Integer = 0
+    Dim ac As Integer = n.firstChild
+    Do While ac <> AST_NULL
+        argc += 1
+        ac = ast.nodes(ac).nextSibling
+    Loop
+    Dim sid As String = UXBAstInterpServiceForCallName(n.value)
+    If sid <> "" Then
+        Dim args As UXBRuntimeArgList
+        UXBRuntimeArgListInit args
+        Dim ch As Integer = n.firstChild
+        Do While ch <> AST_NULL
+            Dim av As UXBInterpValue = UXBAstInterpEvalExpr(ast, ch, ctx)
+            If UXBInterpIsError(av) <> 0 Then Return av
+            UXBRuntimeArgListAdd args, av
+            ch = ast.nodes(ch).nextSibling
+        Loop
+        Return UXBRuntimeDispatch(ctx.runtime, sid, args)
+    End If
+    Dim callUpper As String
+    callUpper = UCase(Trim(n.value))
+    Select Case callUpper
+    Case "BOOLEAN", "BOOL", "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "PTR"
+        If argc <> 1 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "AST scalar conversion expects exactly one argument: " & callUpper)
+        Dim castArg As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 0), ctx)
+        If UXBInterpIsError(castArg) <> 0 Then Return castArg
+        Return UXBInterpApplyDeclaredType(castArg, callUpper)
+    End Select
+    If callUpper = "LEN" Then
+        If argc <> 1 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "AST_INTERP_STRING_ARG_INVALID: LEN_ARG_COUNT")
+        Dim a0 As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 0), ctx)
+        If UXBInterpIsError(a0) <> 0 Then Return a0
+        Return UXBInterpValueInt(Len(UXBInterpValueToString(a0)))
+    End If
+    If callUpper = "UCASE" Then
+        If argc <> 1 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "AST_INTERP_STRING_ARG_INVALID: UCASE_ARG_COUNT")
+        Dim a1 As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 0), ctx)
+        If UXBInterpIsError(a1) <> 0 Then Return a1
+        Return UXBInterpValueString(UCase(UXBInterpValueToString(a1)))
+    End If
+    If callUpper = "LCASE" Then
+        If argc <> 1 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "AST_INTERP_STRING_ARG_INVALID: LCASE_ARG_COUNT")
+        Dim a2 As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 0), ctx)
+        If UXBInterpIsError(a2) <> 0 Then Return a2
+        Return UXBInterpValueString(LCase(UXBInterpValueToString(a2)))
+    End If
+    If callUpper = "LEFT" Then
+        If argc <> 2 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "AST_INTERP_STRING_ARG_INVALID: LEFT_ARG_COUNT")
+        Dim s0 As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 0), ctx)
+        If UXBInterpIsError(s0) <> 0 Then Return s0
+        Dim n0 As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 1), ctx)
+        If UXBInterpIsError(n0) <> 0 Then Return n0
+        Return UXBInterpValueString(Left(UXBInterpValueToString(s0), CInt(n0.intValue)))
+    End If
+    If callUpper = "RIGHT" Then
+        If argc <> 2 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "AST_INTERP_STRING_ARG_INVALID: RIGHT_ARG_COUNT")
+        Dim s1 As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 0), ctx)
+        If UXBInterpIsError(s1) <> 0 Then Return s1
+        Dim n1 As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 1), ctx)
+        If UXBInterpIsError(n1) <> 0 Then Return n1
+        Return UXBInterpValueString(Right(UXBInterpValueToString(s1), CInt(n1.intValue)))
+    End If
+    If callUpper = "MID" Then
+        If argc < 2 Or argc > 3 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "AST_INTERP_STRING_ARG_INVALID: MID_ARG_COUNT")
+        Dim s2 As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 0), ctx)
+        If UXBInterpIsError(s2) <> 0 Then Return s2
+        Dim p2 As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 1), ctx)
+        If UXBInterpIsError(p2) <> 0 Then Return p2
+        If argc >= 3 Then
+            Dim l2 As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 2), ctx)
+            If UXBInterpIsError(l2) <> 0 Then Return l2
+            Return UXBInterpValueString(Mid(UXBInterpValueToString(s2), CInt(p2.intValue), CInt(l2.intValue)))
+        End If
+        Return UXBInterpValueString(Mid(UXBInterpValueToString(s2), CInt(p2.intValue)))
+    End If
+    If callUpper = "TRIM" Then
+        If argc <> 1 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "AST_INTERP_STRING_ARG_INVALID: TRIM_ARG_COUNT")
+        Dim t0 As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 0), ctx)
+        If UXBInterpIsError(t0) <> 0 Then Return t0
+        Return UXBInterpValueString(Trim(UXBInterpValueToString(t0)))
+    End If
+    If callUpper = "INSTR" Then
+        If argc = 2 Or argc = 3 Then
+            Dim startPos As Integer = 1
+            Dim hayNode As Integer
+            Dim needleNode As Integer
+            If argc = 3 Then
+                Dim sv As UXBInterpValue = UXBAstInterpEvalExpr(ast, UXBAstInterpChild(ast, nodeIdx, 0), ctx)
+                If UXBInterpIsError(sv) <> 0 Then Return sv
+                startPos = CInt(sv.intValue)
+                hayNode = UXBAstInterpChild(ast, nodeIdx, 1)
+                needleNode = UXBAstInterpChild(ast, nodeIdx, 2)
+            Else
+                hayNode = UXBAstInterpChild(ast, nodeIdx, 0)
+                needleNode = UXBAstInterpChild(ast, nodeIdx, 1)
+            End If
+            Dim hv As UXBInterpValue = UXBAstInterpEvalExpr(ast, hayNode, ctx)
+            If UXBInterpIsError(hv) <> 0 Then Return hv
+            Dim nv As UXBInterpValue = UXBAstInterpEvalExpr(ast, needleNode, ctx)
+            If UXBInterpIsError(nv) <> 0 Then Return nv
+            Return UXBInterpValueInt(InStr(startPos, UXBInterpValueToString(hv), UXBInterpValueToString(nv)))
+        End If
+        Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "AST_INTERP_STRING_ARG_INVALID: INSTR_ARG_COUNT")
+    End If
+    Return UXBAstInterpExecCall(ast, nodeIdx, ctx)
+End Function
+
+Function UXBAstInterpEvalExpr(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    If nodeIdx < 0 Or nodeIdx >= ast.count Then Return UXBInterpValueVoid()
+    Dim n As ASTNode = ast.nodes(nodeIdx)
+    UXBInterpTraceAdd ctx.trace, "EVAL", "AST", n.kind, "", n.value, "", n.lineNo, n.colNo
+    Select Case UCase(Trim(n.kind))
+    Case ASTK_NUMBER
+        Return UXBInterpValueFromLiteral(n.value, n.typeName)
+    Case ASTK_STRING
+        Return UXBInterpValueString(n.value)
+    Case ASTK_BOOLEAN
+        Return UXBInterpValueBool(IIf(UCase(n.value) = "FALSE" Or n.value = "0", 0, 1))
+    Case ASTK_IDENTIFIER, ASTK_KEYWORD_REF
+        Dim v As UXBInterpValue
+        If UXBInterpContextGetSymbol(ctx, UXBAstInterpNodeName(ast, nodeIdx), v) <> 0 Then Return v
+        Dim identUpper As String
+        identUpper = UCase(Trim(UXBAstInterpNodeName(ast, nodeIdx)))
+        If identUpper = "THIS" Or identUpper = "ME" Or identUpper = "SUPER" Then
+            If UXBInterpContextGetSymbol(ctx, "THIS", v) <> 0 Then Return v
+        End If
+        If identUpper = "RND" Then Return UXBInterpValueFloat(Rnd)
+        If identUpper = "TIMER" Then Return UXBInterpValueFloat(Timer)
+        If UCase(Trim(n.kind)) = ASTK_KEYWORD_REF Then Return UXBInterpValueExternal(n.typeName, 0, n.value)
+        Return UXBInterpValueError(UXB_INTERP_ERR_SYMBOL_NOT_FOUND, "symbol not found: " & UXBAstInterpNodeName(ast, nodeIdx))
+    Case ASTK_BINARY
+        Dim li As Integer = n.left
+        Dim ri As Integer = n.right
+        If li = AST_NULL Then li = UXBAstInterpChild(ast, nodeIdx, 0)
+        If ri = AST_NULL Then ri = UXBAstInterpChild(ast, nodeIdx, 1)
+        Dim lv As UXBInterpValue = UXBAstInterpEvalExpr(ast, li, ctx)
+        If UXBInterpIsError(lv) <> 0 Then Return lv
+        Dim binaryOp As String
+        binaryOp = UCase(Trim(IIf(n.op <> "", n.op, n.value)))
+        If binaryOp = "&&" Or binaryOp = "ANDALSO" Then
+            If UXBInterpTruth(lv) = 0 Then Return UXBInterpValueBool(0)
+        ElseIf binaryOp = "||" Or binaryOp = "ORELSE" Then
+            If UXBInterpTruth(lv) <> 0 Then Return UXBInterpValueBool(1)
+        End If
+        Dim rv As UXBInterpValue = UXBAstInterpEvalExpr(ast, ri, ctx)
+        If UXBInterpIsError(rv) <> 0 Then Return rv
+        Return UXBAstInterpBinary(binaryOp, lv, rv)
+    Case ASTK_UNARY
+        Dim ci As Integer = n.left
+        If ci = AST_NULL Then ci = n.right
+        If ci = AST_NULL Then ci = UXBAstInterpChild(ast, nodeIdx, 0)
+        Dim cv As UXBInterpValue = UXBAstInterpEvalExpr(ast, ci, ctx)
+        If UXBInterpIsError(cv) <> 0 Then Return cv
+        Select Case UCase(Trim(IIf(n.op <> "", n.op, n.value)))
+        Case "-": If cv.kind = UXB_VAL_F32 Or cv.kind = UXB_VAL_F64 Then Return UXBInterpValueFloat(-UXBAstInterpAsFloat(cv)) Else Return UXBInterpValueInt(-cv.intValue)
+        Case "+": Return cv
+        Case "NOT"
+            If cv.kind = UXB_VAL_BOOL Then Return UXBInterpValueBool(UXBInterpTruth(cv) = 0)
+            Return UXBInterpValueInt(Not UXBAstInterpAsIntMask(cv))
+        Case "LNOT", "!": Return UXBInterpValueBool(UXBInterpTruth(cv) = 0)
+        Case "BNOT", "~": Return UXBInterpValueInt(Not UXBAstInterpAsIntMask(cv))
+        End Select
+        Return cv
+    Case ASTK_TERNARY_EXPR
+        Dim condIdx As Integer = n.left
+        If condIdx = AST_NULL Then condIdx = UXBAstInterpChild(ast, nodeIdx, 0)
+        Dim thenIdx As Integer = n.firstChild
+        If thenIdx = AST_NULL Then thenIdx = UXBAstInterpChild(ast, nodeIdx, 1)
+        Dim elseIdx As Integer = n.right
+        If elseIdx = AST_NULL Then elseIdx = UXBAstInterpChild(ast, nodeIdx, 2)
+        Dim condValue As UXBInterpValue = UXBAstInterpEvalExpr(ast, condIdx, ctx)
+        If UXBInterpIsError(condValue) <> 0 Then Return condValue
+        If UXBInterpTruth(condValue) <> 0 Then Return UXBAstInterpEvalExpr(ast, thenIdx, ctx)
+        Return UXBAstInterpEvalExpr(ast, elseIdx, ctx)
+    Case ASTK_CALL_EXPR
+        Return UXBAstInterpEvalCallExpression(ast, nodeIdx, ctx)
+    Case ASTK_CAST_EXPR
+        Dim castChild As Integer = UXBAstInterpFirstExprChild(ast, nodeIdx)
+        Dim castValue As UXBInterpValue = UXBAstInterpEvalExpr(ast, castChild, ctx)
+        If UXBInterpIsError(castValue) <> 0 Then Return castValue
+        If n.value <> "" Then castValue.typeName = UCase(Trim(n.value)): castValue.kind = UXBInterpCanonicalType(n.value)
+        Return castValue
+    Case ASTK_SIZEOF_EXPR
+        Return UXBInterpValueInt(8)
+    Case ASTK_NEW_EXPR
+        Dim typeName As String = n.typeName
+        If typeName = "" Then typeName = n.value
+        Dim id As Integer = UXBInterpHeapAlloc(ctx.heap, "OBJECT", typeName)
+        Return UXBInterpValueHandle("OBJECT", id)
+    Case ASTK_INIT_EXPR
+        If n.firstChild <> AST_NULL Then Return UXBAstInterpEvalExpr(ast, n.firstChild, ctx)
+        Return UXBInterpValueDefaultForType(n.typeName)
+    Case ASTK_INDEX_EXPR
+        Dim arrIdx As Integer = n.left
+        If arrIdx = AST_NULL Then arrIdx = UXBAstInterpChild(ast, nodeIdx, 0)
+        Dim subIdx As Integer = UXBAstInterpChild(ast, nodeIdx, 1)
+        Dim arrValue As UXBInterpValue = UXBAstInterpEvalExpr(ast, arrIdx, ctx)
+        If UXBInterpIsError(arrValue) <> 0 Then Return arrValue
+        Dim subValue As UXBInterpValue = UXBAstInterpEvalExpr(ast, subIdx, ctx)
+        If UXBInterpIsError(subValue) <> 0 Then Return subValue
+        Dim outValue As UXBInterpValue
+        If UXBInterpHeapGetIndex(ctx.heap, arrValue.arrayId, CInt(subValue.intValue), outValue) <> 0 Then Return outValue
+        Return UXBInterpValueVoid()
+    Case ASTK_FIELD_EXPR, ASTK_MEMBER_EXPR
+        Dim namespaceConstDecl As Integer
+        Dim namespaceConstInit As Integer
+        If UXBAstResolveNamespaceConstField(ast, nodeIdx, namespaceConstDecl, namespaceConstInit) <> 0 Then
+            Return UXBAstInterpEvalExpr(ast, namespaceConstInit, ctx)
+        End If
+        Dim objIdx As Integer = n.left
+        If objIdx = AST_NULL Then objIdx = UXBAstInterpChild(ast, nodeIdx, 0)
+        Dim objValue As UXBInterpValue = UXBAstInterpEvalExpr(ast, objIdx, ctx)
+        If UXBInterpIsError(objValue) <> 0 Then Return objValue
+        Dim fieldName As String = n.value
+        If fieldName = "" Then fieldName = UXBAstInterpNodeName(ast, UXBAstInterpChild(ast, nodeIdx, 1))
+        Dim outField As UXBInterpValue
+        If UXBInterpHeapGetField(ctx.heap, objValue.handleId, fieldName, outField) <> 0 Then Return outField
+        Return UXBInterpValueError(UXB_INTERP_ERR_SYMBOL_NOT_FOUND, "field not found: " & fieldName)
+    Case ASTK_RANGE_EXPR
+        Return UXBInterpValueExternal("ARRAY", 0, n.value)
+    Case ASTK_INCDEC_EXPR
+        Dim baseIdx As Integer = UXBAstInterpFirstExprChild(ast, nodeIdx)
+        Dim baseValue As UXBInterpValue = UXBAstInterpEvalExpr(ast, baseIdx, ctx)
+        If UXBInterpIsError(baseValue) <> 0 Then Return baseValue
+        If InStr(UCase(n.op & n.value), "--") > 0 Then baseValue.intValue -= 1 Else baseValue.intValue += 1
+        Return baseValue
+    Case ASTK_PROMPT_EXPR
+        Return UXBInterpValueString(n.value)
+    End Select
+    Return UXBAstInterpFailClosed(ctx, n.kind, UXBAstInterpDecisionForNode(n.kind))
+End Function
+
+#endif

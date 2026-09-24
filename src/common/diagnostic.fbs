@@ -1,0 +1,245 @@
+#ifndef UXB_COMMON_DIAGNOSTIC_FBS
+#define UXB_COMMON_DIAGNOSTIC_FBS
+
+#include once "source_location.fbs"
+#include once "json_builder.fbs"
+#include once "report_writer.fbs"
+#include once "error_system_adim45.fbs"
+
+Const UXB_DIAG_INFO As Integer = 1
+Const UXB_DIAG_WARNING As Integer = 2
+Const UXB_DIAG_ERROR As Integer = 3
+Const UXB_DIAG_FATAL As Integer = 4
+
+Type UXBDiagnostic
+    code As String
+    severity As Integer
+    layer As String
+    phase As String
+    messageTr As String
+    messageEn As String
+    sourceFile As String
+    lineNo As Integer
+    colNo As Integer
+    length As Integer
+    relatedSurface As String
+    hintTr As String
+    hintEn As String
+End Type
+
+Type UXBDiagnosticList
+    items(Any) As UXBDiagnostic
+    count As Integer
+    capacity As Integer
+    errorLimit As Integer
+    strictMode As Integer
+End Type
+
+Function UXBDiagnosticSeverityName(ByVal sev As Integer) As String
+    Select Case sev
+    Case UXB_DIAG_INFO
+        Return "info"
+    Case UXB_DIAG_WARNING
+        Return "warning"
+    Case UXB_DIAG_ERROR
+        Return "error"
+    Case UXB_DIAG_FATAL
+        Return "fatal"
+    Case Else
+        Return "unknown"
+    End Select
+End Function
+
+Sub UXBDiagnosticListInit(ByRef list As UXBDiagnosticList)
+    list.capacity = 32
+    ReDim list.items(list.capacity - 1)
+    list.count = 0
+    list.errorLimit = 100
+    list.strictMode = 0
+End Sub
+
+Private Sub UXBDiagnosticEnsureCapacity(ByRef list As UXBDiagnosticList, ByVal minSize As Integer)
+    If list.capacity >= minSize Then Exit Sub
+    Dim newCap As Integer
+    newCap = list.capacity
+    If newCap < 1 Then newCap = 32
+    Do While newCap < minSize
+        newCap *= 2
+    Loop
+    ReDim Preserve list.items(newCap - 1)
+    list.capacity = newCap
+End Sub
+
+
+Private Function UXBDiagnosticErrorCenterSeverity(ByVal sev As Integer) As String
+    Select Case sev
+    Case UXB_DIAG_INFO
+        Return "INFO"
+    Case UXB_DIAG_WARNING
+        Return "WARN"
+    Case UXB_DIAG_ERROR
+        Return "ERROR"
+    Case UXB_DIAG_FATAL
+        Return "FATAL"
+    End Select
+    Return "INFO"
+End Function
+
+Private Sub UXBDiagnosticMirrorToErrorCenter(ByRef d As UXBDiagnostic)
+    Dim codeUse As String
+    codeUse = Trim(d.code)
+    If codeUse = "" Then codeUse = "E.0001"
+
+    Dim msgUse As String
+    If UXBErrorLanguage45() = "tr" Then
+        msgUse = d.messageTr
+        If Trim(msgUse) = "" Then msgUse = d.messageEn
+    Else
+        msgUse = d.messageEn
+        If Trim(msgUse) = "" Then msgUse = d.messageTr
+    End If
+    If Trim(msgUse) = "" Then msgUse = "diagnostic without message"
+
+    Dim detailText As String
+    detailText = "layer=" & d.layer & " phase=" & d.phase & " source=" & d.sourceFile & ":" & LTrim(Str(d.lineNo)) & ":" & LTrim(Str(d.colNo))
+    If Trim(d.relatedSurface) <> "" Then detailText &= " surface=" & d.relatedSurface
+    Dim hintUse As String
+    If UXBErrorLanguage45() = "tr" Then
+        hintUse = IIf(Trim(d.hintTr) <> "", d.hintTr, d.hintEn)
+    Else
+        hintUse = IIf(Trim(d.hintEn) <> "", d.hintEn, d.hintTr)
+    End If
+    If Trim(hintUse) <> "" Then detailText &= " hint=" & hintUse
+
+    UXBErrorEmit45 UXBDiagnosticErrorCenterSeverity(d.severity), codeUse, d.layer, msgUse, "common/diagnostic.fbs", detailText
+End Sub
+
+Function UXBDiagnosticPushBilingual(ByRef list As UXBDiagnosticList, ByRef codeText As String, ByVal sev As Integer, ByRef layerText As String, ByRef phaseText As String, ByRef msgEn As String, ByRef msgTr As String, ByRef sourceLoc As SourceLocation, ByRef relatedSurfaceText As String = "", ByRef hintEn As String = "", ByRef hintTr As String = "") As Integer
+    UXBDiagnosticEnsureCapacity list, list.count + 1
+    Dim idx As Integer
+    idx = list.count
+    list.count += 1
+    With list.items(idx)
+        .code = Trim(codeText)
+        .severity = sev
+        .layer = Trim(layerText)
+        .phase = Trim(phaseText)
+        .messageTr = msgTr
+        .messageEn = msgEn
+        .sourceFile = sourceLoc.filePath
+        .lineNo = sourceLoc.lineNo
+        .colNo = sourceLoc.colNo
+        .length = sourceLoc.length
+        .relatedSurface = relatedSurfaceText
+        .hintTr = hintTr
+        .hintEn = hintEn
+    End With
+    UXBDiagnosticMirrorToErrorCenter list.items(idx)
+    Return idx
+End Function
+
+Function UXBDiagnosticPush(ByRef list As UXBDiagnosticList, ByRef codeText As String, ByVal sev As Integer, ByRef layerText As String, ByRef phaseText As String, ByRef msgTr As String, ByRef sourceLoc As SourceLocation, ByRef relatedSurfaceText As String = "", ByRef hintText As String = "") As Integer
+    Return UXBDiagnosticPushBilingual(list, codeText, sev, layerText, phaseText, msgTr, msgTr, sourceLoc, relatedSurfaceText, hintText, hintText)
+End Function
+
+Function UXBDiagnosticErrorCount(ByRef list As UXBDiagnosticList) As Integer
+    Dim n As Integer
+    n = 0
+    Dim i As Integer
+    For i = 0 To list.count - 1
+        If list.items(i).severity >= UXB_DIAG_ERROR Then n += 1
+    Next i
+    Return n
+End Function
+
+Function UXBDiagnosticHasEmptyCode(ByRef list As UXBDiagnosticList) As Integer
+    Dim i As Integer
+    For i = 0 To list.count - 1
+        If Trim(list.items(i).code) = "" Then Return 1
+    Next i
+    Return 0
+End Function
+
+Sub UXBDiagnosticToJsonObject(ByRef b As UXBJsonBuilder, ByRef d As UXBDiagnostic)
+    UXBJsonBeginObject b
+    UXBJsonFieldString b, "code", d.code
+    UXBJsonFieldString b, "severity", UXBDiagnosticSeverityName(d.severity)
+    UXBJsonFieldString b, "layer", d.layer
+    UXBJsonFieldString b, "phase", d.phase
+    UXBJsonFieldString b, "message_tr", d.messageTr
+    UXBJsonFieldString b, "message_en", d.messageEn
+    UXBJsonBeginObjectField b, "source"
+    UXBJsonFieldString b, "file", d.sourceFile
+    UXBJsonFieldInt b, "line", d.lineNo
+    UXBJsonFieldInt b, "col", d.colNo
+    UXBJsonFieldInt b, "length", d.length
+    UXBJsonEndObject b
+    UXBJsonFieldString b, "related_surface", d.relatedSurface
+    UXBJsonFieldString b, "hint_tr", d.hintTr
+    UXBJsonFieldString b, "hint_en", d.hintEn
+    UXBJsonEndObject b
+End Sub
+
+Function UXBDiagnosticListToJson(ByRef list As UXBDiagnosticList, ByRef jsonOut As String) As Integer
+    Dim b As UXBJsonBuilder
+    UXBJsonInit b
+    UXBJsonBeginObject b
+    UXBJsonFieldString b, "schema", "uxb.diagnostics.v1"
+    UXBJsonFieldInt b, "count", list.count
+    UXBJsonFieldInt b, "error_count", UXBDiagnosticErrorCount(list)
+    UXBJsonFieldBool b, "strict", list.strictMode
+    UXBJsonBeginArrayField b, "diagnostics"
+    Dim i As Integer
+    For i = 0 To list.count - 1
+        UXBDiagnosticToJsonObject b, list.items(i)
+    Next i
+    UXBJsonEndArray b
+    UXBJsonEndObject b
+    jsonOut = UXBJsonText(b)
+    Return 1
+End Function
+
+Function UXBDiagnosticWriteJson(ByRef list As UXBDiagnosticList, ByRef outPath As String, ByRef errText As String) As Integer
+    Dim jsonText As String
+    UXBDiagnosticListToJson list, jsonText
+    Return UXBReportWriteText(outPath, jsonText, errText)
+End Function
+
+Function UXBDiagnosticListToVSCodeJson(ByRef list As UXBDiagnosticList, ByRef jsonOut As String) As Integer
+    Dim b As UXBJsonBuilder
+    UXBJsonInit b
+    UXBJsonBeginArray b
+    Dim i As Integer
+    For i = 0 To list.count - 1
+        Dim d As UXBDiagnostic
+        d = list.items(i)
+        UXBJsonBeginObject b
+        UXBJsonFieldString b, "code", d.code
+        UXBJsonFieldString b, "severity", UXBDiagnosticSeverityName(d.severity)
+        Dim displayMessage As String
+        If UXBErrorLanguage45() = "tr" Then
+            displayMessage = IIf(Trim(d.messageTr) <> "", d.messageTr, d.messageEn)
+        Else
+            displayMessage = IIf(Trim(d.messageEn) <> "", d.messageEn, d.messageTr)
+        End If
+        UXBJsonFieldString b, "message", displayMessage
+        UXBJsonFieldString b, "source", "uXBasic"
+        UXBJsonBeginObjectField b, "range"
+        UXBJsonBeginObjectField b, "start"
+        UXBJsonFieldInt b, "line", IIf(d.lineNo > 0, d.lineNo - 1, 0)
+        UXBJsonFieldInt b, "character", IIf(d.colNo > 0, d.colNo - 1, 0)
+        UXBJsonEndObject b
+        UXBJsonBeginObjectField b, "end"
+        UXBJsonFieldInt b, "line", IIf(d.lineNo > 0, d.lineNo - 1, 0)
+        UXBJsonFieldInt b, "character", IIf(d.colNo > 0, d.colNo - 1 + IIf(d.length > 0, d.length, 1), 1)
+        UXBJsonEndObject b
+        UXBJsonEndObject b
+        UXBJsonFieldString b, "file", d.sourceFile
+        UXBJsonEndObject b
+    Next i
+    UXBJsonEndArray b
+    jsonOut = UXBJsonText(b)
+    Return 1
+End Function
+
+#endif

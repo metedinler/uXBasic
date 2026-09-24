@@ -1,0 +1,600 @@
+#ifndef UXB_MIR_X64_EMIT_HELPERS_FBS
+#define UXB_MIR_X64_EMIT_HELPERS_FBS
+
+Declare Function MIRX64LocalSlotOffset(ByVal idx As Integer) As Integer
+Declare Function MIRX64IsQuotedStringLiteral(ByRef s As String) As Integer
+Declare Function MIRX64IsFloatLiteral(ByRef s As String) As Integer
+Declare Function MIRX64IsIntegerLiteral(ByRef s As String) As Integer
+' S-064: moved here (from mir_x64_builtins.fbs, which forward-declared these
+' for its own use) so mir_x64_arrays.fbs -- included even earlier than
+' builtins.fbs, see main_x64_mir_include_bundle.fbs -- can also call these
+' real definitions (mir_x64_fp64.fbs) for float array element load/store.
+' A second `Declare Function` with the identical signature is a hard
+' "Duplicated definition" error in FreeBASIC, so this must exist in exactly
+' one place shared by every caller positioned before mir_x64_fp64.fbs.
+Declare Function MIRX64LoadFloatOperandToXmm(ByRef cg As MIRX64Context, ByRef operandText As String, ByRef xmmName As String, ByRef errText As String) As Integer
+Declare Function MIRX64StoreXmmToVar(ByRef cg As MIRX64Context, ByRef xmmName As String, ByRef varName As String, ByRef errText As String) As Integer
+
+Function MIRX64Upper(ByRef s As String) As String
+    Return UCase(Trim(s))
+End Function
+
+Function MIRX64NormalizeVarName(ByRef s As String) As String
+    Return UCase(Trim(s))
+End Function
+
+Function MIRX64FindLocalOffset(ByRef cg As MIRX64Context, ByRef nameText As String, ByRef offsetOut As Integer) As Integer
+    Dim As String target = MIRX64NormalizeVarName(nameText)
+    Dim i As Integer
+    For i = 0 To cg.localCount - 1
+        If MIRX64NormalizeVarName(cg.locals(i).nameText) = target Then
+            offsetOut = cg.locals(i).offset
+            Return 1
+        End If
+    Next
+    Return 0
+End Function
+
+Function MIRX64FindLocalIndex(ByRef cg As MIRX64Context, ByRef nameText As String, ByRef indexOut As Integer) As Integer
+    Dim As String target = MIRX64NormalizeVarName(nameText)
+    Dim i As Integer
+    For i = 0 To cg.localCount - 1
+        If MIRX64NormalizeVarName(cg.locals(i).nameText) = target Then
+            indexOut = i
+            Return 1
+        End If
+    Next i
+    indexOut = -1
+    Return 0
+End Function
+
+' True only for a local slot that holds a BYREF parameter's incoming pointer (see
+' MIRX64EmitFunction's parameter-prologue loop, which sets this flag). Every load or
+' store of such a name needs one extra pointer indirection.
+Function MIRX64LocalIsByRef(ByRef cg As MIRX64Context, ByRef nameText As String) As Integer
+    Dim idx As Integer
+    If MIRX64FindLocalIndex(cg, nameText, idx) = 0 Then Return 0
+    Return cg.locals(idx).isByRef
+End Function
+
+Function MIRX64SetLocalType(ByRef cg As MIRX64Context, ByRef nameText As String, ByRef typeName As String) As Integer
+    Dim idx As Integer
+    If MIRX64FindLocalIndex(cg, nameText, idx) = 0 Then Return 0
+    Dim normalizedType As String
+    normalizedType = UCase(Trim(typeName))
+    If normalizedType = "" Then Return 0
+    If cg.locals(idx).typeName = normalizedType Then Return 0
+    cg.locals(idx).typeName = normalizedType
+    Return 1
+End Function
+
+Function MIRX64OperandIsString(ByRef cg As MIRX64Context, ByRef operandText As String) As Integer
+    If MIRX64IsQuotedStringLiteral(operandText) <> 0 Then Return 1
+    ' S-142: a type stamped by the type pass reads `TYPE_STRING` (the ADD of a string concatenation carries
+    ' the raw stamp); only the bare `STRING` was recognised, so `PRINT "x=" + STR(7)` printed the
+    ' concatenation's pointer as a number.
+    Dim idx As Integer
+    Dim slotType As String
+    If MIRX64FindLocalIndex(cg, operandText, idx) <> 0 Then
+        slotType = UCase(Trim(cg.locals(idx).typeName))
+        If Left(slotType, 5) = "TYPE_" Then slotType = Mid(slotType, 6)
+        If slotType = "STRING" Then Return 1
+    End If
+    Dim globalIdx As Integer
+    If MIRX64FindGlobalSlot(cg, operandText, globalIdx) <> 0 Then
+        slotType = UCase(Trim(cg.globals(globalIdx).typeName))
+        If Left(slotType, 5) = "TYPE_" Then slotType = Mid(slotType, 6)
+        If slotType = "STRING" Then Return 1
+    End If
+    Return 0
+End Function
+
+Function MIRX64TypeIsFloat(ByRef typeText As String) As Integer
+    Dim t As String
+    t = UCase(Trim(typeText))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    ' S-079: F80 scalars ride in the same 8-byte float slot at F64 compute
+    ' precision (the lowering refuses F80 arithmetic). The 10-byte x87 payload
+    ' exists in ARRAY cells and in memory.
+    Return IIf(t = "F32" Or t = "F64" Or t = "SINGLE" Or t = "DOUBLE" Or t = "F80" Or t = "EXTENDED" Or t = "EXT", 1, 0)
+End Function
+
+Function MIRX64ResolvedOperandType(ByRef cg As MIRX64Context, ByRef operandText As String) As String
+    If MIRX64IsFloatLiteral(operandText) <> 0 Then Return "F64"
+    If MIRX64IsIntegerLiteral(operandText) <> 0 Then Return "I64"
+    If MIRX64IsQuotedStringLiteral(operandText) <> 0 Then Return "STRING"
+
+    ' S-143: a routine's own local/parameter shadows a module-level variable of the same name. The
+    ' global table used to be asked first, so `SUB S2(w AS F64) : PRINT w` in a program that also has a
+    ' module-level `DIM w AS I64` printed the IEEE bits of w as an integer (type of the GLOBAL w).
+    Dim localIdx As Integer
+    If MIRX64FindLocalIndex(cg, operandText, localIdx) <> 0 Then
+        Dim localType As String
+        localType = UCase(Trim(cg.locals(localIdx).typeName))
+        If Left(localType, 5) = "TYPE_" Then localType = Mid(localType, 6)
+        If localType <> "" Then Return localType
+    End If
+
+    Dim globalIdx As Integer
+    If MIRX64FindGlobalSlot(cg, operandText, globalIdx) <> 0 Then
+        Dim globalType As String
+        globalType = UCase(Trim(cg.globals(globalIdx).typeName))
+        If Left(globalType, 5) = "TYPE_" Then globalType = Mid(globalType, 6)
+        Return globalType
+    End If
+    Return ""
+End Function
+
+Function MIRX64OperandIsFloat(ByRef cg As MIRX64Context, ByRef operandText As String) As Integer
+    Dim resolvedType As String
+    resolvedType = MIRX64ResolvedOperandType(cg, operandText)
+    Return MIRX64TypeIsFloat(resolvedType)
+End Function
+
+' S-142b: the operand is a single-precision float (F32/SINGLE). It still rides in
+' an 8-byte double slot, so PRINT/STR round it to single and use 7 digits.
+Function MIRX64OperandIsF32(ByRef cg As MIRX64Context, ByRef operandText As String) As Integer
+    Dim resolvedType As String
+    resolvedType = MIRX64ResolvedOperandType(cg, operandText)
+    Return IIf(resolvedType = "F32" Or resolvedType = "SINGLE", 1, 0)
+End Function
+
+' S-077: the operand is an unsigned 64-bit integer (its slot type is U64).
+Function MIRX64OperandIsU64(ByRef cg As MIRX64Context, ByRef operandText As String) As Integer
+    Dim resolvedType As String
+    resolvedType = MIRX64ResolvedOperandType(cg, operandText)
+    Return IIf(resolvedType = "U64" Or resolvedType = "ULONGINT", 1, 0)
+End Function
+
+' S-077: rax holds a 64-bit integer; convert it to a double in `xmmName`.
+' cvtsi2sd reads its source as SIGNED, so an unsigned value >= 2^63 needs the
+' standard halve-round-double sequence (shift right one, keep the dropped bit
+' sticky so rounding stays correct, convert, double). r11 is scratch.
+Sub MIRX64EmitIntRaxToXmm(ByRef cg As MIRX64Context, ByRef xmmName As String, ByVal isUnsigned As Integer)
+    If isUnsigned = 0 Then
+        MIRX64Emit cg, "    cvtsi2sd " & xmmName & ", rax"
+        Exit Sub
+    End If
+    Dim bigLabel As String
+    Dim doneLabel As String
+    bigLabel = MIRX64NextLabel(cg, "u2f_big")
+    doneLabel = MIRX64NextLabel(cg, "u2f_done")
+    MIRX64Emit cg, "    test rax, rax"
+    MIRX64Emit cg, "    js " & bigLabel
+    MIRX64Emit cg, "    cvtsi2sd " & xmmName & ", rax"
+    MIRX64Emit cg, "    jmp " & doneLabel
+    MIRX64Emit cg, bigLabel & ":"
+    MIRX64Emit cg, "    mov r11, rax"
+    MIRX64Emit cg, "    shr rax, 1"
+    MIRX64Emit cg, "    and r11d, 1"
+    MIRX64Emit cg, "    or rax, r11"
+    MIRX64Emit cg, "    cvtsi2sd " & xmmName & ", rax"
+    MIRX64Emit cg, "    addsd " & xmmName & ", " & xmmName
+    MIRX64Emit cg, doneLabel & ":"
+End Sub
+
+Function MIRX64EnsureLocalSlot(ByRef cg As MIRX64Context, ByRef nameText As String, ByRef offsetOut As Integer) As Integer
+    Dim As String norm = MIRX64NormalizeVarName(nameText)
+    If norm = "" Then Return 0
+
+    If MIRX64FindLocalOffset(cg, norm, offsetOut) <> 0 Then Return 1
+
+    Dim idx As Integer
+    idx = cg.localCount
+    If cg.localCount = 0 Then
+        ReDim cg.locals(0)
+    Else
+        ReDim Preserve cg.locals(cg.localCount)
+    End If
+
+    cg.localCount += 1
+    cg.locals(idx).nameText = norm
+    cg.locals(idx).sizeBytes = 8
+    cg.locals(idx).typeName = "I64"
+    cg.locals(idx).offset = MIRX64LocalSlotOffset(idx)
+
+    offsetOut = cg.locals(idx).offset
+    Return 1
+End Function
+
+Function MIRX64RbpRef(ByVal offsetValue As Integer) As String
+    If offsetValue < 0 Then
+        Return "[rbp-" & MIRX64ToStr(Abs(offsetValue)) & "]"
+    ElseIf offsetValue > 0 Then
+        Return "[rbp+" & MIRX64ToStr(offsetValue) & "]"
+    Else
+        Return "[rbp]"
+    End If
+End Function
+
+Function MIRX64IsIntegerLiteral(ByRef s As String) As Integer
+    Dim As String t = Trim(s)
+    If t = "" Then Return 0
+
+    Dim i As Integer
+    For i = 1 To Len(t)
+        Dim c As Integer
+        c = Asc(Mid(t, i, 1))
+
+        If i = 1 And (c = 45 Or c = 43) Then
+            If Len(t) = 1 Then Return 0
+            Continue For
+        End If
+
+        If c < 48 Or c > 57 Then Return 0
+    Next i
+
+    Return 1
+End Function
+
+Function MIRX64IsQuotedStringLiteral(ByRef s As String) As Integer
+    Dim As String t = Trim(s)
+    If Len(t) < 2 Then Return 0
+    If Left(t, 1) <> Chr(34) Then Return 0
+    If Right(t, 1) <> Chr(34) Then Return 0
+    Return 1
+End Function
+
+Function MIRX64Unquote(ByRef s As String) As String
+    Dim As String t = Trim(s)
+    If MIRX64IsQuotedStringLiteral(t) = 0 Then Return t
+    Return Mid(t, 2, Len(t) - 2)
+End Function
+
+Function MIRX64StringToNasmDb(ByRef rawText As String) As String
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim c As Integer
+        c = Asc(Mid(rawText, i, 1))
+
+        If outText <> "" Then outText &= ","
+        outText &= MIRX64ToStr(c)
+    Next i
+
+    If outText <> "" Then outText &= ","
+    outText &= "0"
+    Return outText
+End Function
+
+Function MIRX64EnsureStringLiteralLabel(ByRef cg As MIRX64Context, ByRef literalText As String, ByRef labelOut As String) As Integer
+    Dim As String raw = MIRX64Unquote(literalText)
+
+    Dim i As Integer
+    For i = 0 To cg.stringCount - 1
+        If cg.stringLiterals(i).rawText = raw Then
+            labelOut = cg.stringLiterals(i).labelText
+            Return 1
+        End If
+    Next
+
+    Dim idx As Integer
+    idx = cg.stringCount
+    If cg.stringCount = 0 Then
+        ReDim cg.stringLiterals(0)
+    Else
+        ReDim Preserve cg.stringLiterals(cg.stringCount)
+    End If
+
+    cg.stringCount += 1
+    cg.stringLiterals(idx).rawText = raw
+    cg.stringLiterals(idx).labelText = "__uxb_mir_str_" & MIRX64ToStr(idx)
+
+    labelOut = cg.stringLiterals(idx).labelText
+    MIRX64EmitData cg, labelOut & ": db " & MIRX64StringToNasmDb(raw)
+    Return 1
+End Function
+
+Function MIRX64TryParseBlockId(ByRef s As String, ByRef blockIdOut As Integer) As Integer
+    Dim As String t = Trim(s)
+    If MIRX64IsIntegerLiteral(t) = 0 Then Return 0
+    blockIdOut = ValInt(t)
+    Return 1
+End Function
+
+Function MIRX64BlockLabel(ByVal blockId As Integer) As String
+    Return ".Lmir_block_" & MIRX64ToStr(blockId)
+End Function
+
+' Defined after MIRX64NormalizeRegForType below (which it uses).
+Declare Sub MIRX64LoadVarNarrowFixup(ByRef cg As MIRX64Context, ByRef regName As String, ByRef typeNameRaw As String)
+
+Function MIRX64LoadOperandToReg(ByRef cg As MIRX64Context, ByRef operandText As String, ByRef regName As String, ByRef errText As String) As Integer
+    Dim As String opText = Trim(operandText)
+
+    ' THIS, ME and SUPER are receiver aliases.  They share the same runtime
+    ' object address; SUPER changes member lookup ownership in semantic/MIR,
+    ' but never changes the physical receiver passed through the ABI.
+    If UCase(opText) = "ME" Or UCase(opText) = "SUPER" Then opText = "THIS"
+
+    If MIRX64IsIntegerLiteral(opText) <> 0 Then
+        MIRX64Emit cg, "    mov " & regName & ", " & opText
+        Return 1
+    End If
+
+    ' S-078: the lowering passes &H / &O / &B integer literals through as source
+    ' text. ValULng understands all three radixes and keeps the full 64 bits;
+    ' NASM takes the decimal magnitude (an unsigned qword immediate is fine).
+    If Len(opText) >= 3 And Left(opText, 1) = "&" Then
+        Select Case UCase(Mid(opText, 2, 1))
+        Case "H", "O", "B"
+            MIRX64Emit cg, "    mov " & regName & ", " & LTrim(Str(ValULng(opText)))
+            Return 1
+        End Select
+    End If
+
+    If MIRX64IsQuotedStringLiteral(opText) <> 0 Then
+        Dim litLabel As String
+        If MIRX64EnsureStringLiteralLabel(cg, opText, litLabel) = 0 Then
+            errText = "MIR x64 emitter: string literal label creation failed"
+            Return 0
+        End If
+        MIRX64Emit cg, "    lea " & regName & ", [rel " & litLabel & "]"
+        Return 1
+    End If
+
+    Dim off As Integer
+    If MIRX64FindLocalOffset(cg, opText, off) <> 0 Then
+        MIRX64Emit cg, "    mov " & regName & ", qword " & MIRX64RbpRef(off)
+        If MIRX64LocalIsByRef(cg, opText) <> 0 Then
+            ' This slot holds a BYREF parameter's pointer -- one more indirection
+            ' to get the actual value it points to.
+            MIRX64Emit cg, "    mov " & regName & ", qword [" & regName & "]"
+        End If
+        Dim loadLocalIdx As Integer
+        If MIRX64FindLocalIndex(cg, opText, loadLocalIdx) <> 0 Then MIRX64LoadVarNarrowFixup cg, regName, cg.locals(loadLocalIdx).typeName
+        Return 1
+    End If
+
+    Dim globalIdx As Integer
+    If MIRX64FindGlobalSlot(cg, opText, globalIdx) <> 0 Then
+        MIRX64Emit cg, "    mov " & regName & ", qword [rel " & cg.globals(globalIdx).labelText & "]"
+        MIRX64LoadVarNarrowFixup cg, regName, cg.globals(globalIdx).typeName
+        Return 1
+    End If
+
+    errText = "MIR x64 emitter: unknown operand '" & opText & "'"
+    Return 0
+End Function
+
+' Narrows a register to a declared type's width.  The accepted spellings must
+' match MIRApplyDeclaredScalarType (mir_evaluator.fbs) and the AST interpreter's
+' UXBInterpApplyDeclaredType, because callers reach here with the type as it was
+' written in the source: MIRX64SetLocalType passes MIRFunction type strings
+' straight through, and MIRCanonicalTypeName2 folds only some of the aliases.
+' Matching only I8/U8/... would leave "x AS BYTE" un-narrowed on this backend
+' while the interpreters narrowed it.  LONG is I32 here, per type_binding.fbs.
+'
+' Emits nothing for 64-bit, float, string and non-scalar types: those either
+' already occupy the full register or are not integers at all.
+Private Sub MIRX64NormalizeRegForType(ByRef cg As MIRX64Context, ByRef regName As String, ByRef typeNameRaw As String)
+    Dim t As String
+    t = UCase(Trim(typeNameRaw))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Select Case t
+    Case "BOOLEAN", "BOOL"
+        MIRX64Emit cg, "    cmp " & regName & ", 0"
+        MIRX64Emit cg, "    setne " & IIf(regName = "rax", "al", IIf(regName = "r10", "r10b", "r11b"))
+        If regName = "rax" Then
+            MIRX64Emit cg, "    movzx rax, al"
+        ElseIf regName = "r10" Then
+            MIRX64Emit cg, "    movzx r10, r10b"
+        ElseIf regName = "r11" Then
+            MIRX64Emit cg, "    movzx r11, r11b"
+        End If
+        MIRX64Emit cg, "    neg " & regName
+    Case "U8", "UBYTE"
+        If regName = "rax" Then
+            MIRX64Emit cg, "    movzx rax, al"
+        ElseIf regName = "r10" Then
+            MIRX64Emit cg, "    movzx r10, r10b"
+        ElseIf regName = "r11" Then
+            MIRX64Emit cg, "    movzx r11, r11b"
+        End If
+    Case "U16", "USHORT"
+        If regName = "rax" Then
+            MIRX64Emit cg, "    movzx rax, ax"
+        ElseIf regName = "r10" Then
+            MIRX64Emit cg, "    movzx r10, r10w"
+        ElseIf regName = "r11" Then
+            MIRX64Emit cg, "    movzx r11, r11w"
+        End If
+    Case "U32", "UINTEGER", "UINT", "ULONG"
+        If regName = "rax" Then
+            MIRX64Emit cg, "    mov eax, eax"
+        ElseIf regName = "r10" Then
+            MIRX64Emit cg, "    mov r10d, r10d"
+        ElseIf regName = "r11" Then
+            MIRX64Emit cg, "    mov r11d, r11d"
+        End If
+    Case "I8", "BYTE", "SBYTE"
+        If regName = "rax" Then
+            MIRX64Emit cg, "    movsx rax, al"
+        ElseIf regName = "r10" Then
+            MIRX64Emit cg, "    movsx r10, r10b"
+        ElseIf regName = "r11" Then
+            MIRX64Emit cg, "    movsx r11, r11b"
+        End If
+    Case "I16", "SHORT"
+        If regName = "rax" Then
+            MIRX64Emit cg, "    movsx rax, ax"
+        ElseIf regName = "r10" Then
+            MIRX64Emit cg, "    movsx r10, r10w"
+        ElseIf regName = "r11" Then
+            MIRX64Emit cg, "    movsx r11, r11w"
+        End If
+    Case "I32", "INTEGER", "INT", "LONG"
+        If regName = "rax" Then
+            MIRX64Emit cg, "    movsxd rax, eax"
+        ElseIf regName = "r10" Then
+            MIRX64Emit cg, "    movsxd r10, r10d"
+        ElseIf regName = "r11" Then
+            MIRX64Emit cg, "    movsxd r11, r11d"
+        End If
+    End Select
+End Sub
+
+' S-071: a variable's slot is a full 64-bit cell, kept normalized to its
+' declared width by MIRX64StoreRegToVar. Once its address escapes through
+' VARPTR, a NARROWER raw store (POKED into an I32, POKEB into an I8, ...)
+' only rewrites the low bytes and leaves the old upper bytes -- an I32 that
+' held -1 (upper half FFFFFFFF) and was POKED with 5 then read back as
+' -4294967291. Re-normalize on load for the narrow integer types; for a value
+' that is already normalized this is a no-op, so ordinary code is unaffected
+' apart from one register-only instruction per narrow-variable load.
+Sub MIRX64LoadVarNarrowFixup(ByRef cg As MIRX64Context, ByRef regName As String, ByRef typeNameRaw As String)
+    Dim t As String = UCase(Trim(typeNameRaw))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    Select Case t
+    Case "I8", "BYTE", "SBYTE", "U8", "UBYTE", "I16", "SHORT", "U16", "USHORT", "I32", "INTEGER", "INT", "LONG", "U32", "UINTEGER", "UINT", "ULONG"
+        MIRX64NormalizeRegForType cg, regName, typeNameRaw
+    End Select
+End Sub
+
+Function MIRX64StoreRegToVar(ByRef cg As MIRX64Context, ByRef regName As String, ByRef varName As String, ByRef errText As String) As Integer
+    Dim globalIdx As Integer
+    If MIRX64FindGlobalSlot(cg, varName, globalIdx) <> 0 Then
+        Dim globalType As String = cg.globals(globalIdx).typeName
+        MIRX64NormalizeRegForType cg, regName, globalType
+        MIRX64Emit cg, "    mov qword [rel " & cg.globals(globalIdx).labelText & "], " & regName
+        Return 1
+    End If
+
+    Dim off As Integer
+    If MIRX64FindLocalOffset(cg, varName, off) = 0 Then
+        If MIRX64EnsureLocalSlot(cg, varName, off) = 0 Then
+            errText = "MIR x64 emitter: cannot allocate target variable '" & Trim(varName) & "'"
+            Return 0
+        End If
+    End If
+
+    Dim localIdx As Integer
+    Dim isByRefSlot As Integer
+    isByRefSlot = 0
+    If MIRX64FindLocalIndex(cg, varName, localIdx) <> 0 Then
+        isByRefSlot = cg.locals(localIdx).isByRef
+        If isByRefSlot = 0 Then
+            Dim localType As String = cg.locals(localIdx).typeName
+            MIRX64NormalizeRegForType cg, regName, localType
+        End If
+    End If
+
+    If isByRefSlot <> 0 Then
+        ' This slot holds a BYREF parameter's incoming pointer, not the value
+        ' itself: load the pointer into a scratch register, then store the value
+        ' through it (one extra indirection vs. an ordinary local/global).
+        Dim scratchReg As String
+        scratchReg = IIf(LCase(Trim(regName)) = "r11", "r10", "r11")
+        MIRX64Emit cg, "    mov " & scratchReg & ", qword " & MIRX64RbpRef(off)
+        MIRX64Emit cg, "    mov qword [" & scratchReg & "], " & regName
+        Return 1
+    End If
+
+    MIRX64Emit cg, "    mov qword " & MIRX64RbpRef(off) & ", " & regName
+    Return 1
+End Function
+
+Function MIRX64IsLikelyVariableToken(ByRef tokenText As String) As Integer
+    Dim t As String
+    t = Trim(tokenText)
+
+    If t = "" Then Return 0
+    If MIRX64IsIntegerLiteral(t) <> 0 Then Return 0
+    If MIRX64IsFloatLiteral(t) <> 0 Then Return 0
+    If MIRX64IsQuotedStringLiteral(t) <> 0 Then Return 0
+
+    Dim i As Integer
+    For i = 1 To Len(t)
+        Dim c As Integer
+        c = Asc(Mid(t, i, 1))
+        If c = 95 Then Continue For
+        If c >= 48 And c <= 57 Then Continue For
+        If c >= 65 And c <= 90 Then Continue For
+        If c >= 97 And c <= 122 Then Continue For
+        Return 0
+    Next i
+
+    Return 1
+End Function
+
+
+Function MIRX64StoreImmediateToVar(ByRef cg As MIRX64Context, ByRef varName As String, ByRef valueText As String, ByRef errText As String) As Integer
+    MIRX64Emit cg, "    mov rax, " & Trim(valueText)
+    Return MIRX64StoreRegToVar(cg, "rax", varName, errText)
+End Function
+
+Function MIRX64EmitBooleanizeRax(ByRef cg As MIRX64Context) As Integer
+    MIRX64Emit cg, "    cmp rax, 0"
+    MIRX64Emit cg, "    setne al"
+    MIRX64Emit cg, "    movzx rax, al"
+    Return 1
+End Function
+
+Function MIRX64EmitRotateLeft(ByRef cg As MIRX64Context, ByRef countOperand As String, ByRef errText As String) As Integer
+    If MIRX64LoadOperandToReg(cg, countOperand, "rcx", errText) = 0 Then Return 0
+    MIRX64Emit cg, "    rol rax, cl"
+    Return 1
+End Function
+
+Function MIRX64EmitRotateRight(ByRef cg As MIRX64Context, ByRef countOperand As String, ByRef errText As String) As Integer
+    If MIRX64LoadOperandToReg(cg, countOperand, "rcx", errText) = 0 Then Return 0
+    MIRX64Emit cg, "    ror rax, cl"
+    Return 1
+End Function
+
+
+' mir_x64_arrays.fbs is included after this file.
+Declare Function MIRX64FindArrayIndex(ByRef cg As MIRX64Context, ByRef nameText As String, ByRef indexOut As Integer) As Integer
+Declare Function MIRX64EmitArrayBasePtrToReg(ByRef cg As MIRX64Context, ByVal arrIdx As Integer, ByRef regName As String, ByRef errText As String) As Integer
+
+Function MIRX64AddressOfVarToReg(ByRef cg As MIRX64Context, ByRef nameText As String, ByRef regName As String, ByRef errText As String) As Integer
+    Dim off As Integer
+    Dim localIdx As Integer
+    Dim arrayIdx As Integer
+    ' S-071: VARPTR(array) must be the address of the array's ONE real
+    ' backing block (= address of its first element), per the locked S-036
+    ' design. Since S-035 an array's label holds an 8-byte POINTER to a
+    ' calloc'd block, not the elements themselves, and arrays are also
+    ' registered as module globals -- so falling through to the global-slot
+    ' branch below handed out the address of an unrelated 8-byte slot, and
+    ' PEEK/POKE/MEMCOPY through VARPTR(arr) read/wrote garbage. Locals are
+    ' checked first so a real local scalar is never shadowed by an array of
+    ' the same (flat-namespace) name.
+    ' S-068: an array PARAMETER is a local slot too (it holds the descriptor address),
+    ' but VARPTR(arr) must still be the element block -- resolve it before the local.
+    If MIRX64FindArrayIndex(cg, nameText, arrayIdx) <> 0 Then
+        If cg.arrays(arrayIdx).isParam <> 0 Then Return MIRX64EmitArrayBasePtrToReg(cg, arrayIdx, regName, errText)
+    End If
+    If MIRX64FindLocalOffset(cg, nameText, off) = 0 Then
+        If MIRX64FindArrayIndex(cg, nameText, arrayIdx) <> 0 Then
+            MIRX64Emit cg, "    mov " & regName & ", qword [rel " & cg.arrays(arrayIdx).labelText & "]"
+            Return 1
+        End If
+    End If
+    If MIRX64FindLocalOffset(cg, nameText, off) <> 0 Then
+        If MIRX64FindLocalIndex(cg, nameText, localIdx) <> 0 AndAlso cg.locals(localIdx).isByRef <> 0 Then
+            ' This local IS a BYREF parameter: its slot already holds the address
+            ' of the real storage, so "its address" is that pointer value itself,
+            ' not the address of the slot (which would be the address of a local
+            ' copy of the pointer).
+            MIRX64Emit cg, "    mov " & regName & ", qword " & MIRX64RbpRef(off)
+            Return 1
+        End If
+        MIRX64Emit cg, "    lea " & regName & ", " & MIRX64RbpRef(off)
+        Return 1
+    End If
+
+    Dim globalIdx As Integer
+    If MIRX64FindGlobalSlot(cg, nameText, globalIdx) <> 0 Then
+        MIRX64Emit cg, "    lea " & regName & ", [rel " & cg.globals(globalIdx).labelText & "]"
+        Return 1
+    End If
+
+    errText = "MIR x64 emitter: address source not found: " & Trim(nameText)
+    Return 0
+End Function
+
+
+#endif

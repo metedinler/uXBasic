@@ -1,0 +1,90 @@
+#ifndef UXB_PARSER_ADIM08_ERROR_RECOVERY_FBS
+#define UXB_PARSER_ADIM08_ERROR_RECOVERY_FBS
+
+Const UXB_PARSER_MAX_ERRORS As Integer = 64
+
+Function UXBParserTokenText(ByRef tk As Token) As String
+    Dim k As String
+    k = Trim(tk.kind)
+    If k = "" Then k = "?"
+    Return k & "('" & tk.lexeme & "') @" & LTrim(Str(tk.lineNo)) & ":" & LTrim(Str(tk.colNo))
+End Function
+
+Sub UXBParserAppendError(ByRef ps As ParseState, ByRef tk As Token, ByRef codeText As String, ByRef detailText As String)
+    Dim code As String
+    Dim msg As String
+
+    code = UCase(Trim(codeText))
+    If code = "" Then code = "PARSER_ERROR"
+
+    msg = Trim(detailText)
+    If msg = "" Then msg = "statement parse failed"
+
+    msg = "[" & code & "] [" & LTrim(Str(tk.lineNo)) & ":" & LTrim(Str(tk.colNo)) & "] " & msg & " near " & UXBParserTokenText(tk)
+
+    If ps.parseErrorCount = 0 Then
+        ReDim ps.parseErrors(0)
+    Else
+        ReDim Preserve ps.parseErrors(ps.parseErrorCount)
+    End If
+
+    ps.parseErrors(ps.parseErrorCount) = msg
+    ps.parseErrorCount += 1
+    ps.lastError = msg
+End Sub
+
+Function UXBParserIsStatementBoundary(ByRef tk As Token) As Integer
+    If tk.kind = "EOF" Then Return 1
+    If tk.kind = "EOL" Then Return 1
+    If tk.kind = "OP" And tk.lexeme = ":" Then Return 1
+    Return 0
+End Function
+
+Function UXBParserIsBlockSyncKeyword(ByRef tk As Token) As Integer
+    If tk.kind <> "KEYWORD" Then Return 0
+
+    Select Case UCase(Trim(tk.lexeme))
+    Case "END", "ELSE", "ELSEIF", "CASE", "CATCH", "FINALLY", "NEXT", "LOOP", "WEND"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Sub UXBParserRecoverToNextStatement(ByRef ps As ParseState)
+    Do While CurToken(ps).kind <> "EOF"
+        Dim tk As Token
+        tk = CurToken(ps)
+
+        If UXBParserIsStatementBoundary(tk) <> 0 Then
+            If tk.kind = "EOL" Then AdvanceTok ps
+            If tk.kind = "OP" And tk.lexeme = ":" Then AdvanceTok ps
+            Exit Sub
+        End If
+
+        If UXBParserIsBlockSyncKeyword(tk) <> 0 Then Exit Sub
+
+        AdvanceTok ps
+    Loop
+End Sub
+
+Sub UXBParserRecoverToBlockSync(ByRef ps As ParseState)
+    Do While CurToken(ps).kind <> "EOF"
+        Dim tk As Token
+        tk = CurToken(ps)
+        If UXBParserIsBlockSyncKeyword(tk) <> 0 Then Exit Sub
+        If UXBParserIsStatementBoundary(tk) <> 0 Then
+            If tk.kind = "EOL" Then AdvanceTok ps
+            If tk.kind = "OP" And tk.lexeme = ":" Then AdvanceTok ps
+        Else
+            AdvanceTok ps
+        End If
+    Loop
+End Sub
+
+Function UXBParserErrorLimitExceeded(ByRef ps As ParseState) As Integer
+    If ps.parseErrorCount >= UXB_PARSER_MAX_ERRORS Then Return 1
+    Return 0
+End Function
+
+#endif

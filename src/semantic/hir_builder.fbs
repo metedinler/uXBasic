@@ -1,0 +1,150 @@
+#ifndef UXB_HIR_BUILDER_FBS
+#define UXB_HIR_BUILDER_FBS
+
+#include once "hir_ast_bridge.fbs"
+#include once "hir_scope_bridge.fbs"
+#include once "hir_symbol_bridge.fbs"
+#include once "hir_fact_table.fbs"
+#include once "semantic_targets.fbs"
+
+Type HIRBridge
+    scopeMap As HIRScopeMap
+    facts As HIRFactTable
+    ok As Integer
+    errorCount As Integer
+    warningCount As Integer
+    diagnosticText As String
+End Type
+
+Dim Shared gHIRBridge As HIRBridge
+
+Private Function HIRNodeDeclaredType(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef typeOut As String) As Integer
+    typeOut = ""
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    If Trim(ps.ast.nodes(nodeIdx).typeName) <> "" Then
+        typeOut = UCase(Trim(ps.ast.nodes(nodeIdx).typeName))
+        Return 1
+    End If
+    Dim tNode As Integer = HIRAstFindChildByKind(ps, nodeIdx, "TYPE_REF")
+    If tNode <> -1 Then
+        typeOut = UCase(Trim(ps.ast.nodes(tNode).value))
+        Return IIf(typeOut <> "", 1, 0)
+    End If
+    Return 0
+End Function
+
+Private Function HIRAstKindIsCompileTime(ByRef k As String) As Integer
+    If Left(k, 5) = "META_" Then Return 1
+    If k = "INCLUDE_STMT" Or k = "IMPORT_STMT" Or k = "ALIAS_STMT" Or k = "USING_STMT" Then Return 1
+    Return 0
+End Function
+
+Private Function HIRAstKindIsRuntime(ByRef k As String) As Integer
+    If InStr(k, "_STMT") > 0 Then Return 1
+    If InStr(k, "_EXPR") > 0 Then Return 1
+    If k = "BINARY" Or k = "UNARY" Or k = "IDENT" Or k = "IDENTIFIER" Or k = "NUMBER" Or k = "STRING" Then Return 1
+    Return 0
+End Function
+
+Private Function HIRFillOneFact(ByRef ps As ParseState, ByRef bridge As HIRBridge, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+    Dim f As HIRAstFact Ptr = HIRFactForNode(bridge.facts, nodeIdx)
+    If f = 0 Then Return 1
+
+    Dim ByRef n As ASTNode = ps.ast.nodes(nodeIdx)
+    f->astNode = nodeIdx
+    f->astKind = UCase(Trim(n.kind))
+    f->hirScopeId = bridge.scopeMap.astNodeToOwnerScope(nodeIdx)
+    f->storageClass = HIRInferStorageClass(f->astKind)
+    HIRFactSetSourceFromAst *f, n
+
+    Dim tn As String
+    If HIRNodeDeclaredType(ps, nodeIdx, tn) <> 0 Then
+        f->typeName = tn
+    ElseIf Trim(n.typeName) <> "" Then
+        f->typeName = UCase(Trim(n.typeName))
+    Else
+        f->typeName = ""
+    End If
+
+    Dim sr As HIRSymbolRef
+    If HIRFindSymbolForAstNode(ps, bridge.scopeMap, nodeIdx, "", sr) <> 0 Then
+        f->symbolIndex = sr.symbolIndex
+        f->symbolName = sr.name
+        f->symbolKind = sr.kind
+        ' FUNCTION/SUB sembolleri (Step3BindRoutineSymbol) tip alanina sembol
+        ' TURUNU yazar ("SYM_FUNCTION"/"SYM_SUB"); bu bir deger tipi degildir.
+        ' Eskiden burada CALL_EXPR fact'ine, oradan HIRPrepareMirLowering ile
+        ' AST dugumunun typeName'ine sizip UXBStep3InferExprType'in "acik tip"
+        ' dalinda donuyordu -- ornegin TASK donduren FUNCTION cagrisi
+        ' (MakeTask(5).JOIN()) calisma aninda TASK olarak cozulemiyordu (S-030).
+        ' Rutin cagrisinin deger tipi donus tipidir; onu tip cikarimi bulur.
+        If f->typeName = "" And sr.kind <> SYM_FUNCTION And sr.kind <> SYM_SUB Then f->typeName = sr.typeName
+    Else
+        f->symbolIndex = -1
+        f->symbolName = HIRAstNodeValueOrSymbol(ps, nodeIdx)
+        f->symbolKind = ""
+    End If
+
+    If HIRAstKindIsCompileTime(f->astKind) <> 0 Then
+        f->isCompileTimeNode = 1
+        f->isRuntimeNode = 0
+        f->isLowerableToMir = 0
+    ElseIf HIRAstKindIsRuntime(f->astKind) <> 0 Then
+        f->isCompileTimeNode = 0
+        f->isRuntimeNode = 1
+        f->isLowerableToMir = 1
+    End If
+
+    Dim targetErr As String
+    If SemStep3TargetDecisionExists(f->astKind, targetErr) <> 0 Then
+        f->targetMask = 1
+    Else
+        f->targetMask = 0
+        f->diagnostic = targetErr
+    End If
+
+    If f->isLowerableToMir <> 0 And f->targetMask = 0 Then
+        f->status = "BLOCKED"
+    Else
+        f->status = "OK"
+    End If
+
+    Return 1
+End Function
+
+Function HIRBuildBridgeAfterSemantic(ByRef ps As ParseState, ByRef bridge As HIRBridge, ByRef errText As String) As Integer
+    bridge.ok = 0
+    bridge.errorCount = 0
+    bridge.warningCount = 0
+    bridge.diagnosticText = ""
+    errText = ""
+
+    If ps.rootNode < 0 Or ps.ast.count <= 0 Then
+        errText = "hir_builder: bos AST"
+        bridge.diagnosticText = errText
+        bridge.errorCount = 1
+        Return 0
+    End If
+
+    If HIRBuildScopeMap(ps, bridge.scopeMap, errText) = 0 Then
+        bridge.diagnosticText = errText
+        bridge.errorCount = 1
+        Return 0
+    End If
+
+    HIRFactTableInit bridge.facts, ps.ast.count
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If HIRFillOneFact(ps, bridge, i, errText) = 0 Then
+            bridge.diagnosticText = errText
+            bridge.errorCount += 1
+            Return 0
+        End If
+        If bridge.facts.facts(i).status = "BLOCKED" Then bridge.warningCount += 1
+    Next i
+
+    bridge.ok = 1
+    Return 1
+End Function
+
+#endif

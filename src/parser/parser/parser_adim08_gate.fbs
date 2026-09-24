@@ -1,0 +1,110 @@
+#ifndef UXB_PARSER_ADIM08_GATE_FBS
+#define UXB_PARSER_ADIM08_GATE_FBS
+
+Type UXBParserGateResult
+    ok As Integer
+    nodeCount As Integer
+    errorCount As Integer
+    missingSourceCount As Integer
+    unknownFamilyCount As Integer
+    errorsText As String
+End Type
+
+Sub UXBParserGateInit(ByRef r As UXBParserGateResult)
+    r.ok = 0
+    r.nodeCount = 0
+    r.errorCount = 0
+    r.missingSourceCount = 0
+    r.unknownFamilyCount = 0
+    r.errorsText = ""
+End Sub
+
+Private Sub UXBParserGateAppend(ByRef r As UXBParserGateResult, ByRef msg As String)
+    If Len(r.errorsText) > 0 Then r.errorsText &= Chr(10)
+    r.errorsText &= msg
+End Sub
+
+Function UXBParserValidateAstNodeSource(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef r As UXBParserGateResult) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
+
+    r.nodeCount += 1
+
+    If ps.ast.nodes(nodeIdx).lineNo <= 0 Then
+        r.missingSourceCount += 1
+        UXBParserGateAppend r, "missing source line: node=" & LTrim(Str(nodeIdx)) & " kind=" & ps.ast.nodes(nodeIdx).kind
+    End If
+
+    If ps.ast.nodes(nodeIdx).family = AST_FAMILY_UNKNOWN Then
+        r.unknownFamilyCount += 1
+        UXBParserGateAppend r, "unknown AST family: node=" & LTrim(Str(nodeIdx)) & " kind=" & ps.ast.nodes(nodeIdx).kind
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> AST_NULL Then UXBParserValidateAstNodeSource ps, ps.ast.nodes(nodeIdx).left, r
+    If ps.ast.nodes(nodeIdx).right <> AST_NULL Then UXBParserValidateAstNodeSource ps, ps.ast.nodes(nodeIdx).right, r
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> AST_NULL
+        UXBParserValidateAstNodeSource ps, ch, r
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Function UXBParserRunGate(ByRef ps As ParseState, ByRef r As UXBParserGateResult) As Integer
+    UXBParserGateInit r
+    r.errorCount = ps.parseErrorCount
+
+    If ps.parseErrorCount > 0 Then
+        Dim i As Integer
+        For i = 0 To ps.parseErrorCount - 1
+            UXBParserGateAppend r, ps.parseErrors(i)
+        Next i
+    End If
+
+    If ps.rootNode = AST_NULL Or ps.rootNode < 0 Then
+        UXBParserGateAppend r, "parser root node missing"
+    Else
+        UXBParserValidateAstNodeSource ps, ps.rootNode, r
+    End If
+
+    If r.errorCount = 0 And r.missingSourceCount = 0 And r.unknownFamilyCount = 0 Then
+        r.ok = 1
+        Return 1
+    End If
+
+    r.ok = 0
+    Return 0
+End Function
+
+Function UXBParserGateToJson(ByRef r As UXBParserGateResult) As String
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  ""ok"": " & IIf(r.ok <> 0, "true", "false") & "," & Chr(10)
+    j &= "  ""node_count"": " & LTrim(Str(r.nodeCount)) & "," & Chr(10)
+    j &= "  ""error_count"": " & LTrim(Str(r.errorCount)) & "," & Chr(10)
+    j &= "  ""missing_source_count"": " & LTrim(Str(r.missingSourceCount)) & "," & Chr(10)
+    j &= "  ""unknown_family_count"": " & LTrim(Str(r.unknownFamilyCount)) & "," & Chr(10)
+    j &= "  ""errors"": """ & UXBParserJsonEscape(r.errorsText) & """" & Chr(10)
+    j &= "}"
+    Return j
+End Function
+
+Function UXBParserWriteGateJson(ByRef r As UXBParserGateResult, ByRef outPath As String, ByRef errText As String) As Integer
+    errText = ""
+    If Trim(outPath) = "" Then Return 1
+
+    Dim ff As Integer
+    ff = FreeFile
+    Open outPath For Output As #ff
+    If Err <> 0 Then
+        errText = "parser gate json yazilamadi: " & outPath
+        Return 0
+    End If
+    Print #ff, UXBParserGateToJson(r)
+    Close #ff
+    Return 1
+End Function
+
+#endif

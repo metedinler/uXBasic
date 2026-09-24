@@ -1,0 +1,2389 @@
+#include once "ast_name_index.fbs"
+
+' SemClassMethodHasFlag is defined further down in this same file but used earlier
+' (found 2026-09-06, blocking a from-scratch build) -- forward declare.
+Declare Function SemClassMethodHasFlag(ByRef ps As ParseState, ByVal methodNode As Integer, ByRef flagRaw As String) As Integer
+
+Private Function SemChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    Dim i As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function SemChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return cnt
+End Function
+
+Declare Function SemHasClassName(ByRef ps As ParseState, ByRef classUpper As String) As Integer
+Declare Function SemFindClassNode(ByRef ps As ParseState, ByRef classNameRaw As String) As Integer
+Declare Function SemClassBaseName(ByRef ps As ParseState, ByVal classNode As Integer, ByRef baseNameOut As String) As Integer
+Declare Function SemClassHasFlag(ByRef ps As ParseState, ByVal classNode As Integer, ByRef flagRaw As String) As Integer
+Declare Function SemCanAssignClassType(ByRef ps As ParseState, ByRef declTypeRaw As String, ByRef actualTypeRaw As String) As Integer
+Declare Function SemFindDimDeclTypeByName(ByRef ps As ParseState, ByRef varNameRaw As String, ByRef declTypeOut As String) As Integer
+Declare Function SemFindInterfaceNode(ByRef ps As ParseState, ByRef interfaceNameRaw As String) As Integer
+Declare Function SemClassMethodNode(ByRef ps As ParseState, ByVal classNode As Integer, ByRef methodNameRaw As String) As Integer
+
+Private Function SemSplitMethodCallName(ByRef callNameRaw As String, ByRef ownerOut As String, ByRef methodOut As String) As Integer
+    ownerOut = ""
+    methodOut = ""
+
+    Dim callName As String
+    callName = UCase(Trim(callNameRaw))
+    Dim dotPos As Integer
+    dotPos = InStr(callName, ".")
+    If dotPos <= 1 Then Return 0
+
+    ownerOut = Trim(Left(callName, dotPos - 1))
+    methodOut = Trim(Mid(callName, dotPos + 1))
+    If ownerOut = "" Or methodOut = "" Then Return 0
+    If InStr(methodOut, ".") > 0 Then Return 0
+    Return 1
+End Function
+
+Private Function SemInterfaceHasMethod(ByRef ps As ParseState, ByRef interfaceTypeRaw As String, ByRef methodNameRaw As String) As Integer
+    Dim interfaceNode As Integer
+    interfaceNode = SemFindInterfaceNode(ps, interfaceTypeRaw)
+    If interfaceNode = -1 Then Return 0
+
+    Dim methodUpper As String
+    methodUpper = UCase(Trim(methodNameRaw))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(interfaceNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "INTERFACE_METHOD_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = methodUpper Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function SemClassHasMethodInHierarchy(ByRef ps As ParseState, ByRef classTypeRaw As String, ByRef methodNameRaw As String) As Integer
+    Dim curClass As String
+    curClass = UCase(Trim(classTypeRaw))
+    Dim methodName As String
+    methodName = UCase(Trim(methodNameRaw))
+    Dim magicFallback As String
+    magicFallback = ""
+    If methodName <> "" And Left(methodName, 6) <> "MAGIC_" Then
+        If Left(methodName, 2) = "__" Then
+            If Len(methodName) > 2 Then magicFallback = "MAGIC_" & Mid(methodName, 3)
+        Else
+            magicFallback = "MAGIC_" & methodName
+        End If
+    End If
+
+    Do While curClass <> ""
+        Dim classNode As Integer
+        classNode = SemFindClassNode(ps, curClass)
+        If classNode = -1 Then Exit Do
+        If SemClassMethodNode(ps, classNode, methodName) <> -1 Then Return 1
+        If magicFallback <> "" Then
+            If SemClassMethodNode(ps, classNode, magicFallback) <> -1 Then Return 1
+        End If
+
+        Dim baseName As String
+        If SemClassBaseName(ps, classNode, baseName) = 0 Then Exit Do
+        curClass = UCase(Trim(baseName))
+    Loop
+
+    Return 0
+End Function
+
+Private Function SemMethodNotFoundError(ByRef ownerKindRaw As String, ByRef ownerTypeRaw As String, ByRef methodNameRaw As String) As String
+    Dim ownerKind As String
+    ownerKind = UCase(Trim(ownerKindRaw))
+    Dim ownerType As String
+    ownerType = UCase(Trim(ownerTypeRaw))
+    Dim methodName As String
+    methodName = UCase(Trim(methodNameRaw))
+    Return "semantic: method not found [" & ownerKind & "] " & ownerType & "." & methodName
+End Function
+
+Private Function SemValidateTypeRefs(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "TYPE_REF" Then
+            Dim t As String
+            t = Trim(ps.ast.nodes(i).value)
+            If t = "" Then
+                errText = "semantic: bos type referansi"
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateCallNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "CALL_STMT" Or k = "CALL_EXPR" Then
+            If Trim(ps.ast.nodes(i).value) = "" Then
+                errText = "semantic: bos cagirilan isim"
+                Return 0
+            End If
+
+            Dim ownerName As String
+            Dim methodName As String
+            If SemSplitMethodCallName(ps.ast.nodes(i).value, ownerName, methodName) <> 0 Then
+                Dim ownerType As String
+                If SemFindDimDeclTypeByName(ps, ownerName, ownerType) <> 0 Then
+                    ownerType = UCase(Trim(ownerType))
+                    If ownerType <> "OBJECT" Then
+                        Dim classNode As Integer
+                        classNode = SemFindClassNode(ps, ownerType)
+                        If classNode <> -1 Then
+                            If SemClassHasMethodInHierarchy(ps, ownerType, methodName) = 0 Then
+                                errText = SemMethodNotFoundError("CLASS", ownerType, methodName)
+                                Return 0
+                            End If
+                        Else
+                            If SemFindInterfaceNode(ps, ownerType) <> -1 Then
+                                If SemInterfaceHasMethod(ps, ownerType, methodName) = 0 Then
+                                    errText = SemMethodNotFoundError("INTERFACE", ownerType, methodName)
+                                    Return 0
+                                End If
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateImportNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "IMPORT_STMT" Then
+            Dim fileNode As Integer
+            fileNode = SemChildAt(ps, i, 0)
+            If fileNode = -1 Then
+                errText = "semantic: IMPORT dosya argumani eksik"
+                Return 0
+            End If
+
+            If UCase(ps.ast.nodes(fileNode).kind) <> "STRING" Then
+                errText = "semantic: IMPORT dosya argumani metin olmali"
+                Return 0
+            End If
+
+            If Trim(ps.ast.nodes(fileNode).value) = "" Then
+                errText = "semantic: IMPORT dosya argumani bos olamaz"
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateInputNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "INPUT_STMT" Then
+            Dim argc As Integer
+            argc = SemChildCount(ps, i)
+            If argc = 0 Then
+                errText = "semantic: INPUT icin en az bir hedef gerekli"
+                Return 0
+            End If
+
+            Dim firstTargetPos As Integer
+            firstTargetPos = 0
+
+            Dim firstChild As Integer
+            firstChild = SemChildAt(ps, i, 0)
+            If firstChild <> -1 Then
+                If UCase(ps.ast.nodes(firstChild).kind) = "PROMPT_EXPR" Then firstTargetPos = 1
+            End If
+
+            If argc <= firstTargetPos Then
+                errText = "semantic: INPUT icin en az bir hedef gerekli"
+                Return 0
+            End If
+
+            Dim t As Integer
+            For t = firstTargetPos To argc - 1
+                Dim targetNode As Integer
+                targetNode = SemChildAt(ps, i, t)
+                If targetNode = -1 Or UCase(ps.ast.nodes(targetNode).kind) <> "IDENT" Then
+                    errText = "semantic: INPUT hedefleri IDENT olmali"
+                    Return 0
+                End If
+            Next t
+        ElseIf k = "INPUT_FILE_STMT" Or k = "INPUTF_STMT" Then
+            Dim fileArgc As Integer
+            fileArgc = SemChildCount(ps, i)
+            If fileArgc <= 1 Then
+                errText = "semantic: INPUT# kanal ve hedef gerektirir"
+                Return 0
+            End If
+
+            Dim j As Integer
+            For j = 1 To fileArgc - 1
+                Dim fileTarget As Integer
+                fileTarget = SemChildAt(ps, i, j)
+                If fileTarget = -1 Or UCase(ps.ast.nodes(fileTarget).kind) <> "IDENT" Then
+                    errText = "semantic: INPUT# hedefleri IDENT olmali"
+                    Return 0
+                End If
+            Next j
+        End If
+    Next i
+
+    Return 1
+End Function
+
+
+Private Function SemSlotTargetKindFromTaskNode(ByRef nodeKind As String, ByRef kindOut As String) As Integer
+    Select Case UCase(Trim(nodeKind))
+    Case "EVENT_STMT"
+        kindOut = "EVENT": Return 1
+    Case "PIPE_STMT"
+        kindOut = "PIPE": Return 1
+    Case "THREAD_STMT"
+        kindOut = "THREAD": Return 1
+    Case "PARALEL_STMT"
+        kindOut = "PARALEL": Return 1
+    End Select
+    kindOut = ""
+    Return 0
+End Function
+
+Private Function SemFindTaskNodeByName(ByRef ps As ParseState, ByRef nameRaw As String, ByRef kindOut As String, ByRef nodeOut As Integer, ByRef ambiguousOut As Integer) As Integer
+    Dim wanted As String
+    wanted = UCase(Trim(nameRaw))
+    kindOut = ""
+    nodeOut = -1
+    ambiguousOut = 0
+    If wanted = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+        Dim taskKind As String
+        If SemSlotTargetKindFromTaskNode(k, taskKind) <> 0 Then
+            Dim v As String
+            v = UCase(Trim(ps.ast.nodes(i).value))
+            Dim q As String
+            q = UCase(Trim(ps.ast.nodes(i).symbolName))
+            If v = wanted Or q = wanted Then
+                If nodeOut <> -1 Then ambiguousOut = 1
+                nodeOut = i
+                kindOut = taskKind
+            End If
+        End If
+    Next i
+    If nodeOut = -1 Then Return 0
+    Return 1
+End Function
+
+Private Function SemSlotEntryChildByRole(ByRef ps As ParseState, ByVal entryIdx As Integer, ByRef roleRaw As String) As Integer
+    Dim wanted As String
+    wanted = UCase(Trim(roleRaw))
+    Dim ch As Integer
+    ch = ps.ast.nodes(entryIdx).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).role)) = wanted Then Return ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return -1
+End Function
+
+Private Function SemValidateSlotTableEntry(ByRef ps As ParseState, ByVal tableIdx As Integer, ByVal entryIdx As Integer, usedIds() As Integer, ByRef errText As String) As Integer
+    Dim idIdx As Integer
+    idIdx = SemSlotEntryChildByRole(ps, entryIdx, "SLOT_ID")
+    If idIdx = -1 Then
+        errText = "semantic: SLOT table id eksik"
+        Return 0
+    End If
+
+    Dim idKind As String
+    idKind = UCase(ps.ast.nodes(idIdx).kind)
+    Dim slotId As Integer
+    If idKind <> "NUMBER" Then
+        errText = "semantic: SLOT id sabit sayi olmali"
+        Return 0
+    End If
+    slotId = Val(ps.ast.nodes(idIdx).value)
+    If slotId < 0 Or slotId > 255 Then
+        errText = "semantic: SLOT id 0..255 araliginda olmali"
+        Return 0
+    End If
+    If usedIds(slotId) <> 0 Then
+        ' PCK karari: cakisma hata degil, son gelen ezer.  Burada sadece sessizce gecilir;
+        ' ayrintili uyari altyapisi ayri rapor katmanina baglanacak.
+    End If
+    usedIds(slotId) = 1
+
+    Dim opUpper As String
+    opUpper = UCase(Trim(ps.ast.nodes(entryIdx).op))
+    If opUpper <> "ON" And opUpper <> "OFF" Then
+        errText = "semantic: SLOT entry ON/OFF bekler"
+        Return 0
+    End If
+
+    Dim targetIdx As Integer
+    targetIdx = SemSlotEntryChildByRole(ps, entryIdx, "TARGET")
+    If targetIdx = -1 Then
+        errText = "semantic: SLOT hedefi eksik"
+        Return 0
+    End If
+    Dim targetKindNode As String
+    targetKindNode = UCase(ps.ast.nodes(targetIdx).kind)
+    If targetKindNode <> "IDENT" And targetKindNode <> "IDENTIFIER" Then
+        errText = "semantic: SLOT hedefi ad olmali"
+        Return 0
+    End If
+
+    Dim targetName As String
+    targetName = Trim(ps.ast.nodes(targetIdx).value)
+    Dim resolvedKind As String
+    Dim resolvedNode As Integer
+    Dim ambiguous As Integer
+    If SemFindTaskNodeByName(ps, targetName, resolvedKind, resolvedNode, ambiguous) = 0 Then
+        errText = "semantic: SLOT hedefi bulunamadi: " & targetName
+        Return 0
+    End If
+
+    Dim explicitKind As String
+    explicitKind = UCase(Trim(ps.ast.nodes(entryIdx).typeName))
+    If explicitKind <> "" Then
+        If explicitKind <> resolvedKind Then
+            errText = "semantic: SLOT hedef turu uyusmuyor: beklenen " & explicitKind & ", bulunan " & resolvedKind
+            Return 0
+        End If
+    Else
+        ps.ast.nodes(entryIdx).typeName = resolvedKind
+    End If
+    ps.ast.nodes(entryIdx).symbolName = ps.ast.nodes(resolvedNode).symbolName
+    Return 1
+End Function
+
+Private Function SemValidateSlotTableNode(ByRef ps As ParseState, ByVal tableIdx As Integer, ByRef errText As String) As Integer
+    Dim usedIds(0 To 255) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(tableIdx).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) <> "SLOT_BIND_ENTRY" Then
+            errText = "semantic: SLOT tablosunda gecersiz kayit"
+            Return 0
+        End If
+        If SemValidateSlotTableEntry(ps, tableIdx, ch, usedIds(), errText) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 1
+End Function
+
+Private Function SemSlotTriggerTargetRegisteredBefore(ByRef ps As ParseState, ByVal triggerIdx As Integer, ByRef targetNameRaw As String, ByRef explicitKindRaw As String, ByRef resolvedKindOut As String) As Integer
+    Dim wanted As String
+    wanted = UCase(Trim(targetNameRaw))
+    Dim explicitKind As String
+    explicitKind = UCase(Trim(explicitKindRaw))
+    resolvedKindOut = ""
+    If wanted = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To triggerIdx - 1
+        If UCase(ps.ast.nodes(i).kind) = "SLOT_BIND_ENTRY" Then
+            Dim targetIdx As Integer
+            targetIdx = SemSlotEntryChildByRole(ps, i, "TARGET")
+            If targetIdx <> -1 Then
+                Dim entryTarget As String
+                entryTarget = UCase(Trim(ps.ast.nodes(targetIdx).value))
+                Dim entrySymbol As String
+                entrySymbol = UCase(Trim(ps.ast.nodes(i).symbolName))
+                If entryTarget = wanted Or entrySymbol = wanted Then
+                    Dim entryKind As String
+                    entryKind = UCase(Trim(ps.ast.nodes(i).typeName))
+                    If explicitKind = "" Or explicitKind = "TASK" Or explicitKind = entryKind Then
+                        resolvedKindOut = entryKind
+                        Return 1
+                    End If
+                End If
+            End If
+        ElseIf UCase(ps.ast.nodes(i).kind) = "SLOT_CONTROL_STMT" AndAlso UCase(Trim(ps.ast.nodes(i).op)) = "ON" Then
+            Dim controlTargetIdx As Integer
+            controlTargetIdx = SemChildAt(ps, i, 0)
+            Dim controlSlotIdx As Integer
+            controlSlotIdx = SemChildAt(ps, i, 1)
+            If controlTargetIdx <> -1 AndAlso controlSlotIdx <> -1 Then
+                Dim controlTarget As String
+                controlTarget = UCase(Trim(ps.ast.nodes(controlTargetIdx).value))
+                Dim controlKind As String
+                controlKind = UCase(Trim(ps.ast.nodes(i).value))
+                If controlTarget = wanted Then
+                    If explicitKind = "" Or explicitKind = "TASK" Or explicitKind = controlKind Then
+                        resolvedKindOut = controlKind
+                        Return 1
+                    End If
+                End If
+            End If
+        End If
+    Next i
+
+    Return 0
+End Function
+
+
+Private Function SemTaskParamCount(ByRef ps As ParseState, ByVal taskNode As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(taskNode).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).kind)) = "PARAM_DECL" Then cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return cnt
+End Function
+
+Private Function SemValidateTaskRoutineSignature(ByRef ps As ParseState, ByVal taskNode As Integer, ByRef errText As String) As Integer
+    Dim taskKind As String
+    Dim taskKindText As String
+    taskKind = UCase(Trim(ps.ast.nodes(taskNode).kind))
+    If SemSlotTargetKindFromTaskNode(taskKind, taskKindText) = 0 Then Return 1
+
+    Dim taskName As String
+    taskName = UCase(Trim(ps.ast.nodes(taskNode).value))
+    If taskName = "" Then
+        errText = "semantic: " & taskKindText & " adi bos olamaz"
+        Return 0
+    End If
+
+    Dim seenParams As String
+    Dim returnTypeCount As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(taskNode).firstChild
+    Do While ch <> -1
+        Dim childKind As String
+        childKind = UCase(Trim(ps.ast.nodes(ch).kind))
+        If childKind = "PARAM_DECL" Then
+            Dim paramName As String
+            paramName = UCase(Trim(ps.ast.nodes(ch).value))
+            If paramName = "" Then
+                errText = "semantic: " & taskKindText & " parametre adi bos olamaz"
+                Return 0
+            End If
+            If InStr(seenParams, "|" & paramName & "|") <> 0 Then
+                errText = "semantic: " & taskKindText & " tekrarli parametre adi: " & paramName
+                Return 0
+            End If
+            seenParams &= "|" & paramName & "|"
+
+            ' Native task ABI v1 cannot provide stable reference ownership,
+            ' especially for THREAD/PARALEL.  Reject BYREF instead of silently
+            ' changing it into BYVAL.
+            If UCase(Trim(ps.ast.nodes(ch).op)) = "BYREF" Then
+                errText = "semantic: " & taskKindText & " BYREF parametre desteklenmiyor: " & paramName
+                Return 0
+            End If
+        ElseIf childKind = "RETURN_TYPE" Then
+            returnTypeCount += 1
+            If taskKindText <> "PIPE" Then
+                errText = "semantic: donus tipi yalniz PIPE icin gecerlidir"
+                Return 0
+            End If
+            If Trim(ps.ast.nodes(ch).value) = "" Then
+                errText = "semantic: PIPE donus tipi bos olamaz"
+                Return 0
+            End If
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    If returnTypeCount > 1 Then
+        errText = "semantic: PIPE birden fazla donus tipi bildiremez"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function SemValidateTaskInvocation(ByRef ps As ParseState, ByVal triggerIdx As Integer, ByVal taskNode As Integer, ByRef errText As String) As Integer
+    Dim expectedArgs As Integer
+    Dim actualArgs As Integer
+    expectedArgs = SemTaskParamCount(ps, taskNode)
+    actualArgs = SemChildCount(ps, triggerIdx) - 1
+    If actualArgs < 0 Then actualArgs = 0
+    ' Legacy task declarations have no PARAM_DECL nodes and consume at most one
+    ' implicit INPUT payload through native SLOT ABI v1.  Keep that source
+    ' contract while enforcing exact arity for every typed signature.
+    If expectedArgs = 0 And actualArgs <= 1 Then Return 1
+    If actualArgs <> expectedArgs Then
+        errText = "semantic: TRIGGER parametre sayisi uyusmuyor " & Trim(ps.ast.nodes(taskNode).value) & _
+                  " expected=" & LTrim(Str(expectedArgs)) & " actual=" & LTrim(Str(actualArgs))
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function SemValidateTriggerTargetFromSlotTable(ByRef ps As ParseState, ByVal triggerIdx As Integer, ByRef errText As String) As Integer
+    Dim targetIdx As Integer
+    targetIdx = SemChildAt(ps, triggerIdx, 0)
+    If targetIdx = -1 Then
+        errText = "semantic: TRIGGER hedefi eksik"
+        Return 0
+    End If
+
+    Dim targetKind As String
+    targetKind = UCase(ps.ast.nodes(targetIdx).kind)
+    If targetKind <> "IDENT" And targetKind <> "IDENTIFIER" And targetKind <> "KEYWORD_REF" Then
+        errText = "semantic: TRIGGER hedefi ad olmali"
+        Return 0
+    End If
+
+    Dim targetName As String
+    targetName = Trim(ps.ast.nodes(targetIdx).value)
+    Dim explicitKind As String
+    explicitKind = UCase(Trim(ps.ast.nodes(triggerIdx).value))
+    Dim resolvedKind As String
+    Dim resolvedNode As Integer
+    Dim ambiguous As Integer
+    resolvedNode = -1
+
+    ' A SLOT table is an optional dispatch indirection, not a prerequisite for
+    ' invoking a named EVENT/PIPE/THREAD/PARALEL routine.
+    If SemSlotTriggerTargetRegisteredBefore(ps, triggerIdx, targetName, explicitKind, resolvedKind) = 0 Then
+        If SemFindTaskNodeByName(ps, targetName, resolvedKind, resolvedNode, ambiguous) = 0 Then
+            errText = "semantic: TRIGGER hedefi bulunamadi: " & targetName
+            Return 0
+        End If
+        If ambiguous <> 0 And (explicitKind = "" Or explicitKind = "TASK") Then
+            errText = "semantic: TRIGGER hedefi birden fazla gorev turunde tanimli: " & targetName
+            Return 0
+        End If
+        If explicitKind <> "" And explicitKind <> "TASK" And explicitKind <> resolvedKind Then
+            errText = "semantic: TRIGGER hedef turu uyusmuyor: beklenen " & explicitKind & ", bulunan " & resolvedKind
+            Return 0
+        End If
+    Else
+        Dim directKind As String
+        Dim directNode As Integer
+        Dim directAmbiguous As Integer
+        If SemFindTaskNodeByName(ps, targetName, directKind, directNode, directAmbiguous) <> 0 Then
+            If directKind = resolvedKind Then resolvedNode = directNode
+        End If
+    End If
+
+    If resolvedNode <> -1 Then
+        If SemValidateTaskInvocation(ps, triggerIdx, resolvedNode, errText) = 0 Then Return 0
+        ps.ast.nodes(triggerIdx).symbolName = ps.ast.nodes(resolvedNode).symbolName
+    End If
+
+    If explicitKind = "" Or explicitKind = "TASK" Then
+        ps.ast.nodes(triggerIdx).typeName = resolvedKind
+    Else
+        ps.ast.nodes(triggerIdx).typeName = explicitKind
+    End If
+    Return 1
+End Function
+
+Private Function SemFindPriorSlotCapacity(ByRef ps As ParseState, ByVal beforeNodeIdx As Integer, ByRef laneKindRaw As String, ByRef capacityOut As Integer) As Integer
+    Dim wantedKind As String
+    wantedKind = UCase(Trim(laneKindRaw))
+    Dim found As Integer
+    Dim i As Integer
+    For i = 0 To beforeNodeIdx - 1
+        If UCase(ps.ast.nodes(i).kind) <> "SLOT_STMT" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> wantedKind Then Continue For
+
+        Dim capacityNode As Integer
+        capacityNode = SemChildAt(ps, i, 0)
+        If capacityNode = -1 Then Continue For
+        If UCase(ps.ast.nodes(capacityNode).kind) <> "NUMBER" Then Continue For
+        capacityOut = Val(ps.ast.nodes(capacityNode).value)
+        found = 1
+    Next i
+    Return found
+End Function
+
+Private Function SemValidateSlotIdAgainstCapacity(ByRef ps As ParseState, ByVal ownerNodeIdx As Integer, ByVal idNodeIdx As Integer, ByRef laneKindRaw As String, ByRef errText As String) As Integer
+    If idNodeIdx < 0 Or idNodeIdx >= ps.ast.count Then Return 1
+    If UCase(ps.ast.nodes(idNodeIdx).kind) <> "NUMBER" Then Return 1
+
+    Dim slotId As Integer
+    slotId = Val(ps.ast.nodes(idNodeIdx).value)
+    If slotId < 0 Or slotId > 255 Then
+        errText = "semantic: SLOT id 0..255 araliginda olmali"
+        Return 0
+    End If
+
+    Dim capacity As Integer
+    If SemFindPriorSlotCapacity(ps, ownerNodeIdx, laneKindRaw, capacity) <> 0 Then
+        If slotId >= capacity Then
+            errText = "semantic: " & UCase(Trim(laneKindRaw)) & " SLOT id " & LTrim(Str(slotId)) & " bildirilen kapasite " & LTrim(Str(capacity)) & " disinda"
+            Return 0
+        End If
+    End If
+    Return 1
+End Function
+
+
+Private Function SemValidateSlotLaneNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        Select Case k
+        Case "EVENT_STMT", "THREAD_STMT", "PARALEL_STMT", "PIPE_STMT"
+            If Trim(ps.ast.nodes(i).value) = "" Then
+                errText = "semantic: " & k & " adi bos olamaz"
+                Return 0
+            End If
+
+            Dim headerNode As Integer
+            headerNode = SemChildAt(ps, i, 0)
+            If headerNode <> -1 Then
+                If UCase(ps.ast.nodes(headerNode).kind) = "SLOT_HEADER_ARGS" Then
+                    If SemChildCount(ps, headerNode) > 1 Then
+                        errText = "semantic: " & k & " en fazla bir slot id alir"
+                        Return 0
+                    End If
+                    Dim headerSlotIdNode As Integer
+                    headerSlotIdNode = SemChildAt(ps, headerNode, 0)
+                    If headerSlotIdNode <> -1 Then
+                        Dim headerLaneKind As String
+                        If SemSlotTargetKindFromTaskNode(k, headerLaneKind) = 0 Then
+                            errText = "semantic: SLOT baslik turu cozulemedi"
+                            Return 0
+                        End If
+                        If SemValidateSlotIdAgainstCapacity(ps, i, headerSlotIdNode, headerLaneKind, errText) = 0 Then Return 0
+                    End If
+                End If
+            End If
+
+        Case "SLOT_TABLE_STMT"
+            If SemValidateSlotTableNode(ps, i, errText) = 0 Then Return 0
+
+        Case "SLOT_STMT"
+            Dim slotKind As String
+            slotKind = UCase(Trim(ps.ast.nodes(i).value))
+            If slotKind <> "EVENT" And slotKind <> "THREAD" And slotKind <> "PARALEL" And slotKind <> "PIPE" Then
+                errText = "semantic: SLOT turu gecersiz " & ps.ast.nodes(i).value
+                Return 0
+            End If
+            If SemChildCount(ps, i) > 1 Then
+                errText = "semantic: SLOT en fazla bir kapasite ifadesi alir"
+                Return 0
+            End If
+            Dim capacityNode As Integer
+            capacityNode = SemChildAt(ps, i, 0)
+            If capacityNode = -1 OrElse UCase(ps.ast.nodes(capacityNode).kind) <> "NUMBER" Then
+                errText = "semantic: SLOT kapasitesi sabit sayi olmali"
+                Return 0
+            End If
+            Dim capacityValue As Integer
+            capacityValue = Val(ps.ast.nodes(capacityNode).value)
+            If capacityValue < 0 Or capacityValue > 256 Then
+                errText = "semantic: SLOT kapasitesi 0..256 araliginda olmali"
+                Return 0
+            End If
+
+        Case "SLOT_CONTROL_STMT"
+            Dim laneKind As String
+            laneKind = UCase(Trim(ps.ast.nodes(i).value))
+            If laneKind <> "EVENT" And laneKind <> "THREAD" And laneKind <> "PARALEL" And laneKind <> "PIPE" Then
+                errText = "semantic: slot kontrol turu gecersiz " & ps.ast.nodes(i).value
+                Return 0
+            End If
+            If SemChildCount(ps, i) < 1 Then
+                errText = "semantic: slot kontrol hedefi eksik"
+                Return 0
+            End If
+            Dim controlSlotIdNode As Integer
+            controlSlotIdNode = SemChildAt(ps, i, 1)
+            If controlSlotIdNode <> -1 Then
+                If SemValidateSlotIdAgainstCapacity(ps, i, controlSlotIdNode, laneKind, errText) = 0 Then Return 0
+            End If
+
+        Case "TRIGGER_STMT"
+            Dim triggerKind As String
+            triggerKind = UCase(Trim(ps.ast.nodes(i).value))
+            If triggerKind <> "TASK" And triggerKind <> "EVENT" And triggerKind <> "THREAD" And triggerKind <> "PARALEL" And triggerKind <> "PIPE" Then
+                errText = "semantic: TRIGGER turu gecersiz " & ps.ast.nodes(i).value
+                Return 0
+            End If
+            If SemValidateTriggerTargetFromSlotTable(ps, i, errText) = 0 Then Return 0
+        End Select
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateIfSelectNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "IF_STMT" Then
+            If SemChildAt(ps, i, 0) = -1 Then
+                errText = "semantic: IF kosulu eksik"
+                Return 0
+            End If
+        ElseIf k = "ELSEIF_PART" Then
+            If SemChildAt(ps, i, 0) = -1 Then
+                errText = "semantic: ELSEIF kosulu eksik"
+                Return 0
+            End If
+        ElseIf k = "SELECT_STMT" Then
+            Dim selector As Integer
+            selector = SemChildAt(ps, i, 0)
+            If selector = -1 Then
+                errText = "semantic: SELECT CASE selector ifadesi gerekli"
+                Return 0
+            End If
+
+            Dim selectorKind As String
+            selectorKind = UCase(ps.ast.nodes(selector).kind)
+            If selectorKind = "CASE_BLOCK" Or selectorKind = "CASE_ELSE" Then
+                errText = "semantic: SELECT CASE selector ifadesi gerekli"
+                Return 0
+            End If
+
+            Dim caseCount As Integer
+            Dim c As Integer
+            c = ps.ast.nodes(i).firstChild
+            Do While c <> -1
+                Dim ck As String
+                ck = UCase(ps.ast.nodes(c).kind)
+                If ck = "CASE_BLOCK" Or ck = "CASE_ELSE" Then caseCount += 1
+                c = ps.ast.nodes(c).nextSibling
+            Loop
+
+            If caseCount = 0 Then
+                errText = "semantic: SELECT CASE en az bir CASE blogu gerektirir"
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateTryNode(ByRef ps As ParseState, ByVal tryNode As Integer, ByRef errText As String) As Integer
+    If tryNode < 0 Or tryNode >= ps.ast.count Then
+        errText = "semantic: TRY node out of range"
+        Return 0
+    End If
+
+    Dim tryChildCount As Integer
+    tryChildCount = SemChildCount(ps, tryNode)
+    If tryChildCount < 2 Then
+        errText = "semantic: TRY CATCH veya FINALLY bolumu gerektirir"
+        Return 0
+    End If
+
+    Dim tryBodyNode As Integer
+    tryBodyNode = SemChildAt(ps, tryNode, 0)
+    If tryBodyNode = -1 Or UCase(Trim(ps.ast.nodes(tryBodyNode).kind)) <> "TRY_BODY" Then
+        errText = "semantic: TRY ilk cocuk TRY_BODY olmali"
+        Return 0
+    End If
+
+    Dim catchCount As Integer
+    Dim finallyCount As Integer
+    Dim seenFinally As Integer
+    Dim i As Integer
+    For i = 1 To tryChildCount - 1
+        Dim partNode As Integer
+        partNode = SemChildAt(ps, tryNode, i)
+        If partNode = -1 Then
+            errText = "semantic: TRY bolum dugumu eksik"
+            Return 0
+        End If
+
+        Dim pk As String
+        pk = UCase(Trim(ps.ast.nodes(partNode).kind))
+        Select Case pk
+        Case "CATCH_PART"
+            If seenFinally <> 0 Then
+                errText = "semantic: FINALLY sonrasinda CATCH olamaz"
+                Return 0
+            End If
+            catchCount += 1
+            If catchCount > 1 Then
+                errText = "semantic: TRY birden fazla CATCH desteklemez"
+                Return 0
+            End If
+        Case "FINALLY_PART"
+            finallyCount += 1
+            seenFinally = 1
+            If finallyCount > 1 Then
+                errText = "semantic: TRY birden fazla FINALLY desteklemez"
+                Return 0
+            End If
+        Case Else
+            errText = "semantic: TRY icinde gecersiz bolum " & ps.ast.nodes(partNode).kind
+            Return 0
+        End Select
+    Next i
+
+    If catchCount = 0 And finallyCount = 0 Then
+        errText = "semantic: TRY CATCH veya FINALLY bolumu gerektirir"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function SemValidateErrorFlowNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+
+        Select Case k
+        Case "TRY_STMT"
+            If SemValidateTryNode(ps, i, errText) = 0 Then Return 0
+
+        Case "THROW_STMT"
+            If SemChildCount(ps, i) <> 1 Then
+                errText = "semantic: THROW tek bir ifade ister"
+                Return 0
+            End If
+            If SemChildAt(ps, i, 0) = -1 Then
+                errText = "semantic: THROW ifadesi eksik"
+                Return 0
+            End If
+
+        Case "ASSERT_STMT"
+            Dim argc As Integer
+            argc = SemChildCount(ps, i)
+            If argc < 1 Or argc > 2 Then
+                errText = "semantic: ASSERT kosul veya kosul+mesaj ister"
+                Return 0
+            End If
+            If SemChildAt(ps, i, 0) = -1 Then
+                errText = "semantic: ASSERT kosul ifadesi eksik"
+                Return 0
+            End If
+            If argc = 2 Then
+                If SemChildAt(ps, i, 1) = -1 Then
+                    errText = "semantic: ASSERT mesaj ifadesi eksik"
+                    Return 0
+                End If
+            End If
+        End Select
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateRoutineNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+
+        If k = "EVENT_STMT" Or k = "PIPE_STMT" Or k = "THREAD_STMT" Or k = "PARALEL_STMT" Then
+            If SemValidateTaskRoutineSignature(ps, i, errText) = 0 Then Return 0
+        ElseIf k = "SUB_STMT" Or k = "FUNCTION_STMT" Or k = "DECLARE_SUB_STMT" Or k = "DECLARE_FUNCTION_STMT" Then
+            If Trim(ps.ast.nodes(i).value) = "" Then
+                errText = "semantic: prosedur/fonksiyon adi bos olamaz"
+                Return 0
+            End If
+
+            Dim seenParams As String
+            Dim hasReturnType As Integer
+            Dim ch As Integer
+
+            ch = ps.ast.nodes(i).firstChild
+            Do While ch <> -1
+                Dim ck As String
+                ck = UCase(ps.ast.nodes(ch).kind)
+
+                If ck = "PARAM_DECL" Then
+                    Dim pName As String
+                    pName = UCase(Trim(ps.ast.nodes(ch).value))
+                    If pName = "" Then
+                        errText = "semantic: parametre adi bos olamaz"
+                        Return 0
+                    End If
+
+                    If InStr(seenParams, "|" & pName & "|") <> 0 Then
+                        errText = "semantic: tekrarli parametre adi: " & pName
+                        Return 0
+                    End If
+                    seenParams &= "|" & pName & "|"
+                ElseIf ck = "RETURN_TYPE" Then
+                    hasReturnType = 1
+                    If Trim(ps.ast.nodes(ch).value) = "" Then
+                        errText = "semantic: FUNCTION donus tipi bos olamaz"
+                        Return 0
+                    End If
+                End If
+
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+
+            If k = "FUNCTION_STMT" Or k = "DECLARE_FUNCTION_STMT" Then
+                If hasReturnType = 0 Then
+                    errText = "semantic: FUNCTION icin donus tipi zorunlu"
+                    Return 0
+                End If
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateConstNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CONST_DECL" Then
+            If Trim(ps.ast.nodes(i).value) = "" Then
+                errText = "semantic: CONST adi bos olamaz"
+                Return 0
+            End If
+
+            If ps.ast.nodes(i).left = -1 Then
+                errText = "semantic: CONST ifadesi eksik"
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateNewExprNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "NEW_EXPR" Then Continue For
+
+        Dim classType As String
+        classType = UCase(Trim(ps.ast.nodes(i).value))
+        If classType = "" Then
+            errText = "semantic: NEW class type missing"
+            Return 0
+        End If
+
+        If SemHasClassName(ps, classType) = 0 Then
+            errText = "semantic: NEW target class not found " & classType
+            Return 0
+        End If
+
+        Dim classNode As Integer
+        classNode = SemFindClassNode(ps, classType)
+        If classNode <> -1 Then
+            If SemClassHasFlag(ps, classNode, "ABSTRACT") <> 0 Then
+                errText = "semantic: NEW target class is ABSTRACT " & classType
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateDimClassInitializers(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "DIM_DECL" Then Continue For
+
+        Dim typeNode As Integer
+        typeNode = -1
+        Dim initNode As Integer
+        initNode = -1
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            Dim ck As String
+            ck = UCase(ps.ast.nodes(ch).kind)
+            If ck = "TYPE_REF" Then typeNode = ch
+            If ck = "INIT_EXPR" Then initNode = ch
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+
+        If typeNode = -1 Then Continue For
+
+        Dim declType As String
+        declType = UCase(Trim(ps.ast.nodes(typeNode).value))
+        If declType = "" Then Continue For
+        If SemHasClassName(ps, declType) = 0 Then Continue For
+        Dim classNode As Integer
+        classNode = SemFindClassNode(ps, declType)
+        If classNode <> -1 Then
+            If SemClassHasFlag(ps, classNode, "ABSTRACT") <> 0 Then
+                errText = "semantic: DIM cannot instantiate ABSTRACT class " & declType
+                Return 0
+            End If
+        End If
+
+        If initNode = -1 Then Continue For
+        If ps.ast.nodes(initNode).left = -1 Then
+            errText = "semantic: DIM class initializer expression missing"
+            Return 0
+        End If
+
+        Dim initExpr As Integer
+        initExpr = ps.ast.nodes(initNode).left
+        If UCase(ps.ast.nodes(initExpr).kind) <> "NEW_EXPR" Then
+            errText = "semantic: DIM class initializer must be NEW " & declType
+            Return 0
+        End If
+
+        Dim newType As String
+        newType = UCase(Trim(ps.ast.nodes(initExpr).value))
+        If SemCanAssignClassType(ps, declType, newType) = 0 Then
+            errText = "semantic: DIM class initializer type mismatch expected=" & declType & " actual=" & newType
+            Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateClassAssignments(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "ASSIGN_STMT" Then Continue For
+
+        Dim lhsNode As Integer
+        lhsNode = ps.ast.nodes(i).left
+        Dim rhsNode As Integer
+        rhsNode = ps.ast.nodes(i).right
+        If lhsNode = -1 Or rhsNode = -1 Then Continue For
+        If UCase(ps.ast.nodes(lhsNode).kind) <> "IDENT" Then Continue For
+        If UCase(ps.ast.nodes(rhsNode).kind) <> "NEW_EXPR" Then Continue For
+
+        Dim declType As String
+        If SemFindDimDeclTypeByName(ps, ps.ast.nodes(lhsNode).value, declType) = 0 Then Continue For
+
+        If declType <> "OBJECT" And SemHasClassName(ps, declType) = 0 Then Continue For
+
+        Dim actualType As String
+        actualType = UCase(Trim(ps.ast.nodes(rhsNode).value))
+        If SemCanAssignClassType(ps, declType, actualType) = 0 Then
+            errText = "semantic: class assignment type mismatch expected=" & declType & " actual=" & actualType
+            Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateDeleteNodes(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "DELETE_STMT" Then Continue For
+
+        Dim targetNode As Integer
+        targetNode = SemChildAt(ps, i, 0)
+        ' Legacy fallback for older ASTs; new AST contract stores DELETE target as child[0].
+        If targetNode = -1 Then targetNode = ps.ast.nodes(i).left
+        If targetNode = -1 Then
+            errText = "semantic: DELETE target missing"
+            Return 0
+        End If
+
+        If UCase(ps.ast.nodes(targetNode).kind) <> "IDENT" Then
+            errText = "semantic: DELETE target must be identifier"
+            Return 0
+        End If
+
+        Dim declType As String
+        If SemFindDimDeclTypeByName(ps, ps.ast.nodes(targetNode).value, declType) = 0 Then
+            errText = "semantic: DELETE target must be DIM variable"
+            Return 0
+        End If
+
+        If declType <> "OBJECT" And SemHasClassName(ps, declType) = 0 Then
+            errText = "semantic: DELETE target must be class or OBJECT"
+            Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemHasClassName(ByRef ps As ParseState, ByRef classUpper As String) As Integer
+    ' class nodes of that name from the declaration-name index (ast_name_index.fbs group 2)
+    ' instead of a whole-AST scan per call; same answer
+    If UXBAstNameIndexEnsure(ps) <> 0 Then Return IIf(UXBAstNameIndexFirst(2, classUpper) <> -1, 1, 0)
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = classUpper Then Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+Private Function SemClassIsOrDerivedFrom(ByRef ps As ParseState, ByRef actualTypeRaw As String, ByRef expectedTypeRaw As String) As Integer
+    Dim actualType As String
+    Dim expectedType As String
+    actualType = UCase(Trim(actualTypeRaw))
+    expectedType = UCase(Trim(expectedTypeRaw))
+
+    If actualType = "" Or expectedType = "" Then Return 0
+    If actualType = expectedType Then Return 1
+
+    Dim curType As String
+    curType = actualType
+
+    Do While curType <> ""
+        Dim classNode As Integer
+        classNode = SemFindClassNode(ps, curType)
+        If classNode = -1 Then Exit Do
+
+        Dim baseType As String
+        If SemClassBaseName(ps, classNode, baseType) = 0 Then Exit Do
+        If baseType = expectedType Then Return 1
+
+        curType = baseType
+    Loop
+
+    Return 0
+End Function
+
+Private Function SemClassImplementsInterface(ByRef ps As ParseState, ByRef classTypeRaw As String, ByRef interfaceTypeRaw As String) As Integer
+    Dim curType As String
+    Dim interfaceUpper As String
+    curType = UCase(Trim(classTypeRaw))
+    interfaceUpper = UCase(Trim(interfaceTypeRaw))
+    If curType = "" Or interfaceUpper = "" Then Return 0
+    If SemFindInterfaceNode(ps, interfaceUpper) = -1 Then Return 0
+
+    Dim hop As Integer
+    Do While curType <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+
+        Dim classNode As Integer
+        classNode = SemFindClassNode(ps, curType)
+        If classNode = -1 Then Exit Do
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(classNode).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CLASS_IMPLEMENTS_REF" Then
+                If UCase(Trim(ps.ast.nodes(ch).value)) = interfaceUpper Then Return 1
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+
+        Dim baseType As String
+        If SemClassBaseName(ps, classNode, baseType) = 0 Then Exit Do
+        curType = UCase(Trim(baseType))
+    Loop
+
+    Return 0
+End Function
+
+Private Function SemCanAssignClassType(ByRef ps As ParseState, ByRef declTypeRaw As String, ByRef actualTypeRaw As String) As Integer
+    Dim declType As String
+    Dim actualType As String
+    declType = UCase(Trim(declTypeRaw))
+    actualType = UCase(Trim(actualTypeRaw))
+
+    If actualType = "" Then Return 0
+    If SemHasClassName(ps, actualType) = 0 Then Return 0
+
+    If declType = "OBJECT" Then Return 1
+    If SemFindInterfaceNode(ps, declType) <> -1 Then Return SemClassImplementsInterface(ps, actualType, declType)
+    Return SemClassIsOrDerivedFrom(ps, actualType, declType)
+End Function
+
+Private Function SemFindDimDeclTypeByName(ByRef ps As ParseState, ByRef varNameRaw As String, ByRef declTypeOut As String) As Integer
+    declTypeOut = ""
+
+    Dim varName As String
+    varName = UCase(Trim(varNameRaw))
+    If varName = "" Then Return 0
+
+    Dim i As Integer
+    For i = ps.ast.count - 1 To 0 Step -1
+        If UCase(ps.ast.nodes(i).kind) <> "DIM_DECL" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> varName Then Continue For
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "TYPE_REF" Then
+                declTypeOut = UCase(Trim(ps.ast.nodes(ch).value))
+                Return IIf(declTypeOut <> "", 1, 0)
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
+    Return 0
+End Function
+
+Private Function SemIsMethodRoutineName(ByRef ps As ParseState, ByRef routineNameRaw As String) As Integer
+    Dim routineName As String
+    routineName = UCase(Trim(routineNameRaw))
+    If routineName = "" Then Return 0
+
+    Dim sepPos As Integer
+    sepPos = InStr(routineName, "_")
+    If sepPos <= 1 Then Return 0
+
+    Dim classPrefix As String
+    classPrefix = Left(routineName, sepPos - 1)
+    Return SemHasClassName(ps, classPrefix)
+End Function
+
+Private Function SemValidateThisMeNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal inMethodContext As Integer, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
+
+    Dim k As String
+    k = UCase(ps.ast.nodes(nodeIdx).kind)
+
+    Dim nodeMethodContext As Integer
+    nodeMethodContext = inMethodContext
+    Select Case k
+    Case "CLASS_METHOD_DECL", "CLASS_CONSTRUCTOR_DECL", "CLASS_DESTRUCTOR_DECL", "CLASS_OPERATOR_DECL", "CLASS_PROPERTY_GET_STMT", "CLASS_PROPERTY_SET_STMT"
+        nodeMethodContext = 1
+    Case "SUB_STMT", "FUNCTION_STMT"
+        nodeMethodContext = SemIsMethodRoutineName(ps, ps.ast.nodes(nodeIdx).value)
+    End Select
+
+    If k = "IDENT" Then
+        Dim identText As String
+        identText = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+        If identText = "THIS" Or identText = "ME" Then
+            If nodeMethodContext = 0 Then
+                errText = "semantic: THIS/ME sadece method baglaminda kullanilabilir"
+                Return 0
+            End If
+        End If
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If SemValidateThisMeNode(ps, ps.ast.nodes(nodeIdx).left, nodeMethodContext, errText) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If SemValidateThisMeNode(ps, ps.ast.nodes(nodeIdx).right, nodeMethodContext, errText) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If SemValidateThisMeNode(ps, ch, nodeMethodContext, errText) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function SemValidateStaticMemberReceiverNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
+
+    Dim k As String
+    k = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    If k = "IDENT" Or k = "KEYWORD_REF" Then
+        Dim identText As String
+        identText = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+        If identText = "THIS" Or identText = "ME" Then
+            errText = "semantic: THIS/ME cannot be used in a STATIC class member"
+            Return 0
+        End If
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If SemValidateStaticMemberReceiverNode(ps, ps.ast.nodes(nodeIdx).left, errText) = 0 Then Return 0
+    End If
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If SemValidateStaticMemberReceiverNode(ps, ps.ast.nodes(nodeIdx).right, errText) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If SemValidateStaticMemberReceiverNode(ps, ch, errText) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 1
+End Function
+
+Private Function SemValidateStaticMemberReceiverUsage(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(Trim(ps.ast.nodes(i).kind))
+        Dim isStatic As Integer
+        isStatic = 0
+        If k = "CLASS_METHOD_DECL" Or k = "CLASS_OPERATOR_DECL" Then
+            isStatic = SemClassMethodHasFlag(ps, i, "STATIC")
+        ElseIf k = "CLASS_PROPERTY_GET_STMT" Or k = "CLASS_PROPERTY_SET_STMT" Then
+            Dim propNode As Integer
+            propNode = ps.ast.nodes(i).parent
+            If propNode >= 0 And propNode < ps.ast.count Then
+                If UCase(Trim(ps.ast.nodes(propNode).kind)) = "CLASS_PROPERTY_DECL" Then
+                    Dim pch As Integer
+                    pch = ps.ast.nodes(propNode).firstChild
+                    Do While pch <> -1
+                        If UCase(Trim(ps.ast.nodes(pch).kind)) = "CLASS_PROPERTY_FLAG" And UCase(Trim(ps.ast.nodes(pch).value)) = "STATIC" Then
+                            isStatic = 1
+                            Exit Do
+                        End If
+                        pch = ps.ast.nodes(pch).nextSibling
+                    Loop
+                End If
+            End If
+        End If
+        If isStatic <> 0 Then
+            Dim ch As Integer
+            ch = ps.ast.nodes(i).firstChild
+            Do While ch <> -1
+                If SemValidateStaticMemberReceiverNode(ps, ch, errText) = 0 Then Return 0
+                ch = ps.ast.nodes(ch).nextSibling
+            Loop
+        End If
+    Next i
+    Return 1
+End Function
+
+Private Function SemValidateThisMeUsage(ByRef ps As ParseState, ByRef errText As String) As Integer
+    If ps.rootNode < 0 Or ps.rootNode >= ps.ast.count Then Return 1
+
+    Dim st As Integer
+    st = ps.ast.nodes(ps.rootNode).firstChild
+    Do While st <> -1
+        If SemValidateThisMeNode(ps, st, 0, errText) = 0 Then Return 0
+
+        st = ps.ast.nodes(st).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function SemFindInterfaceNode(ByRef ps As ParseState, ByRef interfaceNameRaw As String) As Integer
+    Dim needle As String
+    needle = UCase(Trim(interfaceNameRaw))
+    If needle = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "INTERFACE_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = needle Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function SemHasRoutineByName(ByRef ps As ParseState, ByRef routineNameRaw As String) As Integer
+    Dim needle As String
+    needle = UCase(Trim(routineNameRaw))
+    If needle = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim k As String
+        k = UCase(ps.ast.nodes(i).kind)
+        If k = "SUB_STMT" Or k = "FUNCTION_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = needle Then Return 1
+        End If
+    Next i
+
+    Return 0
+End Function
+
+Private Function SemFindClassNode(ByRef ps As ParseState, ByRef classNameRaw As String) As Integer
+    Dim classUpper As String
+    classUpper = UCase(Trim(classNameRaw))
+    If classUpper = "" Then Return -1
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CLASS_STMT" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = classUpper Then Return i
+        End If
+    Next i
+
+    Return -1
+End Function
+
+Private Function SemClassBaseName(ByRef ps As ParseState, ByVal classNode As Integer, ByRef baseNameOut As String) As Integer
+    baseNameOut = ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_BASE_REF" Then
+            baseNameOut = UCase(Trim(ps.ast.nodes(ch).value))
+            Return IIf(baseNameOut <> "", 1, 0)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function SemClassMethodNode(ByRef ps As ParseState, ByVal classNode As Integer, ByRef methodNameRaw As String) As Integer
+    Dim methodUpper As String
+    methodUpper = UCase(Trim(methodNameRaw))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = methodUpper Then Return ch
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function SemClassMethodHasFlag(ByRef ps As ParseState, ByVal methodNode As Integer, ByRef flagRaw As String) As Integer
+    Dim flagUpper As String
+    flagUpper = UCase(Trim(flagRaw))
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_FLAG" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = flagUpper Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function SemClassHasFlag(ByRef ps As ParseState, ByVal classNode As Integer, ByRef flagRaw As String) As Integer
+    Dim targetFlag As String
+    targetFlag = UCase(Trim(flagRaw))
+    If targetFlag = "" Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_FLAG" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = targetFlag Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function SemClassMethodSignature(ByRef ps As ParseState, ByVal methodNode As Integer) As String
+    Dim sig As String
+    sig = ""
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        Dim childKind As String
+        childKind = UCase(ps.ast.nodes(ch).kind)
+
+        If childKind = "PARAM_DECL" Then
+            Dim paramType As String
+            paramType = ""
+
+            Dim pch As Integer
+            pch = ps.ast.nodes(ch).firstChild
+            Do While pch <> -1
+                If UCase(ps.ast.nodes(pch).kind) = "TYPE_REF" Then
+                    paramType = UCase(Trim(ps.ast.nodes(pch).value))
+                    Exit Do
+                End If
+                pch = ps.ast.nodes(pch).nextSibling
+            Loop
+
+            sig &= "P:" & paramType & ";"
+        ElseIf childKind = "RETURN_TYPE" Then
+            sig &= "R:" & UCase(Trim(ps.ast.nodes(ch).value)) & ";"
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return sig
+End Function
+
+Private Function SemFindBaseMethod(ByRef ps As ParseState, ByRef baseNameRaw As String, ByRef methodNameRaw As String, ByRef methodOut As Integer) As Integer
+    methodOut = -1
+
+    Dim curClass As String
+    curClass = UCase(Trim(baseNameRaw))
+
+    Dim hop As Integer
+    Do While curClass <> ""
+        hop += 1
+        If hop > 64 Then Exit Do
+
+        Dim classNode As Integer
+        classNode = SemFindClassNode(ps, curClass)
+        If classNode = -1 Then Exit Do
+
+        methodOut = SemClassMethodNode(ps, classNode, methodNameRaw)
+        If methodOut <> -1 Then Return 1
+
+        Dim nextBase As String
+        If SemClassBaseName(ps, classNode, nextBase) = 0 Then Exit Do
+        curClass = nextBase
+    Loop
+
+    methodOut = -1
+    Return 0
+End Function
+
+Private Function SemValidateClassOverrideContracts(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "CLASS_STMT" Then Continue For
+
+        Dim className As String
+        className = UCase(Trim(ps.ast.nodes(i).value))
+
+        Dim baseName As String
+        SemClassBaseName ps, i, baseName
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+                Dim methodName As String
+                methodName = UCase(Trim(ps.ast.nodes(ch).value))
+
+                Dim hasVirtual As Integer
+                Dim hasOverride As Integer
+                hasVirtual = SemClassMethodHasFlag(ps, ch, "VIRTUAL")
+                hasOverride = SemClassMethodHasFlag(ps, ch, "OVERRIDE")
+
+                If hasVirtual <> 0 And hasOverride <> 0 Then
+                    errText = "semantic: CLASS METHOD cannot be both VIRTUAL and OVERRIDE " & className & "." & methodName
+                    Return 0
+                End If
+
+                If SemClassMethodHasFlag(ps, ch, "STATIC") <> 0 And (hasVirtual <> 0 Or hasOverride <> 0) Then
+                    errText = "semantic: STATIC METHOD cannot be VIRTUAL or OVERRIDE " & className & "." & methodName
+                    Return 0
+                End If
+
+                If hasOverride <> 0 Then
+                    If baseName = "" Then
+                        errText = "semantic: CLASS OVERRIDE requires base class " & className & "." & methodName
+                        Return 0
+                    End If
+
+                    Dim baseMethodNode As Integer
+                    If SemFindBaseMethod(ps, baseName, methodName, baseMethodNode) = 0 Then
+                        errText = "semantic: CLASS OVERRIDE base method missing " & className & "." & methodName
+                        Return 0
+                    End If
+
+                    If SemClassMethodHasFlag(ps, baseMethodNode, "VIRTUAL") = 0 And SemClassMethodHasFlag(ps, baseMethodNode, "OVERRIDE") = 0 Then
+                        errText = "semantic: CLASS OVERRIDE base method is not virtual " & className & "." & methodName
+                        Return 0
+                    End If
+
+                    If SemClassMethodSignature(ps, ch) <> SemClassMethodSignature(ps, baseMethodNode) Then
+                        errText = "semantic: CLASS OVERRIDE signature mismatch " & className & "." & methodName
+                        Return 0
+                    End If
+                End If
+            End If
+
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateClassModifierContracts(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "CLASS_STMT" Then Continue For
+
+        Dim className As String
+        className = UCase(Trim(ps.ast.nodes(i).value))
+
+        Dim hasAbstract As Integer
+        Dim hasFinal As Integer
+        Dim hasSealed As Integer
+        hasAbstract = SemClassHasFlag(ps, i, "ABSTRACT")
+        hasFinal = SemClassHasFlag(ps, i, "FINAL")
+        hasSealed = SemClassHasFlag(ps, i, "SEALED")
+
+        If hasAbstract <> 0 And (hasFinal <> 0 Or hasSealed <> 0) Then
+            errText = "semantic: CLASS cannot be both ABSTRACT and FINAL/SEALED " & className
+            Return 0
+        End If
+
+        Dim baseName As String
+        If SemClassBaseName(ps, i, baseName) <> 0 Then
+            Dim baseNode As Integer
+            baseNode = SemFindClassNode(ps, baseName)
+            If baseNode = -1 Then
+                errText = "semantic: CLASS base class not found " & baseName
+                Return 0
+            End If
+
+            If SemClassHasFlag(ps, baseNode, "FINAL") <> 0 Or SemClassHasFlag(ps, baseNode, "SEALED") <> 0 Then
+                errText = "semantic: CLASS cannot extend FINAL/SEALED base " & baseName
+                Return 0
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateClassMixinDecoratorContracts(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "CLASS_STMT" Then Continue For
+
+        Dim className As String
+        className = UCase(Trim(ps.ast.nodes(i).value))
+        If className = "" Then
+            errText = "semantic: CLASS name missing"
+            Return 0
+        End If
+
+        Dim baseName As String
+        baseName = ""
+        Dim baseNode As Integer
+        baseNode = -1
+
+        Dim mixinCount As Integer
+        Dim implicitMixinBase As String
+        implicitMixinBase = ""
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            Dim ck As String
+            ck = UCase(Trim(ps.ast.nodes(ch).kind))
+
+            If ck = "CLASS_BASE_REF" Then
+                baseName = UCase(Trim(ps.ast.nodes(ch).value))
+                baseNode = ch
+            ElseIf ck = "CLASS_MIXIN_REF" Then
+                mixinCount += 1
+                Dim mixinName As String
+                mixinName = UCase(Trim(ps.ast.nodes(ch).value))
+                If mixinName = "" Then
+                    errText = "semantic: MIXIN class name cannot be empty in " & className
+                    Return 0
+                End If
+                If mixinName = className Then
+                    errText = "semantic: CLASS cannot mixin itself " & className
+                    Return 0
+                End If
+                If SemHasClassName(ps, mixinName) = 0 Then
+                    errText = "semantic: MIXIN class not found " & mixinName
+                    Return 0
+                End If
+
+                If implicitMixinBase = "" Then implicitMixinBase = mixinName
+
+                If baseName <> "" And baseName <> mixinName Then
+                    errText = "semantic: MIXIN currently supports single-base model in " & className
+                    Return 0
+                End If
+            ElseIf ck = "CLASS_DECORATOR_REF" Then
+                Dim decoratorName As String
+                decoratorName = UCase(Trim(ps.ast.nodes(ch).value))
+                If decoratorName = "" Then
+                    errText = "semantic: DECORATOR name cannot be empty in " & className
+                    Return 0
+                End If
+            End If
+
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+
+        If mixinCount > 1 Then
+            errText = "semantic: CLASS supports at most one MIXIN in this phase " & className
+            Return 0
+        End If
+
+        If baseNode = -1 And implicitMixinBase <> "" Then
+            Dim injectedBaseNode As Integer
+            injectedBaseNode = ASTNewNode(ps.ast, "CLASS_BASE_REF", implicitMixinBase, "", ps.ast.nodes(i).lineNo, ps.ast.nodes(i).colNo)
+            ASTAddChild ps.ast, i, injectedBaseNode
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateClassPropertyContracts(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "CLASS_PROPERTY_DECL" Then Continue For
+
+        If Trim(ps.ast.nodes(i).value) = "" Then
+            errText = "semantic: PROPERTY name cannot be empty"
+            Return 0
+        End If
+
+        Dim hasTypeRef As Integer
+        Dim hasGet As Integer
+        Dim hasSet As Integer
+        Dim hasGetBody As Integer
+        Dim hasSetBody As Integer
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            Dim ck As String
+            ck = UCase(ps.ast.nodes(ch).kind)
+            If ck = "TYPE_REF" Then
+                hasTypeRef = 1
+            ElseIf ck = "CLASS_PROPERTY_FLAG" Then
+                Dim fv As String
+                fv = UCase(Trim(ps.ast.nodes(ch).value))
+                If fv = "GET" Then hasGet = 1
+                If fv = "SET" Then hasSet = 1
+                If fv <> "GET" And fv <> "SET" And fv <> "STATIC" Then
+                    errText = "semantic: PROPERTY invalid accessor flag " & fv
+                    Return 0
+                End If
+            ElseIf ck = "CLASS_PROPERTY_GET_STMT" Then
+                If hasGetBody <> 0 Then
+                    errText = "semantic: PROPERTY duplicate GET body " & UCase(Trim(ps.ast.nodes(i).value))
+                    Return 0
+                End If
+                hasGetBody = 1
+            ElseIf ck = "CLASS_PROPERTY_SET_STMT" Then
+                If hasSetBody <> 0 Then
+                    errText = "semantic: PROPERTY duplicate SET body " & UCase(Trim(ps.ast.nodes(i).value))
+                    Return 0
+                End If
+                hasSetBody = 1
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+
+        If hasTypeRef = 0 Then
+            errText = "semantic: PROPERTY type reference missing " & UCase(Trim(ps.ast.nodes(i).value))
+            Return 0
+        End If
+
+        If hasGet = 0 And hasSet = 0 Then
+            errText = "semantic: PROPERTY must declare GET and/or SET " & UCase(Trim(ps.ast.nodes(i).value))
+            Return 0
+        End If
+
+        If hasGetBody <> 0 And hasGet = 0 Then
+            errText = "semantic: PROPERTY GET body requires GET accessor " & UCase(Trim(ps.ast.nodes(i).value))
+            Return 0
+        End If
+        If hasSetBody <> 0 And hasSet = 0 Then
+            errText = "semantic: PROPERTY SET body requires SET accessor " & UCase(Trim(ps.ast.nodes(i).value))
+            Return 0
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateClassOperatorContracts(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "CLASS_STMT" Then Continue For
+
+        Dim className As String
+        className = UCase(Trim(ps.ast.nodes(i).value))
+
+        Dim seenSignatures As String
+        seenSignatures = ""
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CLASS_OPERATOR_DECL" Then
+                Dim opName As String
+                opName = UCase(Trim(ps.ast.nodes(ch).value))
+                If opName = "" Then
+                    errText = "semantic: CLASS OPERATOR token missing in " & className
+                    Return 0
+                End If
+
+                Dim signature As String
+                signature = opName & "|"
+                Dim hasReturnType As Integer
+
+                Dim mch As Integer
+                mch = ps.ast.nodes(ch).firstChild
+                Do While mch <> -1
+                    Dim mk As String
+                    mk = UCase(ps.ast.nodes(mch).kind)
+                    If mk = "PARAM_DECL" Then
+                        Dim pType As String
+                        pType = ""
+                        Dim pch As Integer
+                        pch = ps.ast.nodes(mch).firstChild
+                        Do While pch <> -1
+                            If UCase(ps.ast.nodes(pch).kind) = "TYPE_REF" Then
+                                pType = UCase(Trim(ps.ast.nodes(pch).value))
+                                Exit Do
+                            End If
+                            pch = ps.ast.nodes(pch).nextSibling
+                        Loop
+                        signature &= "P:" & pType & ";"
+                    ElseIf mk = "RETURN_TYPE" Then
+                        hasReturnType = 1
+                        signature &= "R:" & UCase(Trim(ps.ast.nodes(mch).value)) & ";"
+                    End If
+                    mch = ps.ast.nodes(mch).nextSibling
+                Loop
+
+                If hasReturnType = 0 Then
+                    errText = "semantic: CLASS OPERATOR return type required " & className & "." & opName
+                    Return 0
+                End If
+
+                If InStr(seenSignatures, "|" & signature & "|") <> 0 Then
+                    errText = "semantic: CLASS OPERATOR duplicate signature " & className & "." & signature
+                    Return 0
+                End If
+                seenSignatures &= "|" & signature & "|"
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemClassMethodParamCount(ByRef ps As ParseState, ByVal methodNode As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "PARAM_DECL" Then cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return cnt
+End Function
+
+Private Function SemClassMethodHasReturnType(ByRef ps As ParseState, ByVal methodNode As Integer) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(methodNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "RETURN_TYPE" Then Return 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 0
+End Function
+
+Private Function SemNormalizeMagicMethodName(ByRef methodNameRaw As String, ByRef normalizedOut As String) As Integer
+    normalizedOut = UCase(Trim(methodNameRaw))
+    If normalizedOut = "" Then Return 0
+    If Left(normalizedOut, 2) = "__" Then
+        normalizedOut = "MAGIC_" & Mid(normalizedOut, 3)
+    End If
+    Return IIf(Left(normalizedOut, 6) = "MAGIC_", 1, 0)
+End Function
+
+Private Function SemIsKnownMagicMethodName(ByRef magicNameRaw As String) As Integer
+    Dim m As String
+    m = UCase(Trim(magicNameRaw))
+
+    Select Case m
+    Case "MAGIC_GET", "MAGIC_SET", "MAGIC_CALL", "MAGIC_TOSTRING", _
+         "MAGIC_ADD", "MAGIC_SUB", "MAGIC_MUL", "MAGIC_DIV", "MAGIC_IDIV", "MAGIC_MOD", _
+         "MAGIC_AND", "MAGIC_OR", "MAGIC_XOR", "MAGIC_SHL", "MAGIC_SHR", "MAGIC_ROL", "MAGIC_ROR", _
+         "MAGIC_EQ", "MAGIC_NE", "MAGIC_LT", "MAGIC_LE", "MAGIC_GT", "MAGIC_GE"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function SemIsOperatorMagicMethodName(ByRef magicNameRaw As String) As Integer
+    Dim m As String
+    m = UCase(Trim(magicNameRaw))
+
+    Select Case m
+    Case "MAGIC_ADD", "MAGIC_SUB", "MAGIC_MUL", "MAGIC_DIV", "MAGIC_IDIV", "MAGIC_MOD", _
+         "MAGIC_AND", "MAGIC_OR", "MAGIC_XOR", "MAGIC_SHL", "MAGIC_SHR", "MAGIC_ROL", "MAGIC_ROR", _
+         "MAGIC_EQ", "MAGIC_NE", "MAGIC_LT", "MAGIC_LE", "MAGIC_GT", "MAGIC_GE"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function SemValidateClassMagicMethodContracts(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "CLASS_STMT" Then Continue For
+
+        Dim className As String
+        className = UCase(Trim(ps.ast.nodes(i).value))
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+                If SemClassMethodHasFlag(ps, ch, "MAGIC") <> 0 Then
+                    Dim methodName As String
+                    methodName = UCase(Trim(ps.ast.nodes(ch).value))
+
+                    Dim normalizedMagic As String
+                    If SemNormalizeMagicMethodName(methodName, normalizedMagic) = 0 Then
+                        errText = "semantic: MAGIC invalid name " & className & "." & methodName
+                        Return 0
+                    End If
+
+                    If SemIsKnownMagicMethodName(normalizedMagic) = 0 Then
+                        ' Custom magic declarations are valid language surface:
+                        '   MAGIC <Name>(...) ... END MAGIC
+                        ' They are registered as CLASS_METHOD_DECL + MAGIC flag, but they do
+                        ' not have an automatic execution trigger unless another layer defines
+                        ' a concrete runtime contract for that name.
+                        ch = ps.ast.nodes(ch).nextSibling
+                        Continue Do
+                    End If
+
+                    Dim paramCount As Integer
+                    Dim hasReturn As Integer
+                    paramCount = SemClassMethodParamCount(ps, ch)
+                    hasReturn = SemClassMethodHasReturnType(ps, ch)
+
+                    Select Case normalizedMagic
+                    Case "MAGIC_GET"
+                        If paramCount <> 1 Then
+                            errText = "semantic: MAGIC GET requires exactly 1 param " & className & "." & methodName
+                            Return 0
+                        End If
+                        If hasReturn = 0 Then
+                            errText = "semantic: MAGIC GET requires return type " & className & "." & methodName
+                            Return 0
+                        End If
+                    Case "MAGIC_SET"
+                        If paramCount <> 2 Then
+                            errText = "semantic: MAGIC SET requires exactly 2 params " & className & "." & methodName
+                            Return 0
+                        End If
+                    Case "MAGIC_CALL"
+                        ' MAGIC CALL may be parameterless: obj() is a valid callable object surface.
+                        ' Return type is optional because the same method can be used as a statement call.
+                    Case "MAGIC_TOSTRING"
+                        If paramCount <> 0 Then
+                            errText = "semantic: MAGIC TOSTRING cannot take parameters " & className & "." & methodName
+                            Return 0
+                        End If
+                        If hasReturn = 0 Then
+                            errText = "semantic: MAGIC TOSTRING requires return type " & className & "." & methodName
+                            Return 0
+                        End If
+                    Case Else
+                        If SemIsOperatorMagicMethodName(normalizedMagic) = 0 Then
+                            errText = "semantic: MAGIC has no execution contract " & className & "." & methodName
+                            Return 0
+                        End If
+                        If paramCount <> 1 Then
+                            errText = "semantic: MAGIC operator hooks require exactly 1 param " & className & "." & methodName
+                            Return 0
+                        End If
+                        If hasReturn = 0 Then
+                            errText = "semantic: MAGIC operator hooks require return type " & className & "." & methodName
+                            Return 0
+                        End If
+                    End Select
+                End If
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemValidateInterfaceContracts(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) <> "CLASS_STMT" Then Continue For
+
+        Dim className As String
+        className = UCase(Trim(ps.ast.nodes(i).value))
+        If className = "" Then Continue For
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CLASS_IMPLEMENTS_REF" Then
+                Dim interfaceName As String
+                interfaceName = UCase(Trim(ps.ast.nodes(ch).value))
+
+                Dim interfaceNode As Integer
+                interfaceNode = SemFindInterfaceNode(ps, interfaceName)
+                If interfaceNode = -1 Then
+                    errText = "semantic: CLASS " & className & " implements unknown interface " & interfaceName
+                    Return 0
+                End If
+
+                Dim m As Integer
+                m = ps.ast.nodes(interfaceNode).firstChild
+                Do While m <> -1
+                    If UCase(ps.ast.nodes(m).kind) = "INTERFACE_METHOD_DECL" Then
+                        Dim methodName As String
+                        methodName = UCase(Trim(ps.ast.nodes(m).value))
+
+                        Dim implMethod As Integer
+                        Dim declaringClass As String
+                        implMethod = SemClassMethodNode(ps, i, methodName)
+                        declaringClass = className
+                        If implMethod = -1 Then
+                            Dim baseName As String
+                            If SemClassBaseName(ps, i, baseName) <> 0 Then
+                                If SemFindBaseMethod(ps, baseName, methodName, implMethod) <> 0 Then
+                                    declaringClass = UCase(Trim(baseName))
+                                End If
+                            End If
+                        End If
+
+                        If implMethod = -1 Then
+                            errText = "semantic: interface method missing implementation " & className & "." & methodName & " for " & interfaceName
+                            Return 0
+                        End If
+
+                        If UCase(Trim(ps.ast.nodes(implMethod).kind)) <> "CLASS_METHOD_DECL" Then
+                            errText = "semantic: interface implementation is not a CLASS METHOD " & className & "." & methodName
+                            Return 0
+                        End If
+                        If SemClassMethodHasFlag(ps, implMethod, "STATIC") <> 0 Then
+                            errText = "semantic: interface method implementation cannot be STATIC " & className & "." & methodName
+                            Return 0
+                        End If
+
+                        Dim expectedSig As String
+                        Dim actualSig As String
+                        expectedSig = SemClassMethodSignature(ps, m)
+                        actualSig = SemClassMethodSignature(ps, implMethod)
+                        If expectedSig <> actualSig Then
+                            errText = "semantic: interface method signature mismatch " & className & "." & methodName & " expected=" & expectedSig & " actual=" & actualSig
+                            Return 0
+                        End If
+                    End If
+                    m = ps.ast.nodes(m).nextSibling
+                Loop
+            End If
+
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
+    Return 1
+End Function
+
+' Assign vtable slots for every class (base-first). This annotates
+' CLASS_METHOD_DECL nodes with a child node of kind "CLASS_METHOD_SLOT"
+' whose value is the slot index (decimal). The algorithm matches the
+' collector used by x64 codegen: collect virtual/override methods from
+' the base chain then assign slot indices 0..n-1 in that order.
+'Helper routines for processed keys passed by caller
+Private Function SemVTableIsProcessed(processedKeys() As String, ByRef processedCount As Integer, ByRef cname As String) As Integer
+    Dim i As Integer
+    For i = 0 To processedCount - 1
+        If processedKeys(i) = cname Then Return 1
+    Next
+    Return 0
+End Function
+
+Private Sub SemVTableMarkProcessed(processedKeys() As String, ByRef processedCount As Integer, ByRef cname As String)
+    If processedCount = 0 Then
+        ReDim processedKeys(0)
+    Else
+        ReDim Preserve processedKeys(0 To processedCount)
+    End If
+    processedKeys(processedCount) = cname
+    processedCount += 1
+End Sub
+
+'' SemVTableCollectVMethods removed — logic inlined in SemVTableAssignSlotsForClass
+
+Private Function SemVTableAssignSlotsForClass(ByRef ps As ParseState, ByRef className As String, processedKeys() As String, ByRef processedCount As Integer, ByRef errText As String) As Integer
+    Dim cname As String
+        cname = UCase(Trim(className))
+    If cname = "" Then Return 1
+    If SemVTableIsProcessed(processedKeys(), processedCount, cname) <> 0 Then Return 1
+
+    Dim classNode As Integer
+        classNode = SemFindClassNode(ps, cname)
+    If classNode = -1 Then
+        SemVTableMarkProcessed(processedKeys(), processedCount, cname)
+        Return 1
+    End If
+
+    ' ensure base processed first
+    Dim baseName As String
+    If SemClassBaseName(ps, classNode, baseName) <> 0 Then
+        If SemVTableAssignSlotsForClass(ps, baseName, processedKeys(), processedCount, errText) = 0 Then Return 0
+    End If
+
+    Dim methodNames() As String
+    Dim methodOwners() As String
+    Dim methodCount As Integer
+    methodCount = 0
+
+    ' build inheritance chain and collect virtual/override methods base-first
+    Dim inheritChain() As String
+    Dim inheritChainCount As Integer
+    inheritChainCount = 0
+    Dim cur As String
+    cur = cname
+    Do
+        If inheritChainCount = 0 Then
+            ReDim inheritChain(0)
+        Else
+            ReDim Preserve inheritChain(0 To inheritChainCount)
+        End If
+        inheritChain(inheritChainCount) = cur
+        inheritChainCount = inheritChainCount + 1
+
+        Dim nodeIdx2 As Integer
+        nodeIdx2 = SemFindClassNode(ps, cur)
+        If nodeIdx2 = -1 Then Exit Do
+
+        Dim nextBase As String
+        If SemClassBaseName(ps, nodeIdx2, nextBase) = 0 Then Exit Do
+        If Trim(nextBase) = "" Then Exit Do
+        cur = nextBase
+    Loop
+
+    Dim inci As Integer
+    For inci = inheritChainCount - 1 To 0 Step -1
+        Dim t As String
+        t = inheritChain(inci)
+        Dim nodeIdx3 As Integer
+        nodeIdx3 = SemFindClassNode(ps, t)
+        If nodeIdx3 = -1 Then Continue For
+
+        Dim ch2 As Integer
+        ch2 = ps.ast.nodes(nodeIdx3).firstChild
+        Do While ch2 <> -1
+            If UCase(ps.ast.nodes(ch2).kind) = "CLASS_METHOD_DECL" Then
+                Dim mname As String
+                mname = UCase(Trim(ps.ast.nodes(ch2).value))
+                If mname <> "" Then
+                    Dim isVirt As Integer
+                    isVirt = IIf(SemClassMethodHasFlag(ps, ch2, "VIRTUAL") <> 0 Or SemClassMethodHasFlag(ps, ch2, "OVERRIDE") <> 0, 1, 0)
+                    If isVirt <> 0 Then
+                        Dim found As Integer
+                        found = 0
+                        Dim i As Integer
+                        For i = 0 To methodCount - 1
+                            If methodNames(i) = mname Then found = 1
+                        Next i
+                        If found = 0 Then
+                            If methodCount = 0 Then
+                                ReDim methodNames(0)
+                                ReDim methodOwners(0)
+                            Else
+                                ReDim Preserve methodNames(0 To methodCount)
+                                ReDim Preserve methodOwners(0 To methodCount)
+                            End If
+                            methodNames(methodCount) = mname
+                            methodOwners(methodCount) = t
+                            methodCount = methodCount + 1
+                        End If
+                    End If
+                End If
+            End If
+            ch2 = ps.ast.nodes(ch2).nextSibling
+        Loop
+    Next inci
+
+    ' annotate each method node in this class with its slot if virtual/override
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_METHOD_DECL" Then
+            Dim mname As String
+            mname = UCase(Trim(ps.ast.nodes(ch).value))
+            If mname <> "" Then
+                ' If this method overrides a virtual method from base, require explicit OVERRIDE
+                If baseName <> "" Then
+                    Dim baseMethodNode As Integer
+                    If SemFindBaseMethod(ps, baseName, mname, baseMethodNode) <> 0 Then
+                        If SemClassMethodHasFlag(ps, baseMethodNode, "VIRTUAL") <> 0 Or SemClassMethodHasFlag(ps, baseMethodNode, "OVERRIDE") <> 0 Then
+                            If SemClassMethodHasFlag(ps, ch, "OVERRIDE") = 0 Then
+                                errText = "semantic: CLASS OVERRIDE required for overriding virtual base method " & cname & "." & mname
+                                Return 0
+                            End If
+                        End If
+                    End If
+                End If
+
+                Dim hasVirt As Integer
+                hasVirt = IIf(SemClassMethodHasFlag(ps, ch, "VIRTUAL") <> 0 Or SemClassMethodHasFlag(ps, ch, "OVERRIDE") <> 0, 1, 0)
+                If hasVirt <> 0 Then
+                    ' find slot index for this method in methodNames
+                    Dim si As Integer
+                    si = -1
+                    Dim i As Integer
+                    For i = 0 To methodCount - 1
+                        If methodNames(i) = mname Then
+                            si = i
+                            Exit For
+                        End If
+                    Next i
+
+                    If si >= 0 Then
+                        ' if slot child already present, update; else add
+                        Dim metaCh As Integer
+                        metaCh = ps.ast.nodes(ch).firstChild
+                        Dim foundMeta As Integer
+                        foundMeta = 0
+                        Do While metaCh <> -1
+                            If UCase(ps.ast.nodes(metaCh).kind) = "CLASS_METHOD_SLOT" Then
+                                ps.ast.nodes(metaCh).value = LTrim(Str(si))
+                                foundMeta = 1
+                                Exit Do
+                            End If
+                            metaCh = ps.ast.nodes(metaCh).nextSibling
+                        Loop
+                        If foundMeta = 0 Then
+                            Dim slotNode As Integer
+                            slotNode = ASTNewNode(ps.ast, "CLASS_METHOD_SLOT", LTrim(Str(si)), "", ps.ast.nodes(ch).lineNo, ps.ast.nodes(ch).colNo)
+                            ASTAddRoleChild ps.ast, ch, slotNode, "VTABLE_SLOT"
+                        End If
+                    End If
+                End If
+            End If
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    SemVTableMarkProcessed(processedKeys(), processedCount, cname)
+    Return 1
+End Function
+
+' Orchestrator: Walk all class declarations and assign slots
+Private Function SemAssignVtableSlots(ByRef ps As ParseState, ByRef errText As String) As Integer
+    errText = ""
+
+    Dim processedKeys() As String
+    Dim processedCount As Integer
+    processedCount = 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CLASS_STMT" Then
+            If Trim(ps.ast.nodes(i).value) <> "" Then
+                If SemVTableAssignSlotsForClass(ps, UCase(Trim(ps.ast.nodes(i).value)), processedKeys(), processedCount, errText) = 0 Then
+                    Return 0
+                End If
+            End If
+        End If
+    Next i
+
+    Return 1
+End Function
+
+Private Function SemCountRoutineParams(ByRef ps As ParseState, ByVal routineNode As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(routineNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "PARAM_DECL" Then cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return cnt
+End Function
+
+Private Function SemCountRoutineGenericParams(ByRef ps As ParseState, ByVal routineNode As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(routineNode).firstChild
+    Do While ch <> -1
+        Dim k As String
+        k = UCase(ps.ast.nodes(ch).kind)
+        If k = "GENERIC_PARAM" Or k = "TYPE_PARAM" Or k = "TYPE_PARAM_DECL" Then cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return cnt
+End Function
+
+Private Function SemCountCallArgs(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(callNode).firstChild
+    Do While ch <> -1
+        Dim k As String
+        k = UCase(ps.ast.nodes(ch).kind)
+        If k <> "GENERIC_ARG" And k <> "TYPE_ARG" Then cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return cnt
+End Function
+
+Private Function SemCountCallGenericArgs(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    Dim cnt As Integer
+    Dim ch As Integer
+
+    ch = ps.ast.nodes(callNode).firstChild
+    Do While ch <> -1
+        Dim k As String
+        k = UCase(ps.ast.nodes(ch).kind)
+        If k = "GENERIC_ARG" Or k = "TYPE_ARG" Then cnt += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return cnt
+End Function
+
+#include once "type_binding.fbs"
+#include once "semantic_step3_gate.fbs"
+#include once "semantic_pass_tail.fbs"

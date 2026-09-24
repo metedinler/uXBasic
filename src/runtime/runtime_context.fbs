@@ -1,0 +1,189 @@
+#ifndef UXB_RUNTIME_CONTEXT_FBS
+#define UXB_RUNTIME_CONTEXT_FBS
+
+#include once "runtime_value.fbs"
+#include once "runtime_error_codes.fbs"
+
+Const UXB_RT_OUT_JSON As String = "JSON"
+Const UXB_RT_OUT_BUFFER As String = "BUFFER"
+Const UXB_RT_OUT_SCREEN As String = "SCREEN"
+Const UXB_RT_OUT_PRINTER As String = "PRINTER"
+Const UXB_RT_OUT_SILENT As String = "SILENT"
+Const UXB_RT_OUT_HOST As String = "HOST"
+
+Type UXBRuntimeHandle
+    handleKind As String
+    nameText As String
+    fileNo As Integer
+    nativePtr As Any Ptr
+    active As Integer
+End Type
+
+Type UXBRuntimeOutputEvent
+    channelName As String
+    textValue As String
+    serviceId As String
+End Type
+
+Type UXBRuntimeContext
+    targetName As String
+    stdoutText As String
+    stderrText As String
+    jsonStdoutText As String
+    screenText As String
+    printerText As String
+    hostText As String
+    outputMode As String
+    ' S-074: 1 = every write is also sent to the real stdout at once (the
+    ' `run --interpreter-backend MIR` driver), so program output interleaves
+    ' correctly with anything that writes to the console directly (FFI/DLL
+    ' calls, the error text). 0 = only collected (BOTH-mode compare, tests).
+    liveEcho As Integer
+    outputEvents(Any) As UXBRuntimeOutputEvent
+    outputEventCount As Integer
+    outputEventCap As Integer
+    handles(Any) As UXBRuntimeHandle
+    handleCount As Integer
+    nextHandleId As Integer
+    lastErrorCode As Integer
+    lastErrorText As String
+    serviceCallCount As Integer
+End Type
+
+Sub UXBRuntimeContextInit(ByRef rt As UXBRuntimeContext, ByVal targetText As String = "native")
+    rt.targetName = UCase(Trim(targetText))
+    If rt.targetName = "" Then rt.targetName = "NATIVE"
+    rt.stdoutText = ""
+    rt.stderrText = ""
+    rt.jsonStdoutText = ""
+    rt.screenText = ""
+    rt.printerText = ""
+    rt.hostText = ""
+    rt.outputMode = UXB_RT_OUT_JSON
+    rt.liveEcho = 0
+    rt.outputEventCount = 0
+    rt.outputEventCap = 0
+    rt.handleCount = 0
+    rt.nextHandleId = 1
+    rt.lastErrorCode = 0
+    rt.lastErrorText = ""
+    rt.serviceCallCount = 0
+    Erase rt.outputEvents
+    Erase rt.handles
+End Sub
+
+Sub UXBRuntimeSetOutputMode(ByRef rt As UXBRuntimeContext, ByVal modeText As String)
+    Dim m As String = UCase(Trim(modeText))
+    Select Case m
+    Case UXB_RT_OUT_JSON, UXB_RT_OUT_BUFFER, UXB_RT_OUT_SCREEN, UXB_RT_OUT_PRINTER, UXB_RT_OUT_SILENT, UXB_RT_OUT_HOST
+        rt.outputMode = m
+    Case Else
+        rt.outputMode = UXB_RT_OUT_JSON
+    End Select
+End Sub
+
+Private Function UXBRuntimeJsonEscape(ByVal rawText As String) As String
+    Dim outText As String = ""
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String = Mid(rawText, i, 1)
+        Select Case ch
+        Case Chr(34): outText &= "\" & Chr(34)
+        Case "\": outText &= "\\"
+        Case Chr(13): outText &= "\r"
+        Case Chr(10): outText &= "\n"
+        Case Chr(9): outText &= "\t"
+        Case Else: outText &= ch
+        End Select
+    Next i
+    Return outText
+End Function
+
+Sub UXBRuntimeOutputEventAdd(ByRef rt As UXBRuntimeContext, ByVal channelText As String, ByVal textValue As String, ByVal serviceText As String)
+    ' S-109: grow geometrically. ReDim Preserve of an array of string-carrying
+    ' records copies every element, so growing by one per PRINT made a loop that
+    ' prints n lines cost O(n^2) (2000 lines took minutes).
+    If rt.outputEventCount >= rt.outputEventCap Then
+        Dim newCap As Integer = rt.outputEventCap * 2
+        If newCap < 16 Then newCap = 16
+        If rt.outputEventCap = 0 Then
+            ReDim rt.outputEvents(newCap - 1)
+        Else
+            ReDim Preserve rt.outputEvents(newCap - 1)
+        End If
+        rt.outputEventCap = newCap
+    End If
+    rt.outputEvents(rt.outputEventCount).channelName = UCase(Trim(channelText))
+    rt.outputEvents(rt.outputEventCount).textValue = textValue
+    rt.outputEvents(rt.outputEventCount).serviceId = serviceText
+    rt.outputEventCount += 1
+End Sub
+
+Sub UXBRuntimeWriteOutput(ByRef rt As UXBRuntimeContext, ByVal textValue As String, ByVal serviceText As String = "RT_PRINT")
+    UXBRuntimeOutputEventAdd rt, rt.outputMode, textValue, serviceText
+    rt.stdoutText &= textValue
+    If rt.liveEcho <> 0 Then Print textValue;
+    Select Case rt.outputMode
+    Case UXB_RT_OUT_JSON
+        If Len(rt.jsonStdoutText) > 0 Then rt.jsonStdoutText &= ","
+        rt.jsonStdoutText &= Chr(34) & UXBRuntimeJsonEscape(textValue) & Chr(34)
+    Case UXB_RT_OUT_BUFFER
+        ' stdoutText already stores the buffer.
+    Case UXB_RT_OUT_SCREEN
+        rt.screenText &= textValue
+    Case UXB_RT_OUT_PRINTER
+        rt.printerText &= textValue
+    Case UXB_RT_OUT_HOST
+        rt.hostText &= textValue
+    Case UXB_RT_OUT_SILENT
+        ' Keep stdoutText for reports but no direct presentation channel.
+    End Select
+End Sub
+
+Function UXBRuntimeSetError(ByRef rt As UXBRuntimeContext, ByVal codeValue As Integer, ByVal textValue As String) As UXBInterpValue
+    rt.lastErrorCode = codeValue
+    rt.lastErrorText = textValue
+    rt.stderrText &= textValue & Chr(10)
+    Return UXBInterpValueError(codeValue, textValue)
+End Function
+
+Function UXBRuntimeAllocHandle(ByRef rt As UXBRuntimeContext, ByVal kindText As String, ByVal nameText As String, ByVal fileNoValue As Integer = 0, ByVal ptrValue As Any Ptr = 0) As Integer
+    If rt.handleCount = 0 Then
+        ReDim rt.handles(0)
+    Else
+        ReDim Preserve rt.handles(rt.handleCount)
+    End If
+    Dim id As Integer = rt.nextHandleId
+    rt.nextHandleId += 1
+    rt.handles(rt.handleCount).handleKind = UCase(Trim(kindText))
+    rt.handles(rt.handleCount).nameText = nameText
+    rt.handles(rt.handleCount).fileNo = fileNoValue
+    rt.handles(rt.handleCount).nativePtr = ptrValue
+    rt.handles(rt.handleCount).active = id
+    rt.handleCount += 1
+    Return id
+End Function
+
+Function UXBRuntimeFindHandle(ByRef rt As UXBRuntimeContext, ByVal id As Integer) As UXBRuntimeHandle Ptr
+    Dim i As Integer
+    For i = 0 To rt.handleCount - 1
+        If rt.handles(i).active = id Then Return @rt.handles(i)
+    Next i
+    Return 0
+End Function
+
+Function UXBRuntimeOutputEventsToJson(ByRef rt As UXBRuntimeContext) As String
+    Dim q As String = Chr(34)
+    Dim j As String = "["
+    Dim i As Integer
+    For i = 0 To rt.outputEventCount - 1
+        If i > 0 Then j &= ","
+        j &= "{" & q & "channel" & q & ":" & q & UXBRuntimeJsonEscape(rt.outputEvents(i).channelName) & q & ","
+        j &= q & "service" & q & ":" & q & UXBRuntimeJsonEscape(rt.outputEvents(i).serviceId) & q & ","
+        j &= q & "text" & q & ":" & q & UXBRuntimeJsonEscape(rt.outputEvents(i).textValue) & q & "}"
+    Next i
+    j &= "]"
+    Return j
+End Function
+
+#endif

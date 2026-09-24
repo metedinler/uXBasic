@@ -1,0 +1,374 @@
+﻿' uXBasic ADIM4 AST contract mandatory child-model gate.
+#ifndef UXBASIC_AST_CONTRACT_GATE_ADIM04_FBS
+#define UXBASIC_AST_CONTRACT_GATE_ADIM04_FBS
+
+#include once "ast_contract.fbs"
+#include once "ast_contract_validate.fbs"
+#include once "ast_contract_child_model.fbs"
+
+Private Function UXBAstAdim04IsValidIndex(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Then Return 0
+    If nodeIdx >= p.count Then Return 0
+    Return 1
+End Function
+
+Type UXBAstAdim04GateResult
+    ok As Integer
+    checkedNodeCount As Integer
+    binaryNodeCount As Integer
+    unaryNodeCount As Integer
+    receiverListNodeCount As Integer
+    roleListNodeCount As Integer
+    leafNodeCount As Integer
+    unknownModelCount As Integer
+    missingOperandCount As Integer
+    leftRightMisuseCount As Integer
+    listMisuseCount As Integer
+    roleErrorCount As Integer
+    parentMismatchCount As Integer
+    errorsText As String
+    warningsText As String
+End Type
+
+Sub UXBAstAdim04GateInit(ByRef r As UXBAstAdim04GateResult)
+    r.ok = 0
+    r.checkedNodeCount = 0
+    r.binaryNodeCount = 0
+    r.unaryNodeCount = 0
+    r.receiverListNodeCount = 0
+    r.roleListNodeCount = 0
+    r.leafNodeCount = 0
+    r.unknownModelCount = 0
+    r.missingOperandCount = 0
+    r.leftRightMisuseCount = 0
+    r.listMisuseCount = 0
+    r.roleErrorCount = 0
+    r.parentMismatchCount = 0
+    r.errorsText = ""
+    r.warningsText = ""
+End Sub
+
+Private Sub UXBAstAdim04GateError(ByRef r As UXBAstAdim04GateResult, ByRef msg As String)
+    If Len(r.errorsText) > 0 Then r.errorsText &= Chr(10)
+    r.errorsText &= msg
+End Sub
+
+Private Sub UXBAstAdim04GateWarn(ByRef r As UXBAstAdim04GateResult, ByRef msg As String)
+    If Len(r.warningsText) > 0 Then r.warningsText &= Chr(10)
+    r.warningsText &= msg
+End Sub
+
+Private Function UXBAstAdim04NodeLabel(ByRef p As ASTPool, ByVal nodeIdx As Integer) As String
+    If UXBAstAdim04IsValidIndex(p, nodeIdx) = 0 Then Return "<invalid>"
+    Return "#" & LTrim(Str(nodeIdx)) & ":" & p.nodes(nodeIdx).kind & "@" & LTrim(Str(p.nodes(nodeIdx).lineNo)) & ":" & LTrim(Str(p.nodes(nodeIdx).colNo))
+End Function
+
+Private Function UXBAstAdim04ListChildCountRaw(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef r As UXBAstAdim04GateResult) As Integer
+    If UXBAstAdim04IsValidIndex(p, nodeIdx) = 0 Then Return 0
+
+    Dim cnt As Integer
+    cnt = 0
+
+    Dim safety As Integer
+    safety = 0
+
+    Dim ch As Integer
+    ch = p.nodes(nodeIdx).firstChild
+    Do While ch <> AST_NULL
+        If UXBAstAdim04IsValidIndex(p, ch) = 0 Then
+            r.parentMismatchCount += 1
+            UXBAstAdim04GateError r, "invalid list child under " & UXBAstAdim04NodeLabel(p, nodeIdx)
+            Exit Do
+        End If
+        If p.nodes(ch).parent <> nodeIdx Then
+            r.parentMismatchCount += 1
+            UXBAstAdim04GateError r, "parent mismatch: parent=" & UXBAstAdim04NodeLabel(p, nodeIdx) & " child=" & UXBAstAdim04NodeLabel(p, ch)
+        End If
+        cnt += 1
+        ch = p.nodes(ch).nextSibling
+        safety += 1
+        If safety > p.count Then
+            UXBAstAdim04GateError r, "sibling loop under " & UXBAstAdim04NodeLabel(p, nodeIdx)
+            Exit Do
+        End If
+    Loop
+
+    Return cnt
+End Function
+
+Private Function UXBAstAdim04ValidateOneNode(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef r As UXBAstAdim04GateResult) As Integer
+    If UXBAstAdim04IsValidIndex(p, nodeIdx) = 0 Then Return 1
+
+    r.checkedNodeCount += 1
+
+    Dim modelValue As Integer
+    modelValue = UXBAstChildModelForNode(p, nodeIdx)
+
+    Dim leftOk As Integer
+    Dim rightOk As Integer
+    Dim listCount As Integer
+
+    leftOk = UXBAstAdim04IsValidIndex(p, p.nodes(nodeIdx).left)
+    rightOk = UXBAstAdim04IsValidIndex(p, p.nodes(nodeIdx).right)
+    listCount = UXBAstAdim04ListChildCountRaw(p, nodeIdx, r)
+
+    Select Case modelValue
+    Case UXB_AST_CHILD_MODEL_BINARY_SHORTCUT
+        r.binaryNodeCount += 1
+        If leftOk = 0 Or rightOk = 0 Then
+            r.missingOperandCount += 1
+            UXBAstAdim04GateError r, "BINARY node must have valid left and right: " & UXBAstAdim04NodeLabel(p, nodeIdx)
+        End If
+        If listCount > 0 Then
+            r.listMisuseCount += 1
+            UXBAstAdim04GateError r, "BINARY node must not use firstChild list: " & UXBAstAdim04NodeLabel(p, nodeIdx)
+        End If
+
+    Case UXB_AST_CHILD_MODEL_UNARY_SHORTCUT
+        r.unaryNodeCount += 1
+        If leftOk = 0 Then
+            r.missingOperandCount += 1
+            UXBAstAdim04GateError r, "UNARY node must have valid left operand: " & UXBAstAdim04NodeLabel(p, nodeIdx)
+        End If
+        If rightOk <> 0 Then
+            r.leftRightMisuseCount += 1
+            UXBAstAdim04GateError r, "UNARY node must not use right operand: " & UXBAstAdim04NodeLabel(p, nodeIdx)
+        End If
+        If listCount > 0 Then
+            r.listMisuseCount += 1
+            UXBAstAdim04GateError r, "UNARY node must not use firstChild list: " & UXBAstAdim04NodeLabel(p, nodeIdx)
+        End If
+
+    Case UXB_AST_CHILD_MODEL_RECEIVER_LIST
+        r.receiverListNodeCount += 1
+        If rightOk <> 0 Then
+            r.leftRightMisuseCount += 1
+            UXBAstAdim04GateError r, "RECEIVER_LIST node must not use right: " & UXBAstAdim04NodeLabel(p, nodeIdx)
+        End If
+        If leftOk <> 0 And InStr(Trim(p.nodes(nodeIdx).value), ".") = 0 Then
+            r.leftRightMisuseCount += 1
+            UXBAstAdim04GateError r, "CALL_EXPR receiver requires a dotted call name: " & UXBAstAdim04NodeLabel(p, nodeIdx)
+        End If
+        Dim receiverRoleErr As String
+        If AstContract_ValidateChildRoles(p, nodeIdx, receiverRoleErr) = 0 Then
+            r.roleErrorCount += 1
+            UXBAstAdim04GateError r, receiverRoleErr & " at " & UXBAstAdim04NodeLabel(p, nodeIdx)
+        End If
+
+    Case UXB_AST_CHILD_MODEL_ROLE_LIST
+        r.roleListNodeCount += 1
+        If leftOk <> 0 Or rightOk <> 0 Then
+            Dim kindU As String
+            kindU = UCase(Trim(p.nodes(nodeIdx).kind))
+            If kindU = "ASSIGN_STMT" Or kindU = "PRINT_ITEM" Or kindU = "FIELD_EXPR" Or kindU = "MEMBER_EXPR" Or kindU = "INDEX_EXPR" Or kindU = "EXPR_STMT" Or kindU = "RANGE_EXPR" Or kindU = "CONST_DECL" Then
+                UXBAstAdim04GateWarn r, "ROLE_LIST node has legacy left/right: " & UXBAstAdim04NodeLabel(p, nodeIdx)
+            Else
+                r.leftRightMisuseCount += 1
+                UXBAstAdim04GateError r, "ROLE_LIST node must not use left/right: " & UXBAstAdim04NodeLabel(p, nodeIdx)
+            End If
+        End If
+        Dim roleErr As String
+        If AstContract_ValidateChildRoles(p, nodeIdx, roleErr) = 0 Then
+            r.roleErrorCount += 1
+            UXBAstAdim04GateError r, roleErr & " at " & UXBAstAdim04NodeLabel(p, nodeIdx)
+        End If
+
+    Case UXB_AST_CHILD_MODEL_LEAF
+        r.leafNodeCount += 1
+        If leftOk <> 0 Or rightOk <> 0 Or listCount > 0 Then
+            r.leftRightMisuseCount += 1
+            UXBAstAdim04GateError r, "LEAF node must not have children: " & UXBAstAdim04NodeLabel(p, nodeIdx)
+        End If
+
+    Case Else
+        r.unknownModelCount += 1
+        UXBAstAdim04GateError r, "unknown child model: " & UXBAstAdim04NodeLabel(p, nodeIdx)
+    End Select
+
+    Return 1
+End Function
+
+Function UXBAstAdim04ValidateChildModels(ByRef p As ASTPool, ByRef r As UXBAstAdim04GateResult) As Integer
+    UXBAstAdim04GateInit r
+
+    Dim i As Integer
+    For i = 0 To p.count - 1
+        UXBAstAdim04ValidateOneNode p, i, r
+    Next i
+
+    If r.missingOperandCount = 0 And r.leftRightMisuseCount = 0 And r.listMisuseCount = 0 And r.roleErrorCount = 0 And r.parentMismatchCount = 0 And r.unknownModelCount = 0 Then
+        r.ok = 1
+        Return 1
+    End If
+
+    r.ok = 0
+    Return 0
+End Function
+
+Function UXBAstAdim04ValidateTree(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef errText As String) As Integer
+    errText = ""
+
+    Dim baseErr As String
+    If AstContract_ValidateTree(p, rootIdx, baseErr) = 0 Then
+        errText = baseErr
+        Return 0
+    End If
+
+    Dim r As UXBAstAdim04GateResult
+    If UXBAstAdim04ValidateChildModels(p, r) = 0 Then
+        errText = r.errorsText
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Function UXBAstAdim04JsonEscape(ByVal rawText As String) As String
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        Select Case Asc(ch)
+        Case 34
+            outText &= "\"""
+        Case 92
+            outText &= "\\"
+        Case 10
+            outText &= "\n"
+        Case 13
+            outText &= "\r"
+        Case 9
+            outText &= "\t"
+        Case Else
+            If Asc(ch) < 32 Then
+                outText &= "?"
+            Else
+                outText &= ch
+            End If
+        End Select
+    Next i
+    Return outText
+End Function
+
+Function UXBAstAdim04GateResultToJson(ByRef r As UXBAstAdim04GateResult) As String
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  ""ok"": " & IIf(r.ok <> 0, "true", "false") & "," & Chr(10)
+    j &= "  ""checked_node_count"": " & LTrim(Str(r.checkedNodeCount)) & "," & Chr(10)
+    j &= "  ""binary_node_count"": " & LTrim(Str(r.binaryNodeCount)) & "," & Chr(10)
+    j &= "  ""unary_node_count"": " & LTrim(Str(r.unaryNodeCount)) & "," & Chr(10)
+    j &= "  ""receiver_list_node_count"": " & LTrim(Str(r.receiverListNodeCount)) & "," & Chr(10)
+    j &= "  ""role_list_node_count"": " & LTrim(Str(r.roleListNodeCount)) & "," & Chr(10)
+    j &= "  ""leaf_node_count"": " & LTrim(Str(r.leafNodeCount)) & "," & Chr(10)
+    j &= "  ""missing_operand_count"": " & LTrim(Str(r.missingOperandCount)) & "," & Chr(10)
+    j &= "  ""left_right_misuse_count"": " & LTrim(Str(r.leftRightMisuseCount)) & "," & Chr(10)
+    j &= "  ""list_misuse_count"": " & LTrim(Str(r.listMisuseCount)) & "," & Chr(10)
+    j &= "  ""role_error_count"": " & LTrim(Str(r.roleErrorCount)) & "," & Chr(10)
+    j &= "  ""parent_mismatch_count"": " & LTrim(Str(r.parentMismatchCount)) & "," & Chr(10)
+    j &= "  ""errors"": """ & UXBAstAdim04JsonEscape(r.errorsText) & """," & Chr(10)
+    j &= "  ""warnings"": """ & UXBAstAdim04JsonEscape(r.warningsText) & """" & Chr(10)
+    j &= "}"
+    Return j
+End Function
+
+Function UXBAstAdim04WriteGateJson(ByRef p As ASTPool, ByRef outPath As String, ByRef errText As String) As Integer
+    errText = ""
+
+    Dim r As UXBAstAdim04GateResult
+    UXBAstAdim04ValidateChildModels p, r
+
+    Dim f As Integer
+    f = FreeFile
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errText = "adim04 ast gate json open failed: " & outPath
+        Return 0
+    End If
+    Print #f, UXBAstAdim04GateResultToJson(r)
+    Close #f
+    Return 1
+End Function
+
+Function UXBAstAdim04WriteGateMd(ByRef p As ASTPool, ByRef outPath As String, ByRef errText As String) As Integer
+    errText = ""
+    Dim r As UXBAstAdim04GateResult
+    UXBAstAdim04ValidateChildModels p, r
+
+    Dim f As Integer
+    f = FreeFile
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errText = "adim04 ast gate md open failed: " & outPath
+        Return 0
+    End If
+    Print #f, "# ADIM04 AST Contract Gate"
+    Print #f, ""
+    Print #f, "status: " & IIf(r.ok <> 0, "PASS", "FAIL")
+    Print #f, "checked_node_count: " & LTrim(Str(r.checkedNodeCount))
+    Print #f, "binary_node_count: " & LTrim(Str(r.binaryNodeCount))
+    Print #f, "unary_node_count: " & LTrim(Str(r.unaryNodeCount))
+    Print #f, "receiver_list_node_count: " & LTrim(Str(r.receiverListNodeCount))
+    Print #f, "role_list_node_count: " & LTrim(Str(r.roleListNodeCount))
+    Print #f, "leaf_node_count: " & LTrim(Str(r.leafNodeCount))
+    Print #f, "missing_operand_count: " & LTrim(Str(r.missingOperandCount))
+    Print #f, "left_right_misuse_count: " & LTrim(Str(r.leftRightMisuseCount))
+    Print #f, "list_misuse_count: " & LTrim(Str(r.listMisuseCount))
+    Print #f, "role_error_count: " & LTrim(Str(r.roleErrorCount))
+    If Trim(r.errorsText) <> "" Then
+        Print #f, ""
+        Print #f, "## Errors"
+        Print #f, r.errorsText
+    End If
+    Close #f
+    Return 1
+End Function
+
+Function UXBAstAdim04WriteChildModelMatrixCsv(ByRef p As ASTPool, ByRef outPath As String, ByRef errText As String) As Integer
+    errText = ""
+    Dim f As Integer
+    f = FreeFile
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errText = "adim04 child model csv open failed: " & outPath
+        Return 0
+    End If
+
+    Print #f, "node_index,kind,model,left,right,list_child_count,line,col,status,diagnostic"
+
+    Dim i As Integer
+    For i = 0 To p.count - 1
+        Dim modelValue As Integer
+        modelValue = UXBAstChildModelForNode(p, i)
+
+        Dim diag As String
+        diag = ""
+        Dim status As String
+        status = "OK"
+
+        Dim tmpResult As UXBAstAdim04GateResult
+        UXBAstAdim04GateInit tmpResult
+        UXBAstAdim04ValidateOneNode p, i, tmpResult
+        If tmpResult.errorsText <> "" Then
+            status = "FAIL"
+            diag = tmpResult.errorsText
+        End If
+
+        Print #f, LTrim(Str(i)) & "," & _
+            p.nodes(i).kind & "," & _
+            UXBAstChildModelName(modelValue) & "," & _
+            LTrim(Str(p.nodes(i).left)) & "," & _
+            LTrim(Str(p.nodes(i).right)) & "," & _
+            LTrim(Str(UXBAstAdim04ListChildCountRaw(p, i, tmpResult))) & "," & _
+            LTrim(Str(p.nodes(i).lineNo)) & "," & _
+            LTrim(Str(p.nodes(i).colNo)) & "," & _
+            status & "," & _
+            Chr(34) & UXBAstAdim04JsonEscape(diag) & Chr(34)
+    Next i
+
+    Close #f
+    Return 1
+End Function
+
+#endif

@@ -1,0 +1,369 @@
+' Structured x64 exception flow for TRY/CATCH/FINALLY, THROW and ASSERT.
+
+Private Function X64TryCurrentTarget(ByRef labelOut As String) As Integer
+    labelOut = ""
+    If gX64TryDepth <= 0 Then Return 0
+    labelOut = gX64TryTargetLabels(gX64TryDepth - 1)
+    Return IIf(labelOut <> "", 1, 0)
+End Function
+
+Private Function X64TryPushTarget(ByRef labelText As String, ByRef errText As String) As Integer
+    If gX64TryDepth > 255 Then
+        errText = "x64-codegen: TRY nesting exceeds 256"
+        Return 0
+    End If
+    gX64TryTargetLabels(gX64TryDepth) = labelText
+    gX64TryDepth += 1
+    Return 1
+End Function
+
+Private Sub X64TryPopTarget()
+    If gX64TryDepth <= 0 Then Exit Sub
+    gX64TryDepth -= 1
+    gX64TryTargetLabels(gX64TryDepth) = ""
+End Sub
+
+Private Sub X64EmitExceptionSave(ByVal slotIdx As Integer, ByRef cg As X64CodegenContext)
+    Dim off4 As String
+    Dim off8 As String
+    off4 = LTrim(Str(slotIdx * 4))
+    off8 = LTrim(Str(slotIdx * 8))
+
+    X64EmitText cg, "    mov eax, dword [rel __uxb_exc_active]"
+    X64EmitText cg, "    mov dword [rel __uxb_exc_saved_active + " & off4 & "], eax"
+    X64EmitText cg, "    mov eax, dword [rel __uxb_exc_is_string]"
+    X64EmitText cg, "    mov dword [rel __uxb_exc_saved_is_string + " & off4 & "], eax"
+
+    Dim srcNames(0 To 8) As String
+    Dim dstNames(0 To 8) As String
+    srcNames(0) = "__uxb_exc_code": dstNames(0) = "__uxb_exc_saved_code"
+    srcNames(1) = "__uxb_exc_value": dstNames(1) = "__uxb_exc_saved_value"
+    srcNames(2) = "__uxb_exc_line": dstNames(2) = "__uxb_exc_saved_line"
+    srcNames(3) = "__uxb_exc_col": dstNames(3) = "__uxb_exc_saved_col"
+    srcNames(4) = "__uxb_exc_kind": dstNames(4) = "__uxb_exc_saved_kind"
+    srcNames(5) = "__uxb_exc_message": dstNames(5) = "__uxb_exc_saved_message"
+    srcNames(6) = "__uxb_exc_routine": dstNames(6) = "__uxb_exc_saved_routine"
+    srcNames(7) = "__uxb_exc_value_type": dstNames(7) = "__uxb_exc_saved_value_type"
+    srcNames(8) = "__uxb_exc_value_text": dstNames(8) = "__uxb_exc_saved_value_text"
+
+    Dim i As Integer
+    For i = 0 To 8
+        X64EmitText cg, "    mov rax, [rel " & srcNames(i) & "]"
+        X64EmitText cg, "    mov [rel " & dstNames(i) & " + " & off8 & "], rax"
+    Next i
+End Sub
+
+Private Sub X64EmitExceptionRestore(ByVal slotIdx As Integer, ByRef cg As X64CodegenContext)
+    Dim off4 As String
+    Dim off8 As String
+    off4 = LTrim(Str(slotIdx * 4))
+    off8 = LTrim(Str(slotIdx * 8))
+
+    X64EmitText cg, "    mov eax, dword [rel __uxb_exc_saved_active + " & off4 & "]"
+    X64EmitText cg, "    mov dword [rel __uxb_exc_active], eax"
+    X64EmitText cg, "    mov eax, dword [rel __uxb_exc_saved_is_string + " & off4 & "]"
+    X64EmitText cg, "    mov dword [rel __uxb_exc_is_string], eax"
+
+    Dim srcNames(0 To 8) As String
+    Dim dstNames(0 To 8) As String
+    srcNames(0) = "__uxb_exc_saved_code": dstNames(0) = "__uxb_exc_code"
+    srcNames(1) = "__uxb_exc_saved_value": dstNames(1) = "__uxb_exc_value"
+    srcNames(2) = "__uxb_exc_saved_line": dstNames(2) = "__uxb_exc_line"
+    srcNames(3) = "__uxb_exc_saved_col": dstNames(3) = "__uxb_exc_col"
+    srcNames(4) = "__uxb_exc_saved_kind": dstNames(4) = "__uxb_exc_kind"
+    srcNames(5) = "__uxb_exc_saved_message": dstNames(5) = "__uxb_exc_message"
+    srcNames(6) = "__uxb_exc_saved_routine": dstNames(6) = "__uxb_exc_routine"
+    srcNames(7) = "__uxb_exc_saved_value_type": dstNames(7) = "__uxb_exc_value_type"
+    srcNames(8) = "__uxb_exc_saved_value_text": dstNames(8) = "__uxb_exc_value_text"
+
+    Dim i As Integer
+    For i = 0 To 8
+        X64EmitText cg, "    mov rax, [rel " & srcNames(i) & " + " & off8 & "]"
+        X64EmitText cg, "    mov [rel " & dstNames(i) & "], rax"
+    Next i
+End Sub
+
+Private Sub X64EmitExceptionUncaught(ByRef cg As X64CodegenContext)
+    X64EmitText cg, "    mov rcx, [rel __uxb_exc_message]"
+    X64EmitCall0 cg, "__uxb_runtime_print"
+    X64EmitCall0 cg, "__uxb_runtime_print_newline"
+    X64EmitNativeRuntimeAbort cg
+End Sub
+
+Private Sub X64EmitExceptionPropagate(ByRef cg As X64CodegenContext)
+    Dim targetLabel As String
+    If X64TryCurrentTarget(targetLabel) <> 0 Then
+        X64EmitText cg, "    jmp " & targetLabel
+    Else
+        X64EmitExceptionUncaught cg
+    End If
+End Sub
+
+Private Sub X64EmitExceptionRoutineName(ByRef cg As X64CodegenContext)
+    If Trim(cg.currentRoutineLabel) = "" Then
+        X64EmitText cg, "    lea rax, [rel __uxb_empty_text]"
+    Else
+        Dim routineLabel As String
+        Dim routineText As String
+        Dim escapedText As String
+        routineLabel = X64NextLabel(cg, "exc_routine")
+        routineText = cg.currentRoutineLabel
+        escapedText = ""
+        Dim routinePos As Integer
+        For routinePos = 1 To Len(routineText)
+            Dim routineCh As String
+            routineCh = Mid(routineText, routinePos, 1)
+            If routineCh = Chr(34) Then escapedText &= Chr(34)
+            escapedText &= routineCh
+        Next routinePos
+        X64EmitData cg, routineLabel & ": db " & Chr(34) & escapedText & Chr(34) & ", 0"
+        X64EmitText cg, "    lea rax, [rel " & routineLabel & "]"
+    End If
+    X64EmitText cg, "    mov [rel __uxb_exc_routine], rax"
+End Sub
+
+Private Sub X64EmitExceptionLocation(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext)
+    X64EmitText cg, "    mov qword [rel __uxb_exc_line], " & LTrim(Str(ps.ast.nodes(nodeIdx).lineNo))
+    X64EmitText cg, "    mov qword [rel __uxb_exc_col], " & LTrim(Str(ps.ast.nodes(nodeIdx).colNo))
+    X64EmitExceptionRoutineName cg
+End Sub
+
+Private Sub X64EmitCatchStoreQword(ByRef cg As X64CodegenContext, ByRef varName As String, ByRef stateName As String)
+    Dim ignoredLabel As String
+    ignoredLabel = X64EnsureVar(cg, varName)
+    X64EmitText cg, "    mov rax, [rel " & stateName & "]"
+    X64EmitStoreVar cg, varName
+End Sub
+
+Private Sub X64EmitCatchStoreDword(ByRef cg As X64CodegenContext, ByRef varName As String, ByRef stateName As String)
+    Dim ignoredLabel As String
+    ignoredLabel = X64EnsureVar(cg, varName)
+    X64EmitText cg, "    movsxd rax, dword [rel " & stateName & "]"
+    X64EmitStoreVar cg, varName
+End Sub
+
+Private Sub X64EmitCatchPublish(ByRef cg As X64CodegenContext, ByRef catchVarName As String)
+    Dim ignoredLabel As String
+    If Trim(catchVarName) <> "" Then
+        ignoredLabel = X64EnsureVar(cg, catchVarName)
+        X64EmitText cg, "    mov rax, 1"
+        X64EmitStoreVar cg, catchVarName
+    End If
+
+    ignoredLabel = X64EnsureVar(cg, "__ERR_THROWN")
+    X64EmitText cg, "    mov rax, 1"
+    X64EmitStoreVar cg, "__ERR_THROWN"
+    X64EmitCatchStoreQword cg, "__ERR_CODE", "__uxb_exc_code"
+    X64EmitCatchStoreQword cg, "__ERR_LINE", "__uxb_exc_line"
+    X64EmitCatchStoreQword cg, "__ERR_COL", "__uxb_exc_col"
+    X64EmitCatchStoreDword cg, "__ERR_IS_STRING", "__uxb_exc_is_string"
+
+    ignoredLabel = X64EnsureVar(cg, "__ERR_VALUE")
+    Dim valueIsNumericLabel As String
+    Dim valueStoredLabel As String
+    valueIsNumericLabel = X64NextLabel(cg, "exc_value_numeric")
+    valueStoredLabel = X64NextLabel(cg, "exc_value_stored")
+    X64EmitText cg, "    cmp dword [rel __uxb_exc_is_string], 0"
+    X64EmitText cg, "    je " & valueIsNumericLabel
+    X64EmitText cg, "    xor rax, rax"
+    X64EmitText cg, "    jmp " & valueStoredLabel
+    X64EmitLabel cg, valueIsNumericLabel
+    X64EmitText cg, "    mov rax, [rel __uxb_exc_value]"
+    X64EmitLabel cg, valueStoredLabel
+    X64EmitStoreVar cg, "__ERR_VALUE"
+
+    X64RegisterVarType cg, "__ERR_KIND", "STRING"
+    X64RegisterVarType cg, "__ERR_MESSAGE", "STRING"
+    X64RegisterVarType cg, "__ERR_ROUTINE", "STRING"
+    X64RegisterVarType cg, "__ERR_VALUE_TYPE", "STRING"
+    X64RegisterVarType cg, "__ERR_VALUE_TEXT", "STRING"
+    X64EmitCatchStoreQword cg, "__ERR_KIND", "__uxb_exc_kind"
+    X64EmitCatchStoreQword cg, "__ERR_MESSAGE", "__uxb_exc_message"
+    X64EmitCatchStoreQword cg, "__ERR_ROUTINE", "__uxb_exc_routine"
+    X64EmitCatchStoreQword cg, "__ERR_VALUE_TYPE", "__uxb_exc_value_type"
+    X64EmitCatchStoreQword cg, "__ERR_VALUE_TEXT", "__uxb_exc_value_text"
+End Sub
+
+Private Function X64EmitTryPart(ByRef ps As ParseState, ByVal partNode As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(partNode).firstChild
+    Do While ch <> -1
+        If X64EmitNode(ps, ch, cg, errText) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 1
+End Function
+
+Private Function X64EmitTryStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim tryBodyNode As Integer
+    Dim catchNode As Integer
+    Dim finallyNode As Integer
+    tryBodyNode = -1: catchNode = -1: finallyNode = -1
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        Select Case X64Upper(ps.ast.nodes(ch).kind)
+        Case "TRY_BODY": tryBodyNode = ch
+        Case "CATCH_PART": If catchNode = -1 Then catchNode = ch
+        Case "FINALLY_PART": finallyNode = ch
+        Case Else
+            errText = "x64-codegen: TRY unexpected child " & ps.ast.nodes(ch).kind
+            Return 0
+        End Select
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    If tryBodyNode = -1 Then
+        errText = "x64-codegen: TRY body missing"
+        Return 0
+    End If
+    If gX64TryFrameDepth > 255 Then
+        errText = "x64-codegen: TRY nesting exceeds 256"
+        Return 0
+    End If
+
+    Dim saveSlot As Integer
+    saveSlot = gX64TryFrameDepth
+    gX64TryFrameDepth += 1
+    Dim catchLabel As String
+    Dim finallyLabel As String
+    Dim finishLabel As String
+    Dim endLabel As String
+    catchLabel = X64NextLabel(cg, "try_catch")
+    finallyLabel = X64NextLabel(cg, "try_finally")
+    finishLabel = X64NextLabel(cg, "try_finish")
+    endLabel = X64NextLabel(cg, "try_end")
+
+    X64EmitComment cg, "TRY enter"
+    X64EmitExceptionSave saveSlot, cg
+    X64EmitText cg, "    mov dword [rel __uxb_exc_active], 0"
+
+    Dim bodyTarget As String
+    bodyTarget = ""
+    If catchNode <> -1 Then
+        bodyTarget = catchLabel
+    ElseIf finallyNode <> -1 Then
+        bodyTarget = finallyLabel
+    End If
+
+    If bodyTarget <> "" Then
+        If X64TryPushTarget(bodyTarget, errText) = 0 Then
+            gX64TryFrameDepth -= 1
+            Return 0
+        End If
+    End If
+    If X64EmitTryPart(ps, tryBodyNode, cg, errText) = 0 Then
+        If bodyTarget <> "" Then X64TryPopTarget
+        gX64TryFrameDepth -= 1
+        Return 0
+    End If
+    If bodyTarget <> "" Then X64TryPopTarget
+    X64EmitText cg, "    mov dword [rel __uxb_exc_active], 0"
+    X64EmitText cg, "    jmp " & IIf(finallyNode <> -1, finallyLabel, finishLabel)
+
+    If catchNode <> -1 Then
+        X64EmitLabel cg, catchLabel
+        Dim catchVarName As String
+        catchVarName = Trim(ps.ast.nodes(catchNode).value)
+        X64EmitCatchPublish cg, catchVarName
+
+        If finallyNode <> -1 Then
+            If X64TryPushTarget(finallyLabel, errText) = 0 Then
+                gX64TryFrameDepth -= 1
+                Return 0
+            End If
+        End If
+        If X64EmitTryPart(ps, catchNode, cg, errText) = 0 Then
+            If finallyNode <> -1 Then X64TryPopTarget
+            gX64TryFrameDepth -= 1
+            Return 0
+        End If
+        If finallyNode <> -1 Then X64TryPopTarget
+        X64EmitText cg, "    mov dword [rel __uxb_exc_active], 0"
+        X64EmitText cg, "    jmp " & IIf(finallyNode <> -1, finallyLabel, finishLabel)
+    End If
+
+    If finallyNode <> -1 Then
+        X64EmitLabel cg, finallyLabel
+        If X64EmitTryPart(ps, finallyNode, cg, errText) = 0 Then
+            gX64TryFrameDepth -= 1
+            Return 0
+        End If
+    End If
+
+    X64EmitLabel cg, finishLabel
+    X64EmitText cg, "    cmp dword [rel __uxb_exc_active], 0"
+    X64EmitText cg, "    je " & endLabel
+    X64EmitExceptionPropagate cg
+    X64EmitLabel cg, endLabel
+    X64EmitExceptionRestore saveSlot, cg
+    gX64TryFrameDepth -= 1
+    Return 1
+End Function
+
+Private Function X64EmitThrowStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim valueNode As Integer
+    valueNode = X64ChildAt(ps, nodeIdx, 0)
+    If valueNode = -1 Then
+        errText = "x64-codegen: THROW expression missing"
+        Return 0
+    End If
+
+    Dim isString As Integer
+    isString = X64ExprIsStringLike(ps, valueNode, cg)
+    If X64EmitExprToRax(ps, valueNode, cg, errText) = 0 Then Return 0
+
+    X64EmitComment cg, "THROW"
+    X64EmitText cg, "    mov [rel __uxb_exc_value], rax"
+    X64EmitText cg, "    mov dword [rel __uxb_exc_active], 1"
+    X64EmitText cg, "    mov dword [rel __uxb_exc_is_string], " & LTrim(Str(IIf(isString <> 0, 1, 0)))
+    If isString <> 0 Then
+        X64EmitText cg, "    mov qword [rel __uxb_exc_code], 1001"
+        X64EmitText cg, "    mov [rel __uxb_exc_message], rax"
+        X64EmitText cg, "    mov [rel __uxb_exc_value_text], rax"
+        X64EmitText cg, "    lea rax, [rel __uxb_exc_type_string]"
+    Else
+        X64EmitText cg, "    mov [rel __uxb_exc_code], rax"
+        X64EmitText cg, "    mov rcx, rax"
+        X64EmitCall0 cg, "__uxb_exception_format_throw"
+        X64EmitText cg, "    mov [rel __uxb_exc_message], rax"
+        X64EmitText cg, "    lea rax, [rax + 6]"
+        X64EmitText cg, "    mov [rel __uxb_exc_value_text], rax"
+        X64EmitText cg, "    lea rax, [rel __uxb_exc_type_integer]"
+    End If
+    X64EmitText cg, "    mov [rel __uxb_exc_value_type], rax"
+    X64EmitText cg, "    lea rax, [rel __uxb_exc_kind_throw]"
+    X64EmitText cg, "    mov [rel __uxb_exc_kind], rax"
+    X64EmitExceptionLocation ps, nodeIdx, cg
+    X64EmitExceptionPropagate cg
+    Return 1
+End Function
+
+Private Sub X64EmitAssertFailure(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String)
+    X64EmitText cg, "    mov dword [rel __uxb_exc_active], 1"
+    X64EmitText cg, "    mov dword [rel __uxb_exc_is_string], 0"
+    X64EmitText cg, "    mov qword [rel __uxb_exc_code], 1002"
+    X64EmitText cg, "    mov qword [rel __uxb_exc_value], 0"
+    X64EmitText cg, "    lea rax, [rel __uxb_exc_kind_assert]"
+    X64EmitText cg, "    mov [rel __uxb_exc_kind], rax"
+    X64EmitText cg, "    lea rax, [rel __uxb_exc_type_integer]"
+    X64EmitText cg, "    mov [rel __uxb_exc_value_type], rax"
+    X64EmitText cg, "    lea rax, [rel __uxb_exc_text_zero]"
+    X64EmitText cg, "    mov [rel __uxb_exc_value_text], rax"
+
+    Dim messageNode As Integer
+    messageNode = X64ChildAt(ps, nodeIdx, 1)
+    If messageNode <> -1 And X64ExprIsStringLike(ps, messageNode, cg) <> 0 Then
+        If X64EmitExprToRax(ps, messageNode, cg, errText) = 0 Then Exit Sub
+        X64EmitText cg, "    mov rcx, rax"
+        X64EmitCall0 cg, "__uxb_exception_format_assert"
+        X64EmitText cg, "    mov [rel __uxb_exc_message], rax"
+    Else
+        X64EmitText cg, "    lea rax, [rel __uxb_exc_message_assert]"
+        X64EmitText cg, "    mov [rel __uxb_exc_message], rax"
+    End If
+
+    X64EmitExceptionLocation ps, nodeIdx, cg
+    X64EmitExceptionPropagate cg
+End Sub

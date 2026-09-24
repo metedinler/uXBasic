@@ -1,0 +1,781 @@
+' YAMA-5: taskTable + slot[256] runtime dispatcher
+' EVENT / PIPE / THREAD / PARALEL bloklari gorev tanimi olarak taskTable'a kaydedilir.
+' SLOT ... END SLOT tablosu 0..255 slotTable kaydini doldurur.
+' TRIGGER hedefi slotTable uzerinden cozulur; hedef turune gore ayni dispatcher'a iner.
+
+
+Type ExecNativeSlotBinding
+    ps As ParseState Ptr
+    es As ExecState Ptr
+    targetNodeIdx As Integer
+    lastError As String
+End Type
+
+Private Dim Shared gExecNativeSlotBindings(0 To 255) As ExecNativeSlotBinding
+
+Private Sub ExecSlotSetCapacity(ByRef es As ExecState, ByRef kindRaw As String, ByVal capacity As Integer)
+    Select Case UCase(Trim(kindRaw))
+    Case "EVENT"
+        es.slotCapEvent = capacity
+        es.slotCapEventDeclared = 1
+    Case "THREAD"
+        es.slotCapThread = capacity
+        es.slotCapThreadDeclared = 1
+    Case "PARALEL"
+        es.slotCapParalel = capacity
+        es.slotCapParalelDeclared = 1
+    Case "PIPE"
+        es.slotCapPipe = capacity
+        es.slotCapPipeDeclared = 1
+    End Select
+End Sub
+
+Private Function ExecSlotGetCapacity(ByRef es As ExecState, ByRef kindRaw As String, ByRef capacityOut As Integer) As Integer
+    Select Case UCase(Trim(kindRaw))
+    Case "EVENT"
+        capacityOut = es.slotCapEvent
+        Return es.slotCapEventDeclared
+    Case "THREAD"
+        capacityOut = es.slotCapThread
+        Return es.slotCapThreadDeclared
+    Case "PARALEL"
+        capacityOut = es.slotCapParalel
+        Return es.slotCapParalelDeclared
+    Case "PIPE"
+        capacityOut = es.slotCapPipe
+        Return es.slotCapPipeDeclared
+    End Select
+    Return 0
+End Function
+
+Private Function ExecSlotNormalizeKind(ByRef kindText As String) As String
+    Return UCase(Trim(kindText))
+End Function
+
+Private Function ExecSlotNormalizeName(ByRef nameText As String) As String
+    Return UCase(Trim(nameText))
+End Function
+
+Private Sub ExecSlotsReset(ByRef es As ExecState)
+    es.slotEntryCount = 0
+    Erase es.slotEntries
+    es.taskEntryCount = 0
+    Erase es.taskEntries
+
+    Dim i As Integer
+    For i = 0 To 255
+        es.slotTable(i).kindText = ""
+        es.slotTable(i).nameText = ""
+        es.slotTable(i).slotId = i
+        es.slotTable(i).nodeIdx = -1
+        es.slotTable(i).active = 0
+        es.slotTable(i).loaded = 0
+        es.slotTable(i).targetName = ""
+        es.slotTable(i).targetQualifiedName = ""
+        es.slotTable(i).targetKind = ""
+        es.slotTable(i).targetNodeIdx = -1
+        gExecNativeSlotBindings(i).ps = 0
+        gExecNativeSlotBindings(i).es = 0
+        gExecNativeSlotBindings(i).targetNodeIdx = -1
+        gExecNativeSlotBindings(i).lastError = ""
+    Next i
+End Sub
+
+Private Function ExecSlotBlockKind(ByRef nodeKind As String, ByRef kindOut As String) As Integer
+    Select Case UCase(Trim(nodeKind))
+    Case "EVENT_STMT"
+        kindOut = "EVENT": Return 1
+    Case "THREAD_STMT"
+        kindOut = "THREAD": Return 1
+    Case "PARALEL_STMT"
+        kindOut = "PARALEL": Return 1
+    Case "PIPE_STMT"
+        kindOut = "PIPE": Return 1
+    End Select
+    kindOut = ""
+    Return 0
+End Function
+
+Private Function ExecTaskFind(ByRef es As ExecState, ByRef kindText As String, ByRef nameText As String) As Integer
+    Dim k As String
+    k = ExecSlotNormalizeKind(kindText)
+    Dim n As String
+    n = ExecSlotNormalizeName(nameText)
+    Dim i As Integer
+    For i = es.taskEntryCount - 1 To 0 Step -1
+        If k <> "" And es.taskEntries(i).kindText <> k Then Continue For
+        If ExecSlotNormalizeName(es.taskEntries(i).nameText) = n Or ExecSlotNormalizeName(es.taskEntries(i).qualifiedName) = n Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function ExecTaskRegisterNode(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef kindText As String) As Integer
+    Dim taskName As String
+    taskName = Trim(st.value)
+    Dim qualifiedName As String
+    qualifiedName = Trim(st.symbolName)
+    If qualifiedName = "" Then qualifiedName = taskName
+
+    Dim existing As Integer
+    existing = ExecTaskFind(es, kindText, qualifiedName)
+    If existing = -1 Then existing = ExecTaskFind(es, kindText, taskName)
+
+    If existing = -1 Then
+        If es.taskEntryCount = 0 Then
+            ReDim es.taskEntries(0)
+        Else
+            ReDim Preserve es.taskEntries(es.taskEntryCount)
+        End If
+        existing = es.taskEntryCount
+        es.taskEntryCount += 1
+    End If
+
+    es.taskEntries(existing).kindText = ExecSlotNormalizeKind(kindText)
+    es.taskEntries(existing).nameText = taskName
+    es.taskEntries(existing).qualifiedName = qualifiedName
+    es.taskEntries(existing).nodeIdx = stmtIdx
+    es.taskEntries(existing).active = 1
+    es.taskEntries(existing).loaded = 1
+    es.taskEntries(existing).parentName = ""
+    Return 1
+End Function
+
+Private Function ExecSlotReadHeaderId(ByRef ps As ParseState, ByRef es As ExecState, ByVal blockIdx As Integer, ByRef errText As String) As Integer
+    Dim headerIdx As Integer
+    headerIdx = ps.ast.nodes(blockIdx).firstChild
+    Do While headerIdx <> -1
+        If UCase(Trim(ps.ast.nodes(headerIdx).kind)) = "SLOT_HEADER_ARGS" Then Exit Do
+        headerIdx = ps.ast.nodes(headerIdx).nextSibling
+    Loop
+    If headerIdx = -1 Then Return -1
+
+    Dim idExpr As Integer
+    idExpr = ExecChildAt(ps, headerIdx, 0)
+    If idExpr = -1 Then Return -1
+
+    Dim slotId As Integer
+    slotId = ExecEvalNode(ps, es, idExpr, errText)
+    If errText <> "" Then Return -2
+    Return slotId
+End Function
+
+Private Function ExecSlotRegisterBlock(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim kindText As String
+    If ExecSlotBlockKind(st.kind, kindText) = 0 Then Return -2
+    Return ExecTaskRegisterNode(ps, es, stmtIdx, st, kindText)
+End Function
+
+Private Function ExecSlotEntryChildByRole(ByRef ps As ParseState, ByVal entryIdx As Integer, ByRef roleRaw As String) As Integer
+    Dim wanted As String
+    wanted = UCase(Trim(roleRaw))
+    Dim ch As Integer
+    ch = ps.ast.nodes(entryIdx).firstChild
+    Do While ch <> -1
+        If UCase(Trim(ps.ast.nodes(ch).role)) = wanted Then Return ch
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return -1
+End Function
+
+Private Function ExecSlotFindTaskNodeByName(ByRef ps As ParseState, ByRef nameRaw As String, ByRef kindOut As String, ByRef nodeOut As Integer) As Integer
+    Dim wanted As String
+    wanted = ExecSlotNormalizeName(nameRaw)
+    kindOut = ""
+    nodeOut = -1
+    If wanted = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim taskKind As String
+        If ExecSlotBlockKind(ps.ast.nodes(i).kind, taskKind) <> 0 Then
+            Dim v As String
+            v = ExecSlotNormalizeName(ps.ast.nodes(i).value)
+            Dim q As String
+            q = ExecSlotNormalizeName(ps.ast.nodes(i).symbolName)
+            If v = wanted Or q = wanted Then
+                kindOut = taskKind
+                nodeOut = i
+            End If
+        End If
+    Next i
+    If nodeOut = -1 Then Return 0
+    Return 1
+End Function
+
+Private Function ExecSlotFind(ByRef es As ExecState, ByRef kindText As String, ByRef nameText As String, ByVal slotId As Integer, ByVal preferId As Integer) As Integer
+    If preferId <> 0 Then
+        If slotId < 0 Or slotId > 255 Then Return -1
+        If es.slotTable(slotId).loaded <> 0 Then Return slotId
+        Return -1
+    End If
+
+    Dim k As String
+    k = ExecSlotNormalizeKind(kindText)
+    Dim n As String
+    n = ExecSlotNormalizeName(nameText)
+    Dim i As Integer
+    For i = 255 To 0 Step -1
+        If es.slotTable(i).loaded = 0 Then Continue For
+        If k <> "" And k <> "TASK" Then
+            If es.slotTable(i).targetKind <> k And es.slotTable(i).kindText <> k Then Continue For
+        End If
+        If ExecSlotNormalizeName(es.slotTable(i).targetName) = n Or ExecSlotNormalizeName(es.slotTable(i).targetQualifiedName) = n Or ExecSlotNormalizeName(es.slotTable(i).nameText) = n Then Return i
+    Next i
+    Return -1
+End Function
+
+Private Function ExecSlotFindAnyById(ByRef es As ExecState, ByVal slotId As Integer) As Integer
+    If slotId < 0 Or slotId > 255 Then Return -1
+    If es.slotTable(slotId).loaded <> 0 Then Return slotId
+    Return -1
+End Function
+
+Private Function ExecSlotBindDirect(ByRef es As ExecState, ByRef kindText As String, ByRef slotName As String, ByVal slotId As Integer, ByRef targetName As String, ByRef targetQualifiedName As String, ByVal targetNodeIdx As Integer, ByVal activeValue As Integer) As Integer
+    If slotId < 0 Or slotId > 255 Then Return 0
+
+    es.slotTable(slotId).kindText = ExecSlotNormalizeKind(kindText)
+    es.slotTable(slotId).targetKind = ExecSlotNormalizeKind(kindText)
+    es.slotTable(slotId).nameText = slotName
+    es.slotTable(slotId).slotId = slotId
+    es.slotTable(slotId).nodeIdx = targetNodeIdx
+    es.slotTable(slotId).targetNodeIdx = targetNodeIdx
+    es.slotTable(slotId).targetName = targetName
+    es.slotTable(slotId).targetQualifiedName = targetQualifiedName
+    es.slotTable(slotId).active = activeValue
+    es.slotTable(slotId).loaded = 1
+
+    ' Native runtime optional: slot metadata and callback binding.
+    If uxb_runtime_is_loaded() = 0 Then uxb_runtime_try_init()
+    If uxb_runtime_is_loaded() Then
+        uxb_task_register slotId, kindText, targetName
+        uxb_slot_bind slotId, kindText, targetName
+        uxb_slot_control slotId, activeValue
+    End If
+
+    ' Uyumluluk: eski dinamik liste raporlama/denetim icin ayna kayit.
+    Dim mirror As Integer
+    mirror = -1
+    Dim i As Integer
+    For i = es.slotEntryCount - 1 To 0 Step -1
+        If es.slotEntries(i).slotId = slotId Then mirror = i: Exit For
+    Next i
+    If mirror = -1 Then
+        If es.slotEntryCount = 0 Then
+            ReDim es.slotEntries(0)
+        Else
+            ReDim Preserve es.slotEntries(es.slotEntryCount)
+        End If
+        mirror = es.slotEntryCount
+        es.slotEntryCount += 1
+    End If
+    es.slotEntries(mirror) = es.slotTable(slotId)
+    Return 1
+End Function
+
+Private Function ExecSlotTargetInfo(ByRef ps As ParseState, ByRef es As ExecState, ByVal targetIdx As Integer, ByRef nameOut As String, ByRef slotIdOut As Integer, ByRef preferIdOut As Integer, ByRef errText As String) As Integer
+    If targetIdx = -1 Then
+        errText = "exec: slot target missing"
+        Return 0
+    End If
+
+    Dim k As String
+    k = UCase(ps.ast.nodes(targetIdx).kind)
+    Select Case k
+    Case "IDENT", "KEYWORD_REF", "STRING"
+        nameOut = ps.ast.nodes(targetIdx).value
+        slotIdOut = -1
+        preferIdOut = 0
+    Case Else
+        slotIdOut = ExecEvalNode(ps, es, targetIdx, errText)
+        If errText <> "" Then Return 0
+        If slotIdOut < 0 Or slotIdOut > 255 Then
+            errText = "exec: slot target id out of range"
+            Return 0
+        End If
+        nameOut = ""
+        preferIdOut = 1
+    End Select
+    Return 1
+End Function
+
+Private Function ExecSlotIsTaskMetadataChild(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
+    Dim k As String
+    k = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    Select Case k
+    Case "SLOT_HEADER_ARGS", "PARAM_DECL", "TYPE_REF", "RETURN_TYPE", "CLASS_ACCESS", "CLASS_METHOD_FLAG", "CLASS_FIELD_FLAG", "CLASS_PROPERTY_FLAG"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function ExecSlotRunTaskNode(ByRef ps As ParseState, ByRef es As ExecState, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
+
+    Dim childKind As String
+    childKind = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+
+    If ExecSlotIsTaskMetadataChild(ps, nodeIdx) <> 0 Then Return 1
+
+    ' Bazi AST varyantlarinda govde ROLE_LIST/BODY gibi ara dugumle gelebilir.
+    ' Bu dugumleri statement gibi calistirmak yerine cocuklarini calistir.
+    If childKind = "ROLE_LIST" Or childKind = "BODY" Or childKind = "BLOCK" Or childKind = "STMT_LIST" Then
+        Dim subCh As Integer
+        subCh = ps.ast.nodes(nodeIdx).firstChild
+        Do While subCh <> -1
+            If ExecSlotRunTaskNode(ps, es, subCh, errText) = 0 Then Return 0
+            If es.runtime.exitRequest <> "" Then Exit Do
+            subCh = ps.ast.nodes(subCh).nextSibling
+        Loop
+        Return 1
+    End If
+
+    If ExecRunStmt(ps, es, nodeIdx, errText) = 0 Then Return 0
+    Return 1
+End Function
+
+Private Sub ExecSlotRestoreParam(ByRef es As ExecState, ByRef paramName As String, ByVal hadPrevious As Integer, ByRef previousVar As ExecVar)
+    If Trim(paramName) = "" Then Exit Sub
+    Dim idx As Integer
+    idx = ExecFindVar(es, paramName)
+    If hadPrevious <> 0 Then
+        If idx = -1 Then
+            idx = ExecEnsureVar(es, paramName)
+        End If
+        If idx <> -1 Then es.vars(idx) = previousVar
+        Exit Sub
+    End If
+
+    If idx = -1 Then Exit Sub
+    Dim i As Integer
+    For i = idx To es.count - 2
+        es.vars(i) = es.vars(i + 1)
+    Next i
+    If es.count > 0 Then
+        Dim emptyVar As ExecVar
+        es.vars(es.count - 1) = emptyVar
+        es.count -= 1
+    End If
+End Sub
+
+Private Function ExecSlotRunBlockBody(ByRef ps As ParseState, ByRef es As ExecState, ByVal blockIdx As Integer, ByRef errText As String) As Integer
+    ' YAMA6_PIPE_RETURN_CONTEXT_FIX_20260711:
+    ' EVENT/PIPE/THREAD/PARALEL bodies are task-like routines, not top-level
+    ' GOSUB blocks.  A RETURN inside PIPE must end the task body and expose the
+    ' returned value as OUTPUT instead of leaking to ExecRunMemoryProgram as
+    ' "RETURN used without GOSUB".
+    Dim oldCallContextDepth As Integer
+    oldCallContextDepth = es.runtime.callContextDepth
+    es.runtime.callContextDepth += 1
+
+    ' PIPE parameters are real local names bound to the trigger input value.
+    Dim paramName As String
+    Dim paramHadPrevious As Integer
+    Dim paramPrevious As ExecVar
+    If UCase(Trim(ps.ast.nodes(blockIdx).kind)) = "PIPE_STMT" Then
+        Dim paramNode As Integer
+        paramNode = ps.ast.nodes(blockIdx).firstChild
+        Do While paramNode <> -1
+            If UCase(Trim(ps.ast.nodes(paramNode).kind)) = "PARAM_DECL" Then Exit Do
+            paramNode = ps.ast.nodes(paramNode).nextSibling
+        Loop
+        If paramNode <> -1 Then
+            paramName = Trim(ps.ast.nodes(paramNode).value)
+            Dim previousIdx As Integer
+            previousIdx = ExecFindVar(es, paramName)
+            If previousIdx <> -1 Then
+                paramHadPrevious = 1
+                paramPrevious = es.vars(previousIdx)
+            End If
+            Dim pipeInput As ExecValue
+            ExecValueInit pipeInput
+            ExecGetVarValue es, UXB_TASK_INPUT_NAME, pipeInput
+            ExecSetVarValue es, paramName, pipeInput
+        End If
+    End If
+
+    Dim ranBody As Integer
+    ranBody = 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(blockIdx).firstChild
+    Do While ch <> -1
+        If ExecSlotIsTaskMetadataChild(ps, ch) = 0 Then
+            ranBody = 1
+            If ExecSlotRunTaskNode(ps, es, ch, errText) = 0 Then
+                ExecSlotRestoreParam es, paramName, paramHadPrevious, paramPrevious
+                es.runtime.callContextDepth = oldCallContextDepth
+                Return 0
+            End If
+            If es.runtime.exitRequest <> "" Then Exit Do
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    ' Koruma: eski/bozuk child zincirinde BODY role'u parent uzerinde kayitli kaldiysa tara.
+    If ranBody = 0 Then
+        Dim i As Integer
+        For i = 0 To ps.ast.count - 1
+            If ps.ast.nodes(i).parent = blockIdx Then
+                If UCase(Trim(ps.ast.nodes(i).role)) = "BODY" Then
+                    ranBody = 1
+                    If ExecSlotRunTaskNode(ps, es, i, errText) = 0 Then
+                        ExecSlotRestoreParam es, paramName, paramHadPrevious, paramPrevious
+                        es.runtime.callContextDepth = oldCallContextDepth
+                        Return 0
+                    End If
+                    If es.runtime.exitRequest <> "" Then Exit For
+                End If
+            End If
+        Next i
+    End If
+
+    Dim taskExitReq As String
+    taskExitReq = UCase(Trim(es.runtime.exitRequest))
+    If taskExitReq = "RETURN_CALL" Then
+        If es.runtime.callReturnHasValue <> 0 Then
+            ExecSetVarValue es, UXB_TASK_RESULT_NAME, es.runtime.callReturnValueEx
+        End If
+        es.runtime.exitRequest = ""
+        es.runtime.callReturnHasValue = 0
+        es.runtime.callReturnValue = 0
+        es.runtime.callReturnValueEx.valueType = "INTEGER"
+        es.runtime.callReturnValueEx.intValue = 0
+        es.runtime.callReturnValueEx.floatValue = 0.0
+        es.runtime.callReturnValueEx.stringValue = ""
+    End If
+
+    ExecSlotRestoreParam es, paramName, paramHadPrevious, paramPrevious
+    es.runtime.callContextDepth = oldCallContextDepth
+    Return 1
+End Function
+
+Private Function ExecSlotNativeCallback Cdecl (ByVal slotId As Long, ByVal inputValue As Long, ByVal outputValue As Long Ptr, ByVal userData As Any Ptr) As Long
+    If userData = 0 Then Return 0
+    Dim binding As ExecNativeSlotBinding Ptr = CPtr(ExecNativeSlotBinding Ptr, userData)
+    If binding->ps = 0 Or binding->es = 0 Or binding->targetNodeIdx < 0 Then Return 0
+    Dim inputEv As ExecValue
+    ExecValueSetInteger inputEv, CLngInt(inputValue)
+    ExecSetVarValue *binding->es, UXB_TASK_INPUT_NAME, inputEv
+    Dim outputEv As ExecValue
+    ExecValueInit outputEv
+    ExecSetVarValue *binding->es, UXB_TASK_RESULT_NAME, outputEv
+    Dim localErr As String
+    If ExecSlotRunBlockBody(*binding->ps, *binding->es, binding->targetNodeIdx, localErr) = 0 Then
+        binding->lastError = localErr
+        Return 0
+    End If
+    If outputValue <> 0 Then
+        If ExecGetVarValue(*binding->es, UXB_TASK_RESULT_NAME, outputEv) Then *outputValue = CLng(ExecValueToInteger(outputEv))
+    End If
+    binding->lastError = ""
+    Return 1
+End Function
+
+Private Function ExecSlotTrigger(ByRef ps As ParseState, ByRef es As ExecState, ByRef kindText As String, ByRef nameText As String, ByVal slotId As Integer, ByVal preferId As Integer, ByRef errText As String) As Integer
+    Dim wantedKind As String
+    wantedKind = ExecSlotNormalizeKind(kindText)
+    Dim wantedName As String
+    wantedName = ExecSlotNormalizeName(nameText)
+
+    Dim found As Integer
+    Dim ran As Integer
+    Dim i As Integer
+    For i = 0 To 255
+        If es.slotTable(i).loaded = 0 Then Continue For
+        Dim matchEntry As Integer
+        matchEntry = 0
+        If preferId <> 0 Then
+            If i = slotId Then matchEntry = 1
+        Else
+            If wantedKind = "" Or wantedKind = "TASK" Or es.slotTable(i).targetKind = wantedKind Or es.slotTable(i).kindText = wantedKind Then
+                If ExecSlotNormalizeName(es.slotTable(i).targetName) = wantedName Or ExecSlotNormalizeName(es.slotTable(i).targetQualifiedName) = wantedName Or ExecSlotNormalizeName(es.slotTable(i).nameText) = wantedName Then matchEntry = 1
+            End If
+        End If
+        If matchEntry <> 0 Then
+            found = 1
+            If es.slotTable(i).active <> 0 Then
+                ran = 1
+                Dim nativeRan As Integer
+                nativeRan = 0
+                If uxb_runtime_is_loaded() = 0 Then uxb_runtime_try_init()
+                If uxb_runtime_is_loaded() And uxb_runtime_native_callbacks_enabled() Then
+                    gExecNativeSlotBindings(i).ps = @ps
+                    gExecNativeSlotBindings(i).es = @es
+                    gExecNativeSlotBindings(i).targetNodeIdx = es.slotTable(i).targetNodeIdx
+                    If uxb_task_set_callback(i, CPtr(Any Ptr, ProcPtr(ExecSlotNativeCallback)), @gExecNativeSlotBindings(i)) Then
+                        Dim inputNative As Integer
+                        Dim inputEvNative As ExecValue
+                        If ExecGetVarValue(es, UXB_TASK_INPUT_NAME, inputEvNative) Then inputNative = ExecValueToInteger(inputEvNative)
+                        Dim outputNative As Integer
+                        Select Case UCase(es.slotTable(i).targetKind)
+                        Case "THREAD"
+                            nativeRan = uxb_thread_start(i, inputNative, outputNative)
+                        Case "PIPE"
+                            nativeRan = uxb_pipe_run(i, inputNative, outputNative)
+                        Case "PARALEL"
+                            nativeRan = uxb_parallel_run(i, inputNative, outputNative)
+                        Case Else
+                            nativeRan = uxb_task_trigger(i, inputNative, outputNative)
+                        End Select
+                        If nativeRan Then
+                            Dim outputEvNative As ExecValue
+                            ExecValueSetInteger outputEvNative, outputNative
+                            ExecSetVarValue es, UXB_TASK_RESULT_NAME, outputEvNative
+                        End If
+                    End If
+                End If
+                If nativeRan = 0 Then
+                    If ExecSlotRunBlockBody(ps, es, es.slotTable(i).targetNodeIdx, errText) = 0 Then Return 0
+                End If
+                If es.runtime.exitRequest <> "" Then Exit For
+            End If
+        End If
+    Next i
+
+    If found = 0 Then
+        errText = "exec: TRIGGER hedefi SLOT tablosunda kayitli degil"
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Function ExecSlotTriggerPipeValue(ByRef ps As ParseState, ByRef es As ExecState, ByRef pipeName As String, ByRef inputValue As ExecValue, ByRef outputValue As ExecValue, ByRef errText As String) As Integer
+    ExecSetVarValue es, UXB_TASK_INPUT_NAME, inputValue
+    ExecValueInit outputValue
+    ExecSetVarValue es, UXB_TASK_RESULT_NAME, outputValue
+    If ExecSlotTrigger(ps, es, "PIPE", pipeName, -1, 0, errText) = 0 Then Return 0
+    If ExecGetVarValue(es, UXB_TASK_RESULT_NAME, outputValue) = 0 Then ExecValueInit outputValue
+    Return 1
+End Function
+
+Private Function ExecSlotRunControlStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim kindName As String
+    kindName = ExecSlotNormalizeKind(st.value)
+    Dim targetName As String
+    Dim targetId As Integer
+    Dim preferId As Integer
+    If ExecSlotTargetInfo(ps, es, ExecChildAt(ps, stmtIdx, 0), targetName, targetId, preferId, errText) = 0 Then Return 0
+    Dim idx As Integer
+    idx = ExecSlotFind(es, kindName, targetName, targetId, preferId)
+    If idx = -1 AndAlso UCase(Trim(st.op)) = "ON" Then
+        Dim slotExpr As Integer
+        slotExpr = ExecChildAt(ps, stmtIdx, 1)
+        If slotExpr = -1 Then
+            errText = "exec: ON target has no SLOT id"
+            Return 0
+        End If
+        Dim directSlotId As Integer
+        directSlotId = ExecEvalNode(ps, es, slotExpr, errText)
+        If errText <> "" Then Return 0
+        If directSlotId < 0 Or directSlotId > 255 Then
+            errText = "exec: slot target id out of range"
+            Return 0
+        End If
+        Dim directCapacity As Integer
+        If ExecSlotGetCapacity(es, kindName, directCapacity) <> 0 Then
+            If directSlotId >= directCapacity Then
+                errText = "exec: slot target id exceeds declared " & kindName & " capacity"
+                Return 0
+            End If
+        End If
+        Dim declaredKind As String
+        Dim targetNode As Integer
+        If ExecSlotFindTaskNodeByName(ps, targetName, declaredKind, targetNode) = 0 Then
+            errText = "exec: slot target not found"
+            Return 0
+        End If
+        If declaredKind <> kindName Then
+            errText = "exec: slot target kind mismatch"
+            Return 0
+        End If
+        Dim taskNode As ASTNode
+        taskNode = ps.ast.nodes(targetNode)
+        ExecTaskRegisterNode ps, es, targetNode, taskNode, declaredKind
+        Dim qualifiedName As String
+        qualifiedName = Trim(taskNode.symbolName)
+        If qualifiedName = "" Then qualifiedName = targetName
+        If ExecSlotBindDirect(es, kindName, targetName, directSlotId, targetName, qualifiedName, targetNode, 1) = 0 Then
+            errText = "exec: slot bind failed"
+            Return 0
+        End If
+        idx = directSlotId
+    End If
+    If idx = -1 Then
+        errText = "exec: slot target not found"
+        Return 0
+    End If
+    Select Case UCase(st.op)
+    Case "ON"
+        es.slotTable(idx).active = 1
+        If uxb_runtime_is_loaded() Then uxb_slot_control idx, 1
+        Return 1
+    Case "OFF"
+        es.slotTable(idx).active = 0
+        If uxb_runtime_is_loaded() Then uxb_slot_control idx, 0
+        Return 1
+    End Select
+    Return -2
+End Function
+
+Private Function ExecSlotRunTableStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal tableIdx As Integer, ByRef errText As String) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(tableIdx).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) <> "SLOT_BIND_ENTRY" Then
+            errText = "exec: invalid SLOT table entry"
+            Return 0
+        End If
+
+        Dim idIdx As Integer
+        idIdx = ExecSlotEntryChildByRole(ps, ch, "SLOT_ID")
+        If idIdx = -1 Then errText = "exec: SLOT id missing": Return 0
+        Dim slotId As Integer
+        slotId = ExecEvalNode(ps, es, idIdx, errText)
+        If errText <> "" Then Return 0
+        If slotId < 0 Or slotId > 255 Then errText = "exec: SLOT id out of range": Return 0
+
+        Dim targetIdx As Integer
+        targetIdx = ExecSlotEntryChildByRole(ps, ch, "TARGET")
+        If targetIdx = -1 Then errText = "exec: SLOT target missing": Return 0
+        Dim targetName As String
+        targetName = Trim(ps.ast.nodes(targetIdx).value)
+        If targetName = "" Then errText = "exec: SLOT target name missing": Return 0
+
+        Dim kindName As String
+        Dim targetNode As Integer
+        If Trim(ps.ast.nodes(ch).typeName) <> "" Then
+            kindName = UCase(Trim(ps.ast.nodes(ch).typeName))
+            Dim inferredKind As String
+            If ExecSlotFindTaskNodeByName(ps, targetName, inferredKind, targetNode) = 0 Then errText = "exec: SLOT target not found": Return 0
+            If inferredKind <> "" And inferredKind <> kindName Then errText = "exec: SLOT explicit kind mismatch": Return 0
+        Else
+            If ExecSlotFindTaskNodeByName(ps, targetName, kindName, targetNode) = 0 Then errText = "exec: SLOT target not found": Return 0
+        End If
+
+        ' Gorev daha once calistirilmese bile tablo baglamasi taskTable'a kaydedilsin.
+        If targetNode >= 0 Then
+            Dim dummySt As ASTNode
+            dummySt = ps.ast.nodes(targetNode)
+            ExecTaskRegisterNode ps, es, targetNode, dummySt, kindName
+        End If
+
+        Dim activeValue As Integer
+        Dim entryOp As String
+        entryOp = UCase(Trim(ps.ast.nodes(ch).op))
+        If entryOp = "OFF" Then
+            activeValue = 0
+        Else
+            ' Kanonik SLOT tablosunda ON/OFF zorunlu; yine de eski AST varyantinda op bos gelirse
+            ' kullanicinin bekledigi varsayilan davranis "aktif" olsun. OFF acik yazilirsa kapali kalir.
+            activeValue = 1
+        End If
+        Dim slotName As String
+        slotName = Trim(ps.ast.nodes(ch).value)
+        Dim qName As String
+        qName = Trim(ps.ast.nodes(targetNode).symbolName)
+        If ExecSlotBindDirect(es, kindName, slotName, slotId, targetName, qName, targetNode, activeValue) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return 1
+End Function
+
+Private Function ExecSlotRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
+    Dim registerResult As Integer
+    registerResult = ExecSlotRegisterBlock(ps, es, stmtIdx, st, errText)
+    If registerResult <> -2 Then Return registerResult
+
+    Select Case UCase(st.kind)
+    Case "SLOT_TABLE_STMT"
+        Return ExecSlotRunTableStmt(ps, es, stmtIdx, errText)
+
+    Case "SLOT_STMT"
+        Dim countExpr As Integer
+        countExpr = ExecChildAt(ps, stmtIdx, 0)
+        If countExpr <> -1 Then
+            Dim slotCount As Integer
+            slotCount = ExecEvalNode(ps, es, countExpr, errText)
+            If errText <> "" Then Return 0
+            If slotCount < 0 Or slotCount > 256 Then
+                errText = "exec: slot count out of range"
+                Return 0
+            End If
+            Dim slotKindName As String
+            slotKindName = UCase(Trim(st.value))
+            ExecSlotSetCapacity es, slotKindName, slotCount
+        End If
+        Return 1
+
+    Case "SLOT_CONTROL_STMT"
+        Return ExecSlotRunControlStmt(ps, es, stmtIdx, st, errText)
+
+    Case "TRIGGER_STMT"
+        Dim targetName As String
+        Dim targetId As Integer
+        Dim preferId As Integer
+        If ExecSlotTargetInfo(ps, es, ExecChildAt(ps, stmtIdx, 0), targetName, targetId, preferId, errText) = 0 Then Return 0
+
+        Dim triggerKind As String
+        triggerKind = UCase(Trim(st.value))
+        If triggerKind = "" Or triggerKind = "TASK" Then
+            If Trim(st.typeName) <> "" Then triggerKind = UCase(Trim(st.typeName))
+            If triggerKind = "" Then triggerKind = "TASK"
+        End If
+
+        ' Typed and multi-argument tasks are ordinary local routines.  SLOT is
+        ' retained as optional activation/native dispatch metadata, but it is
+        ' no longer required merely to invoke a task by name.
+        If preferId = 0 Then
+            Dim routineLookupName As String
+            routineLookupName = Trim(st.symbolName)
+            If routineLookupName = "" Then routineLookupName = targetName
+            Dim taskRoutineIdx As Integer
+            taskRoutineIdx = ExecRoutineIndexOf(es, routineLookupName)
+            If taskRoutineIdx = -1 Then taskRoutineIdx = ExecRoutineIndexOf(es, targetName)
+
+            If taskRoutineIdx <> -1 Then
+                Dim boundSlotIdx As Integer
+                boundSlotIdx = ExecSlotFind(es, triggerKind, targetName, targetId, 0)
+                If boundSlotIdx <> -1 AndAlso es.slotTable(boundSlotIdx).active = 0 Then Return 1
+
+                Dim taskNodeIdx As Integer
+                taskNodeIdx = es.runtime.routineDefs(taskRoutineIdx).nodeIdx
+                Dim taskParamCount As Integer
+                Dim taskMetaChild As Integer
+                taskMetaChild = ps.ast.nodes(taskNodeIdx).firstChild
+                Do While taskMetaChild <> -1
+                    If UCase(Trim(ps.ast.nodes(taskMetaChild).kind)) = "PARAM_DECL" Then taskParamCount += 1
+                    taskMetaChild = ps.ast.nodes(taskMetaChild).nextSibling
+                Loop
+
+                ' Parameterless tasks with an active SLOT keep the old native
+                ' ABI v1 path.  Anything carrying typed values uses the local
+                ' routine frame so no value is narrowed to a 32-bit payload.
+                If boundSlotIdx = -1 Or taskParamCount > 0 Or ExecChildCount(ps, stmtIdx) > 1 Then
+                    Dim taskResult As Integer
+                    Dim wantsTaskValue As Integer
+                    wantsTaskValue = IIf(UCase(Trim(ps.ast.nodes(taskNodeIdx).kind)) = "PIPE_STMT", 1, 0)
+                    If ExecInvokeTaskRoutineByIndex(ps, es, taskRoutineIdx, stmtIdx, wantsTaskValue, taskResult, errText) = 0 Then Return 0
+                    If wantsTaskValue <> 0 And gExecLastCallValueExValid <> 0 Then
+                        ExecSetVarValue es, UXB_TASK_RESULT_NAME, gExecLastCallValueEx
+                    End If
+                    Return 1
+                End If
+            End If
+        End If
+
+        ' Legacy SLOT/native ABI v1 compatibility: only the first payload is
+        ' mirrored to INPUT.  The branch above handles every typed/multiarg
+        ' invocation and therefore never truncates those values here.
+        Dim inputArgIdx As Integer
+        inputArgIdx = ExecChildAt(ps, stmtIdx, 1)
+        If inputArgIdx <> -1 Then
+            Dim inputValue As ExecValue
+            If ExecEvalExpression(ps, inputArgIdx, es, inputValue, errText) = 0 Then Return 0
+            ExecSetVarValue es, UXB_TASK_INPUT_NAME, inputValue
+        End If
+        Return ExecSlotTrigger(ps, es, triggerKind, targetName, targetId, preferId, errText)
+    End Select
+
+    Return -2
+End Function

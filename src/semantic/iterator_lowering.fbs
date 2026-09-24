@@ -1,0 +1,598 @@
+#ifndef UXB_SEMANTIC_ITERATOR_LOWERING_FBS
+#define UXB_SEMANTIC_ITERATOR_LOWERING_FBS
+
+#include once "../common/array_memory_ref.fbs"
+#include once "../common/iterator_contract.fbs"
+
+' Returns 1 when a single EACH expression is a statically-known array.
+' The caller keeps the historical expression-list semantics for every other case.
+Function MIREachSingleArrayInfo(ByRef ps As ParseState, ByVal itemsNode As Integer, ByRef info As UXBArrayMemoryInfo, ByRef errText As String) As Integer
+    UXBArrayMemoryInfoReset info
+    errText = ""
+    If itemsNode < 0 Or itemsNode >= ps.ast.count Then Return 0
+    Dim first As Integer = ps.ast.nodes(itemsNode).firstChild
+    If first = -1 Or ps.ast.nodes(first).nextSibling <> -1 Then Return 0
+    Dim k As String = UCase(Trim(ps.ast.nodes(first).kind))
+    If k <> "IDENT" And k <> "IDENTIFIER" And k <> "VAR" And k <> "VAR_REF" Then Return 0
+    If UXBFindArrayMemoryInfo(ps, ps.ast.nodes(first).value, info, errText) = 0 Then Return -1
+    If info.found <> 0 Then
+        If info.dynamicBounds <> 0 Then
+            errText = "mir: FOR EACH/DO EACH dynamic array requires a runtime iterator ABI; REDIM arrays are not silently treated as one-item sequences"
+            Return -1
+        End If
+        Return 1
+    End If
+
+    Dim declaredType As String
+    If UXBFindDeclaredTypeForMemoryOperand(ps, ps.ast.nodes(first).value, declaredType) <> 0 Then
+        Select Case UCase(Trim(declaredType))
+        ' LIST/DICT/SET all have real collection-iterator lowerings now
+        ' (MIRLowerListEachLoop/MIRLowerDictEachLoop/MIRLowerSetEachLoop, below)
+        ' -- excluded here so MIRLowerArrayEachLoop cleanly falls through
+        ' (detect=0) to them instead of hard-failing. CLASS/INTERFACE/STRING/
+        ' WSTRING still have no MIR-level iterator lowering and must keep
+        ' failing closed here rather than being silently mishandled as a
+        ' one-item sequence.
+        ' (STRING/WSTRING: iterated by Unicode code point, S-107 - MIRLowerStringEachLoop, tried first.)
+        Case "CLASS", "INTERFACE"
+            errText = "mir: FOR EACH/DO EACH source type " & declaredType & " requires a concrete iterator contract; it cannot fall back to legacy one-item sequence semantics"
+            Return -1
+        End Select
+    End If
+    Return 0
+End Function
+
+' Returns 1 when itemsNode is a single IDENT declared AS LIST. LIST is the
+' only collection kind with full positional-accessor support in the canonical
+' MIR interpreter today (LISTLEN/LISTGET/LISTADD -- see mir_interp_collections.fbs);
+' DICT/SET enumeration needs DICTKEYAT/DICTVALUEAT/SETMEMBERAT-equivalent MIR
+' opcodes added there first (S-038 follow-up, not done here) before they can get
+' the same treatment -- until then they keep failing closed via
+' MIREachSingleArrayInfo's rejection above, never silently mishandled here.
+Function MIREachSingleListInfo(ByRef ps As ParseState, ByVal itemsNode As Integer, ByRef nameOut As String) As Integer
+    nameOut = ""
+    If itemsNode < 0 Or itemsNode >= ps.ast.count Then Return 0
+    Dim first As Integer = ps.ast.nodes(itemsNode).firstChild
+    If first = -1 Or ps.ast.nodes(first).nextSibling <> -1 Then Return 0
+    Dim k As String = UCase(Trim(ps.ast.nodes(first).kind))
+    If k <> "IDENT" And k <> "IDENTIFIER" And k <> "VAR" And k <> "VAR_REF" Then Return 0
+    Dim declaredType As String
+    If UXBFindDeclaredTypeForMemoryOperand(ps, ps.ast.nodes(first).value, declaredType) = 0 Then Return 0
+    If UCase(Trim(declaredType)) <> "LIST" Then Return 0
+    nameOut = ps.ast.nodes(first).value
+    Return 1
+End Function
+
+' Lowers "FOR EACH item[, idx] IN listVar" / "DO EACH item[, idx] IN listVar"
+' into real canonical-MIR LISTLEN/LISTGET calls. Matches
+' ExecRunSingleCollectionEachLoop's LIST semantics exactly: the iteration
+' count is read once via LISTLEN before the loop starts (same for FOR and DO);
+' FOR EACH additionally copies every element into a fresh, compiler-only
+' LIST_NEW snapshot before the loop body ever runs (so a LISTADD/LISTSET/
+' LISTREMOVE inside the body cannot change what an earlier- or later-visited
+' index sees), while DO EACH reads LISTGET live against the original handle
+' each iteration. The optional second loop variable binds the ordinal index
+' (never a physical position), matching the array-EACH precedent.
+' Returns 2 (not applicable, caller falls through) when itemsNode isn't a
+' single LIST-typed IDENT; 1 on success; 0 on a real lowering error.
+Function MIRLowerListEachLoop(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByVal itemsNode As Integer, ByVal bodyNode As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    Dim listVarName As String
+    If MIREachSingleListInfo(ps, itemsNode, listVarName) = 0 Then Return 2
+
+    Dim isForEach As Integer = IIf(UCase(Trim(ps.ast.nodes(stmtIdx).kind)) = "FOR_EACH_STMT", 1, 0)
+
+    Dim srcHandle As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_VAR, srcHandle, 1, listVarName
+
+    Dim srcLen As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, srcLen, 2, "LISTLEN", srcHandle
+
+    Dim enumHandle As String = srcHandle
+
+    If isForEach <> 0 Then
+        Dim snapHandle As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, snapHandle, 1, "LIST_NEW"
+
+        Dim copyIdx As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, copyIdx, 1, "0"
+
+        Dim copyCheckBlock As Integer = MIRAllocBlock(module, fnIdx)
+        Dim copyDoneBlock As Integer = MIRAllocBlock(module, fnIdx)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(copyCheckBlock))
+        blkIdx = copyCheckBlock
+
+        Dim copyCmp As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LT, copyCmp, 2, copyIdx, srcLen
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JZ, "", 2, copyCmp, LTrim(Str(copyDoneBlock))
+
+        Dim copyVal As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, copyVal, 3, "LISTGET", srcHandle, copyIdx
+        Dim copyAddResult As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, copyAddResult, 3, "LISTADD", snapHandle, copyVal
+
+        Dim copyOne As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, copyOne, 1, "1"
+        Dim copyInc As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_ADD, copyInc, 2, copyIdx, copyOne
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, copyIdx, 1, copyInc
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(copyCheckBlock))
+
+        blkIdx = copyDoneBlock
+        enumHandle = snapHandle
+    End If
+
+    Dim mainIdx As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, mainIdx, 1, "0"
+
+    Dim checkBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim bodyBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim endBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim nextBlock As Integer = MIRAllocBlock(module, fnIdx)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(checkBlock))
+    blkIdx = checkBlock
+
+    Dim mainCmp As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LT, mainCmp, 2, mainIdx, srcLen
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JZ, "", 2, mainCmp, LTrim(Str(endBlock))
+    Dim itemVal As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, itemVal, 3, "LISTGET", enumHandle, mainIdx
+    ' LISTGET is dynamically kinded (a LIST holds ANY), so the x64 emitter has
+    ' no static way to know whether the raw bits it gets back are an I64 or an
+    ' F64 -- without this, a later STORE_VAR into an F64-declared item variable
+    ' would see a (wrongly) I64-typed source and numerically CONVERT the bits
+    ' (cvtsi2sd) instead of copying them, corrupting the value. Tagging this
+    ' instruction's resultType with the item variable's own declared type lets
+    ' MIRX64TryEmitCollectionCall (mir_x64_collections.fbs) mark itemVal's
+    ' local slot with the matching type before the STORE_VAR runs.
+    Dim itemDeclaredType As String
+    If UXBFindDeclaredTypeForMemoryOperand(ps, ps.ast.nodes(stmtIdx).value, itemDeclaredType) <> 0 Then
+        MIRSetLastInstructionMetadata module, fnIdx, blkIdx, itemDeclaredType
+    End If
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(stmtIdx).value, 1, itemVal
+    If Trim(ps.ast.nodes(stmtIdx).op) <> "" Then MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(stmtIdx).op, 1, mainIdx
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(bodyBlock))
+
+    blkIdx = bodyBlock
+    MIRPushLoopContext IIf(UCase(ps.ast.nodes(stmtIdx).kind) = "FOR_EACH_STMT", "FOR", "DO"), endBlock, nextBlock
+    Dim bodyStmt As Integer = ps.ast.nodes(bodyNode).firstChild
+    Do While bodyStmt <> -1
+        If MIRLowerTopLevelStmt(ps, bodyStmt, module, fnIdx, blkIdx, tempSeed, errText) = 0 Then
+            MIRPopLoopContext
+            Return 0
+        End If
+        bodyStmt = ps.ast.nodes(bodyStmt).nextSibling
+    Loop
+    MIRPopLoopContext
+
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(nextBlock))
+    blkIdx = nextBlock
+    Dim mainOne As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, mainOne, 1, "1"
+    Dim mainInc As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_ADD, mainInc, 2, mainIdx, mainOne
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, mainIdx, 1, mainInc
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(checkBlock))
+    blkIdx = endBlock
+    Return 1
+End Function
+
+' S-107 (Mete decision 2026-09-20): `FOR EACH c[, i] IN s` / `DO EACH c[, i] IN s` over a STRING (or WSTRING)
+' iterates by UNICODE CODE POINT (not byte, not UTF-16 unit): `c` is a one-code-point string, the optional
+' second variable is the 0-based CHARACTER ordinal. The source is captured once (a string is a value: changing
+' the variable inside the body does not change the iteration).
+'
+' The cursor is expressed with existing string builtins plus ONE new builtin, CPLEN(s, pos): the number of
+' string units the code point at unit position `pos` (0-based) occupies (UTF-8 engines: 1..4 bytes from the
+' lead byte; JavaScript: 1 or 2 UTF-16 units). `c = MID(s, pos + 1, CPLEN(s, pos))`, `pos += CPLEN`.
+' Returns 2 (not applicable, caller falls through) when the single EACH item is not string-typed;
+' 1 on success; 0 on a real lowering error.
+Function MIRLowerStringEachLoop(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByVal itemsNode As Integer, ByVal bodyNode As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    If itemsNode < 0 Or itemsNode >= ps.ast.count Then Return 2
+    Dim first As Integer = ps.ast.nodes(itemsNode).firstChild
+    If first = -1 Or ps.ast.nodes(first).nextSibling <> -1 Then Return 2
+    Dim sourceType As String
+    If MIRTryInferExprTypeName(ps, first, sourceType) = 0 Then Return 2
+    sourceType = UCase(Trim(sourceType))
+    If Left(sourceType, 5) = "TYPE_" Then sourceType = Mid(sourceType, 6)
+    If sourceType <> "STRING" And sourceType <> "WSTRING" Then Return 2
+
+    ' An array OF STRING elements (`DIM a(1) AS STRING`) infers the same element type "STRING" as a
+    ' plain scalar STRING variable -- without this check it was mistaken for a single string value and
+    ' walked by code point instead of falling through to MIRLowerArrayEachLoop (its real handler).
+    Dim firstKind As String = UCase(Trim(ps.ast.nodes(first).kind))
+    If firstKind = "IDENT" Or firstKind = "IDENTIFIER" Or firstKind = "VAR" Or firstKind = "VAR_REF" Then
+        Dim arrCheckInfo As UXBArrayMemoryInfo
+        Dim arrCheckErr As String
+        If UXBFindArrayMemoryInfo(ps, ps.ast.nodes(first).value, arrCheckInfo, arrCheckErr) <> 0 Then
+            If arrCheckInfo.found <> 0 Then Return 2
+        End If
+    End If
+
+    Dim loopVarName As String = ps.ast.nodes(stmtIdx).value
+    Dim loopVarType As String
+    If UXBFindDeclaredTypeForMemoryOperand(ps, loopVarName, loopVarType) <> 0 Then
+        loopVarType = UCase(Trim(loopVarType))
+        If loopVarType <> "STRING" And loopVarType <> "WSTRING" Then
+            errText = "mir: FOR EACH/DO EACH over a " & sourceType & " needs a STRING loop variable (each element is one character): " & loopVarName & " is " & loopVarType
+            Return 0
+        End If
+    End If
+
+    Dim srcValue As String
+    If MIRLowerExprNode(ps, first, module, fnIdx, blkIdx, tempSeed, srcValue, errText) = 0 Then Return 0
+    Dim snap As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_VAR, snap, 1, srcValue
+    MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "STRING"
+    Dim lenName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, lenName, 2, "LEN", snap
+    MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "I64"
+    Dim posName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, posName, 1, "0"
+    MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "I64"
+    Dim idxName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, idxName, 1, "0"
+    MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "I64"
+    Dim stepName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, stepName, 1, "1"
+    MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "I64"
+
+    Dim checkBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim bodyBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim endBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim nextBlock As Integer = MIRAllocBlock(module, fnIdx)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(checkBlock))
+    blkIdx = checkBlock
+
+    Dim cmpName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LT, cmpName, 2, posName, lenName
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JZ, "", 2, cmpName, LTrim(Str(endBlock))
+    Dim cpLenName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, cpLenName, 3, "CPLEN", snap, posName
+    MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "I64"
+    Dim startName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_ADD, startName, 2, posName, stepName
+    Dim charName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, charName, 4, "MID", snap, startName, cpLenName
+    MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "STRING"
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, loopVarName, 1, charName
+    If Trim(ps.ast.nodes(stmtIdx).op) <> "" Then MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(stmtIdx).op, 1, idxName
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(bodyBlock))
+
+    blkIdx = bodyBlock
+    MIRPushLoopContext IIf(UCase(ps.ast.nodes(stmtIdx).kind) = "FOR_EACH_STMT", "FOR", "DO"), endBlock, nextBlock
+    Dim bodyStmt As Integer = ps.ast.nodes(bodyNode).firstChild
+    Do While bodyStmt <> -1
+        If MIRLowerTopLevelStmt(ps, bodyStmt, module, fnIdx, blkIdx, tempSeed, errText) = 0 Then
+            MIRPopLoopContext
+            Return 0
+        End If
+        bodyStmt = ps.ast.nodes(bodyStmt).nextSibling
+    Loop
+    MIRPopLoopContext
+
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(nextBlock))
+    blkIdx = nextBlock
+    Dim newPos As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_ADD, newPos, 2, posName, cpLenName
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, posName, 1, newPos
+    Dim newIdx As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_ADD, newIdx, 2, idxName, stepName
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, idxName, 1, newIdx
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(checkBlock))
+    blkIdx = endBlock
+    Return 1
+End Function
+
+Function MIRLowerArrayEachLoop(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByVal itemsNode As Integer, ByVal bodyNode As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    Dim info As UXBArrayMemoryInfo
+    Dim detect As Integer = MIREachSingleArrayInfo(ps, itemsNode, info, errText)
+    If detect < 0 Then Return 0
+    If detect = 0 Then Return 2
+
+    Dim indexName As String = MIRNextTemp(tempSeed)
+    Dim itemName As String = MIRNextTemp(tempSeed)
+    Dim okName As String = MIRNextTemp(tempSeed)
+    Dim checkBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim bodyBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim endBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim nextBlock As Integer = MIRAllocBlock(module, fnIdx)
+
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, indexName, 1, LTrim(Str(info.lowerBound))
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(checkBlock))
+    blkIdx = checkBlock
+
+    Dim upperName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, upperName, 1, LTrim(Str(info.upperBound))
+    Dim cmpName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LE, cmpName, 2, indexName, upperName
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JZ, "", 2, cmpName, LTrim(Str(endBlock))
+    MIRAppendInstruction module, fnIdx, blkIdx, "LOAD_INDEXED", itemName, 2, info.nameText, indexName
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(stmtIdx).value, 1, itemName
+    If Trim(ps.ast.nodes(stmtIdx).op) <> "" Then MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(stmtIdx).op, 1, indexName
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(bodyBlock))
+
+    blkIdx = bodyBlock
+    MIRPushLoopContext IIf(UCase(ps.ast.nodes(stmtIdx).kind) = "FOR_EACH_STMT", "FOR", "DO"), endBlock, nextBlock
+    Dim bodyStmt As Integer = ps.ast.nodes(bodyNode).firstChild
+    Do While bodyStmt <> -1
+        If MIRLowerTopLevelStmt(ps, bodyStmt, module, fnIdx, blkIdx, tempSeed, errText) = 0 Then
+            MIRPopLoopContext
+            Return 0
+        End If
+        bodyStmt = ps.ast.nodes(bodyStmt).nextSibling
+    Loop
+    MIRPopLoopContext
+
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(nextBlock))
+    blkIdx = nextBlock
+    Dim oneName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, oneName, 1, "1"
+    Dim incName As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_ADD, incName, 2, indexName, oneName
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, indexName, 1, incName
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(checkBlock))
+    blkIdx = endBlock
+    Return 1
+End Function
+
+' Returns 1 when itemsNode is a single IDENT declared AS DICT.
+Function MIREachSingleDictInfo(ByRef ps As ParseState, ByVal itemsNode As Integer, ByRef nameOut As String) As Integer
+    nameOut = ""
+    If itemsNode < 0 Or itemsNode >= ps.ast.count Then Return 0
+    Dim first As Integer = ps.ast.nodes(itemsNode).firstChild
+    If first = -1 Or ps.ast.nodes(first).nextSibling <> -1 Then Return 0
+    Dim k As String = UCase(Trim(ps.ast.nodes(first).kind))
+    If k <> "IDENT" And k <> "IDENTIFIER" And k <> "VAR" And k <> "VAR_REF" Then Return 0
+    Dim declaredType As String
+    If UXBFindDeclaredTypeForMemoryOperand(ps, ps.ast.nodes(first).value, declaredType) = 0 Then Return 0
+    If UCase(Trim(declaredType)) <> "DICT" Then Return 0
+    nameOut = ps.ast.nodes(first).value
+    Return 1
+End Function
+
+' Lowers "FOR EACH key[, value] IN dictVar" / "DO EACH key[, value] IN dictVar"
+' into real canonical-MIR DICTLEN/DICTKEYAT/DICTVALUEAT calls. Single loop
+' variable binds the key; optional second binds the value (matches
+' ExecRunSingleCollectionEachLoop's DICT case exactly -- positional, not
+' identifier-text-driven). Same fixed-count-at-entry / snapshot-vs-live
+' discipline as MIRLowerListEachLoop: FOR EACH copies every (key,value) pair
+' into a fresh DICT_NEW snapshot (rebuilt via DICTSET, which preserves
+' insertion order since the source is walked in its own insertion order)
+' before the loop body runs; DO EACH reads DICTKEYAT/DICTVALUEAT live.
+Function MIRLowerDictEachLoop(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByVal itemsNode As Integer, ByVal bodyNode As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    Dim dictVarName As String
+    If MIREachSingleDictInfo(ps, itemsNode, dictVarName) = 0 Then Return 2
+
+    Dim isForEach As Integer = IIf(UCase(Trim(ps.ast.nodes(stmtIdx).kind)) = "FOR_EACH_STMT", 1, 0)
+
+    Dim srcHandle As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_VAR, srcHandle, 1, dictVarName
+
+    Dim srcLen As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, srcLen, 2, "DICTLEN", srcHandle
+
+    Dim enumHandle As String = srcHandle
+
+    If isForEach <> 0 Then
+        Dim snapHandle As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, snapHandle, 1, "DICT_NEW"
+
+        Dim copyIdx As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, copyIdx, 1, "0"
+
+        Dim copyCheckBlock As Integer = MIRAllocBlock(module, fnIdx)
+        Dim copyDoneBlock As Integer = MIRAllocBlock(module, fnIdx)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(copyCheckBlock))
+        blkIdx = copyCheckBlock
+
+        Dim copyCmp As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LT, copyCmp, 2, copyIdx, srcLen
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JZ, "", 2, copyCmp, LTrim(Str(copyDoneBlock))
+
+        Dim copyKey As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, copyKey, 3, "DICTKEYAT", srcHandle, copyIdx
+        Dim copyVal As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, copyVal, 3, "DICTVALUEAT", srcHandle, copyIdx
+        Dim copySetResult As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, copySetResult, 4, "DICTSET", snapHandle, copyKey, copyVal
+
+        Dim copyOne As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, copyOne, 1, "1"
+        Dim copyInc As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_ADD, copyInc, 2, copyIdx, copyOne
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, copyIdx, 1, copyInc
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(copyCheckBlock))
+
+        blkIdx = copyDoneBlock
+        enumHandle = snapHandle
+    End If
+
+    Dim mainIdx As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, mainIdx, 1, "0"
+
+    Dim checkBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim bodyBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim endBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim nextBlock As Integer = MIRAllocBlock(module, fnIdx)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(checkBlock))
+    blkIdx = checkBlock
+
+    Dim mainCmp As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LT, mainCmp, 2, mainIdx, srcLen
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JZ, "", 2, mainCmp, LTrim(Str(endBlock))
+    Dim keyVal As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, keyVal, 3, "DICTKEYAT", enumHandle, mainIdx
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(stmtIdx).value, 1, keyVal
+    If Trim(ps.ast.nodes(stmtIdx).op) <> "" Then
+        Dim valVal As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, valVal, 3, "DICTVALUEAT", enumHandle, mainIdx
+        ' DICTVALUEAT is dynamically kinded -- see the identical comment in
+        ' MIRLowerListEachLoop above.
+        Dim valDeclaredType As String
+        If UXBFindDeclaredTypeForMemoryOperand(ps, ps.ast.nodes(stmtIdx).op, valDeclaredType) <> 0 Then
+            MIRSetLastInstructionMetadata module, fnIdx, blkIdx, valDeclaredType
+        End If
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(stmtIdx).op, 1, valVal
+    End If
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(bodyBlock))
+
+    blkIdx = bodyBlock
+    MIRPushLoopContext IIf(UCase(ps.ast.nodes(stmtIdx).kind) = "FOR_EACH_STMT", "FOR", "DO"), endBlock, nextBlock
+    Dim bodyStmt As Integer = ps.ast.nodes(bodyNode).firstChild
+    Do While bodyStmt <> -1
+        If MIRLowerTopLevelStmt(ps, bodyStmt, module, fnIdx, blkIdx, tempSeed, errText) = 0 Then
+            MIRPopLoopContext
+            Return 0
+        End If
+        bodyStmt = ps.ast.nodes(bodyStmt).nextSibling
+    Loop
+    MIRPopLoopContext
+
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(nextBlock))
+    blkIdx = nextBlock
+    Dim mainOne As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, mainOne, 1, "1"
+    Dim mainInc As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_ADD, mainInc, 2, mainIdx, mainOne
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, mainIdx, 1, mainInc
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(checkBlock))
+    blkIdx = endBlock
+    Return 1
+End Function
+
+' Returns 1 when itemsNode is a single IDENT declared AS SET.
+Function MIREachSingleSetInfo(ByRef ps As ParseState, ByVal itemsNode As Integer, ByRef nameOut As String) As Integer
+    nameOut = ""
+    If itemsNode < 0 Or itemsNode >= ps.ast.count Then Return 0
+    Dim first As Integer = ps.ast.nodes(itemsNode).firstChild
+    If first = -1 Or ps.ast.nodes(first).nextSibling <> -1 Then Return 0
+    Dim k As String = UCase(Trim(ps.ast.nodes(first).kind))
+    If k <> "IDENT" And k <> "IDENTIFIER" And k <> "VAR" And k <> "VAR_REF" Then Return 0
+    Dim declaredType As String
+    If UXBFindDeclaredTypeForMemoryOperand(ps, ps.ast.nodes(first).value, declaredType) = 0 Then Return 0
+    If UCase(Trim(declaredType)) <> "SET" Then Return 0
+    nameOut = ps.ast.nodes(first).value
+    Return 1
+End Function
+
+' Lowers "FOR EACH member[, idx] IN setVar" / "DO EACH member[, idx] IN setVar"
+' into real canonical-MIR SETLEN/SETMEMBERAT calls. Single loop variable binds
+' the member (string); optional second binds the ordinal index -- same
+' (item, ordinal index) pairing as LIST, not (key,value) like DICT, matching
+' ExecRunSingleCollectionEachLoop's SET case. Same snapshot-vs-live discipline
+' as the LIST/DICT loops: FOR EACH copies every member into a fresh SET_NEW
+' snapshot (via SETADD) before the loop body runs; DO EACH reads SETMEMBERAT
+' live against the original handle.
+Function MIRLowerSetEachLoop(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByVal itemsNode As Integer, ByVal bodyNode As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    Dim setVarName As String
+    If MIREachSingleSetInfo(ps, itemsNode, setVarName) = 0 Then Return 2
+
+    Dim isForEach As Integer = IIf(UCase(Trim(ps.ast.nodes(stmtIdx).kind)) = "FOR_EACH_STMT", 1, 0)
+
+    Dim srcHandle As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_VAR, srcHandle, 1, setVarName
+
+    Dim srcLen As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, srcLen, 2, "SETLEN", srcHandle
+
+    Dim enumHandle As String = srcHandle
+
+    If isForEach <> 0 Then
+        Dim snapHandle As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, snapHandle, 1, "SET_NEW"
+
+        Dim copyIdx As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, copyIdx, 1, "0"
+
+        Dim copyCheckBlock As Integer = MIRAllocBlock(module, fnIdx)
+        Dim copyDoneBlock As Integer = MIRAllocBlock(module, fnIdx)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(copyCheckBlock))
+        blkIdx = copyCheckBlock
+
+        Dim copyCmp As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LT, copyCmp, 2, copyIdx, srcLen
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JZ, "", 2, copyCmp, LTrim(Str(copyDoneBlock))
+
+        Dim copyMember As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, copyMember, 3, "SETMEMBERAT", srcHandle, copyIdx
+        Dim copyAddResult As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, copyAddResult, 3, "SETADD", snapHandle, copyMember
+
+        Dim copyOne As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, copyOne, 1, "1"
+        Dim copyInc As String = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_ADD, copyInc, 2, copyIdx, copyOne
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, copyIdx, 1, copyInc
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(copyCheckBlock))
+
+        blkIdx = copyDoneBlock
+        enumHandle = snapHandle
+    End If
+
+    Dim mainIdx As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, mainIdx, 1, "0"
+
+    Dim checkBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim bodyBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim endBlock As Integer = MIRAllocBlock(module, fnIdx)
+    Dim nextBlock As Integer = MIRAllocBlock(module, fnIdx)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(checkBlock))
+    blkIdx = checkBlock
+
+    Dim mainCmp As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LT, mainCmp, 2, mainIdx, srcLen
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JZ, "", 2, mainCmp, LTrim(Str(endBlock))
+    Dim memberVal As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, memberVal, 3, "SETMEMBERAT", enumHandle, mainIdx
+    ' A SET member is a STRING. The interpreters convert it when it is stored into a numeric
+    ' variable (their declared-type coercion), native x64 does not: `FOR EACH x IN s` with
+    ' `x AS I32` stored the member's string POINTER into x and printed garbage
+    ' (-1955109992 instead of 7). Make the conversion explicit in the lowering.
+    Dim setLoopVarType As String
+    Dim setStoreValue As String
+    setStoreValue = memberVal
+    setLoopVarType = ""
+    If UXBFindDeclaredTypeForMemoryOperand(ps, ps.ast.nodes(stmtIdx).value, setLoopVarType) <> 0 Then
+        Dim setLoopCanon As String
+        setLoopCanon = UCase(Trim(setLoopVarType))
+        If Left(setLoopCanon, 5) = "TYPE_" Then setLoopCanon = Mid(setLoopCanon, 6)
+        Select Case setLoopCanon
+        Case "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "INTEGER", "LONG", "LONGINT", "SHORT", "BYTE", "UBYTE", "USHORT", "UINTEGER", "ULONG", "ULONGINT", "SBYTE", "INT", "UINT"
+            Dim setValTemp As String = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, setValTemp, 2, "VAL", memberVal
+            setStoreValue = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, setStoreValue, 2, "CLNG", setValTemp
+        Case "F32", "F64", "SINGLE", "DOUBLE"
+            setStoreValue = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, setStoreValue, 2, "VAL", memberVal
+        End Select
+    End If
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(stmtIdx).value, 1, setStoreValue
+    If Trim(ps.ast.nodes(stmtIdx).op) <> "" Then MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(stmtIdx).op, 1, mainIdx
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(bodyBlock))
+
+    blkIdx = bodyBlock
+    MIRPushLoopContext IIf(UCase(ps.ast.nodes(stmtIdx).kind) = "FOR_EACH_STMT", "FOR", "DO"), endBlock, nextBlock
+    Dim bodyStmt As Integer = ps.ast.nodes(bodyNode).firstChild
+    Do While bodyStmt <> -1
+        If MIRLowerTopLevelStmt(ps, bodyStmt, module, fnIdx, blkIdx, tempSeed, errText) = 0 Then
+            MIRPopLoopContext
+            Return 0
+        End If
+        bodyStmt = ps.ast.nodes(bodyStmt).nextSibling
+    Loop
+    MIRPopLoopContext
+
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(nextBlock))
+    blkIdx = nextBlock
+    Dim mainOne As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, mainOne, 1, "1"
+    Dim mainInc As String = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_ADD, mainInc, 2, mainIdx, mainOne
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, mainIdx, 1, mainInc
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(checkBlock))
+    blkIdx = endBlock
+    Return 1
+End Function
+
+#endif

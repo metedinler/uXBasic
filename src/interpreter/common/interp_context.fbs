@@ -1,0 +1,175 @@
+#ifndef UXB_INTERP_CONTEXT_FBS
+#define UXB_INTERP_CONTEXT_FBS
+
+#include once "../../common/step_budget.fbs"
+#include once "interp_stack.fbs"
+#include once "interp_heap.fbs"
+#include once "interp_result.fbs"
+#include once "../trace/interp_trace.fbs"
+#include once "../../runtime/runtime_context.fbs"
+
+Type UXBInterpGlobal
+    nameText As String
+    value As UXBInterpValue
+    declaredType As String
+    isConst As Integer
+End Type
+
+Type UXBInterpRoutine
+    nameText As String
+    routineKind As String
+    nodeIndex As Integer
+End Type
+
+Type UXBInterpContext
+    globals(Any) As UXBInterpGlobal
+    globalCount As Integer
+    routines(Any) As UXBInterpRoutine
+    routineCount As Integer
+    stack As UXBInterpStack
+    heap As UXBInterpHeap
+    trace As UXBInterpTraceBuffer
+    result As UXBInterpResult
+    targetName As String
+    lastError As String
+    lastErrorCode As Integer
+    stepLimit As LongInt
+    serviceCallCount As Integer
+    strictMode As Integer
+    runtime As UXBRuntimeContext
+End Type
+
+Declare Sub UXBInterpContextFail(ByRef ctx As UXBInterpContext, ByVal codeValue As Integer, ByVal messageText As String)
+Declare Sub UXBInterpContextSyncRuntime(ByRef ctx As UXBInterpContext)
+
+Sub UXBInterpContextInit(ByRef ctx As UXBInterpContext, ByVal targetText As String = "native", ByVal traceEnabled As Integer = 0)
+    ctx.globalCount = 0
+    ctx.routineCount = 0
+    Erase ctx.globals
+    Erase ctx.routines
+    UXBInterpStackInit ctx.stack
+    UXBInterpHeapInit ctx.heap
+    UXBInterpTraceInit ctx.trace, traceEnabled
+    UXBInterpResultInit ctx.result
+    ctx.targetName = UCase(Trim(targetText))
+    If ctx.targetName = "" Then ctx.targetName = "NATIVE"
+    ctx.lastError = ""
+    ctx.lastErrorCode = 0
+    ' S-110: 0 = unlimited (was a fixed 250000); --max-steps N sets gUxbMaxSteps
+    ctx.stepLimit = gUxbMaxSteps
+    ctx.serviceCallCount = 0
+    ctx.strictMode = 1
+    UXBRuntimeContextInit ctx.runtime, ctx.targetName
+End Sub
+
+Private Function UXBInterpContextFindGlobal(ByRef ctx As UXBInterpContext, ByVal nameText As String) As Integer
+    Dim key As String = UCase(Trim(nameText))
+    Dim i As Integer
+    For i = 0 To ctx.globalCount - 1
+        If UCase(ctx.globals(i).nameText) = key Then Return i
+    Next i
+    Return -1
+End Function
+
+Sub UXBInterpContextSetGlobal(ByRef ctx As UXBInterpContext, ByVal nameText As String, ByRef v As UXBInterpValue, ByVal declaredType As String = "", ByVal constFlag As Integer = 0)
+    Dim idx As Integer = UXBInterpContextFindGlobal(ctx, nameText)
+    If idx < 0 Then
+        If ctx.globalCount = 0 Then
+            ReDim ctx.globals(0)
+        Else
+            ReDim Preserve ctx.globals(ctx.globalCount)
+        End If
+        idx = ctx.globalCount
+        ctx.globalCount += 1
+        ctx.globals(idx).nameText = Trim(nameText)
+        ctx.globals(idx).isConst = IIf(constFlag <> 0, 1, 0)
+    Else
+        If ctx.globals(idx).isConst <> 0 Then
+            UXBInterpContextFail ctx, UXB_INTERP_ERR_RUNTIME_SERVICE, "constant cannot be assigned: " & nameText
+            Exit Sub
+        End If
+    End If
+    If Trim(declaredType) <> "" Then ctx.globals(idx).declaredType = UCase(Trim(declaredType))
+    ctx.globals(idx).value = UXBInterpApplyDeclaredType(v, ctx.globals(idx).declaredType)
+End Sub
+
+Function UXBInterpContextGetSymbol(ByRef ctx As UXBInterpContext, ByVal nameText As String, ByRef outValue As UXBInterpValue) As Integer
+    Dim framePtr As UXBInterpFrame Ptr = UXBInterpStackTop(ctx.stack)
+    If framePtr <> 0 Then
+        If UXBInterpFrameGetLocal(*framePtr, nameText, outValue) <> 0 Then Return 1
+    End If
+    Dim idx As Integer = UXBInterpContextFindGlobal(ctx, nameText)
+    If idx >= 0 Then
+        outValue = ctx.globals(idx).value
+        Return 1
+    End If
+    Return 0
+End Function
+
+Sub UXBInterpContextSetSymbol(ByRef ctx As UXBInterpContext, ByVal nameText As String, ByRef v As UXBInterpValue, ByVal declaredType As String = "")
+    Dim framePtr As UXBInterpFrame Ptr = UXBInterpStackTop(ctx.stack)
+    If framePtr <> 0 Then
+        UXBInterpFrameSetLocal *framePtr, nameText, v, declaredType
+    Else
+        UXBInterpContextSetGlobal ctx, nameText, v, declaredType
+    End If
+End Sub
+
+Sub UXBInterpContextAssignSymbol(ByRef ctx As UXBInterpContext, ByVal nameText As String, ByRef v As UXBInterpValue, ByVal declaredType As String = "")
+    Dim framePtr As UXBInterpFrame Ptr = UXBInterpStackTop(ctx.stack)
+    If framePtr <> 0 AndAlso UXBInterpFrameHasLocal(*framePtr, nameText) <> 0 Then
+        UXBInterpFrameSetLocal *framePtr, nameText, v, declaredType
+        Exit Sub
+    End If
+    Dim globalIdx As Integer = UXBInterpContextFindGlobal(ctx, nameText)
+    If globalIdx >= 0 Then
+        UXBInterpContextSetGlobal ctx, nameText, v, declaredType
+        Exit Sub
+    End If
+    UXBInterpContextSetSymbol ctx, nameText, v, declaredType
+End Sub
+
+Sub UXBInterpContextRegisterRoutine(ByRef ctx As UXBInterpContext, ByVal nameText As String, ByVal kindText As String, ByVal nodeIndex As Integer)
+    Dim key As String = UCase(Trim(nameText))
+    If key = "" Then Exit Sub
+    Dim i As Integer
+    For i = 0 To ctx.routineCount - 1
+        If UCase(ctx.routines(i).nameText) = key Then
+            ctx.routines(i).routineKind = UCase(Trim(kindText))
+            ctx.routines(i).nodeIndex = nodeIndex
+            Exit Sub
+        End If
+    Next i
+    If ctx.routineCount = 0 Then
+        ReDim ctx.routines(0)
+    Else
+        ReDim Preserve ctx.routines(ctx.routineCount)
+    End If
+    ctx.routines(ctx.routineCount).nameText = key
+    ctx.routines(ctx.routineCount).routineKind = UCase(Trim(kindText))
+    ctx.routines(ctx.routineCount).nodeIndex = nodeIndex
+    ctx.routineCount += 1
+End Sub
+
+Function UXBInterpContextFindRoutine(ByRef ctx As UXBInterpContext, ByVal nameText As String) As Integer
+    Dim key As String = UCase(Trim(nameText))
+    Dim i As Integer
+    For i = 0 To ctx.routineCount - 1
+        If UCase(ctx.routines(i).nameText) = key Then Return ctx.routines(i).nodeIndex
+    Next i
+    Return -1
+End Function
+
+Sub UXBInterpContextFail(ByRef ctx As UXBInterpContext, ByVal codeValue As Integer, ByVal messageText As String)
+    ctx.lastErrorCode = codeValue
+    ctx.lastError = messageText
+    UXBInterpResultFail ctx.result, codeValue, messageText
+End Sub
+
+Sub UXBInterpContextSyncRuntime(ByRef ctx As UXBInterpContext)
+    ctx.result.runtimeServiceCalls = ctx.runtime.serviceCallCount
+    ctx.result.stdoutText = ctx.runtime.stdoutText
+    ctx.result.stderrText = ctx.runtime.stderrText
+End Sub
+
+#endif

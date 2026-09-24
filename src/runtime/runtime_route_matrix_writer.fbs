@@ -1,0 +1,200 @@
+#ifndef UXB_RUNTIME_ROUTE_MATRIX_WRITER_FBS
+#define UXB_RUNTIME_ROUTE_MATRIX_WRITER_FBS
+
+#include once "services/runtime_service_matrix.fbs"
+#include once "services/runtime_service_catalog.fbs"
+#include once "services/runtime_service_gate.fbs"
+#include once "../common/report_writer.fbs"
+
+Private Function UXBRuntimeCsvEscape(ByVal rawText As String) As String
+    Dim s As String
+    s = ""
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        If ch = Chr(34) Then
+            s &= Chr(34) & Chr(34)
+        Else
+            s &= ch
+        End If
+    Next i
+    If InStr(s, ",") > 0 Or InStr(s, Chr(10)) > 0 Or InStr(s, Chr(13)) > 0 Or InStr(s, Chr(34)) > 0 Then
+        Return Chr(34) & s & Chr(34)
+    End If
+    Return s
+End Function
+
+Function UXBRuntimeWriteServiceMatrixCsv(ByRef cat As UXBRuntimeServiceCatalog, ByVal outPath As String, ByRef errText As String) As Integer
+    errText = ""
+    Dim ff As Integer = FreeFile
+    Open outPath For Output As #ff
+    Print #ff, "service_id,family,handler,signature,supported_targets,x64_status,js_status,wasm_status,browser_status,positive_test,negative_test,fail_closed_code"
+
+    Dim i As Integer
+    For i = 0 To cat.count - 1
+        Dim ByRef c As UXBRuntimeServiceContract = cat.records(i)
+        Print #ff, UXBRuntimeCsvEscape(c.serviceId) & "," & _
+            UXBRuntimeCsvEscape(c.familyName) & "," & _
+            UXBRuntimeCsvEscape(c.handlerName) & "," & _
+            UXBRuntimeCsvEscape(c.signatureText) & "," & _
+            UXBRuntimeCsvEscape(c.supportedTargets) & "," & _
+            UXBRuntimeCsvEscape(UXBRuntimeServiceDecision(c.serviceId, "X64")) & "," & _
+            UXBRuntimeCsvEscape(UXBRuntimeServiceDecision(c.serviceId, "JS")) & "," & _
+            UXBRuntimeCsvEscape(UXBRuntimeServiceDecision(c.serviceId, "WASM")) & "," & _
+            UXBRuntimeCsvEscape(UXBRuntimeServiceDecision(c.serviceId, "BROWSER")) & "," & _
+            UXBRuntimeCsvEscape(c.positiveTest) & "," & _
+            UXBRuntimeCsvEscape(c.negativeTest) & "," & _
+            UXBRuntimeCsvEscape(c.failClosedCode)
+    Next i
+
+    Close #ff
+    Return 1
+End Function
+
+Function UXBRuntimeWriteTestsCsv(ByRef cat As UXBRuntimeServiceCatalog, ByVal outPath As String, ByVal positiveValue As Integer, ByRef errText As String) As Integer
+    errText = ""
+    Dim ff As Integer = FreeFile
+    Open outPath For Output As #ff
+    Print #ff, "service_id,test_path,expected"
+    Dim i As Integer
+    For i = 0 To cat.count - 1
+        If positiveValue <> 0 Then
+            Print #ff, UXBRuntimeCsvEscape(cat.records(i).serviceId) & "," & UXBRuntimeCsvEscape(cat.records(i).positiveTest) & ",PASS"
+        Else
+            Print #ff, UXBRuntimeCsvEscape(cat.records(i).serviceId) & "," & UXBRuntimeCsvEscape(cat.records(i).negativeTest) & ",FAIL_CLOSED"
+        End If
+    Next i
+    Close #ff
+    Return 1
+End Function
+
+Function UXBRuntimeWriteGateJson(ByRef gate As UXBRuntimeServiceGateResult, ByVal outPath As String, ByRef errText As String) As Integer
+    errText = ""
+    Dim ff As Integer = FreeFile
+    Open outPath For Output As #ff
+    Print #ff, "{"
+    Print #ff, "  " & Chr(34) & "status" & Chr(34) & ": " & Chr(34) & IIf(gate.ok <> 0, "PASS", "FAIL") & Chr(34) & ","
+    Print #ff, "  " & Chr(34) & "checked_count" & Chr(34) & ": " & LTrim(Str(gate.checkedCount)) & ","
+    Print #ff, "  " & Chr(34) & "missing_service_count" & Chr(34) & ": " & LTrim(Str(gate.missingServiceCount)) & ","
+    Print #ff, "  " & Chr(34) & "missing_handler_count" & Chr(34) & ": " & LTrim(Str(gate.missingHandlerCount)) & ","
+    Print #ff, "  " & Chr(34) & "missing_signature_count" & Chr(34) & ": " & LTrim(Str(gate.missingSignatureCount)) & ","
+    Print #ff, "  " & Chr(34) & "missing_test_count" & Chr(34) & ": " & LTrim(Str(gate.missingTestCount)) & ","
+    Print #ff, "  " & Chr(34) & "missing_target_count" & Chr(34) & ": " & LTrim(Str(gate.missingTargetCount))
+    Print #ff, "}"
+    Close #ff
+    Return 1
+End Function
+
+Function UXBRuntimeWriteGateMd(ByRef gate As UXBRuntimeServiceGateResult, ByVal outPath As String, ByRef errText As String) As Integer
+    errText = ""
+    Dim ff As Integer = FreeFile
+    Open outPath For Output As #ff
+    Print #ff, "# Adim 7 Runtime Gate"
+    Print #ff, ""
+    Print #ff, "Status: **" & IIf(gate.ok <> 0, "PASS", "FAIL") & "**"
+    Print #ff, ""
+    Print #ff, "- checked: " & LTrim(Str(gate.checkedCount))
+    Print #ff, "- missing services: " & LTrim(Str(gate.missingServiceCount))
+    Print #ff, "- missing handlers: " & LTrim(Str(gate.missingHandlerCount))
+    Print #ff, "- missing signatures: " & LTrim(Str(gate.missingSignatureCount))
+    Print #ff, "- missing tests: " & LTrim(Str(gate.missingTestCount))
+    Print #ff, "- missing targets: " & LTrim(Str(gate.missingTargetCount))
+    If Trim(gate.errorsText) <> "" Then
+        Print #ff, ""
+        Print #ff, "## Errors"
+        Print #ff, "```text"
+        Print #ff, gate.errorsText
+        Print #ff, "```"
+    End If
+    Close #ff
+    Return 1
+End Function
+
+Function UXBRuntimeWriteAdim7Reports(ByVal reportDir As String, ByRef gate As UXBRuntimeServiceGateResult, ByRef errText As String) As Integer
+    errText = ""
+    Dim cat As UXBRuntimeServiceCatalog
+    UXBRuntimeBuildCanonicalCatalog cat
+    MkDir reportDir
+    UXBRuntimeWriteServiceMatrixCsv cat, reportDir & "/adim7_runtime_services.csv", errText
+    UXBRuntimeWriteServiceMatrixCsv cat, reportDir & "/adim7_runtime_route_matrix.csv", errText
+    UXBRuntimeWriteTestsCsv cat, reportDir & "/adim7_positive_tests.csv", 1, errText
+    UXBRuntimeWriteTestsCsv cat, reportDir & "/adim7_negative_tests.csv", 0, errText
+    UXBRuntimeWriteGateJson gate, reportDir & "/adim7_gate.json", errText
+    UXBRuntimeWriteGateMd gate, reportDir & "/adim7_gate.md", errText
+    Return 1
+End Function
+
+
+Private Function UXBRuntimeRouteJsonEscape(ByVal rawText As String) As String
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        Select Case ch
+        Case Chr(34)
+            outText &= "\" & Chr(34)
+        Case "\"
+            outText &= "\\"
+        Case Chr(13)
+            outText &= "\r"
+        Case Chr(10)
+            outText &= "\n"
+        Case Chr(9)
+            outText &= "\t"
+        Case Else
+            outText &= ch
+        End Select
+    Next i
+    Return outText
+End Function
+
+Function UXBRuntimeRouteMatrixJson(ByRef mx As UXBRuntimeServiceMatrix) As String
+    Dim q As String
+    q = Chr(34)
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  " & q & "schema" & q & ": " & q & "uxb.runtime_route_matrix.v1" & q & "," & Chr(10)
+    j &= "  " & q & "count" & q & ": " & LTrim(Str(mx.count)) & "," & Chr(10)
+    j &= "  " & q & "rows" & q & ": [" & Chr(10)
+    Dim i As Integer
+    For i = 0 To mx.count - 1
+        Dim ByRef r As UXBRuntimeServiceMatrixRow = mx.rows(i)
+        j &= "    {"
+        j &= q & "service_id" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.serviceId) & q & ","
+        j &= q & "family" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.familyName) & q & ","
+        j &= q & "handler" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.handlerName) & q & ","
+        j &= q & "signature" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.signatureText) & q & ","
+        j &= q & "return_type" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.returnType) & q & ","
+        j &= q & "arg_count" & q & ":" & LTrim(Str(r.argCount)) & ","
+        j &= q & "arg_types" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.argTypesText) & q & ","
+        j &= q & "supported_targets" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.supportedTargets) & q & ","
+        j &= q & "x64_status" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.x64Status) & q & ","
+        j &= q & "js_status" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.jsStatus) & q & ","
+        j &= q & "wasm_status" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.wasmStatus) & q & ","
+        j &= q & "browser_status" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.browserStatus) & q & ","
+        j &= q & "gate_status" & q & ":" & q & UXBRuntimeRouteJsonEscape(r.gateStatus) & q
+        j &= "}"
+        If i < mx.count - 1 Then j &= ","
+        j &= Chr(10)
+    Next i
+    j &= "  ]" & Chr(10)
+    j &= "}" & Chr(10)
+    Return j
+End Function
+
+Function UXBRuntimeWriteRouteMatrixJson(ByRef mx As UXBRuntimeServiceMatrix, ByVal outPath As String, ByRef errText As String) As Integer
+    Dim jsonText As String
+    jsonText = UXBRuntimeRouteMatrixJson(mx)
+    Return UXBReportWriteText(outPath, jsonText, errText)
+End Function
+
+Function UXBRuntimeBuildAndWriteRouteMatrixJson(ByVal outPath As String, ByRef errText As String) As Integer
+    Dim mx As UXBRuntimeServiceMatrix
+    UXBRuntimeServiceMatrixBuild mx
+    Return UXBRuntimeWriteRouteMatrixJson(mx, outPath, errText)
+End Function
+
+#endif

@@ -1,0 +1,201 @@
+#ifndef UXB_MIR_X64_FP64_FBS
+#define UXB_MIR_X64_FP64_FBS
+
+' Minimal F64 MIR backend for FADD/FSUB/FMUL/FDIV/FNEG.
+' This is for ordinary F64/SINGLE/DOUBLE MIR float ops only.
+' F80/F128/BIGF/BIGD/BALL remain external runtime families.
+
+Function MIRX64IsFloatLiteral(ByRef s As String) As Integer
+    Dim t As String
+    t = Trim(s)
+    If t = "" Then Return 0
+    If MIRX64IsQuotedStringLiteral(t) <> 0 Then Return 0
+
+    Dim seenDigit As Integer
+    Dim seenDot As Integer
+    Dim seenExponent As Integer
+    Dim exponentDigit As Integer
+    Dim i As Integer
+    For i = 1 To Len(t)
+        Dim ch As String
+        ch = Mid(t, i, 1)
+        If ch >= "0" And ch <= "9" Then
+            seenDigit = 1
+            If seenExponent <> 0 Then exponentDigit = 1
+        ElseIf ch = "." Then
+            If seenDot <> 0 Or seenExponent <> 0 Then Return 0
+            seenDot = 1
+        ElseIf ch = "E" Or ch = "e" Then
+            If seenExponent <> 0 Or seenDigit = 0 Then Return 0
+            seenExponent = 1
+        ElseIf ch = "+" Or ch = "-" Then
+            If i <> 1 Then
+                Dim prev As String
+                prev = Mid(t, i - 1, 1)
+                If prev <> "E" And prev <> "e" Then Return 0
+            End If
+        Else
+            Return 0
+        End If
+    Next i
+
+    If seenDigit = 0 Then Return 0
+    If seenDot = 0 And seenExponent = 0 Then Return 0
+    If seenExponent <> 0 And exponentDigit = 0 Then Return 0
+    Return 1
+End Function
+
+Function MIRX64EnsureFloatLiteralLabel(ByRef cg As MIRX64Context, ByRef literalText As String, ByRef labelOut As String) As Integer
+    Dim idx As Integer
+    idx = cg.labelCounter + 1
+    labelOut = "__uxb_f64_lit_" & MIRX64ToStr(idx)
+    cg.labelCounter = idx
+    MIRX64EmitData cg, labelOut & ": dq " & Trim(literalText)
+    Return 1
+End Function
+
+Function MIRX64LoadFloatOperandToXmm(ByRef cg As MIRX64Context, ByRef operandText As String, ByRef xmmName As String, ByRef errText As String) As Integer
+    Dim opText As String
+    opText = Trim(operandText)
+
+    If MIRX64IsFloatLiteral(opText) <> 0 Then
+        Dim lbl As String
+        If MIRX64EnsureFloatLiteralLabel(cg, opText, lbl) = 0 Then
+            errText = "MIR x64 F64: float literal label failed"
+            Return 0
+        End If
+        MIRX64Emit cg, "    movsd " & xmmName & ", qword [rel " & lbl & "]"
+        Return 1
+    End If
+
+    Dim off As Integer
+    Dim localIdx As Integer
+    If MIRX64FindLocalOffset(cg, opText, off) <> 0 And MIRX64FindLocalIndex(cg, opText, localIdx) <> 0 Then
+        If cg.locals(localIdx).isByRef <> 0 Then
+            ' BYREF parameter: the slot holds a POINTER, not the float bits. Load
+            ' the pointer as a plain 8-byte value first, then dereference it as the
+            ' declared float width.
+            MIRX64Emit cg, "    mov rax, qword " & MIRX64RbpRef(off)
+            If UCase(Trim(cg.locals(localIdx).typeName)) = "F32" Then
+                MIRX64Emit cg, "    cvtss2sd " & xmmName & ", dword [rax]"
+            Else
+                MIRX64Emit cg, "    movsd " & xmmName & ", qword [rax]"
+            End If
+            Return 1
+        End If
+        If MIRX64TypeIsFloat(cg.locals(localIdx).typeName) <> 0 Then
+            If UCase(Trim(cg.locals(localIdx).typeName)) = "F32" Then
+                MIRX64Emit cg, "    cvtss2sd " & xmmName & ", dword " & MIRX64RbpRef(off)
+            Else
+                MIRX64Emit cg, "    movsd " & xmmName & ", qword " & MIRX64RbpRef(off)
+            End If
+        Else
+            MIRX64Emit cg, "    mov rax, qword " & MIRX64RbpRef(off)
+            MIRX64EmitIntRaxToXmm cg, xmmName, MIRX64OperandIsU64(cg, opText)
+        End If
+        Return 1
+    End If
+
+    Dim globalIdx As Integer
+    If MIRX64FindGlobalSlot(cg, opText, globalIdx) <> 0 Then
+        If MIRX64TypeIsFloat(cg.globals(globalIdx).typeName) <> 0 Then
+            If UCase(Trim(cg.globals(globalIdx).typeName)) = "F32" Then
+                MIRX64Emit cg, "    cvtss2sd " & xmmName & ", dword [rel " & cg.globals(globalIdx).labelText & "]"
+            Else
+                MIRX64Emit cg, "    movsd " & xmmName & ", qword [rel " & cg.globals(globalIdx).labelText & "]"
+            End If
+        Else
+            MIRX64Emit cg, "    mov rax, qword [rel " & cg.globals(globalIdx).labelText & "]"
+            MIRX64EmitIntRaxToXmm cg, xmmName, MIRX64OperandIsU64(cg, opText)
+        End If
+        Return 1
+    End If
+
+    If MIRX64IsIntegerLiteral(opText) <> 0 Then
+        MIRX64Emit cg, "    mov rax, " & opText
+        MIRX64Emit cg, "    cvtsi2sd " & xmmName & ", rax"
+        Return 1
+    End If
+
+    errText = "MIR x64 F64: unknown float operand '" & opText & "'"
+    Return 0
+End Function
+
+Function MIRX64StoreXmmToVar(ByRef cg As MIRX64Context, ByRef xmmName As String, ByRef varName As String, ByRef errText As String) As Integer
+    Dim globalIdx As Integer
+    If MIRX64FindGlobalSlot(cg, varName, globalIdx) <> 0 Then
+        If UCase(Trim(cg.globals(globalIdx).typeName)) = "F32" Then
+            MIRX64Emit cg, "    cvtsd2ss xmm4, " & xmmName
+            MIRX64Emit cg, "    movss dword [rel " & cg.globals(globalIdx).labelText & "], xmm4"
+        Else
+            MIRX64Emit cg, "    movsd qword [rel " & cg.globals(globalIdx).labelText & "], " & xmmName
+        End If
+        Return 1
+    End If
+    Dim off As Integer
+    If MIRX64FindLocalOffset(cg, varName, off) = 0 Then
+        If MIRX64EnsureLocalSlot(cg, varName, off) = 0 Then
+            errText = "MIR x64 F64: cannot allocate result " & varName
+            Return 0
+        End If
+    End If
+    Dim localIdx As Integer
+    If MIRX64FindLocalIndex(cg, varName, localIdx) <> 0 AndAlso cg.locals(localIdx).isByRef <> 0 Then
+        ' BYREF parameter: the slot holds a POINTER, not the float bits. Load the
+        ' pointer as a plain 8-byte value first, then store through it.
+        MIRX64Emit cg, "    mov rax, qword " & MIRX64RbpRef(off)
+        If UCase(Trim(cg.locals(localIdx).typeName)) = "F32" Then
+            MIRX64Emit cg, "    cvtsd2ss xmm4, " & xmmName
+            MIRX64Emit cg, "    movss dword [rax], xmm4"
+        Else
+            MIRX64Emit cg, "    movsd qword [rax], " & xmmName
+        End If
+        Return 1
+    End If
+    If MIRX64FindLocalIndex(cg, varName, localIdx) <> 0 And UCase(Trim(cg.locals(localIdx).typeName)) = "F32" Then
+        MIRX64Emit cg, "    cvtsd2ss xmm4, " & xmmName
+        MIRX64Emit cg, "    movss dword " & MIRX64RbpRef(off) & ", xmm4"
+    Else
+        MIRX64Emit cg, "    movsd qword " & MIRX64RbpRef(off) & ", " & xmmName
+    End If
+    Return 1
+End Function
+
+Function MIRX64EmitFloatOp(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    Dim op As String
+    op = UCase(Trim(ins.opcode))
+
+    If op = "FNEG" Then
+        If ins.operandCount < 1 Or Trim(ins.result) = "" Then
+            errText = "MIR x64 F64: FNEG requires operand and result"
+            Return 0
+        End If
+        If MIRX64LoadFloatOperandToXmm(cg, ins.operands(0), "xmm0", errText) = 0 Then Return 0
+        MIRX64Emit cg, "    movq rax, xmm0"
+        MIRX64Emit cg, "    btc rax, 63"
+        MIRX64Emit cg, "    movq xmm0, rax"
+        Return MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText)
+    End If
+
+    If ins.operandCount < 2 Or Trim(ins.result) = "" Then
+        errText = "MIR x64 F64: " & op & " requires 2 operands and result"
+        Return 0
+    End If
+
+    If MIRX64LoadFloatOperandToXmm(cg, ins.operands(0), "xmm0", errText) = 0 Then Return 0
+    If MIRX64LoadFloatOperandToXmm(cg, ins.operands(1), "xmm1", errText) = 0 Then Return 0
+
+    Select Case op
+    Case "FADD": MIRX64Emit cg, "    addsd xmm0, xmm1"
+    Case "FSUB": MIRX64Emit cg, "    subsd xmm0, xmm1"
+    Case "FMUL": MIRX64Emit cg, "    mulsd xmm0, xmm1"
+    Case "FDIV": MIRX64Emit cg, "    divsd xmm0, xmm1"
+    Case Else
+        errText = "MIR x64 F64: unsupported float opcode " & op
+        Return 0
+    End Select
+
+    Return MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText)
+End Function
+
+#endif

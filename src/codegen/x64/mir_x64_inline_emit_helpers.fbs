@@ -1,0 +1,122 @@
+#ifndef UXB_MIR_X64_INLINE_EMIT_HELPERS_FBS
+#define UXB_MIR_X64_INLINE_EMIT_HELPERS_FBS
+
+#include once "../../common/report_writer.fbs"
+
+Private Function MIRX64InlineHeaderArg(ByRef headerText As String, ByVal argIndex As Integer) As String
+    Dim h As String
+    h = Trim(headerText)
+    If Left(h, 1) = "(" Then h = Mid(h, 2)
+    If Right(h, 1) = ")" Then h = Left(h, Len(h) - 1)
+
+    Dim cur As String
+    Dim idx As Integer
+    Dim i As Integer
+    cur = ""
+    idx = 0
+    For i = 1 To Len(h)
+        Dim ch As String
+        ch = Mid(h, i, 1)
+        If ch = "," Then
+            If idx = argIndex Then Return Trim(cur)
+            idx += 1
+            cur = ""
+        Else
+            cur &= ch
+        End If
+    Next i
+    If idx = argIndex Then Return Trim(cur)
+    Return ""
+End Function
+
+Private Function MIRX64InlineSafeFileStem(ByRef textValue As String) As String
+    Dim raw As String
+    raw = Trim(textValue)
+    If Left(raw, 1) = Chr(34) And Right(raw, 1) = Chr(34) And Len(raw) >= 2 Then raw = Mid(raw, 2, Len(raw) - 2)
+    If raw = "" Then raw = "inline"
+
+    Dim outText As String
+    Dim i As Integer
+    outText = ""
+    For i = 1 To Len(raw)
+        Dim ch As String
+        ch = Mid(raw, i, 1)
+        If (ch >= "A" And ch <= "Z") Or (ch >= "a" And ch <= "z") Or (ch >= "0" And ch <= "9") Or ch = "_" Or ch = "-" Or ch = "." Then
+            outText &= ch
+        Else
+            outText &= "_"
+        End If
+    Next i
+    Do While InStr(outText, "_._") > 0
+        outText = Left(outText, InStr(outText, "_._") - 1) & "." & Mid(outText, InStr(outText, "_._") + 3)
+    Loop
+    Do While InStr(outText, "_.") > 0
+        outText = Left(outText, InStr(outText, "_.") - 1) & "." & Mid(outText, InStr(outText, "_.") + 2)
+    Loop
+    Do While InStr(outText, "._") > 0
+        outText = Left(outText, InStr(outText, "._") - 1) & "." & Mid(outText, InStr(outText, "._") + 2)
+    Loop
+    Return outText
+End Function
+
+Private Function MIRX64InlineSidecarPath(ByRef labelText As String, ByRef headerText As String) As String
+    Dim requested As String
+    requested = MIRX64InlineHeaderArg(headerText, 1)
+    requested = MIRX64InlineSafeFileStem(requested)
+    If Instr(requested, ".") = 0 Then requested &= ".asm"
+    Return "dist\x64build\" & requested
+End Function
+
+Private Function MIRX64InlineKind(ByRef headerText As String) As String
+    Dim k As String
+    k = UCase(Trim(MIRX64InlineHeaderArg(headerText, 2)))
+    If k = "" Then k = "PROC"
+    Return k
+End Function
+
+Private Function MIRX64EmitInlineInstruction(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount < 3 Then
+        errText = "MIR x64 inline: label/header/body operands required"
+        Return 0
+    End If
+
+    Dim labelText As String
+    Dim headerText As String
+    Dim bodyText As String
+    labelText = MIRX64SanitizeSymbolName(ins.operands(0))
+    headerText = ins.operands(1)
+    bodyText = ins.operands(2)
+    If labelText = "" Then labelText = MIRX64NextLabel(cg, "inline")
+
+    Dim sidecarPath As String
+    Dim writeErr As String
+    sidecarPath = MIRX64InlineSidecarPath(labelText, headerText)
+    If UXBReportWriteText(sidecarPath, bodyText & Chr(10), writeErr) = 0 Then
+        errText = "MIR x64 inline: sidecar write failed: " & writeErr
+        Return 0
+    End If
+
+    MIRX64EnsureInlineSharedMemory cg
+    Dim afterLabel As String
+    afterLabel = MIRX64NextLabel(cg, "inline_after")
+    MIRX64Emit cg, "    ; INLINE sidecar: " & sidecarPath
+    MIRX64Emit cg, "    lea rcx, [rel __uxb_inline_shared64k]"
+    MIRX64Emit cg, "    mov rdx, 65536"
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call " & labelText
+    MIRX64Emit cg, "    add rsp, 32"
+    MIRX64Emit cg, "    jmp " & afterLabel
+
+    MIRX64Emit cg, labelText & ":"
+    MIRX64Emit cg, "    push rbp"
+    MIRX64Emit cg, "    mov rbp, rsp"
+    MIRX64Emit cg, "    ; INLINE ABI: rcx=BYREF shared64k, rdx=BYVAL shared64k_size"
+    MIRX64Emit cg, bodyText
+    MIRX64Emit cg, "    pop rbp"
+    MIRX64Emit cg, "    ret"
+    MIRX64Emit cg, afterLabel & ":"
+
+    Return 1
+End Function
+
+#endif

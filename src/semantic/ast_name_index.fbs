@@ -1,0 +1,176 @@
+#ifndef UXB_AST_NAME_INDEX_FBS
+#define UXB_AST_NAME_INDEX_FBS
+
+' Name index of the AST's declaration nodes.
+'
+' Why it exists: MIR lowering and type inference look declarations up by NAME
+' constantly ("what is the declared type of variable X?", "which node is class Y?",
+' "what does function F return?") and answered each question by walking EVERY AST
+' node, upper-casing and trimming its kind and value on the way -- O(N) allocations
+' per identifier, O(N^2) for a program (a 1000-statement file spent ~30 s in the MIR
+' stage, most of it in these scans).
+'
+' One pass over the tree builds, for five groups of node kinds, a hash table
+' name -> declaration nodes in ascending node order:
+'     group 0  DIM_DECL / REDIM_DECL / PARAM_DECL       (variable declarations)
+'     group 1  CONST_DECL / CONST_STMT                  (constants)
+'     group 2  CLASS_STMT                               (classes)
+'     group 3  FUNCTION_STMT / DECLARE_FUNCTION_STMT    (functions)
+'     group 4  INTERFACE_STMT                           (interfaces)
+' Callers keep their own scan bodies: only the set of candidate nodes changes, and
+' they are visited in the same order as before, so results are identical.
+'
+' The index is (re)built whenever the AST it was built for has a different node
+' count, is a different ParseState, or a new parse started (gUxbAstEpoch, bumped by
+' ASTPoolInit). Declaration nodes are created by the parser
+' and never re-kinded/renamed afterwards; if a caller ever needs to be sure, it
+' re-checks kind/value of the node it is handed (all current callers do).
+' If the table cannot hold the names (very large programs) Ensure returns 0 and the
+' caller falls back to its plain scan.
+
+Const UXB_NAMEIDX_SLOTS As Integer = 16384
+Const UXB_NAMEIDX_GROUPS As Integer = 5
+
+Type UXBAstNameIndex
+    slotName(0 To UXB_NAMEIDX_GROUPS - 1, 0 To UXB_NAMEIDX_SLOTS - 1) As String
+    slotFirst(0 To UXB_NAMEIDX_GROUPS - 1, 0 To UXB_NAMEIDX_SLOTS - 1) As Integer
+    slotLast(0 To UXB_NAMEIDX_GROUPS - 1, 0 To UXB_NAMEIDX_SLOTS - 1) As Integer
+    slotUsed(0 To UXB_NAMEIDX_GROUPS - 1, 0 To UXB_NAMEIDX_SLOTS - 1) As Byte
+    slotCount(0 To UXB_NAMEIDX_GROUPS - 1) As Integer
+    entryNode(Any) As Integer
+    entryNext(Any) As Integer
+    entryPrev(Any) As Integer
+    entryCount As Integer
+    entryCap As Integer
+    builtForCount As Integer
+    builtForState As Any Ptr
+    builtForEpoch As Integer
+    usable As Integer
+End Type
+
+Dim Shared gUxbAstNameIndex As UXBAstNameIndex
+
+Private Function UXBAstNameIndexHash(ByRef s As String) As Integer
+    Dim h As ULong = 2166136261UL
+    Dim i As Integer
+    For i = 0 To Len(s) - 1
+        h = (h Xor CULng(s[i])) * 16777619UL
+    Next i
+    Return CInt(h And CULng(UXB_NAMEIDX_SLOTS - 1))
+End Function
+
+Private Function UXBAstNameIndexGroupOf(ByRef kindUpper As String) As Integer
+    Select Case kindUpper
+    Case "DIM_DECL", "REDIM_DECL", "PARAM_DECL": Return 0
+    Case "CONST_DECL", "CONST_STMT": Return 1
+    Case "CLASS_STMT": Return 2
+    Case "FUNCTION_STMT", "DECLARE_FUNCTION_STMT": Return 3
+    Case "INTERFACE_STMT": Return 4
+    End Select
+    Return -1
+End Function
+
+' slot for (group, name); creates it when create <> 0. -1 when the table is too full.
+Private Function UXBAstNameIndexSlot(ByVal grp As Integer, ByRef nameUpper As String, ByVal create As Integer) As Integer
+    Dim slot As Integer = UXBAstNameIndexHash(nameUpper)
+    Dim probes As Integer = 0
+    Do While probes < UXB_NAMEIDX_SLOTS
+        If gUxbAstNameIndex.slotUsed(grp, slot) = 0 Then
+            If create = 0 Then Return -1
+            If gUxbAstNameIndex.slotCount(grp) >= (UXB_NAMEIDX_SLOTS * 3) \ 4 Then Return -1
+            gUxbAstNameIndex.slotUsed(grp, slot) = 1
+            gUxbAstNameIndex.slotName(grp, slot) = nameUpper
+            gUxbAstNameIndex.slotFirst(grp, slot) = -1
+            gUxbAstNameIndex.slotLast(grp, slot) = -1
+            gUxbAstNameIndex.slotCount(grp) += 1
+            Return slot
+        End If
+        If gUxbAstNameIndex.slotName(grp, slot) = nameUpper Then Return slot
+        slot = (slot + 1) And (UXB_NAMEIDX_SLOTS - 1)
+        probes += 1
+    Loop
+    Return -1
+End Function
+
+Private Sub UXBAstNameIndexBuild(ByRef ps As ParseState)
+    Dim g As Integer
+    Dim s As Integer
+    For g = 0 To UXB_NAMEIDX_GROUPS - 1
+        For s = 0 To UXB_NAMEIDX_SLOTS - 1
+            gUxbAstNameIndex.slotUsed(g, s) = 0
+        Next s
+        gUxbAstNameIndex.slotCount(g) = 0
+    Next g
+    gUxbAstNameIndex.entryCount = 0
+    gUxbAstNameIndex.usable = 1
+    If gUxbAstNameIndex.entryCap < 64 Then
+        gUxbAstNameIndex.entryCap = 64
+        ReDim gUxbAstNameIndex.entryNode(0 To gUxbAstNameIndex.entryCap - 1)
+        ReDim gUxbAstNameIndex.entryNext(0 To gUxbAstNameIndex.entryCap - 1)
+        ReDim gUxbAstNameIndex.entryPrev(0 To gUxbAstNameIndex.entryCap - 1)
+    End If
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        Dim grp As Integer = UXBAstNameIndexGroupOf(UCase(Trim(ps.ast.nodes(i).kind)))
+        If grp < 0 Then Continue For
+        Dim nm As String = UCase(Trim(ps.ast.nodes(i).value))
+        Dim slot As Integer = UXBAstNameIndexSlot(grp, nm, 1)
+        If slot < 0 Then
+            gUxbAstNameIndex.usable = 0
+            Exit For
+        End If
+        If gUxbAstNameIndex.entryCount >= gUxbAstNameIndex.entryCap Then
+            gUxbAstNameIndex.entryCap *= 2
+            ReDim Preserve gUxbAstNameIndex.entryNode(0 To gUxbAstNameIndex.entryCap - 1)
+            ReDim Preserve gUxbAstNameIndex.entryNext(0 To gUxbAstNameIndex.entryCap - 1)
+            ReDim Preserve gUxbAstNameIndex.entryPrev(0 To gUxbAstNameIndex.entryCap - 1)
+        End If
+        Dim e As Integer = gUxbAstNameIndex.entryCount
+        gUxbAstNameIndex.entryCount += 1
+        gUxbAstNameIndex.entryNode(e) = i
+        gUxbAstNameIndex.entryNext(e) = -1
+        gUxbAstNameIndex.entryPrev(e) = gUxbAstNameIndex.slotLast(grp, slot)
+        If gUxbAstNameIndex.slotLast(grp, slot) <> -1 Then gUxbAstNameIndex.entryNext(gUxbAstNameIndex.slotLast(grp, slot)) = e
+        If gUxbAstNameIndex.slotFirst(grp, slot) = -1 Then gUxbAstNameIndex.slotFirst(grp, slot) = e
+        gUxbAstNameIndex.slotLast(grp, slot) = e
+    Next i
+    gUxbAstNameIndex.builtForCount = ps.ast.count
+    gUxbAstNameIndex.builtForState = @ps
+    gUxbAstNameIndex.builtForEpoch = gUxbAstEpoch
+End Sub
+
+' 1 when the index is current and usable for this AST (builds/rebuilds on demand), else 0.
+Function UXBAstNameIndexEnsure(ByRef ps As ParseState) As Integer
+    If gUxbAstNameIndex.builtForState <> @ps Or gUxbAstNameIndex.builtForCount <> ps.ast.count Or gUxbAstNameIndex.builtForEpoch <> gUxbAstEpoch Then
+        UXBAstNameIndexBuild ps
+    End If
+    Return gUxbAstNameIndex.usable
+End Function
+
+' First / last declaration entry of `nameUpper` in group grp (0..3), or -1.
+Function UXBAstNameIndexFirst(ByVal grp As Integer, ByRef nameUpper As String) As Integer
+    Dim slot As Integer = UXBAstNameIndexSlot(grp, nameUpper, 0)
+    If slot < 0 Then Return -1
+    Return gUxbAstNameIndex.slotFirst(grp, slot)
+End Function
+
+Function UXBAstNameIndexLast(ByVal grp As Integer, ByRef nameUpper As String) As Integer
+    Dim slot As Integer = UXBAstNameIndexSlot(grp, nameUpper, 0)
+    If slot < 0 Then Return -1
+    Return gUxbAstNameIndex.slotLast(grp, slot)
+End Function
+
+Function UXBAstNameIndexNode(ByVal entry As Integer) As Integer
+    Return gUxbAstNameIndex.entryNode(entry)
+End Function
+
+Function UXBAstNameIndexNext(ByVal entry As Integer) As Integer
+    Return gUxbAstNameIndex.entryNext(entry)
+End Function
+
+Function UXBAstNameIndexPrev(ByVal entry As Integer) As Integer
+    Return gUxbAstNameIndex.entryPrev(entry)
+End Function
+
+#endif

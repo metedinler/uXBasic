@@ -1,0 +1,168 @@
+#ifndef UXB_WASM_BACKEND_STRICT_ADIM14_FBS
+#define UXB_WASM_BACKEND_STRICT_ADIM14_FBS
+
+#include once "wasm_codegen.fbs"
+#include once "uxb_wat_emit_buffer_adim14.fbs"
+#include once "uxb_wasm_type_bridge_adim14.fbs"
+#include once "runtime/wasm_runtime_bridge.fbs"
+
+Private Function UXBAdim14WasmDirOf(ByRef filePath As String) As String
+    Dim i As Integer
+    For i = Len(filePath) To 1 Step -1
+        If Mid(filePath, i, 1) = "\" Or Mid(filePath, i, 1) = "/" Then Return Left(filePath, i - 1)
+    Next i
+    Return ""
+End Function
+
+Private Function UXBAdim14WasmBaseName(ByRef filePath As String) As String
+    Dim i As Integer
+    For i = Len(filePath) To 1 Step -1
+        If Mid(filePath, i, 1) = "\" Or Mid(filePath, i, 1) = "/" Then Return Mid(filePath, i + 1)
+    Next i
+    Return filePath
+End Function
+
+Private Function UXBAdim14WasmWriteText(ByRef filePath As String, ByRef contentText As String, ByRef errText As String) As Integer
+    UXBWasmEnsureDir UXBAdim14WasmDirOf(filePath)
+    Dim ff As Integer
+    ff = FreeFile
+    Open filePath For Output As #ff
+    If Err <> 0 Then
+        errText = "WASM support artifact cannot be written: " & filePath
+        Return 0
+    End If
+    Print #ff, contentText;
+    Close #ff
+    Return 1
+End Function
+
+Private Function UXBAdim14WasmEntryName(ByRef moduleValue As MIRModule) As String
+    Dim i As Integer
+    For i = 0 To moduleValue.functionCount - 1
+        If UCase(Trim(moduleValue.functions(i).name)) = "MAIN" Then Return UXBWasmSafeName(moduleValue.functions(i).name)
+    Next i
+    If moduleValue.functionCount > 0 Then Return UXBWasmSafeName(moduleValue.functions(0).name)
+    Return ""
+End Function
+
+Private Function UXBAdim14WriteWasmRunner(ByRef moduleValue As MIRModule, ByRef wasmPath As String, ByRef errText As String) As Integer
+    Dim outDir As String
+    Dim wasmName As String
+    Dim runtimePath As String
+    Dim runnerPath As String
+    outDir = UXBAdim14WasmDirOf(wasmPath)
+    wasmName = UXBAdim14WasmBaseName(wasmPath)
+    If outDir = "" Then
+        runtimePath = "ux_wasm_runtime.js"
+        runnerPath = "run_wasm.js"
+    Else
+        runtimePath = outDir & "\ux_wasm_runtime.js"
+        runnerPath = outDir & "\run_wasm.js"
+    End If
+    Dim runtimeText As String
+    runtimeText = UXBWasmRuntimeBridgeJs(moduleValue)
+    If UXBAdim14WasmWriteText(runtimePath, runtimeText, errText) = 0 Then Return 0
+
+    Dim entryName As String
+    entryName = UXBAdim14WasmEntryName(moduleValue)
+    If entryName = "" Then
+        errText = "WASM runner entry function is missing"
+        Return 0
+    End If
+    Dim runnerText As String
+    runnerText = "const fs = require('fs');" & Chr(10)
+    runnerText &= "const path = require('path');" & Chr(10)
+    runnerText &= "require(path.join(__dirname, 'ux_wasm_runtime.js'));" & Chr(10)
+    runnerText &= "const bytes = fs.readFileSync(path.join(__dirname, " & Chr(34) & wasmName & Chr(34) & "));" & Chr(10)
+    runnerText &= "WebAssembly.instantiate(bytes, globalThis.uxbWasmImports).then(({instance}) => {" & Chr(10)
+    runnerText &= "  globalThis.uxbWasmInstance = instance;" & Chr(10)
+    runnerText &= "  const entry = instance.exports[" & Chr(34) & entryName & Chr(34) & "];" & Chr(10)
+    runnerText &= "  if (typeof entry !== 'function') throw new Error('WASM entry export missing: " & entryName & "');" & Chr(10)
+    runnerText &= "  entry();" & Chr(10)
+    runnerText &= "}).catch((error) => { console.error(error); process.exitCode = 1; });" & Chr(10)
+    Return UXBAdim14WasmWriteText(runnerPath, runnerText, errText)
+End Function
+
+Function UXBAdim14RunWat2Wasm(ByRef wat2wasmPath As String, ByRef watPath As String, ByRef wasmPath As String, ByVal requireBinary As Integer, ByRef errText As String) As Integer
+    errText = ""
+
+    If Trim(watPath) = "" Then
+        errText = "wat path is empty"
+        Return 0
+    End If
+
+    If Trim(wasmPath) = "" And requireBinary <> 0 Then
+        errText = "wasm path is empty"
+        Return 0
+    End If
+
+    If Trim(wat2wasmPath) = "" Then
+        If requireBinary <> 0 Then
+            errText = "wat2wasm path is empty"
+            Return 0
+        End If
+        Return 1
+    End If
+
+    If Dir(wat2wasmPath) = "" Then
+        If requireBinary <> 0 Then
+            errText = "wat2wasm not found: " & wat2wasmPath
+            Return 0
+        End If
+        Return 1
+    End If
+
+    UXBWasmEnsureDir UXBAdim14WasmDirOf(wasmPath)
+    Dim cmd As String
+    cmd = "cmd.exe /d /s /c " & Chr(34) & Chr(34) & wat2wasmPath & Chr(34) & " " & Chr(34) & watPath & Chr(34) & " -o " & Chr(34) & wasmPath & Chr(34) & Chr(34)
+
+    Dim rc As Integer
+    rc = Shell(cmd)
+    If rc <> 0 Then
+        errText = "wat2wasm failed rc=" & LTrim(Str(rc))
+        Return 0
+    End If
+
+    If Dir(wasmPath) = "" Then
+        errText = "wat2wasm completed but output wasm is missing: " & wasmPath
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Function UXBAdim14WasmBackendEmitStrict(ByRef moduleValue As MIRModule, ByRef ctx As UXBBackendContext, ByRef result As UXBBackendResult) As Integer
+    Dim errText As String
+    errText = ""
+
+    If UXBAdim14WasmRequireWatPath(ctx.watOutPath, errText) = 0 Then
+        UXBBackendResultFail result, UXB_BACKEND_E_TARGET, errText
+        Return 0
+    End If
+
+    ' Mevcut repo WAT/WASM emitter'ına bağlanır. Yoksa compile gate açık hata verir.
+    If UXBWasmBackendEmitModule(moduleValue, ctx, result) = 0 Then
+        If Trim(result.errorText) = "" Then
+            UXBBackendResultFail result, UXB_BACKEND_E_EMIT, "WASM backend emit failed without error text"
+        End If
+        Return 0
+    End If
+
+    ' ctx.wasmOutPath boşsa bu WAT-only çalışmadır; binary gerektirmez.
+    If Trim(ctx.wasmOutPath) <> "" Then
+        If UXBAdim14RunWat2Wasm(ctx.wasmToolPath, ctx.watOutPath, ctx.wasmOutPath, 1, errText) = 0 Then
+            UXBBackendResultFail result, UXB_BACKEND_E_EXTERNAL_TOOL, errText
+            Return 0
+        End If
+        If UXBAdim14WriteWasmRunner(moduleValue, ctx.wasmOutPath, errText) = 0 Then
+            UXBBackendResultFail result, UXB_BACKEND_E_EMIT, errText
+            Return 0
+        End If
+        UXBBackendResultPass result, ctx.watOutPath, "WAT and WASM emitted"
+        result.auxPath = ctx.wasmOutPath
+    End If
+
+    Return 1
+End Function
+
+#endif

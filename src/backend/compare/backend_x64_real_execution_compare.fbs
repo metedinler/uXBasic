@@ -1,0 +1,215 @@
+#ifndef UXB_BACKEND_X64_REAL_EXECUTION_COMPARE_FBS
+#define UXB_BACKEND_X64_REAL_EXECUTION_COMPARE_FBS
+
+' S-025: `--x64-mode BOTH` used to call UXBX64CompareAsmFiles (backend_output_compare.fbs),
+' which compares the two emitters' raw NASM TEXT for byte equality. AST-direct x64
+' and MIR-x64 are structurally different emitters (different register allocation,
+' different helper layout) that are never expected to produce identical assembly
+' even when they are 100% behaviorally correct and agree on every observable
+' result — so that comparison was guaranteed to report FAIL on real, healthy
+' builds (audit evidence: ~37.9K vs ~5.2K normalized characters). This file
+' replaces the pass/fail *gate* with the only invariant "BOTH" is actually meant
+' to prove: the two routes' compiled, LINKED, EXECUTED programs produce the same
+' observable output. It builds both routes into separate directories, runs both
+' real .exe files (through a timeout-bounded PowerShell runner so a user
+' program's infinite loop cannot hang the compiler), and compares normalized
+' stdout plus exit code. The raw assembly text is still emitted and still
+' reported (as non-gating diagnostic info) so nothing that was visible before is
+' lost.
+
+#include once "backend_output_compare.fbs"
+#include once "../../build/x64_build_pipeline.fbs"
+
+Type UXBX64RouteRunResult
+    buildOk As Integer
+    runOk As Integer
+    exeFilePathArg As String
+    stdoutText As String
+    stderrText As String
+    exitCode As Integer
+    errorText As String
+End Type
+
+Private Function UXBX64ComparePsScriptPath() As String
+    Return "tools\x64_compare\run_with_timeout.ps1"
+End Function
+
+' Runs one already-built executable with a timeout, capturing stdout/stderr and
+' the process exit code. Never blocks on stdin (the script closes it immediately),
+' so a program that reads INPUT just sees EOF instead of hanging the comparison.
+Function UXBX64RunExeCaptureOutput( _
+    ByRef exeFilePathArg As String, _
+    ByRef workDir As String, _
+    ByVal timeoutMs As Integer, _
+    ByRef stdoutTextOut As String, _
+    ByRef stderrTextOut As String, _
+    ByRef exitCodeOut As Integer, _
+    ByRef errText As String _
+) As Integer
+    stdoutTextOut = ""
+    stderrTextOut = ""
+    exitCodeOut = -1
+    errText = ""
+
+    If Dir(exeFilePathArg) = "" Then
+        errText = "executable not found: " & exeFilePathArg
+        Return 0
+    End If
+
+    Dim scriptPath As String
+    scriptPath = UXBX64ComparePsScriptPath()
+    If Dir(scriptPath) = "" Then
+        errText = "x64 compare runner script not found: " & scriptPath
+        Return 0
+    End If
+
+    UXBBackendCompareEnsureDir workDir & "\marker.txt"
+    Dim stdoutPath As String
+    Dim stderrPath As String
+    stdoutPath = workDir & "\exec_stdout.txt"
+    stderrPath = workDir & "\exec_stderr.txt"
+
+    Dim cmdText As String
+    cmdText = "cmd /c " & Chr(34) & "powershell -NoProfile -ExecutionPolicy Bypass -File " & Chr(34) & scriptPath & Chr(34) & _
+        " -ExePath " & Chr(34) & exeFilePathArg & Chr(34) & _
+        " -StdoutPath " & Chr(34) & stdoutPath & Chr(34) & _
+        " -StderrPath " & Chr(34) & stderrPath & Chr(34) & _
+        " -TimeoutMs " & LTrim(Str(timeoutMs)) & Chr(34)
+    exitCodeOut = Shell(cmdText)
+
+    Dim loadErr As String
+    UXBBackendCompareLoadText stdoutPath, stdoutTextOut, loadErr
+    UXBBackendCompareLoadText stderrPath, stderrTextOut, loadErr
+
+    If exitCodeOut = 124 Then
+        errText = "execution timed out: " & exeFilePathArg
+        Return 0
+    End If
+    Return 1
+End Function
+
+' Builds one route (AST-direct x64 or MIR-x64, selected by which NASM text the
+' caller passes in) into its own directory, then runs the resulting exe.
+Function UXBX64BuildAndRunRoute( _
+    ByRef ps As ParseState, _
+    ByRef sourcePath As String, _
+    ByRef outputDir As String, _
+    ByRef asmText As String, _
+    ByVal timeoutMs As Integer, _
+    ByRef result As UXBX64RouteRunResult _
+) As Integer
+    result.buildOk = 0
+    result.runOk = 0
+    result.exeFilePathArg = outputDir & "\program.exe"
+    result.stdoutText = ""
+    result.stderrText = ""
+    result.exitCode = -1
+    result.errorText = ""
+
+    Dim buildErr As String
+    If X64BuildRunArtifactsFromAsmNamed(ps, sourcePath, outputDir, "program.exe", asmText, buildErr) = 0 Then
+        result.errorText = "build failed: " & buildErr
+        Return 0
+    End If
+    result.buildOk = 1
+
+    Dim runErr As String
+    If UXBX64RunExeCaptureOutput(result.exeFilePathArg, outputDir, timeoutMs, result.stdoutText, result.stderrText, result.exitCode, runErr) = 0 Then
+        result.errorText = "run failed: " & runErr
+        Return 0
+    End If
+    result.runOk = 1
+    Return 1
+End Function
+
+Function UXBX64CompareRealExecution( _
+    ByRef ps As ParseState, _
+    ByRef sourcePath As String, _
+    ByRef astAsmPath As String, _
+    ByRef astAsmText As String, _
+    ByRef mirAsmPath As String, _
+    ByRef mirAsmText As String, _
+    ByRef compareRootDir As String, _
+    ByRef reportPath As String, _
+    ByRef compareStatusOut As String, _
+    ByRef errText As String _
+) As Integer
+    compareStatusOut = "UNKNOWN"
+    errText = ""
+
+    Dim astResult As UXBX64RouteRunResult
+    Dim mirResult As UXBX64RouteRunResult
+    Dim timeoutMs As Integer
+    timeoutMs = 10000
+
+    Dim astErr As String
+    Dim astOk As Integer
+    astOk = UXBX64BuildAndRunRoute(ps, sourcePath, compareRootDir & "\ast_exe", astAsmText, timeoutMs, astResult)
+
+    Dim mirOk As Integer
+    mirOk = UXBX64BuildAndRunRoute(ps, sourcePath, compareRootDir & "\mir_exe", mirAsmText, timeoutMs, mirResult)
+
+    Dim stdoutMatch As Integer
+    Dim exitCodeMatch As Integer
+    stdoutMatch = 0
+    exitCodeMatch = 0
+    If astOk <> 0 And mirOk <> 0 Then
+        stdoutMatch = IIf(UXBBackendNormalizeOutput(astResult.stdoutText) = UXBBackendNormalizeOutput(mirResult.stdoutText), 1, 0)
+        exitCodeMatch = IIf(astResult.exitCode = mirResult.exitCode, 1, 0)
+    End If
+
+    ' Raw assembly text is still diffed and reported, but only as non-gating
+    ' diagnostic context (see file header) -- structurally different emitters
+    ' are never expected to match here even when both are correct.
+    Dim asmTextMatch As Integer
+    asmTextMatch = IIf(UXBBackendNormalizeOutput(astAsmText) = UXBBackendNormalizeOutput(mirAsmText), 1, 0)
+
+    If astOk <> 0 And mirOk <> 0 And stdoutMatch <> 0 And exitCodeMatch <> 0 Then
+        compareStatusOut = "PASS"
+    Else
+        compareStatusOut = "FAIL"
+        If astOk = 0 Then errText = "AST route: " & astResult.errorText
+        If mirOk = 0 Then errText = IIf(errText <> "", errText & " | ", "") & "MIR route: " & mirResult.errorText
+        If astOk <> 0 And mirOk <> 0 And errText = "" Then
+            errText = "observable output differs: stdout_match=" & LTrim(Str(stdoutMatch)) & " exit_code_match=" & LTrim(Str(exitCodeMatch)) & _
+                " (ast_exit=" & LTrim(Str(astResult.exitCode)) & " mir_exit=" & LTrim(Str(mirResult.exitCode)) & ")"
+        End If
+    End If
+
+    Dim q As String
+    q = Chr(34)
+    Dim j As String
+    j = "{" & Chr(10)
+    j &= "  " & q & "schema_version" & q & ": " & q & "uxb.x64_ast_mir_compare.v2" & q & "," & Chr(10)
+    j &= "  " & q & "kind" & q & ": " & q & "x64_ast_vs_x64_mir_real_execution_compare" & q & "," & Chr(10)
+    j &= "  " & q & "status" & q & ": " & q & UXBBackendCompareJsonEscape(compareStatusOut) & q & "," & Chr(10)
+    j &= "  " & q & "ast_asm_path" & q & ": " & q & UXBBackendCompareJsonEscape(astAsmPath) & q & "," & Chr(10)
+    j &= "  " & q & "mir_asm_path" & q & ": " & q & UXBBackendCompareJsonEscape(mirAsmPath) & q & "," & Chr(10)
+    j &= "  " & q & "ast_exe_path" & q & ": " & q & UXBBackendCompareJsonEscape(astResult.exeFilePathArg) & q & "," & Chr(10)
+    j &= "  " & q & "mir_exe_path" & q & ": " & q & UXBBackendCompareJsonEscape(mirResult.exeFilePathArg) & q & "," & Chr(10)
+    j &= "  " & q & "ast_build_ok" & q & ": " & IIf(astResult.buildOk <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "mir_build_ok" & q & ": " & IIf(mirResult.buildOk <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "ast_run_ok" & q & ": " & IIf(astResult.runOk <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "mir_run_ok" & q & ": " & IIf(mirResult.runOk <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "ast_exit_code" & q & ": " & LTrim(Str(astResult.exitCode)) & "," & Chr(10)
+    j &= "  " & q & "mir_exit_code" & q & ": " & LTrim(Str(mirResult.exitCode)) & "," & Chr(10)
+    j &= "  " & q & "exit_code_match" & q & ": " & IIf(exitCodeMatch <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "stdout_match" & q & ": " & IIf(stdoutMatch <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "ast_stdout" & q & ": " & q & UXBBackendCompareJsonEscape(astResult.stdoutText) & q & "," & Chr(10)
+    j &= "  " & q & "mir_stdout" & q & ": " & q & UXBBackendCompareJsonEscape(mirResult.stdoutText) & q & "," & Chr(10)
+    j &= "  " & q & "asm_text_match_informational_only" & q & ": " & IIf(asmTextMatch <> 0, "true", "false") & "," & Chr(10)
+    j &= "  " & q & "diagnostic" & q & ": " & q & UXBBackendCompareJsonEscape(errText) & q & Chr(10)
+    j &= "}" & Chr(10)
+
+    Dim writeErr As String
+    If UXBBackendCompareWriteText(reportPath, j, writeErr) = 0 Then
+        errText = writeErr
+        compareStatusOut = "ERROR"
+        Return 0
+    End If
+
+    If compareStatusOut = "ERROR" Then Return 0
+    Return 1
+End Function
+
+#endif

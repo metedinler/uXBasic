@@ -1,0 +1,121 @@
+#ifndef UXB_WASM_MANIFEST_EMIT_FBS
+#define UXB_WASM_MANIFEST_EMIT_FBS
+
+Private Function UXBWasmJsonEscape(ByRef rawText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    Dim c As String
+    outText = ""
+    For i = 1 To Len(rawText)
+        c = Mid(rawText, i, 1)
+        Select Case c
+        Case Chr(34): outText &= "\" & Chr(34)
+        Case "\": outText &= "\\"
+        Case Chr(10): outText &= "\n"
+        Case Chr(13): outText &= "\r"
+        Case Else: outText &= c
+        End Select
+    Next i
+    Return outText
+End Function
+
+Private Function UXBWasmBaseName(ByRef filePath As String) As String
+    Dim i As Integer
+    Dim s As String
+    s = Trim(filePath)
+    For i = Len(s) To 1 Step -1
+        If Mid(s, i, 1) = "\" Or Mid(s, i, 1) = "/" Then
+            s = Mid(s, i + 1)
+            Exit For
+        End If
+    Next i
+    Return s
+End Function
+
+Private Function UXBWasmDefaultModuleName(ByRef watPath As String) As String
+    Dim b As String
+    b = UXBWasmBaseName(watPath)
+    If LCase(Right(b, 4)) = ".wat" Then b = Left(b, Len(b) - 4) & ".wasm"
+    If Trim(b) = "" Then b = "program.wasm"
+    Return b
+End Function
+
+Private Function UXBWasmManifestDirOf(ByRef filePath As String) As String
+    Dim i As Integer
+    For i = Len(filePath) To 1 Step -1
+        If Mid(filePath, i, 1) = "\" Or Mid(filePath, i, 1) = "/" Then Return Left(filePath, i - 1)
+    Next i
+    Return ""
+End Function
+
+Private Sub UXBWasmManifestEnsureDir(ByRef dirPath As String)
+    Dim cleaned As String
+    Dim part As String
+    Dim current As String
+    Dim i As Integer
+    cleaned = Trim(dirPath)
+    part = ""
+    current = ""
+    For i = 1 To Len(cleaned)
+        Dim ch As String
+        ch = Mid(cleaned, i, 1)
+        If ch = "\" Or ch = "/" Then
+            If part <> "" Then
+                If current <> "" Then current &= "\"
+                current &= part
+                If Dir(current, 16) = "" Then MkDir current
+                part = ""
+            End If
+        Else
+            part &= ch
+        End If
+    Next i
+    If part <> "" Then
+        If current <> "" Then current &= "\"
+        current &= part
+        If Dir(current, 16) = "" Then MkDir current
+    End If
+End Sub
+
+Public Function UXBWasmWriteManifest(ByRef module As MIRModule, ByRef watPath As String, ByRef manifestPath As String, ByRef errText As String) As Integer
+    Dim textValue As String
+    Dim i As Integer
+    Dim ff As Integer
+
+    If Trim(manifestPath) = "" Then Return 1
+
+    textValue = "{" & Chr(10)
+    textValue &= "  " & Chr(34) & "format" & Chr(34) & ": " & Chr(34) & "uxb-wasm-manifest-v2" & Chr(34) & "," & Chr(10)
+    textValue &= "  " & Chr(34) & "wat" & Chr(34) & ": " & Chr(34) & UXBWasmJsonEscape(watPath) & Chr(34) & "," & Chr(10)
+    textValue &= "  " & Chr(34) & "module" & Chr(34) & ": " & Chr(34) & UXBWasmDefaultModuleName(watPath) & Chr(34) & "," & Chr(10)
+    textValue &= "  " & Chr(34) & "exports" & Chr(34) & ": [" & Chr(10)
+
+    For i = 0 To module.functionCount - 1
+        If i > 0 Then textValue &= "," & Chr(10)
+        textValue &= "    {" & Chr(34) & "name" & Chr(34) & ": " & Chr(34) & UXBWasmSafeName(module.functions(i).name) & Chr(34) & ", " & Chr(34) & "kind" & Chr(34) & ": " & Chr(34) & "function" & Chr(34) & "}"
+    Next i
+
+    textValue &= Chr(10) & "  ]," & Chr(10)
+    textValue &= "  " & Chr(34) & "imports" & Chr(34) & ": [" & Chr(10)
+    textValue &= "    {" & Chr(34) & "module" & Chr(34) & ": " & Chr(34) & "ux" & Chr(34) & ", " & Chr(34) & "name" & Chr(34) & ": " & Chr(34) & "host_call4" & Chr(34) & "}," & Chr(10)
+    textValue &= "    {" & Chr(34) & "module" & Chr(34) & ": " & Chr(34) & "ux" & Chr(34) & ", " & Chr(34) & "name" & Chr(34) & ": " & Chr(34) & "host_call16" & Chr(34) & "}," & Chr(10)
+    textValue &= "    {" & Chr(34) & "module" & Chr(34) & ": " & Chr(34) & "ux" & Chr(34) & ", " & Chr(34) & "name" & Chr(34) & ": " & Chr(34) & "print_i32" & Chr(34) & "}," & Chr(10)
+    textValue &= "    {" & Chr(34) & "module" & Chr(34) & ": " & Chr(34) & "ux" & Chr(34) & ", " & Chr(34) & "name" & Chr(34) & ": " & Chr(34) & "print_f64" & Chr(34) & "}" & Chr(10)
+    textValue &= "  ]" & Chr(10)
+    textValue &= "}" & Chr(10)
+
+    Dim manifestDir As String
+    manifestDir = UXBWasmManifestDirOf(manifestPath)
+    If manifestDir <> "" Then UXBWasmManifestEnsureDir manifestDir
+    ff = FreeFile
+    Open manifestPath For Output As #ff
+    If Err <> 0 Then
+        errText = "WASM manifest cannot be opened: " & manifestPath
+        Return 0
+    End If
+    Print #ff, textValue;
+    Close #ff
+    Return 1
+End Function
+
+#endif

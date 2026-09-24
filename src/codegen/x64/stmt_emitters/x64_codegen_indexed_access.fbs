@@ -1,0 +1,201 @@
+' Extracted from code_generator.fbs for wave-14 modular split
+' Scope: indexed local/global load-store helpers
+
+#include once "../../../common/array_memory_ref.fbs"
+
+' S-045: shared lower-bound lookup for every indexed load/store/addr-of helper below.
+' Returns 0 for a non-array symbol or one whose declaration can't be found, which is
+' the correct no-op ("nothing to subtract") for those cases.
+Private Function X64ArrayLowerBoundOf(ByRef ps As ParseState, ByRef varName As String) As LongInt
+    Dim info As UXBArrayMemoryInfo
+    Dim infoErr As String
+    If UXBFindArrayMemoryInfo(ps, varName, info, infoErr) = 0 Then Return 0
+    If info.found = 0 Then Return 0
+    Return info.lowerBound
+End Function
+
+' The element's SIGNEDNESS decides how a narrow cell widens into rax: `movsx` for a
+' signed type, `movzx` (or the implicit zero-extension of a 32-bit mov) for an unsigned
+' one. This used to widen by cell width alone, so a U8 250 read back as -6 and a
+' U32 4000000000 as -294967296. For an `arr AS T[]` parameter the element type is the
+' parameter's type without the trailing "[]".
+Private Function X64ArrayElemIsUnsigned(ByRef cg As X64CodegenContext, ByRef varName As String) As Integer
+    Dim keyText As String
+    keyText = X64Upper(Trim(varName))
+    Dim i As Integer
+    For i = 0 To cg.paramCount - 1
+        If i > 255 Then Exit For
+        If X64Upper(Trim(gX64ParamNames(i))) = keyText Then
+            Dim paramTypeText As String
+            paramTypeText = X64Upper(Trim(gX64ParamTypes(i)))
+            If Right(paramTypeText, 2) = "[]" Then paramTypeText = Left(paramTypeText, Len(paramTypeText) - 2)
+            Return X64TypeNameIsUnsignedInteger(paramTypeText)
+        End If
+    Next i
+    Dim declTypeText As String
+    declTypeText = ""
+    If X64TryGetVarType(cg, varName, declTypeText) <> 0 Then Return X64TypeNameIsUnsignedInteger(declTypeText)
+    Return 0
+End Function
+
+Private Sub X64EmitElemLoadToRax(ByRef cg As X64CodegenContext, ByVal strideBytes As Integer, ByVal isUnsigned As Integer)
+    Select Case strideBytes
+    Case 1
+        X64EmitText cg, IIf(isUnsigned <> 0, "    movzx rax, byte [rcx]", "    movsx rax, byte [rcx]")
+    Case 2
+        X64EmitText cg, IIf(isUnsigned <> 0, "    movzx rax, word [rcx]", "    movsx rax, word [rcx]")
+    Case 4
+        X64EmitText cg, IIf(isUnsigned <> 0, "    mov eax, dword [rcx]", "    movsxd rax, dword [rcx]")
+    Case Else
+        X64EmitText cg, "    mov rax, [rcx]"
+    End Select
+End Sub
+
+Private Function X64EmitLoadIndexedLocal(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef varName As String, ByVal indexExpr As Integer, ByRef errText As String) As Integer
+    Dim baseOffset As Integer
+    Dim slotCount As Integer
+    If X64TryFindLocalInfo(cg, varName, baseOffset, slotCount) = 0 Then Return 0
+
+    If X64EmitExprToRax(ps, indexExpr, cg, errText) = 0 Then Return 0
+    Dim lowerBound As LongInt
+    lowerBound = X64LocalArrayLowerBoundOf(ps, cg, varName)
+    If lowerBound <> 0 Then X64EmitText cg, "    sub rax, " & LTrim(Str(lowerBound))
+    X64EmitText cg, "    mov rbx, rax"
+    Dim strideBytes As Integer
+    strideBytes = 8
+    If X64TryGetLocalElemBytes(cg, varName, strideBytes) = 0 Then strideBytes = 8
+    X64EmitText cg, "    imul rbx, " & X64ToStr(strideBytes)
+    X64EmitLocalArrayBaseToRcx cg, varName, baseOffset
+    X64EmitText cg, "    add rcx, rbx"
+    X64EmitElemLoadToRax cg, strideBytes, X64ArrayElemIsUnsigned(cg, varName)
+    Return 1
+End Function
+
+Private Function X64EmitStoreIndexedLocal(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef varName As String, ByVal indexExpr As Integer, ByRef errText As String) As Integer
+    Dim baseOffset As Integer
+    Dim slotCount As Integer
+    If X64TryFindLocalInfo(cg, varName, baseOffset, slotCount) = 0 Then Return 0
+
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, indexExpr, cg, errText) = 0 Then Return 0
+    Dim lowerBound2 As LongInt
+    lowerBound2 = X64LocalArrayLowerBoundOf(ps, cg, varName)
+    If lowerBound2 <> 0 Then X64EmitText cg, "    sub rax, " & LTrim(Str(lowerBound2))
+
+    X64EmitText cg, "    mov rbx, rax"
+    X64EmitText cg, "    pop rax"
+    Dim strideBytes2 As Integer
+    strideBytes2 = 8
+    If X64TryGetLocalElemBytes(cg, varName, strideBytes2) = 0 Then strideBytes2 = 8
+    X64EmitText cg, "    imul rbx, " & X64ToStr(strideBytes2)
+    X64EmitLocalArrayBaseToRcx cg, varName, baseOffset
+    X64EmitText cg, "    add rcx, rbx"
+    Select Case strideBytes2
+    Case 1
+        X64EmitText cg, "    mov [rcx], al"
+    Case 2
+        X64EmitText cg, "    mov [rcx], ax"
+    Case 4
+        X64EmitText cg, "    mov [rcx], eax"
+    Case Else
+        X64EmitText cg, "    mov [rcx], rax"
+    End Select
+    Return 1
+End Function
+
+Private Function X64TryFindGlobalInfo(ByRef cg As X64CodegenContext, ByRef varName As String, ByRef labelOut As String, ByRef slotCountOut As Integer) As Integer
+    Dim keyText As String
+    keyText = X64Upper(Trim(varName))
+    If keyText = "" Then
+        labelOut = ""
+        slotCountOut = 0
+        Return 0
+    End If
+
+    Dim i As Integer
+    For i = 0 To cg.globalCount - 1
+        If gX64GlobalKeys(i) = keyText Then
+            labelOut = gX64GlobalLabels(i)
+            slotCountOut = gX64GlobalSlots(i)
+            Return 1
+        End If
+    Next i
+
+    labelOut = ""
+    slotCountOut = 0
+    Return 0
+End Function
+
+Private Function X64TryGetGlobalElemBytes(ByRef cg As X64CodegenContext, ByRef varName As String, ByRef elemBytesOut As Integer) As Integer
+    Dim keyText As String
+    keyText = X64Upper(Trim(varName))
+    If keyText = "" Then
+        elemBytesOut = 8
+        Return 0
+    End If
+
+    Dim i As Integer
+    For i = 0 To cg.globalCount - 1
+        If gX64GlobalKeys(i) = keyText Then
+            elemBytesOut = gX64GlobalElemBytes(i)
+            If elemBytesOut <= 0 Then elemBytesOut = 8
+            Return 1
+        End If
+    Next i
+
+    elemBytesOut = 8
+    Return 0
+End Function
+
+Private Function X64EmitLoadIndexedGlobal(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef varName As String, ByVal indexExpr As Integer, ByRef errText As String) As Integer
+    Dim labelText As String
+    Dim slotCount As Integer
+    If X64TryFindGlobalInfo(cg, varName, labelText, slotCount) = 0 Then Return 0
+
+    If X64EmitExprToRax(ps, indexExpr, cg, errText) = 0 Then Return 0
+    Dim lowerBound3 As LongInt
+    lowerBound3 = X64ArrayLowerBoundOf(ps, varName)
+    If lowerBound3 <> 0 Then X64EmitText cg, "    sub rax, " & LTrim(Str(lowerBound3))
+    X64EmitText cg, "    mov rbx, rax"
+    Dim gStride As Integer
+    gStride = 8
+    If X64TryGetGlobalElemBytes(cg, varName, gStride) = 0 Then gStride = 8
+    X64EmitText cg, "    imul rbx, " & X64ToStr(gStride)
+    X64EmitText cg, "    lea rcx, [rel " & labelText & "]"
+    X64EmitText cg, "    add rcx, rbx"
+    X64EmitElemLoadToRax cg, gStride, X64ArrayElemIsUnsigned(cg, varName)
+    Return 1
+End Function
+
+Private Function X64EmitStoreIndexedGlobal(ByRef ps As ParseState, ByRef cg As X64CodegenContext, ByRef varName As String, ByVal indexExpr As Integer, ByRef errText As String) As Integer
+    Dim labelText As String
+    Dim slotCount As Integer
+    If X64TryFindGlobalInfo(cg, varName, labelText, slotCount) = 0 Then Return 0
+
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, indexExpr, cg, errText) = 0 Then Return 0
+    Dim lowerBound4 As LongInt
+    lowerBound4 = X64ArrayLowerBoundOf(ps, varName)
+    If lowerBound4 <> 0 Then X64EmitText cg, "    sub rax, " & LTrim(Str(lowerBound4))
+
+    X64EmitText cg, "    mov rbx, rax"
+    X64EmitText cg, "    pop rax"
+    Dim gStride2 As Integer
+    gStride2 = 8
+    If X64TryGetGlobalElemBytes(cg, varName, gStride2) = 0 Then gStride2 = 8
+    X64EmitText cg, "    imul rbx, " & X64ToStr(gStride2)
+    X64EmitText cg, "    lea rcx, [rel " & labelText & "]"
+    X64EmitText cg, "    add rcx, rbx"
+    Select Case gStride2
+    Case 1
+        X64EmitText cg, "    mov [rcx], al"
+    Case 2
+        X64EmitText cg, "    mov [rcx], ax"
+    Case 4
+        X64EmitText cg, "    mov [rcx], eax"
+    Case Else
+        X64EmitText cg, "    mov [rcx], rax"
+    End Select
+    Return 1
+End Function
+

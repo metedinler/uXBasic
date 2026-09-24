@@ -1,0 +1,186 @@
+#ifndef UXB_MIR_INTERP_ARRAY_OBJECT_FBS
+#define UXB_MIR_INTERP_ARRAY_OBJECT_FBS
+
+#include once "../../mir/mir_instruction.fbs"
+#include once "../common/interp_context.fbs"
+#include once "mir_interp_state.fbs"
+
+' S-097: one out-of-range wording across engines ("array index out of bounds NAME"): the
+' interpreters used to say "array index not available" / "cannot be written" with no
+' array name. The name is the heap slot's owner ("array NAME", set by DIM).
+Private Function UXBMIRInterpArrayOobText(ByRef h As UXBInterpHeap, ByVal arrayId As Integer) As String
+    Dim nameText As String
+    nameText = ""
+    If arrayId >= 0 And arrayId < h.slotCount Then nameText = Trim(h.slots(arrayId).ownerName)
+    If UCase(Left(nameText, 6)) = "ARRAY " Then nameText = Trim(Mid(nameText, 7))
+    If nameText = "" Then nameText = "?"
+    Return "array index out of bounds " & UCase(nameText)
+End Function
+
+Private Function UXBMIRInterpObjectId(ByRef v As UXBInterpValue) As Integer
+    If v.kind = UXB_VAL_ARRAY Then Return v.arrayId
+    If v.kind = UXB_VAL_OBJECT Then Return v.objectId
+    If v.arrayId >= 0 Then Return v.arrayId
+    Return v.objectId
+End Function
+
+Function UXBMIRInterpExecArrayObject(ByRef ins As UXBMIRInstructionRecord, ByRef ctx As UXBInterpContext, ByRef st As UXBMIRInterpState) As UXBInterpValue
+    Dim op As String = UXBMIRStep4CanonicalOpcode(ins.opcode)
+    Select Case op
+    Case "MIR_ARRAY_NEW"
+        Dim id As Integer = UXBInterpHeapAlloc(ctx.heap, "ARRAY", ins.resultType)
+        If ins.operandCount > 0 Then
+            Dim n As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(0))
+            UXBInterpHeapResizeArray ctx.heap, id, CInt(n.intValue)
+        End If
+        Return UXBInterpValueHandle("ARRAY", id)
+    Case "MIR_ARRAY_REDIM"
+        ' S-035: REDIM / REDIM PRESERVE was a silent no-op in canonical-MIR --
+        ' the raw "REDIM" opcode used to canonicalize to MIR_ARRAY_NEW (mir_registry.fbs),
+        ' an unrelated opcode that allocates a brand-new orphaned array and
+        ' whose result was discarded (REDIM's ins.result is always ""). Real
+        ' operand shape (mir_lower_stmt_core_split.fbs): (varName, lowerBound,
+        ' upperBound, preserveFlag). Resolve the variable's EXISTING array
+        ' handle and resize that same heap slot in place.
+        If ins.operandCount < 4 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_ARRAY_REDIM requires name,lower,upper,preserve")
+        Dim redimVarName As String = Trim(ins.operands(0))
+        Dim redimVarIdx As Integer = UXBMIRInterpFindVar(st, redimVarName)
+        If redimVarIdx < 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "REDIM: array variable not found: " & redimVarName)
+        Dim redimArrId As Integer = UXBMIRInterpObjectId(st.vars(redimVarIdx)->value)
+        Dim redimLower As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(1))
+        Dim redimUpper As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(2))
+        Dim redimPreserve As Integer = CInt(Val(Trim(ins.operands(3))))
+        If UXBInterpHeapRedimArray(ctx.heap, redimArrId, CInt(redimLower.intValue), CInt(redimUpper.intValue), redimPreserve) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "REDIM: invalid array bounds")
+        Return UXBInterpValueVoid()
+    Case "MIR_OBJECT_NEW"
+        Dim objectTypeName As String
+        objectTypeName = ins.resultType
+        If ins.operandCount >= 1 And Trim(ins.operands(0)) <> "" Then objectTypeName = UCase(Trim(ins.operands(0)))
+        Dim id As Integer = UXBInterpHeapAlloc(ctx.heap, "OBJECT", objectTypeName)
+        Return UXBInterpValueHandle("OBJECT", id)
+    Case "MIR_ARRAY_LOAD"
+        If ins.operandCount < 2 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_ARRAY_LOAD requires array and index")
+        Dim av As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(0))
+        Dim iv As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(1))
+        Dim outv As UXBInterpValue = UXBInterpValueVoid()
+        If UXBInterpHeapGetIndex(ctx.heap, UXBMIRInterpObjectId(av), CInt(iv.intValue), outv) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, UXBMIRInterpArrayOobText(ctx.heap, UXBMIRInterpObjectId(av)))
+        Return outv
+    Case "MIR_ARRAY_STORE"
+        If ins.operandCount < 3 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_ARRAY_STORE requires array, index and value")
+        Dim av As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(0))
+        Dim iv As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(1))
+        Dim vv As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(2))
+        If UXBInterpHeapSetIndex(ctx.heap, UXBMIRInterpObjectId(av), CInt(iv.intValue), vv) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, UXBMIRInterpArrayOobText(ctx.heap, UXBMIRInterpObjectId(av)))
+        Return UXBInterpValueVoid()
+    Case "MIR_FIELD_LOAD"
+        If ins.operandCount < 2 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_FIELD_LOAD requires object and field")
+        Dim ov As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(0))
+        Dim fieldName As String = ins.operands(1)
+        Dim outv As UXBInterpValue = UXBInterpValueVoid()
+        If UXBInterpHeapGetField(ctx.heap, UXBMIRInterpObjectId(ov), fieldName, outv) = 0 Then
+            ' S-037: a field that was never written reads as the zero value of its type
+            ' (AST interpreter and native x64 allocate zero-filled objects). Only an
+            ' invalid/inactive object handle is an error.
+            Dim fieldObjId As Integer = UXBMIRInterpObjectId(ov)
+            ' S-108: a NULL / dead class reference (`DIM a AS Cls` without NEW) is the same clean
+            ' error on every engine.
+            If fieldObjId < 0 Or fieldObjId >= ctx.heap.slotCount Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "field access on a null object reference: " & UCase(Trim(fieldName)))
+            If ctx.heap.slots(fieldObjId).active = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "field access on a null object reference: " & UCase(Trim(fieldName)))
+            Dim fieldResultType As String = Trim(ins.resultType)
+            If fieldResultType = "" Or LCase(fieldResultType) = "missing" Then Return UXBInterpValueInt(0)
+            ' The load's type metadata can still be the registry default of the opcode group
+            ' (TYPE_OBJECT = the type of the object operand, not of the field) or unresolved;
+            ' only a recognised VALUE type has a typed zero. Anything else (object/array
+            ' references included: an unset reference is 0/null on every engine) reads as
+            ' integer 0 - an unknown-kind value used to print as an EMPTY line where every
+            ' other engine printed 0.
+            Select Case UXBInterpCanonicalType(fieldResultType)
+            Case UXB_VAL_BOOL, UXB_VAL_I32, UXB_VAL_U32, UXB_VAL_I64, UXB_VAL_U64, UXB_VAL_F32, UXB_VAL_F64, UXB_VAL_STRING, UXB_VAL_WSTRING, UXB_VAL_BIGF, UXB_VAL_BIGD, UXB_VAL_BALL, UXB_VAL_BIGINT
+                Return UXBInterpValueDefaultForType(fieldResultType)
+            End Select
+            Return UXBInterpValueInt(0)
+        End If
+        Return outv
+    Case "MIR_FIELD_STORE"
+        If ins.operandCount < 3 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_FIELD_STORE requires object, field and value")
+        Dim ov As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(0))
+        Dim fieldName As String = ins.operands(1)
+        Dim vv As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(2))
+        If UXBInterpHeapSetField(ctx.heap, UXBMIRInterpObjectId(ov), fieldName, vv) = 0 Then
+            ' S-108: NULL / dead reference -> the common clean error text
+            Dim storeObjId As Integer = UXBMIRInterpObjectId(ov)
+            If storeObjId < 0 Or storeObjId >= ctx.heap.slotCount Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "field access on a null object reference: " & UCase(Trim(fieldName)))
+            If ctx.heap.slots(storeObjId).active = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "field access on a null object reference: " & UCase(Trim(fieldName)))
+            Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "object field cannot be written: " & fieldName)
+        End If
+        Return UXBInterpValueVoid()
+    Case "MIR_ARRAY_FIELD_LOAD"
+        ' S-050: real fix for array-of-TYPE field reads with a runtime index
+        ' (e.g. pts(i).X). Previously this case fell through generic
+        ' CALL_EXPR lowering into a flat compile-time-literal pseudo-variable
+        ' name like "PTS(I).X" -- correct by coincidence for a literal index,
+        ' silently wrong (always 0) for a variable one, since the index's
+        ' text (not its runtime value) was baked into the name at lowering
+        ' time. Now routed through the real heap array+object model already
+        ' used by plain (non-struct) arrays: get the element at the real
+        ' runtime index, lazily materialize it as a heap OBJECT the first
+        ' time any element is touched this way (a never-written field on a
+        ' freshly materialized element simply doesn't exist yet, matching
+        ' the AST interpreter's zero-initialized aggregate semantics), then
+        ' read the named field off that object.
+        If ins.operandCount < 3 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_ARRAY_FIELD_LOAD requires array, index and field")
+        Dim afl_av As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(0))
+        Dim afl_iv As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(1))
+        Dim afl_fieldName As String = ins.operands(2)
+        Dim afl_elemType As String = ""
+        If ins.operandCount > 3 Then afl_elemType = ins.operands(3)
+        Dim afl_arrId As Integer = UXBMIRInterpObjectId(afl_av)
+        Dim afl_elemVal As UXBInterpValue = UXBInterpValueVoid()
+        If UXBInterpHeapGetIndex(ctx.heap, afl_arrId, CInt(afl_iv.intValue), afl_elemVal) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, UXBMIRInterpArrayOobText(ctx.heap, afl_arrId))
+        Dim afl_elemObjId As Integer
+        If afl_elemVal.kind = UXB_VAL_OBJECT Then
+            afl_elemObjId = afl_elemVal.objectId
+        Else
+            afl_elemObjId = UXBInterpHeapAlloc(ctx.heap, "OBJECT", afl_elemType)
+            Dim afl_newElemVal As UXBInterpValue = UXBInterpValueHandle("OBJECT", afl_elemObjId)
+            UXBInterpHeapSetIndex ctx.heap, afl_arrId, CInt(afl_iv.intValue), afl_newElemVal
+        End If
+        Dim afl_outv As UXBInterpValue = UXBInterpValueVoid()
+        If UXBInterpHeapGetField(ctx.heap, afl_elemObjId, afl_fieldName, afl_outv) = 0 Then Return UXBInterpValueDefaultForType(ins.resultType)
+        Return afl_outv
+    Case "MIR_ARRAY_FIELD_STORE"
+        ' S-050: write-side counterpart of MIR_ARRAY_FIELD_LOAD -- see its
+        ' comment. Same lazy-materialize-then-write behavior.
+        If ins.operandCount < 4 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR_ARRAY_FIELD_STORE requires array, index, field and value")
+        Dim afs_av As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(0))
+        Dim afs_iv As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(1))
+        Dim afs_fieldName As String = ins.operands(2)
+        Dim afs_vv As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(3))
+        Dim afs_elemType As String = ""
+        If ins.operandCount > 4 Then afs_elemType = ins.operands(4)
+        Dim afs_arrId As Integer = UXBMIRInterpObjectId(afs_av)
+        Dim afs_elemVal As UXBInterpValue = UXBInterpValueVoid()
+        If UXBInterpHeapGetIndex(ctx.heap, afs_arrId, CInt(afs_iv.intValue), afs_elemVal) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, UXBMIRInterpArrayOobText(ctx.heap, afs_arrId))
+        Dim afs_elemObjId As Integer
+        If afs_elemVal.kind = UXB_VAL_OBJECT Then
+            afs_elemObjId = afs_elemVal.objectId
+        Else
+            afs_elemObjId = UXBInterpHeapAlloc(ctx.heap, "OBJECT", afs_elemType)
+            Dim afs_newElemVal As UXBInterpValue = UXBInterpValueHandle("OBJECT", afs_elemObjId)
+            UXBInterpHeapSetIndex ctx.heap, afs_arrId, CInt(afs_iv.intValue), afs_newElemVal
+        End If
+        If UXBInterpHeapSetField(ctx.heap, afs_elemObjId, afs_fieldName, afs_vv) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "object field cannot be written: " & afs_fieldName)
+        Return UXBInterpValueVoid()
+    Case "MIR_TYPE_DECL", "MIR_CLASS_DECL", "MIR_METHOD_DECL", "MIR_INTERFACE_DECL", "MIR_PROPERTY_DECL", "MIR_OPERATOR_DECL", "MIR_CONSTRUCTOR_DECL", "MIR_DESTRUCTOR_DECL", "MIR_IMPLEMENTS_DECL"
+        UXBRuntimeOutputEventAdd ctx.runtime, "META", UXBMIRStep4CanonicalOpcode(ins.opcode), ins.resultName
+        Return UXBInterpValueVoid()
+    Case "MIR_DELETE_OBJECT"
+        If ins.operandCount < 1 Then Return UXBInterpValueVoid()
+        Dim dv As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(0))
+        UXBRuntimeOutputEventAdd ctx.runtime, "OBJECT", "DELETE#" & Str(UXBMIRInterpObjectId(dv)), ins.opcode
+        Return UXBInterpValueVoid()
+    End Select
+    Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR object opcode not executable: " & ins.opcode)
+End Function
+
+#endif

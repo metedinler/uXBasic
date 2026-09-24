@@ -1,0 +1,581 @@
+#ifndef UXB_MIR_X64_RUNTIME_EMIT_HELPERS_FBS
+#define UXB_MIR_X64_RUNTIME_EMIT_HELPERS_FBS
+
+' Helper routines to emit Win64 runtime calls from MIR x64 backend.
+' These helpers assume Microsoft x64 ABI:
+' RCX, RDX, R8, R9 integer/pointer args + 32-byte shadow space.
+
+Sub MIRX64EmitRuntimeExtern(ByRef cg As MIRX64Context, ByRef symbolName As String)
+    If Trim(symbolName) = "" Then Exit Sub
+    ' Avoid duplicates by simple text check.
+    If InStr(cg.externText, "extern " & symbolName) = 0 Then
+        MIRX64EmitExtern cg, "extern " & symbolName
+    End If
+End Sub
+
+Sub MIRX64EmitRuntimeCall0(ByRef cg As MIRX64Context, ByRef symbolName As String)
+    MIRX64EmitRuntimeExtern cg, symbolName
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call " & symbolName
+    MIRX64Emit cg, "    add rsp, 32"
+End Sub
+
+Sub MIRX64EmitRuntimeCall1Reg(ByRef cg As MIRX64Context, ByRef symbolName As String, ByRef rcxReg As String)
+    MIRX64EmitRuntimeExtern cg, symbolName
+    MIRX64Emit cg, "    mov rcx, " & rcxReg
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call " & symbolName
+    MIRX64Emit cg, "    add rsp, 32"
+End Sub
+
+Sub MIRX64EmitRuntimeCall2Reg(ByRef cg As MIRX64Context, ByRef symbolName As String, ByRef rcxReg As String, ByRef rdxReg As String)
+    MIRX64EmitRuntimeExtern cg, symbolName
+    MIRX64Emit cg, "    mov rcx, " & rcxReg
+    MIRX64Emit cg, "    mov rdx, " & rdxReg
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call " & symbolName
+    MIRX64Emit cg, "    add rsp, 32"
+End Sub
+
+Sub MIRX64EmitRuntimeCall3Reg(ByRef cg As MIRX64Context, ByRef symbolName As String, ByRef rcxReg As String, ByRef rdxReg As String, ByRef r8Reg As String)
+    MIRX64EmitRuntimeExtern cg, symbolName
+    MIRX64Emit cg, "    mov rcx, " & rcxReg
+    MIRX64Emit cg, "    mov rdx, " & rdxReg
+    MIRX64Emit cg, "    mov r8, " & r8Reg
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call " & symbolName
+    MIRX64Emit cg, "    add rsp, 32"
+End Sub
+
+Sub MIRX64EmitRuntimeCall4Reg(ByRef cg As MIRX64Context, ByRef symbolName As String, ByRef rcxReg As String, ByRef rdxReg As String, ByRef r8Reg As String, ByRef r9Reg As String)
+    MIRX64EmitRuntimeExtern cg, symbolName
+    ' Preserve every source before assigning ABI argument registers. A source
+    ' may itself be r8/r9, so sequential MOVs would otherwise corrupt it.
+    MIRX64Emit cg, "    sub rsp, 64"
+    MIRX64Emit cg, "    mov qword [rsp+32], " & rcxReg
+    MIRX64Emit cg, "    mov qword [rsp+40], " & rdxReg
+    MIRX64Emit cg, "    mov qword [rsp+48], " & r8Reg
+    MIRX64Emit cg, "    mov qword [rsp+56], " & r9Reg
+    MIRX64Emit cg, "    mov rcx, qword [rsp+32]"
+    MIRX64Emit cg, "    mov rdx, qword [rsp+40]"
+    MIRX64Emit cg, "    mov r8, qword [rsp+48]"
+    MIRX64Emit cg, "    mov r9, qword [rsp+56]"
+    MIRX64Emit cg, "    call " & symbolName
+    MIRX64Emit cg, "    add rsp, 64"
+End Sub
+
+Function MIRX64EmitRuntimePrintI64(ByRef cg As MIRX64Context, ByRef valueReg As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_print_i64", valueReg
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimePrintF64(ByRef cg As MIRX64Context, ByVal isSingle As Integer = 0) As Integer
+    ' Value must already be in xmm0. __uxb_rt_print_f64/_f32 take a plain
+    ' (non-variadic) double parameter, so no integer-register duplication is needed
+    ' here. S-142b: F32 prints through the single-precision (7 digit) entry.
+    Dim symbolName As String
+    symbolName = IIf(isSingle <> 0, "__uxb_rt_print_f32", "__uxb_rt_print_f64")
+    MIRX64EmitRuntimeExtern cg, symbolName
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call " & symbolName
+    MIRX64Emit cg, "    add rsp, 32"
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimePrintCStr(ByRef cg As MIRX64Context, ByRef valueReg As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_print_cstr", valueReg
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimePrintNewline(ByRef cg As MIRX64Context) As Integer
+    MIRX64EmitRuntimeCall0 cg, "__uxb_rt_print_newline"
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimeCls(ByRef cg As MIRX64Context) As Integer
+    MIRX64EmitRuntimeCall0 cg, "__uxb_rt_cls"
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimeInputI64(ByRef cg As MIRX64Context, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall0 cg, "__uxb_rt_input_i64"
+    If Trim(resultVar) = "" Then Return 1
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeLocate(ByRef cg As MIRX64Context, ByRef rowReg As String, ByRef colReg As String) As Integer
+    MIRX64EmitRuntimeCall2Reg cg, "__uxb_rt_locate", rowReg, colReg
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimeColor(ByRef cg As MIRX64Context, ByRef fgReg As String, ByRef bgReg As String) As Integer
+    MIRX64EmitRuntimeCall2Reg cg, "__uxb_rt_color", fgReg, bgReg
+    Return 1
+End Function
+
+
+' S-057: __uxb_mem_*_mode helpers (mir_x64_context.fbs) already detect
+' out-of-range VIRTUAL/NATIVE access and every failure path already jumps to
+' the shared __uxb_mem_fail label, which sets the sticky __uxb_mem_error flag
+' to 1 and returns eax=0 -- but until now nothing at any call site ever
+' consulted that flag. A failed LOAD therefore silently produced 0
+' (indistinguishable from a real zero byte/word/dword/qword), and a failed
+' STORE/COPY/FILL/PEEKS/POKES/VIRTUAL_INIT was simply never reported at all,
+' letting the whole program exit 0 as if the access had succeeded. AST and
+' canonical-MIR both fail closed with a real, controlled error for the exact
+' same access; native x64 must match -- this is the "asla sessiz yanlış
+' sonuç" (never a silent wrong result) standard this project holds every
+' other memory path to (see IsBadReadPtr/IsBadWritePtr in runtime_memory.fbs
+' and exec_state_value_utils.fbs).
+'
+' __uxb_mem_error is cleared right before every call (it is a write-once-
+' until-cleared sticky flag, never reset by the helpers themselves) and
+' checked right after -- a load's own return value cannot be trusted to mean
+' failure, since 0 is also a perfectly legal loaded value.
+Private Function MIRX64EmitMemoryErrorExit(ByRef cg As MIRX64Context, ByRef message As String, ByRef errText As String) As Integer
+    Dim litLabel As String
+    If MIRX64EnsureStringLiteralLabel(cg, Chr(34) & message & Chr(34), litLabel) = 0 Then
+        errText = "MIR x64 emitter: memory error-message label creation failed"
+        Return 0
+    End If
+    MIRX64EmitRuntimeExtern cg, "__uxb_rt_runtime_error_exit"
+    MIRX64Emit cg, "    lea rcx, [rel " & litLabel & "]"
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call __uxb_rt_runtime_error_exit"
+    MIRX64Emit cg, "    add rsp, 32"
+    Return 1
+End Function
+
+' Emits: clear __uxb_mem_error; call symbolName (caller has already loaded
+' whatever registers that symbol expects); if __uxb_mem_error is still 0,
+' fall through with RAX/register state intact; otherwise raise failureMessage
+' via __uxb_rt_runtime_error_exit, which never returns.
+Private Function MIRX64EmitMemoryModeCallChecked(ByRef cg As MIRX64Context, ByRef symbolName As String, ByRef failureMessage As String, ByRef errText As String) As Integer
+    MIRX64Emit cg, "    mov qword [rel __uxb_mem_error], 0"
+    MIRX64Emit cg, "    call " & symbolName
+    Dim okLabel As String
+    okLabel = MIRX64NextLabel(cg, "memok")
+    MIRX64Emit cg, "    cmp qword [rel __uxb_mem_error], 0"
+    MIRX64Emit cg, "    je " & okLabel
+    If MIRX64EmitMemoryErrorExit(cg, failureMessage, errText) = 0 Then Return 0
+    MIRX64Emit cg, okLabel & ":"
+    Return 1
+End Function
+
+Private Function MIRX64MemoryModeValue(ByRef modeText As String) As Integer
+    Select Case UCase(Trim(modeText))
+    Case "VIRTUAL": Return 1
+    Case "NATIVE": Return 2
+    Case Else: Return 0
+    End Select
+End Function
+
+Private Function MIRX64VirtualSizeLiteral(ByRef rawText As String, ByRef bytesOut As ULongInt, ByRef errText As String) As Integer
+    Dim s As String = Trim(rawText)
+    If s = "" Then errText = "MIR x64 VIRTUAL: empty size": Return 0
+    Dim suffix As String = UCase(Right(s, 1))
+    Dim mult As ULongInt = 1
+    If suffix = "K" Then mult = 1024: s = Left(s, Len(s) - 1)
+    If suffix = "M" Then mult = 1048576: s = Left(s, Len(s) - 1)
+    If suffix = "G" Then mult = 1073741824: s = Left(s, Len(s) - 1)
+    If suffix = "T" Then mult = 1099511627776ULL: s = Left(s, Len(s) - 1)
+    s = Trim(s)
+    If s = "" Then errText = "MIR x64 VIRTUAL: invalid size": Return 0
+    Dim i As Integer
+    For i = 1 To Len(s)
+        Dim c As String = Mid(s, i, 1)
+        If c < "0" Or c > "9" Then errText = "MIR x64 VIRTUAL: invalid size " & rawText: Return 0
+    Next i
+    Dim n As ULongInt = CULngInt(Val(s))
+    ' S-057 follow-up crash: FreeBASIC's "And" does not short-circuit, so
+    ' "n <> 0 And mult > ... \ n" always evaluates the division too, even
+    ' when n=0 (e.g. VIRTUAL's disk size defaults to the literal "0" when no
+    ' disk argument is given) -- an integer divide-by-zero, real SIGFPE
+    ' crash, not a silent-wrong-result. Split into nested Ifs so the division
+    ' is only ever reached once n<>0 is already known.
+    If n <> 0 Then
+        If mult > &hFFFFFFFFFFFFFFFFULL \ n Then errText = "MIR x64 VIRTUAL: size overflow": Return 0
+    End If
+    bytesOut = n * mult
+    Return 1
+End Function
+
+Function MIRX64EmitVirtualInit(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
+    If ins.operandCount <> 2 Then errText = "MIR x64 VIRTUAL_INIT requires ram,disk": Return 0
+    Dim ramBytes As ULongInt
+    Dim diskBytes As ULongInt
+    If MIRX64VirtualSizeLiteral(ins.operands(0), ramBytes, errText) = 0 Then Return 0
+    If MIRX64VirtualSizeLiteral(ins.operands(1), diskBytes, errText) = 0 Then Return 0
+    If ramBytes < 65536 Or ramBytes > 2147483647ULL Then errText = "MIR x64 VIRTUAL ram size must be between 64K and 2G": Return 0
+    If ramBytes + diskBytes < ramBytes Then errText = "MIR x64 VIRTUAL total size overflow": Return 0
+    MIRX64EnsureMemoryModeHelpers cg
+    MIRX64EmitExtern cg, "extern CreateFileMappingA"
+    MIRX64EmitExtern cg, "extern MapViewOfFile"
+    MIRX64Emit cg, "    mov rcx, " & LTrim(Str(CLngInt(ramBytes)))
+    MIRX64Emit cg, "    mov rdx, " & LTrim(Str(CLngInt(diskBytes)))
+    MIRX64Emit cg, "    sub rsp, 32"
+    Dim virtualInitOk As Integer = MIRX64EmitMemoryModeCallChecked(cg, "__uxb_mem_virtual_init", "TR: VIRTUAL bellek ayirma basarisiz | EN: VIRTUAL memory allocation failed", errText)
+    MIRX64Emit cg, "    add rsp, 32"
+    If virtualInitOk = 0 Then Return 0
+    Return 1
+End Function
+
+Function MIRX64EmitCanonicalMemoryLoad(ByRef cg As MIRX64Context, ByRef modeText As String, ByRef addrName As String, ByVal widthBytes As Integer, ByRef resultVar As String, ByRef errText As String) As Integer
+    If widthBytes <> 1 And widthBytes <> 2 And widthBytes <> 4 And widthBytes <> 8 Then errText = "MIR x64 memory load: unsupported width": Return 0
+    MIRX64EnsureMemoryModeHelpers cg
+    If MIRX64LoadOperandToReg(cg, addrName, "rcx", errText) = 0 Then Return 0
+    MIRX64Emit cg, "    mov rdx, " & LTrim(Str(MIRX64MemoryModeValue(modeText)))
+    Dim loadSymbol As String
+    Select Case widthBytes
+    Case 1: loadSymbol = "__uxb_mem_loadb_mode"
+    Case 2: loadSymbol = "__uxb_mem_loadw_mode"
+    Case 4: loadSymbol = "__uxb_mem_loadd_mode"
+    Case 8: loadSymbol = "__uxb_mem_loadq_mode"
+    End Select
+    If MIRX64EmitMemoryModeCallChecked(cg, loadSymbol, "TR: bellek okuma sinirlari disinda veya adres gecersiz | EN: memory read out of range or invalid address", errText) = 0 Then Return 0
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitCanonicalMemoryStore(ByRef cg As MIRX64Context, ByRef modeText As String, ByRef addrName As String, ByRef valueName As String, ByVal widthBytes As Integer, ByRef errText As String) As Integer
+    If widthBytes <> 1 And widthBytes <> 2 And widthBytes <> 4 And widthBytes <> 8 Then errText = "MIR x64 memory store: unsupported width": Return 0
+    MIRX64EnsureMemoryModeHelpers cg
+    If MIRX64LoadOperandToReg(cg, addrName, "rcx", errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, valueName, "r10", errText) = 0 Then Return 0
+    MIRX64Emit cg, "    mov rdx, r10"
+    MIRX64Emit cg, "    mov r8, " & LTrim(Str(MIRX64MemoryModeValue(modeText)))
+    Dim storeSymbol As String
+    Select Case widthBytes
+    Case 1: storeSymbol = "__uxb_mem_storeb_mode"
+    Case 2: storeSymbol = "__uxb_mem_storew_mode"
+    Case 4: storeSymbol = "__uxb_mem_stored_mode"
+    Case 8: storeSymbol = "__uxb_mem_storeq_mode"
+    End Select
+    Return MIRX64EmitMemoryModeCallChecked(cg, storeSymbol, "TR: bellek yazma sinirlari disinda veya adres gecersiz | EN: memory write out of range or invalid address", errText)
+End Function
+
+Function MIRX64EmitCanonicalMemoryCopy(ByRef cg As MIRX64Context, ByRef modeText As String, ByRef srcName As String, ByRef dstName As String, ByRef countName As String, ByVal widthBytes As Integer, ByRef errText As String) As Integer
+    If widthBytes <> 1 And widthBytes <> 2 And widthBytes <> 4 And widthBytes <> 8 Then errText = "MIR x64 memory copy: unsupported width": Return 0
+    MIRX64EnsureMemoryModeHelpers cg
+    If MIRX64LoadOperandToReg(cg, srcName, "rcx", errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, dstName, "rdx", errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, countName, "r8", errText) = 0 Then Return 0
+    If widthBytes = 2 Then MIRX64Emit cg, "    lea r8, [r8 * 2]"
+    If widthBytes = 4 Then MIRX64Emit cg, "    lea r8, [r8 * 4]"
+    If widthBytes = 8 Then MIRX64Emit cg, "    lea r8, [r8 * 8]"
+    MIRX64Emit cg, "    mov r9, " & LTrim(Str(MIRX64MemoryModeValue(modeText)))
+    Return MIRX64EmitMemoryModeCallChecked(cg, "__uxb_mem_copy_mode", "TR: bellek kopyalama sinirlari disinda veya adres gecersiz | EN: memory copy out of range or invalid address", errText)
+End Function
+
+Function MIRX64EmitCanonicalMemoryFill(ByRef cg As MIRX64Context, ByRef modeText As String, ByRef dstName As String, ByRef valueName As String, ByRef countName As String, ByVal widthBytes As Integer, ByRef errText As String) As Integer
+    If widthBytes <> 1 And widthBytes <> 2 And widthBytes <> 4 And widthBytes <> 8 Then errText = "MIR x64 memory fill: unsupported width": Return 0
+    MIRX64EnsureMemoryModeHelpers cg
+    If MIRX64LoadOperandToReg(cg, dstName, "rcx", errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, valueName, "rdx", errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, countName, "r8", errText) = 0 Then Return 0
+    MIRX64Emit cg, "    mov r9, " & LTrim(Str(MIRX64MemoryModeValue(modeText)))
+    MIRX64Emit cg, "    mov r10, " & LTrim(Str(widthBytes))
+    Return MIRX64EmitMemoryModeCallChecked(cg, "__uxb_mem_fill_mode", "TR: bellek doldurma sinirlari disinda veya adres gecersiz | EN: memory fill out of range or invalid address", errText)
+End Function
+
+Function MIRX64EmitCanonicalMemoryReadSequence(ByRef cg As MIRX64Context, ByRef modeText As String, ByRef addrName As String, ByRef lengthName As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EnsureMemoryModeHelpers cg
+    If MIRX64LoadOperandToReg(cg, addrName, "rcx", errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, lengthName, "rdx", errText) = 0 Then Return 0
+    MIRX64Emit cg, "    mov r8, " & LTrim(Str(MIRX64MemoryModeValue(modeText)))
+    If MIRX64EmitMemoryModeCallChecked(cg, "__uxb_mem_peeks_mode", "TR: PEEKS sinirlari disinda veya adres gecersiz | EN: PEEKS out of range or invalid address", errText) = 0 Then Return 0
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitCanonicalMemoryWriteSequence(ByRef cg As MIRX64Context, ByRef modeText As String, ByRef dstName As String, ByRef sourceName As String, ByRef lengthName As String, ByRef errText As String) As Integer
+    MIRX64EnsureMemoryModeHelpers cg
+    If MIRX64LoadOperandToReg(cg, dstName, "rcx", errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, sourceName, "rdx", errText) = 0 Then Return 0
+    If MIRX64LoadOperandToReg(cg, lengthName, "r8", errText) = 0 Then Return 0
+    MIRX64Emit cg, "    mov r9, " & LTrim(Str(MIRX64MemoryModeValue(modeText)))
+    Return MIRX64EmitMemoryModeCallChecked(cg, "__uxb_mem_pokes_mode", "TR: POKES sinirlari disinda veya adres gecersiz | EN: POKES out of range or invalid address", errText)
+End Function
+
+Function MIRX64EmitRuntimeMemoryCopy(ByRef cg As MIRX64Context, ByRef dstReg As String, ByRef srcReg As String, ByRef bytesReg As String) As Integer
+    MIRX64EmitRuntimeCall3Reg cg, "__uxb_rt_memcopy", dstReg, srcReg, bytesReg
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimeMemoryFill(ByRef cg As MIRX64Context, ByRef dstReg As String, ByRef valueReg As String, ByRef bytesReg As String) As Integer
+    MIRX64EmitRuntimeCall3Reg cg, "__uxb_rt_memfill", dstReg, valueReg, bytesReg
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimeStringLen(ByRef cg As MIRX64Context, ByRef valueReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_strlen", valueReg
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeValueI64(ByRef cg As MIRX64Context, ByRef valueReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_val_i64", valueReg
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimePeekI64(ByRef cg As MIRX64Context, ByRef addrReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_peek_i64", addrReg
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimePokeI64(ByRef cg As MIRX64Context, ByRef addrReg As String, ByRef valueReg As String) As Integer
+    MIRX64EmitRuntimeCall2Reg cg, "__uxb_rt_poke_i64", addrReg, valueReg
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimeStringRight(ByRef cg As MIRX64Context, ByRef textReg As String, ByRef countReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall2Reg cg, "__uxb_rt_right", textReg, countReg
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeStringLeft(ByRef cg As MIRX64Context, ByRef textReg As String, ByRef countReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall2Reg cg, "__uxb_rt_left", textReg, countReg
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeStringMid(ByRef cg As MIRX64Context, ByRef textReg As String, ByRef startReg As String, ByRef lenReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall3Reg cg, "__uxb_rt_mid", textReg, startReg, lenReg
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeStringInstr(ByRef cg As MIRX64Context, ByRef textReg As String, ByRef needleReg As String, ByRef startReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall3Reg cg, "__uxb_rt_instr", textReg, needleReg, startReg
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeStringFromI64(ByRef cg As MIRX64Context, ByRef valueReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_str_i64", valueReg
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeFileOpen(ByRef cg As MIRX64Context, ByRef fileReg As String, ByRef modeReg As String, ByRef handleReg As String, ByRef lenReg As String) As Integer
+    If Trim(lenReg) = "" Then
+        MIRX64Emit cg, "    xor rbx, rbx"
+        MIRX64EmitRuntimeCall4Reg cg, "__uxb_rt_file_open", fileReg, modeReg, handleReg, "rbx"
+    Else
+        MIRX64EmitRuntimeCall4Reg cg, "__uxb_rt_file_open", fileReg, modeReg, handleReg, lenReg
+    End If
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimeFileClose(ByRef cg As MIRX64Context, ByRef handleReg As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_file_close", handleReg
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimeFileSeek(ByRef cg As MIRX64Context, ByRef handleReg As String, ByRef posReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    If Trim(posReg) = "" Then
+        MIRX64Emit cg, "    mov r10, -1"
+        MIRX64EmitRuntimeCall2Reg cg, "__uxb_rt_file_seek", handleReg, "r10"
+    Else
+        MIRX64EmitRuntimeCall2Reg cg, "__uxb_rt_file_seek", handleReg, posReg
+    End If
+    If Trim(resultVar) = "" Then Return 1
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeFileEof(ByRef cg As MIRX64Context, ByRef handleReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_file_eof", handleReg
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeFileLof(ByRef cg As MIRX64Context, ByRef handleReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_file_lof", handleReg
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeFileGet(ByRef cg As MIRX64Context, ByRef handleReg As String, ByRef posReg As String, ByRef bytesReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    If Trim(posReg) = "" Then
+        MIRX64Emit cg, "    mov r10, -1"
+        MIRX64Emit cg, "    mov r11, 1"
+        MIRX64EmitRuntimeCall3Reg cg, "__uxb_rt_file_get", handleReg, "r10", "r11"
+    ElseIf Trim(bytesReg) = "" Then
+        MIRX64Emit cg, "    mov r11, 1"
+        MIRX64EmitRuntimeCall3Reg cg, "__uxb_rt_file_get", handleReg, posReg, "r11"
+    Else
+        MIRX64EmitRuntimeCall3Reg cg, "__uxb_rt_file_get", handleReg, posReg, bytesReg
+    End If
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeFilePut(ByRef cg As MIRX64Context, ByRef handleReg As String, ByRef posReg As String, ByRef bytesReg As String, ByRef valueReg As String) As Integer
+    If Trim(posReg) = "" Then
+        MIRX64Emit cg, "    mov r10, -1"
+        MIRX64Emit cg, "    mov r11, 1"
+        MIRX64EmitRuntimeCall4Reg cg, "__uxb_rt_file_put", handleReg, "r10", "r11", valueReg
+    ElseIf Trim(bytesReg) = "" Then
+        MIRX64Emit cg, "    mov r11, 1"
+        MIRX64EmitRuntimeCall4Reg cg, "__uxb_rt_file_put", handleReg, posReg, "r11", valueReg
+    Else
+        MIRX64EmitRuntimeCall4Reg cg, "__uxb_rt_file_put", handleReg, posReg, bytesReg, valueReg
+    End If
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimeUnsupportedDiagnostic(ByRef cg As MIRX64Context, ByRef opcodeText As String, ByRef reasonText As String) As Integer
+    MIRX64AddError cg, "TR: MIR_X64_RUNTIME_BACKED_BEKLEMEDE: " & opcodeText & " - " & reasonText & " | EN: MIR_X64_RUNTIME_BACKED_PENDING: " & opcodeText & " - " & reasonText
+    Return 0
+End Function
+
+
+
+Function MIRX64EmitRuntimeUnaryI64(ByRef cg As MIRX64Context, ByRef symbolName As String, ByRef valueReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, symbolName, valueReg
+    If Trim(resultVar) = "" Then Return 1
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeBinaryI64(ByRef cg As MIRX64Context, ByRef symbolName As String, ByRef leftReg As String, ByRef rightReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall2Reg cg, symbolName, leftReg, rightReg
+    If Trim(resultVar) = "" Then Return 1
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeNoArgI64(ByRef cg As MIRX64Context, ByRef symbolName As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall0 cg, symbolName
+    If Trim(resultVar) = "" Then Return 1
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeStringUnary(ByRef cg As MIRX64Context, ByRef symbolName As String, ByRef textReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, symbolName, textReg
+    If Trim(resultVar) = "" Then Return 1
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeStringConcat(ByRef cg As MIRX64Context, ByRef leftReg As String, ByRef rightReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall2Reg cg, "__uxb_rt_str_concat", leftReg, rightReg
+    If MIRX64StoreRegToVar(cg, "rax", resultVar, errText) = 0 Then Return 0
+    ' S-142: the result holds a string POINTER. A temp whose type is unknown or integer (the ADD that made
+    ' it was typed I64 when no static type was stamped) made `PRINT "x=" + STR(7)` / `PRINT "[" + p + "]"`
+    ' print the pointer as a number; `r = "x=" + ...` only worked because the store into a STRING variable
+    ' fixed the type up.
+    Dim concatSlot As Integer
+    If MIRX64FindLocalIndex(cg, resultVar, concatSlot) <> 0 Then
+        Dim concatType As String
+        concatType = UCase(Trim(cg.locals(concatSlot).typeName))
+        If Left(concatType, 5) = "TYPE_" Then concatType = Mid(concatType, 6)
+        If concatType = "" Or concatType = "I64" Or concatType = "I32" Or concatType = "OBJECT" Then cg.locals(concatSlot).typeName = "STRING"
+    End If
+    Return 1
+End Function
+
+Function MIRX64EmitRuntimeStringCompare(ByRef cg As MIRX64Context, ByRef leftReg As String, ByRef rightReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall2Reg cg, "__uxb_rt_str_compare", leftReg, rightReg
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeStringRelation(ByRef cg As MIRX64Context, ByRef leftReg As String, ByRef rightReg As String, ByRef relationOp As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall2Reg cg, "__uxb_rt_str_compare", leftReg, rightReg
+    MIRX64Emit cg, "    cmp rax, 0"
+    Select Case UCase(Trim(relationOp))
+    Case "EQ": MIRX64Emit cg, "    sete al"
+    Case "NE": MIRX64Emit cg, "    setne al"
+    Case "LT": MIRX64Emit cg, "    setl al"
+    Case "LE": MIRX64Emit cg, "    setle al"
+    Case "GT": MIRX64Emit cg, "    setg al"
+    Case "GE": MIRX64Emit cg, "    setge al"
+    Case Else
+        errText = "MIR x64 runtime string relation is unsupported: " & relationOp
+        Return 0
+    End Select
+    MIRX64Emit cg, "    movzx rax, al"
+    MIRX64Emit cg, "    neg rax"
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeFileDelete(ByRef cg As MIRX64Context, ByRef pathReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_file_delete", pathReg
+    If Trim(resultVar) = "" Then Return 1
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeHostCallNamed(ByRef cg As MIRX64Context, ByRef hostName As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    Dim litLabel As String
+    Dim literalText As String
+    literalText = Chr(34) & UCase(Trim(hostName)) & Chr(34)
+    If MIRX64EnsureStringLiteralLabel(cg, literalText, litLabel) = 0 Then
+        errText = "MIR x64 runtime host call label failed"
+        Return 0
+    End If
+    MIRX64Emit cg, "    lea rcx, [rel " & litLabel & "]"
+    MIRX64EmitRuntimeExtern cg, "__uxb_rt_host_call"
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call __uxb_rt_host_call"
+    MIRX64Emit cg, "    add rsp, 32"
+    If Trim(resultVar) = "" Then Return 1
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeBigInit(ByRef cg As MIRX64Context, ByRef valueReg As String, ByRef resultVar As String, ByRef errText As String) As Integer
+    MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_biginit", valueReg
+    If Trim(resultVar) = "" Then Return 1
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeHostCallInstruction( _
+    ByRef cg As MIRX64Context, _
+    ByRef hostName As String, _
+    ByRef ins As MIRIRInstruction, _
+    ByVal firstArgIndex As Integer, _
+    ByRef resultVar As String, _
+    ByRef errText As String _
+) As Integer
+    Dim litLabel As String
+    Dim literalText As String
+    literalText = Chr(34) & UCase(Trim(hostName)) & Chr(34)
+    If MIRX64EnsureStringLiteralLabel(cg, literalText, litLabel) = 0 Then
+        errText = "MIR x64 runtime host-call instruction label failed: " & hostName
+        Return 0
+    End If
+
+    MIRX64Emit cg, "    lea rcx, [rel " & litLabel & "]"
+
+    If ins.operandCount > firstArgIndex Then
+        If MIRX64LoadOperandToReg(cg, ins.operands(firstArgIndex), "rdx", errText) = 0 Then Return 0
+    Else
+        MIRX64Emit cg, "    xor rdx, rdx"
+    End If
+
+    If ins.operandCount > firstArgIndex + 1 Then
+        If MIRX64LoadOperandToReg(cg, ins.operands(firstArgIndex + 1), "r8", errText) = 0 Then Return 0
+    Else
+        MIRX64Emit cg, "    xor r8, r8"
+    End If
+
+    If ins.operandCount > firstArgIndex + 2 Then
+        If MIRX64LoadOperandToReg(cg, ins.operands(firstArgIndex + 2), "r9", errText) = 0 Then Return 0
+    Else
+        MIRX64Emit cg, "    xor r9, r9"
+    End If
+
+    MIRX64EmitRuntimeExtern cg, "__uxb_rt_host_call4"
+    MIRX64Emit cg, "    sub rsp, 32"
+    MIRX64Emit cg, "    call __uxb_rt_host_call4"
+    MIRX64Emit cg, "    add rsp, 32"
+
+    If Trim(resultVar) = "" Then Return 1
+    Return MIRX64StoreRegToVar(cg, "rax", resultVar, errText)
+End Function
+
+Function MIRX64EmitRuntimeSurfaceCall( _
+    ByRef cg As MIRX64Context, _
+    ByRef surfaceName As String, _
+    ByRef ins As MIRIRInstruction, _
+    ByRef errText As String _
+) As Integer
+    Return MIRX64EmitRuntimeHostCallInstruction(cg, surfaceName, ins, 0, ins.result, errText)
+End Function
+
+Function MIRX64EmitRuntimeCallTargetWithArgs( _
+    ByRef cg As MIRX64Context, _
+    ByRef callTarget As String, _
+    ByRef ins As MIRIRInstruction, _
+    ByRef errText As String _
+) As Integer
+    Return MIRX64EmitRuntimeHostCallInstruction(cg, callTarget, ins, 1, ins.result, errText)
+End Function
+
+#endif

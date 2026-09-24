@@ -1,0 +1,527 @@
+' uXBasic AST Layer - geniş lexer/parser yüzeyini kayıpsız taşımak için
+' Drop-in hedef: mevcut ASTNode / ASTPool / ASTNewNode / ASTAddChild API'sini korur.
+' Parser eski çağrıları bozulmasın diye kind/value/op/left/right/firstChild/nextSibling alanları korunmuştur.
+
+#ifndef UXBASIC_AST_FBS
+#define UXBASIC_AST_FBS
+
+Const AST_NULL As Integer = -1
+
+Enum ASTNodeFamily
+    AST_FAMILY_UNKNOWN = 0
+    AST_FAMILY_PROGRAM
+    AST_FAMILY_DECL
+    AST_FAMILY_STMT
+    AST_FAMILY_EXPR
+    AST_FAMILY_TYPE
+    AST_FAMILY_PARAM
+    AST_FAMILY_META
+End Enum
+
+Enum ASTNodeFlags
+    AST_FLAG_NONE        = 0
+    AST_FLAG_PUBLIC      = 1 Shl 0
+    AST_FLAG_PRIVATE     = 1 Shl 1
+    AST_FLAG_PROTECTED   = 1 Shl 2
+    AST_FLAG_STATIC      = 1 Shl 3
+    AST_FLAG_SHARED      = 1 Shl 4
+    AST_FLAG_VIRTUAL     = 1 Shl 5
+    AST_FLAG_OVERRIDE    = 1 Shl 6
+    AST_FLAG_ABSTRACT    = 1 Shl 7
+    AST_FLAG_BYREF       = 1 Shl 8
+    AST_FLAG_BYVAL       = 1 Shl 9
+    AST_FLAG_PRESERVE    = 1 Shl 10
+    AST_FLAG_INLINE      = 1 Shl 11
+    AST_FLAG_EXTERN      = 1 Shl 12
+    AST_FLAG_FRIEND      = 1 Shl 13
+End Enum
+
+' 2026-05-26 19:32 +03:00 - Codex: Step 2 contract için node sabitleri resmi ast_node_kinds.fbs dosyasına taşındı.
+#include once "ast_node_kinds.fbs"
+#include once "ast_contract_layer_bindings.fbs"
+#include once "../common/source_location.fbs"
+
+Type ASTNode
+    kind As String
+    value As String
+    op As String
+    lineNo As Integer
+    colNo As Integer
+
+    ' Eski binary-tree alanları. Mevcut parser/codegen bozulmasın diye kalır.
+    left As Integer
+    right As Integer
+
+    ' Genel çocuk listesi.
+    firstChild As Integer
+    nextSibling As Integer
+
+    ' Yeni AST sözleşmesi alanları.
+    parent As Integer
+    family As Integer
+    flags As Integer
+    typeName As String      ' semantic sonrası bağlanan tip veya parser'ın AS tipi
+    symbolName As String    ' semantic sonrası sembol adı / fully qualified name
+    role As String          ' PARAMS, BODY, CONDITION, THEN, ELSE, INIT, STEP vb.
+    sourceFile As String
+    originalTokenKind As String
+    sourceOffset As Integer
+    sourceLength As Integer
+    lexemeSnippet As String
+End Type
+
+Type ASTPool
+    nodes(Any) As ASTNode
+    count As Integer
+    capacity As Integer
+End Type
+
+' Bumped every time an AST is (re)started. Lookup indexes built over an AST
+' (semantic/ast_name_index.fbs) compare it so they never survive into a new parse.
+Dim Shared gUxbAstEpoch As Integer
+
+Sub ASTPoolInit(ByRef p As ASTPool)
+    gUxbAstEpoch += 1
+    p.capacity = 64
+    ReDim p.nodes(p.capacity - 1)
+    p.count = 0
+End Sub
+
+Private Sub ASTEnsureCapacity(ByRef p As ASTPool, ByVal minSize As Integer)
+    If p.capacity >= minSize Then Exit Sub
+    Dim newCapacity As Integer = p.capacity
+    If newCapacity < 1 Then newCapacity = 64
+    Do While newCapacity < minSize
+        newCapacity *= 2
+    Loop
+    ReDim Preserve p.nodes(newCapacity - 1)
+    p.capacity = newCapacity
+End Sub
+
+Private Function ASTInferFamily(ByRef kindName As String) As Integer
+    If kindName = ASTK_PROGRAM Then Return AST_FAMILY_PROGRAM
+    If Instr(kindName, "_EXPR") > 0 Or kindName = ASTK_BINARY Or kindName = ASTK_UNARY Or kindName = ASTK_IDENTIFIER Or kindName = ASTK_NUMBER Or kindName = ASTK_STRING Then Return AST_FAMILY_EXPR
+    If Instr(kindName, "_STMT") > 0 Then Return AST_FAMILY_STMT
+    If Instr(kindName, "_DECL") > 0 Or Instr(kindName, "CLASS_") = 1 Or Instr(kindName, "INTERFACE_") = 1 Or Instr(kindName, "TYPE_") = 1 Then Return AST_FAMILY_DECL
+    If kindName = ASTK_TYPE_REF Or kindName = ASTK_RETURN_TYPE Then Return AST_FAMILY_TYPE
+    If kindName = ASTK_PARAM_DECL Then Return AST_FAMILY_PARAM
+    Return AST_FAMILY_UNKNOWN
+End Function
+
+Function ASTNewNode(ByRef p As ASTPool, ByRef kindName As String, ByRef valueText As String, ByRef opText As String, ByVal lineNo As Integer, ByVal colNo As Integer, ByVal sourceFileText As String = "", ByVal tokenKindText As String = "", ByVal sourceLengthValue As Integer = 0, ByVal lexemeText As String = "", ByVal sourceOffsetValue As Integer = 0) As Integer
+    ASTEnsureCapacity p, p.count + 1
+    Dim idx As Integer = p.count
+    p.count += 1
+
+    With p.nodes(idx)
+        .kind = kindName
+        .value = valueText
+        .op = opText
+        .lineNo = lineNo
+        .colNo = colNo
+        .left = AST_NULL
+        .right = AST_NULL
+        .firstChild = AST_NULL
+        .nextSibling = AST_NULL
+        .parent = AST_NULL
+        .family = ASTInferFamily(kindName)
+        .flags = AST_FLAG_NONE
+        .typeName = ""
+        .symbolName = ""
+        .role = ""
+        .sourceFile = sourceFileText
+        .originalTokenKind = tokenKindText
+        .sourceOffset = sourceOffsetValue
+        .sourceLength = sourceLengthValue
+        .lexemeSnippet = UXBSourceSnippet(lexemeText)
+    End With
+    Return idx
+End Function
+
+Function ASTNewTypedNode(ByRef p As ASTPool, ByRef kindName As String, ByRef valueText As String, ByRef opText As String, ByRef typeText As String, ByVal lineNo As Integer, ByVal colNo As Integer, ByVal sourceFileText As String = "", ByVal tokenKindText As String = "", ByVal sourceLengthValue As Integer = 0, ByVal lexemeText As String = "", ByVal sourceOffsetValue As Integer = 0) As Integer
+    Dim idx As Integer = ASTNewNode(p, kindName, valueText, opText, lineNo, colNo, sourceFileText, tokenKindText, sourceLengthValue, lexemeText, sourceOffsetValue)
+    p.nodes(idx).typeName = typeText
+    Return idx
+End Function
+
+Sub ASTAddChild(ByRef p As ASTPool, ByVal parentIdx As Integer, ByVal childIdx As Integer)
+    If parentIdx < 0 Or parentIdx >= p.count Then Exit Sub
+    If childIdx < 0 Or childIdx >= p.count Then Exit Sub
+    p.nodes(childIdx).parent = parentIdx
+    If p.nodes(parentIdx).firstChild = AST_NULL Then
+        p.nodes(parentIdx).firstChild = childIdx
+        Exit Sub
+    End If
+    Dim it As Integer = p.nodes(parentIdx).firstChild
+    Do While p.nodes(it).nextSibling <> AST_NULL
+        it = p.nodes(it).nextSibling
+    Loop
+    p.nodes(it).nextSibling = childIdx
+End Sub
+
+Sub ASTAddRoleChild(ByRef p As ASTPool, ByVal parentIdx As Integer, ByVal childIdx As Integer, ByRef roleName As String)
+    If childIdx >= 0 And childIdx < p.count Then p.nodes(childIdx).role = roleName
+    ASTAddChild p, parentIdx, childIdx
+End Sub
+
+Sub ASTSetLeft(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByVal childIdx As Integer)
+    If nodeIdx < 0 Or nodeIdx >= p.count Then Exit Sub
+    p.nodes(nodeIdx).left = childIdx
+    If childIdx >= 0 And childIdx < p.count Then p.nodes(childIdx).parent = nodeIdx
+End Sub
+
+Sub ASTSetRight(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByVal childIdx As Integer)
+    If nodeIdx < 0 Or nodeIdx >= p.count Then Exit Sub
+    p.nodes(nodeIdx).right = childIdx
+    If childIdx >= 0 And childIdx < p.count Then p.nodes(childIdx).parent = nodeIdx
+End Sub
+
+Function ASTPoolChildCount(ByRef p As ASTPool, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= p.count Then Return 0
+    Dim n As Integer = 0
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While ch <> AST_NULL
+        n += 1
+        ch = p.nodes(ch).nextSibling
+    Loop
+    Return n
+End Function
+
+Function ASTFirstChildByRole(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef roleName As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= p.count Then Return AST_NULL
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While ch <> AST_NULL
+        If UCase(p.nodes(ch).role) = UCase(roleName) Then Return ch
+        ch = p.nodes(ch).nextSibling
+    Loop
+    Return AST_NULL
+End Function
+
+Function ASTFirstChildByKind(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef kindName As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= p.count Then Return AST_NULL
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While ch <> AST_NULL
+        If p.nodes(ch).kind = kindName Then Return ch
+        ch = p.nodes(ch).nextSibling
+    Loop
+    Return AST_NULL
+End Function
+
+Function ASTMakeBlock(ByRef p As ASTPool, ByRef roleName As String, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Dim idx As Integer = ASTNewNode(p, ASTK_BLOCK, "", "", lineNo, colNo)
+    p.nodes(idx).role = roleName
+    Return idx
+End Function
+
+Function ASTMakeTypeRef(ByRef p As ASTPool, ByRef typeText As String, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Return ASTNewTypedNode(p, ASTK_TYPE_REF, typeText, "", typeText, lineNo, colNo)
+End Function
+
+Function ASTMakeParam(ByRef p As ASTPool, ByRef nameText As String, ByRef typeText As String, ByVal flags As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Dim n As Integer = ASTNewTypedNode(p, ASTK_PARAM_DECL, nameText, "", typeText, lineNo, colNo)
+    p.nodes(n).flags = flags
+    Return n
+End Function
+
+Function ASTMakeRoutine(ByRef p As ASTPool, ByRef kindName As String, ByRef nameText As String, ByRef returnType As String, ByVal flags As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Dim n As Integer = ASTNewTypedNode(p, kindName, nameText, "", returnType, lineNo, colNo)
+    p.nodes(n).flags = flags
+    Return n
+End Function
+
+Function ASTMakeClass(ByRef p As ASTPool, ByRef className As String, ByVal flags As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Dim n As Integer = ASTNewNode(p, ASTK_CLASS_STMT, className, "", lineNo, colNo)
+    p.nodes(n).flags = flags
+    Return n
+End Function
+
+Function ASTMakeClassField(ByRef p As ASTPool, ByRef fieldName As String, ByRef typeText As String, ByVal flags As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Dim n As Integer = ASTNewTypedNode(p, ASTK_CLASS_FIELD, fieldName, "", typeText, lineNo, colNo)
+    p.nodes(n).flags = flags
+    Return n
+End Function
+
+Function ASTMakeClassMethod(ByRef p As ASTPool, ByRef methodName As String, ByRef returnType As String, ByVal flags As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Return ASTMakeRoutine(p, ASTK_CLASS_METHOD_DECL, methodName, returnType, flags, lineNo, colNo)
+End Function
+
+Function ASTMakeConstructor(ByRef p As ASTPool, ByVal flags As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Return ASTMakeRoutine(p, ASTK_CLASS_CONSTRUCTOR_DECL, "CONSTRUCTOR", "VOID", flags, lineNo, colNo)
+End Function
+
+Function ASTMakeDestructor(ByRef p As ASTPool, ByVal flags As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Return ASTMakeRoutine(p, ASTK_CLASS_DESTRUCTOR_DECL, "DESTRUCTOR", "VOID", flags, lineNo, colNo)
+End Function
+
+Function ASTMakeOperator(ByRef p As ASTPool, ByRef opText As String, ByRef returnType As String, ByVal flags As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Dim n As Integer = ASTMakeRoutine(p, ASTK_CLASS_OPERATOR_DECL, "OPERATOR", returnType, flags, lineNo, colNo)
+    p.nodes(n).op = opText
+    Return n
+End Function
+
+Function ASTMakeBinary(ByRef p As ASTPool, ByRef opText As String, ByVal leftIdx As Integer, ByVal rightIdx As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Dim n As Integer = ASTNewNode(p, ASTK_BINARY, "", opText, lineNo, colNo)
+    ASTSetLeft p, n, leftIdx
+    ASTSetRight p, n, rightIdx
+    Return n
+End Function
+
+Function ASTMakeUnary(ByRef p As ASTPool, ByRef opText As String, ByVal exprIdx As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Dim n As Integer = ASTNewNode(p, ASTK_UNARY, "", opText, lineNo, colNo)
+    ASTSetLeft p, n, exprIdx
+    Return n
+End Function
+
+Function ASTMakeCall(ByRef p As ASTPool, ByRef calleeName As String, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Return ASTNewNode(p, ASTK_CALL_EXPR, calleeName, "", lineNo, colNo)
+End Function
+
+Function ASTMakeMember(ByRef p As ASTPool, ByVal baseIdx As Integer, ByRef memberName As String, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Dim n As Integer = ASTNewNode(p, ASTK_MEMBER_EXPR, memberName, ".", lineNo, colNo)
+    ASTAddRoleChild p, n, baseIdx, "BASE"
+    Return n
+End Function
+
+Function ASTMakeIndex(ByRef p As ASTPool, ByVal baseIdx As Integer, ByVal indexIdx As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Dim n As Integer = ASTNewNode(p, ASTK_INDEX_EXPR, "", "[]", lineNo, colNo)
+    ASTAddRoleChild p, n, baseIdx, "BASE"
+    ASTAddRoleChild p, n, indexIdx, "INDEX"
+    Return n
+End Function
+
+Function ASTMakeNew(ByRef p As ASTPool, ByRef className As String, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Return ASTNewNode(p, ASTK_NEW_EXPR, className, "", lineNo, colNo)
+End Function
+
+' S-030: SPAWN <taskCallExpr> — wraps an existing CALL_EXPR (THREAD/PARALEL routine
+' invocation) so it evaluates to a TASK handle instead of running synchronously.
+Function ASTMakeSpawn(ByRef p As ASTPool, ByVal callExprIdx As Integer, ByVal lineNo As Integer, ByVal colNo As Integer) As Integer
+    Dim n As Integer
+    n = ASTNewNode(p, ASTK_SPAWN_EXPR, "", "", lineNo, colNo)
+    ASTSetLeft p, n, callExprIdx
+    Return n
+End Function
+
+Private Function ASTJsonEscape(ByRef textIn As String) As String
+    Dim outText As String = ""
+    Dim i As Integer
+    For i = 1 To Len(textIn)
+        Dim ch As String = Mid(textIn, i, 1)
+        Select Case Asc(ch)
+        Case 8: outText &= "\b"
+        Case 9: outText &= "\t"
+        Case 10: outText &= "\n"
+        Case 13: outText &= "\r"
+        Case 34: outText &= "\"""
+        Case 92: outText &= "\\"
+        Case Else
+            If Asc(ch) < 32 Then outText &= "?" Else outText &= ch
+        End Select
+    Next i
+    Return outText
+End Function
+
+' AST JSON serialization used to accumulate directly into one big String via
+' repeated "&=". Each append reallocates and copies the whole buffer, so for a
+' tree with thousands of nodes (dozens of appends per node) that was a genuine
+' O(n^2) cost - multi-second AST JSON writes on any moderately large program,
+' since this report is written on every run by default. ASTJsonBuf collects
+' fragments into a geometrically-grown array and joins them once at the end,
+' turning the accumulation into O(n) amortized. External callers (ASTToJson's
+' ByRef jsonOut As String contract) are unaffected.
+Type ASTJsonBuf
+    chunks(Any) As String
+    count As Integer
+    capacity As Integer
+End Type
+
+Private Sub ASTJsonBufInit(ByRef b As ASTJsonBuf)
+    b.capacity = 256
+    ReDim b.chunks(b.capacity - 1)
+    b.count = 0
+End Sub
+
+Private Sub ASTJsonBufAppend(ByRef b As ASTJsonBuf, ByRef s As String)
+    If b.count >= b.capacity Then
+        Dim newCap As Integer = b.capacity * 2
+        ReDim Preserve b.chunks(newCap - 1)
+        b.capacity = newCap
+    End If
+    b.chunks(b.count) = s
+    b.count += 1
+End Sub
+
+Private Function ASTJsonBufToString(ByRef b As ASTJsonBuf) As String
+    If b.count <= 0 Then Return ""
+
+    Dim totalLen As LongInt
+    totalLen = 0
+    Dim i As Integer
+    For i = 0 To b.count - 1
+        totalLen += Len(b.chunks(i))
+    Next i
+    If totalLen <= 0 Then Return ""
+
+    Dim result As String
+    result = String(totalLen, " ")
+    Dim writePos As LongInt
+    writePos = 1
+    For i = 0 To b.count - 1
+        Dim chunkLen As Integer
+        chunkLen = Len(b.chunks(i))
+        If chunkLen > 0 Then
+            Mid(result, writePos, chunkLen) = b.chunks(i)
+            writePos += chunkLen
+        End If
+    Next i
+    Return result
+End Function
+
+Private Sub ASTAppendIndent(ByRef buf As ASTJsonBuf, ByVal depth As Integer)
+    Dim i As Integer
+    For i = 1 To depth: ASTJsonBufAppend buf, "  ": Next i
+End Sub
+
+Private Function ASTContractJsonGroupForFamily(ByVal familyValue As Integer, ByRef kindName As String) As String
+    Dim k As String = UCase(Trim(kindName))
+    If k = ASTK_PROGRAM Then Return "PROGRAM_STRUCTURE"
+    If k = ASTK_BLOCK Then Return "STATEMENT"
+    If Instr(k, "CLASS_") = 1 Or Instr(k, "INTERFACE_") = 1 Then Return "OOP"
+    If Instr(k, "TYPE_") = 1 Or k = ASTK_TYPE_REF Or k = ASTK_RETURN_TYPE Then Return "TYPE_SYSTEM"
+    If k = ASTK_IF_STMT Or k = ASTK_FOR_STMT Or k = ASTK_FOR_EACH_STMT Or k = ASTK_DO_STMT Or k = ASTK_DO_EACH_STMT Or k = ASTK_SELECT_STMT Or k = ASTK_CASE_BLOCK Or k = ASTK_CASE_ELSE Or k = ASTK_ELSEIF_PART Or k = ASTK_ELSE_PART Or k = ASTK_EXIT_STMT Or k = ASTK_RETURN_STMT Or k = ASTK_GOTO_STMT Or k = ASTK_GOSUB_STMT Or k = ASTK_END_STMT Then Return "CONTROL_FLOW"
+    If k = ASTK_TRY_STMT Or k = ASTK_TRY_BODY Or k = ASTK_CATCH_PART Or k = ASTK_FINALLY_PART Or k = ASTK_THROW_STMT Or k = ASTK_ASSERT_STMT Then Return "ERROR_HANDLING"
+    If k = ASTK_OPEN_STMT Or k = ASTK_CLOSE_STMT Or k = ASTK_GET_STMT Or k = ASTK_PUT_STMT Or k = ASTK_SEEK_STMT Or k = ASTK_INPUT_FILE_STMT Or k = ASTK_INPUTF_STMT Then Return "FILE_IO"
+    If Instr(k, "POKE") > 0 Or Instr(k, "MEMCOPY") > 0 Or Instr(k, "MEMFILL") > 0 Or k = ASTK_SETNEWOFFSET_STMT Then Return "MEMORY"
+    If k = ASTK_IMPORT_STMT Or k = ASTK_INCLUDE_STMT Or k = ASTK_USING_STMT Or k = ASTK_ALIAS_STMT Or k = ASTK_MODULE_STMT Or k = ASTK_NAMESPACE_STMT Then Return "MODULE_SYSTEM"
+    If k = ASTK_INLINE_STMT Then Return "FFI"
+    If familyValue = AST_FAMILY_EXPR Then Return "EXPRESSION"
+    If familyValue = AST_FAMILY_DECL Or familyValue = AST_FAMILY_PARAM Then Return "DECLARATION"
+    If familyValue = AST_FAMILY_STMT Then Return "STATEMENT"
+    Return "DIAGNOSTIC"
+End Function
+
+Private Function ASTContractJsonTargetSupport(ByRef kindName As String, ByVal familyValue As Integer) As String
+    Return UXBAstContractTargetSupportJson(kindName)
+End Function
+
+Private Sub ASTAppendNodeJson(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByVal depth As Integer, ByRef buf As ASTJsonBuf)
+    If nodeIdx < 0 Or nodeIdx >= p.count Then ASTJsonBufAppend buf, "null": Exit Sub
+    ASTAppendIndent buf, depth: ASTJsonBufAppend buf, "{" & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """index"": " & LTrim(Str(nodeIdx)) & "," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """kind"": """ & ASTJsonEscape(p.nodes(nodeIdx).kind) & """," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """value"": """ & ASTJsonEscape(p.nodes(nodeIdx).value) & """," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """op"": """ & ASTJsonEscape(p.nodes(nodeIdx).op) & """," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """line"": " & LTrim(Str(p.nodes(nodeIdx).lineNo)) & "," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """column"": " & LTrim(Str(p.nodes(nodeIdx).colNo)) & "," & Chr(10)
+    Dim parentText As String
+    If p.nodes(nodeIdx).parent = AST_NULL Then
+        parentText = "null"
+    Else
+        parentText = LTrim(Str(p.nodes(nodeIdx).parent))
+    End If
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """parent"": " & parentText & "," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """family"": " & LTrim(Str(p.nodes(nodeIdx).family)) & "," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """flags"": " & LTrim(Str(p.nodes(nodeIdx).flags)) & "," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """type"": """ & ASTJsonEscape(p.nodes(nodeIdx).typeName) & """," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """symbol"": """ & ASTJsonEscape(p.nodes(nodeIdx).symbolName) & """," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """role"": """ & ASTJsonEscape(p.nodes(nodeIdx).role) & """," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """contract_status"": """ & UXBAstContractFinalDecisionForNode(p.nodes(nodeIdx).kind) & """," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """contract_group"": """ & ASTJsonEscape(ASTContractJsonGroupForFamily(p.nodes(nodeIdx).family, p.nodes(nodeIdx).kind)) & """," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """target_support"": " & ASTContractJsonTargetSupport(p.nodes(nodeIdx).kind, p.nodes(nodeIdx).family) & "," & Chr(10)
+
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """left"": "
+    If p.nodes(nodeIdx).left = AST_NULL Then
+        ASTJsonBufAppend buf, "null"
+    Else
+        ASTJsonBufAppend buf, Chr(10)
+        ASTAppendNodeJson p, p.nodes(nodeIdx).left, depth + 2, buf
+    End If
+    ASTJsonBufAppend buf, "," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """right"": "
+    If p.nodes(nodeIdx).right = AST_NULL Then
+        ASTJsonBufAppend buf, "null"
+    Else
+        ASTJsonBufAppend buf, Chr(10)
+        ASTAppendNodeJson p, p.nodes(nodeIdx).right, depth + 2, buf
+    End If
+    ASTJsonBufAppend buf, "," & Chr(10)
+    ASTAppendIndent buf, depth + 1: ASTJsonBufAppend buf, """children"": ["
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    If ch <> AST_NULL Then ASTJsonBufAppend buf, Chr(10)
+    Do While ch <> AST_NULL
+        ASTAppendNodeJson p, ch, depth + 2, buf
+        ch = p.nodes(ch).nextSibling
+        If ch <> AST_NULL Then ASTJsonBufAppend buf, "," & Chr(10)
+    Loop
+    If p.nodes(nodeIdx).firstChild <> AST_NULL Then
+        ASTJsonBufAppend buf, Chr(10)
+        ASTAppendIndent buf, depth + 1
+    End If
+    ASTJsonBufAppend buf, "]" & Chr(10)
+    ASTAppendIndent buf, depth: ASTJsonBufAppend buf, "}"
+End Sub
+
+Function ASTToJson(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef jsonOut As String) As Integer
+    Dim buf As ASTJsonBuf
+    ASTJsonBufInit buf
+    ASTJsonBufAppend buf, "{" & Chr(10)
+    ASTAppendIndent buf, 1: ASTJsonBufAppend buf, """node_count"": " & LTrim(Str(p.count)) & "," & Chr(10)
+    ASTAppendIndent buf, 1: ASTJsonBufAppend buf, """root"": "
+    If rootIdx = AST_NULL Then
+        ASTJsonBufAppend buf, "null" & Chr(10)
+    Else
+        ASTJsonBufAppend buf, Chr(10)
+        ASTAppendNodeJson p, rootIdx, 2, buf
+        ASTJsonBufAppend buf, Chr(10)
+    End If
+    ASTJsonBufAppend buf, "}" & Chr(10)
+    jsonOut = ASTJsonBufToString(buf)
+    Return 1
+End Function
+
+Function ASTWriteJson(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef outPath As String, ByRef errText As String) As Integer
+    Dim jsonText As String
+    If ASTToJson(p, rootIdx, jsonText) = 0 Then errText = "ast: json conversion failed": Return 0
+    Dim f As Integer = FreeFile
+    Open outPath For Output As #f
+    If Err <> 0 Then errText = "ast: json write open failed " & outPath: Return 0
+    Print #f, jsonText;
+    Close #f
+    Return 1
+End Function
+
+Private Sub ASTDumpNode(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByVal depth As Integer)
+    If nodeIdx < 0 Or nodeIdx >= p.count Then Exit Sub
+    Dim i As Integer
+    For i = 1 To depth: Print "  ";: Next i
+    Print p.nodes(nodeIdx).kind;
+    If p.nodes(nodeIdx).role <> "" Then Print " role="; p.nodes(nodeIdx).role;
+    If p.nodes(nodeIdx).op <> "" Then Print " op="; p.nodes(nodeIdx).op;
+    If p.nodes(nodeIdx).value <> "" Then Print " value="; p.nodes(nodeIdx).value;
+    If p.nodes(nodeIdx).typeName <> "" Then Print " type="; p.nodes(nodeIdx).typeName;
+    Print ""
+    If p.nodes(nodeIdx).left <> AST_NULL Then ASTDumpNode p, p.nodes(nodeIdx).left, depth + 1
+    If p.nodes(nodeIdx).right <> AST_NULL Then ASTDumpNode p, p.nodes(nodeIdx).right, depth + 1
+    Dim ch As Integer = p.nodes(nodeIdx).firstChild
+    Do While ch <> AST_NULL
+        ASTDumpNode p, ch, depth + 1
+        ch = p.nodes(ch).nextSibling
+    Loop
+End Sub
+
+Sub ASTDump(ByRef p As ASTPool, ByVal rootIdx As Integer)
+    ASTDumpNode p, rootIdx, 0
+End Sub
+
+Function ASTSourceLocationOf(ByRef p As ASTPool, ByVal nodeIdx As Integer) As SourceLocation
+    If nodeIdx < 0 Or nodeIdx >= p.count Then Return UXBSourceLocationMake()
+    Return UXBSourceLocationMake(p.nodes(nodeIdx).sourceFile, p.nodes(nodeIdx).lineNo, p.nodes(nodeIdx).colNo, p.nodes(nodeIdx).sourceLength, p.nodes(nodeIdx).lexemeSnippet, p.nodes(nodeIdx).sourceOffset)
+End Function
+
+Function ASTSourceLineOf(ByRef p As ASTPool, ByVal nodeIdx As Integer) As String
+    Dim srcLoc As SourceLocation
+    srcLoc = ASTSourceLocationOf(p, nodeIdx)
+    Return UXBSourceLocationLine(srcLoc)
+End Function
+
+#endif

@@ -1,0 +1,507 @@
+#ifndef UXB_MIR_INTERP_FFI_FBS
+#define UXB_MIR_INTERP_FFI_FBS
+
+' Canonical MIR native-call executor.
+' All mixed/extended calls are routed through the optional libffi-backed
+' uxffi.dll deployed beside bin\uxb.exe. This keeps AST and MIR interpreters
+' on the same ABI10 contract without duplicating platform call stubs.
+' ABI10_MIR_FFI_LONG_KIND_FIX_20260711: keep MIR FFI bridge ABI-compatible with uxffi.h int/const int*.
+
+Const UXB_MIRFFI_VOID As Long = 0
+Const UXB_MIRFFI_I32 As Long = 1
+Const UXB_MIRFFI_U32 As Long = 2
+Const UXB_MIRFFI_I64 As Long = 3
+Const UXB_MIRFFI_U64 As Long = 4
+Const UXB_MIRFFI_F64 As Long = 5
+Const UXB_MIRFFI_PTR As Long = 6
+Const UXB_MIRFFI_STRPTR As Long = 7
+Const UXB_MIRFFI_MAX_ARGS As Long = 10
+Const UXB_MIRFFI_REQUIRED_VERSION As Long = 131
+
+Declare Function UXBMIRFfiLoadLibraryA Lib "kernel32" Alias "LoadLibraryA" (ByVal lpLibFileName As ZString Ptr) As Any Ptr
+Declare Function UXBMIRFfiGetProcAddress Lib "kernel32" Alias "GetProcAddress" (ByVal hModule As Any Ptr, ByVal lpProcName As ZString Ptr) As Any Ptr
+Declare Function UXBMIRFfiGetModuleFileNameA Lib "kernel32" Alias "GetModuleFileNameA" (ByVal hModule As Any Ptr, ByVal lpFilename As ZString Ptr, ByVal nSize As ULong) As ULong
+Declare Function UXBMIRFfiFreeLibrary Lib "kernel32" Alias "FreeLibrary" (ByVal hModule As Any Ptr) As Long
+
+Type UXBMIRFfiInvoke10Fn As Function Cdecl ( _
+    ByVal dllName As ZString Ptr, _
+    ByVal symbolName As ZString Ptr, _
+    ByVal returnKind As Long, _
+    ByVal argCount As Long, _
+    ByVal argKinds As Long Ptr, _
+    ByVal argU64 As ULongInt Ptr, _
+    ByVal argF64 As Double Ptr, _
+    ByVal returnU64 As ULongInt Ptr, _
+    ByVal returnF64 As Double Ptr, _
+    ByVal errorText As ZString Ptr, _
+    ByVal errorCapacity As Long _
+ ) As Long
+
+Type UXBMIRFfiVersionFn As Function Cdecl () As Long
+Type UXBMIRFfiMaxArgsFn As Function Cdecl () As Long
+Type UXBMIRFfiStringLengthFn As Function Cdecl (ByVal tokenValue As ULong) As Long
+
+Type UXBMIRFfiCopyStringFn As Function Cdecl ( _
+    ByVal tokenValue As ULong, _
+    ByVal textOut As ZString Ptr, _
+    ByVal textCapacity As Long _
+) As Long
+
+Private Function UXBMIRFfiDirName(ByRef pathText As String) As String
+    Dim slashPos As Integer
+    slashPos = InStrRev(pathText, "\")
+    If slashPos = 0 Then slashPos = InStrRev(pathText, "/")
+    If slashPos <= 1 Then Return ""
+    Return Left(pathText, slashPos - 1)
+End Function
+
+Private Sub UXBMIRFfiTryLoad(ByRef moduleOut As Any Ptr, ByRef candidate As String)
+    If moduleOut <> 0 Or Trim(candidate) = "" Then Exit Sub
+    moduleOut = UXBMIRFfiLoadLibraryA(StrPtr(candidate))
+End Sub
+
+Private Sub UXBMIRFfiUnload(ByRef moduleHandle As Any Ptr)
+    If moduleHandle = 0 Then Exit Sub
+    Dim ignored As Long
+    ignored = UXBMIRFfiFreeLibrary(moduleHandle)
+    moduleHandle = 0
+End Sub
+
+Private Function UXBMIRFfiValidateBridge(ByRef moduleHandle As Any Ptr, ByRef errorOut As String) As Integer
+    Dim versionProc As Any Ptr
+    Dim maxArgsProc As Any Ptr
+    If moduleHandle = 0 Then Return 0
+    versionProc = UXBMIRFfiGetProcAddress(moduleHandle, StrPtr("uxffi_version"))
+    maxArgsProc = UXBMIRFfiGetProcAddress(moduleHandle, StrPtr("uxffi_max_args"))
+    If versionProc = 0 Or maxArgsProc = 0 Then
+        errorOut = "MIR CALL(DLL): stale uxffi.dll; version/max-args exports are missing"
+        UXBMIRFfiUnload moduleHandle
+        Return 0
+    End If
+    Dim versionFn As UXBMIRFfiVersionFn
+    Dim maxArgsFn As UXBMIRFfiMaxArgsFn
+    versionFn = CPtr(UXBMIRFfiVersionFn, versionProc)
+    maxArgsFn = CPtr(UXBMIRFfiMaxArgsFn, maxArgsProc)
+    If versionFn() < UXB_MIRFFI_REQUIRED_VERSION Or maxArgsFn() < UXB_MIRFFI_MAX_ARGS Then
+        errorOut = "MIR CALL(DLL): stale or incompatible uxffi.dll; rebuild runtime_ext\uxffi"
+        UXBMIRFfiUnload moduleHandle
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Sub UXBMIRFfiLoadBridge( _
+    ByRef moduleOut As Any Ptr, _
+    ByRef invokeProcOut As Any Ptr, _
+    ByRef lengthProcOut As Any Ptr, _
+    ByRef copyProcOut As Any Ptr, _
+    ByRef errorOut As String _
+)
+    If moduleOut <> 0 Then Exit Sub
+    Dim exeBuffer As ZString * 32768
+    Dim runtimeExePath As String
+    Dim exeDir As String
+    Dim candidate As String
+    exeBuffer = ""
+    If UXBMIRFfiGetModuleFileNameA(0, @exeBuffer, 32767) <> 0 Then runtimeExePath = exeBuffer
+    exeDir = UXBMIRFfiDirName(runtimeExePath)
+    candidate = exeDir & "\uxffi.dll": UXBMIRFfiTryLoad moduleOut, candidate
+    candidate = CurDir & "\bin\uxffi.dll": UXBMIRFfiTryLoad moduleOut, candidate
+    candidate = CurDir & "\dist\runtime_ext\uxffi.dll": UXBMIRFfiTryLoad moduleOut, candidate
+    candidate = CurDir & "\uxffi.dll": UXBMIRFfiTryLoad moduleOut, candidate
+    candidate = exeDir & "\..\dist\runtime_ext\uxffi.dll": UXBMIRFfiTryLoad moduleOut, candidate
+    candidate = "uxffi.dll": UXBMIRFfiTryLoad moduleOut, candidate
+    If moduleOut = 0 Then
+        errorOut = "MIR CALL(DLL): ABI10 requires bin\uxffi.dll API 131"
+        Exit Sub
+    End If
+    If UXBMIRFfiValidateBridge(moduleOut, errorOut) = 0 Then Exit Sub
+    invokeProcOut = UXBMIRFfiGetProcAddress(moduleOut, StrPtr("uxffi_invoke10"))
+    lengthProcOut = UXBMIRFfiGetProcAddress(moduleOut, StrPtr("uxffi_string_length"))
+    copyProcOut = UXBMIRFfiGetProcAddress(moduleOut, StrPtr("uxffi_copy_string"))
+End Sub
+
+Private Function UXBMIRFfiTypeKind(ByVal typeText As String, ByRef kindOut As Long, ByRef canonicalOut As String) As Integer
+    canonicalOut = UCase(Trim(typeText))
+    Select Case canonicalOut
+    Case "VOID"
+        kindOut = UXB_MIRFFI_VOID
+    Case "I8", "I16", "I32", "INT", "INTEGER"
+        kindOut = UXB_MIRFFI_I32: canonicalOut = "I32"
+    Case "U8", "U16", "U32", "UINT"
+        kindOut = UXB_MIRFFI_U32: canonicalOut = "U32"
+    Case "I64", "LONGINT"
+        kindOut = UXB_MIRFFI_I64: canonicalOut = "I64"
+    Case "U64", "ULONGINT"
+        kindOut = UXB_MIRFFI_U64: canonicalOut = "U64"
+    Case "F32", "F64", "SINGLE", "DOUBLE"
+        kindOut = UXB_MIRFFI_F64: canonicalOut = "F64"
+    Case "PTR", "POINTER", "BYREF"
+        kindOut = UXB_MIRFFI_PTR: canonicalOut = "PTR"
+    Case "STRPTR", "STRING"
+        kindOut = UXB_MIRFFI_STRPTR: canonicalOut = "STRPTR"
+    Case Else
+        kindOut = -1
+        Return 0
+    End Select
+    Return 1
+End Function
+
+Private Function UXBMIRFfiOperandText(ByRef st As UXBMIRInterpState, ByRef ins As UXBMIRInstructionRecord, ByVal operandIndex As Integer, ByRef textOut As String) As Integer
+    textOut = ""
+    If operandIndex < 0 Or operandIndex >= ins.operandCount Then Return 0
+    Dim rawText As String
+    rawText = Trim(ins.operands(operandIndex))
+    If rawText = "" Then Return 0
+
+    ' FFI metadata is required to be a literal string or keyword. Preserve bare
+    ' metadata (CDECL, F64, DLL names in explicit MIR records) instead of
+    ' passing it through the generic literal parser, which maps unknown names to 0.
+    Dim firstChar As String
+    firstChar = Left(rawText, 1)
+    Dim looksNumeric As Integer
+    looksNumeric = IIf((firstChar >= "0" And firstChar <= "9") Or firstChar = "+" Or firstChar = "-", 1, 0)
+    If Left(rawText, 3) <> "__t" And firstChar <> Chr(34) And looksNumeric = 0 Then
+        textOut = rawText
+        Return 1
+    End If
+
+    Dim value As UXBInterpValue
+    value = UXBMIRInterpGetOperand(st, rawText)
+    If value.kind = UXB_VAL_STRING Or value.kind = UXB_VAL_WSTRING Then
+        textOut = value.stringValue
+        Return 1
+    End If
+    If value.kind <> UXB_VAL_VOID And value.kind <> UXB_VAL_ERROR Then
+        textOut = UXBInterpValueToString(value)
+        Return 1
+    End If
+
+    ' Explicit MIR_CALL_DLL/API records may carry metadata as quoted text.
+    textOut = rawText
+    If Left(textOut, 1) = Chr(34) And Right(textOut, 1) = Chr(34) And Len(textOut) >= 2 Then
+        textOut = Mid(textOut, 2, Len(textOut) - 2)
+    End If
+    Return IIf(Trim(textOut) <> "", 1, 0)
+End Function
+
+Private Function UXBMIRFfiSplitTypes(ByVal csvText As String, typesOut() As String, ByRef typeCountOut As Integer) As Integer
+    typeCountOut = 0
+    Dim sourceText As String
+    sourceText = Trim(csvText)
+    If sourceText = "" Then Return 0
+
+    Dim cursor As Integer
+    cursor = 1
+    Do
+        Dim commaPos As Integer
+        commaPos = InStr(cursor, sourceText, ",")
+        Dim partText As String
+        If commaPos = 0 Then
+            partText = Trim(Mid(sourceText, cursor))
+        Else
+            partText = Trim(Mid(sourceText, cursor, commaPos - cursor))
+        End If
+        If partText = "" Or typeCountOut >= UXB_MIRFFI_MAX_ARGS Then Return 0
+
+        Dim kindValue As Long
+        Dim canonicalText As String
+        If UXBMIRFfiTypeKind(partText, kindValue, canonicalText) = 0 Or kindValue = UXB_MIRFFI_VOID Then Return 0
+        typesOut(typeCountOut) = canonicalText
+        typeCountOut += 1
+
+        If commaPos = 0 Then Exit Do
+        cursor = commaPos + 1
+    Loop
+    Return IIf(typeCountOut > 0, 1, 0)
+End Function
+
+Private Function UXBMIRFfiPointerBits(ByRef value As UXBInterpValue) As ULongInt
+    If value.ptrValue <> 0 Then
+#Ifdef __FB_64BIT__
+        Return CULngInt(CLngInt(value.ptrValue))
+#Else
+        Return CULngInt(CULng(value.ptrValue))
+#EndIf
+    End If
+    If value.uintValue <> 0 Then Return value.uintValue
+    Return CULngInt(value.intValue)
+End Function
+
+Private Function UXBMIRFfiArgValue( _
+    ByRef st As UXBMIRInterpState, _
+    ByRef ins As UXBMIRInstructionRecord, _
+    ByVal operandIndex As Integer, _
+    ByVal typeText As String, _
+    ByRef stringKeepAlive As String, _
+    ByRef u64Out As ULongInt, _
+    ByRef f64Out As Double, _
+    ByRef errText As String _
+) As Integer
+    If operandIndex < 0 Or operandIndex >= ins.operandCount Then
+        errText = "MIR CALL(DLL): argument operand is missing"
+        Return 0
+    End If
+
+    Dim value As UXBInterpValue
+    value = UXBMIRInterpGetOperand(st, ins.operands(operandIndex))
+    u64Out = 0
+    f64Out = 0.0
+    stringKeepAlive = ""
+
+    Select Case UCase(Trim(typeText))
+    Case "F64"
+        If UXBInterpIsNumeric(value) = 0 Then
+            errText = "MIR CALL(DLL): F64 argument is not numeric"
+            Return 0
+        End If
+        f64Out = value.floatValue
+        If value.kind <> UXB_VAL_F32 And value.kind <> UXB_VAL_F64 Then f64Out = CDbl(value.intValue)
+    Case "STRPTR"
+        stringKeepAlive = UXBInterpValueToString(value)
+        ' S-145: FreeBASIC StrPtr of an empty string is NULL; "" must reach the callee as a real empty C string.
+        If Len(stringKeepAlive) = 0 Then stringKeepAlive = Chr(0)
+#Ifdef __FB_64BIT__
+        u64Out = CULngInt(CLngInt(CPtr(Any Ptr, StrPtr(stringKeepAlive))))
+#Else
+        u64Out = CULngInt(CULng(CPtr(Any Ptr, StrPtr(stringKeepAlive))))
+#EndIf
+    Case "PTR"
+        u64Out = UXBMIRFfiPointerBits(value)
+    Case "I32", "I64"
+        If UXBInterpIsNumeric(value) = 0 Then
+            errText = "MIR CALL(DLL): signed integer argument is not numeric"
+            Return 0
+        End If
+        u64Out = CULngInt(value.intValue)
+    Case "U32", "U64"
+        If UXBInterpIsNumeric(value) = 0 Then
+            errText = "MIR CALL(DLL): unsigned integer argument is not numeric"
+            Return 0
+        End If
+        If value.intValue < 0 And value.uintValue = 0 Then
+            errText = "MIR CALL(DLL): unsigned argument cannot be negative"
+            Return 0
+        End If
+        If value.uintValue <> 0 Then u64Out = value.uintValue Else u64Out = CULngInt(value.intValue)
+    Case Else
+        errText = "MIR CALL(DLL): unsupported argument type " & typeText
+        Return 0
+    End Select
+    Return 1
+End Function
+
+Private Function UXBMIRFfiPointerResult(ByVal tokenValue As ULongInt, ByVal typeText As String) As UXBInterpValue
+    Dim result As UXBInterpValue
+    result.kind = UXB_VAL_PTR
+    result.typeName = UCase(Trim(typeText))
+    result.uintValue = tokenValue
+    result.intValue = CLngInt(tokenValue)
+    result.handleId = CInt(tokenValue And &h7FFFFFFF)
+    result.ptrValue = 0
+    Return result
+End Function
+
+Private Function UXBMIRInterpExecFfi(ByRef ins As UXBMIRInstructionRecord, ByRef ctx As UXBInterpContext, ByRef st As UXBMIRInterpState) As UXBInterpValue
+    Static bridgeModule As Any Ptr
+    Static bridgeProc As Any Ptr
+    Static bridgeLengthProc As Any Ptr
+    Static bridgeCopyProc As Any Ptr
+    Static bridgeTried As Integer
+
+    Dim canonicalOp As String
+    canonicalOp = UXBMIRStep4CanonicalOpcode(ins.opcode)
+    Dim metadataStart As Integer
+    Dim callKind As String
+
+    If canonicalOp = "MIR_CALL_DLL" Then
+        callKind = "DLL": metadataStart = 0
+    ElseIf canonicalOp = "MIR_CALL_API" Then
+        callKind = "API": metadataStart = 0
+    Else
+        If ins.operandCount < 1 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR CALL target is missing")
+        callKind = UCase(Trim(ins.operands(0)))
+        If Left(callKind, 1) = Chr(34) And Right(callKind, 1) = Chr(34) And Len(callKind) >= 2 Then callKind = Mid(callKind, 2, Len(callKind) - 2)
+        If callKind <> "DLL" And callKind <> "API" Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR call is not a native FFI call")
+        metadataStart = 1
+    End If
+
+    If ins.operandCount < metadataStart + 3 Then
+        Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR CALL(" & callKind & ") requires library, symbol and return signature")
+    End If
+
+    Dim dllName As String, symbolName As String, returnTypeText As String
+    If UXBMIRFfiOperandText(st, ins, metadataStart, dllName) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR CALL(DLL) library cannot be resolved")
+    If UXBMIRFfiOperandText(st, ins, metadataStart + 1, symbolName) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR CALL(DLL) symbol cannot be resolved")
+    If UXBMIRFfiOperandText(st, ins, metadataStart + 2, returnTypeText) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR CALL(DLL) return signature cannot be resolved")
+    If InStr(dllName, ".") = 0 Then dllName &= ".dll"
+
+    Dim returnKind As Long
+    Dim canonicalReturnType As String
+    If UXBMIRFfiTypeKind(returnTypeText, returnKind, canonicalReturnType) = 0 Then
+        Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR CALL(DLL) unsupported return type " & returnTypeText)
+    End If
+
+    Dim argStart As Integer
+    argStart = metadataStart + 3
+    Dim conventionText As String
+    conventionText = "CDECL"
+    If argStart < ins.operandCount Then
+        Dim candidate As String
+        If UXBMIRFfiOperandText(st, ins, argStart, candidate) <> 0 Then
+            candidate = UCase(Trim(candidate))
+            If candidate = "CDECL" Or candidate = "STDCALL" Then
+                conventionText = candidate
+                argStart += 1
+            End If
+        End If
+    End If
+
+    ' libffi uses the platform default ABI on Win64; CDECL/STDCALL are accepted
+    ' for source compatibility and collapse to the Microsoft x64 convention.
+    If conventionText <> "CDECL" And conventionText <> "STDCALL" Then
+        Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR CALL(DLL) invalid calling convention")
+    End If
+
+    Dim argTypes(0 To UXB_MIRFFI_MAX_ARGS - 1) As String
+    Dim argTypeCount As Integer
+    Dim hasTypeList As Integer
+    hasTypeList = 0
+    If argStart < ins.operandCount Then
+        Dim typeListCandidate As String
+        If UXBMIRFfiOperandText(st, ins, argStart, typeListCandidate) <> 0 Then
+            hasTypeList = UXBMIRFfiSplitTypes(typeListCandidate, argTypes(), argTypeCount)
+            If hasTypeList <> 0 Then argStart += 1
+        End If
+    End If
+
+    Dim runtimeArgCount As Integer
+    runtimeArgCount = ins.operandCount - argStart
+    If runtimeArgCount < 0 Then runtimeArgCount = 0
+    If runtimeArgCount > UXB_MIRFFI_MAX_ARGS Then
+        Return UXBInterpValueError(UXB_INTERP_ERR_LIMIT, "MIR CALL(DLL) supports at most 10 runtime arguments")
+    End If
+
+    Dim i As Integer
+    If hasTypeList <> 0 Then
+        If argTypeCount <> runtimeArgCount Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR CALL(DLL) type-list count does not match runtime arguments")
+        End If
+    Else
+        ' Legacy calls without an explicit ABI10 type list are integer calls.
+        ' The return signature never describes the argument types.
+        For i = 0 To runtimeArgCount - 1
+            argTypes(i) = "I32"
+        Next i
+    End If
+
+    If bridgeTried = 0 Then
+        bridgeTried = 1
+        Dim bridgeLoadError As String
+        UXBMIRFfiLoadBridge bridgeModule, bridgeProc, bridgeLengthProc, bridgeCopyProc, bridgeLoadError
+        If bridgeModule = 0 Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_NATIVE_ONLY, bridgeLoadError)
+        End If
+    End If
+    If bridgeProc = 0 Then
+        Return UXBInterpValueError(UXB_INTERP_ERR_NATIVE_ONLY, "uxffi.dll does not export uxffi_invoke10")
+    End If
+
+    ' ABI10_MIR_FFI_LONG_KIND_FIX_20260711: uxffi.dll exports C int/const int*; FreeBASIC Long is the stable 32-bit C-int carrier on Win64.
+    Dim argKinds(0 To UXB_MIRFFI_MAX_ARGS - 1) As Long
+    Dim argU64(0 To UXB_MIRFFI_MAX_ARGS - 1) As ULongInt
+    Dim argF64(0 To UXB_MIRFFI_MAX_ARGS - 1) As Double
+    Dim keepAlive(0 To UXB_MIRFFI_MAX_ARGS - 1) As String
+    Dim canonicalArgType As String
+    For i = 0 To runtimeArgCount - 1
+        If UXBMIRFfiTypeKind(argTypes(i), argKinds(i), canonicalArgType) = 0 Or argKinds(i) = UXB_MIRFFI_VOID Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "MIR CALL(DLL) invalid argument type " & argTypes(i))
+        End If
+        argTypes(i) = canonicalArgType
+        Dim valueError As String
+        If UXBMIRFfiArgValue(st, ins, argStart + i, argTypes(i), keepAlive(i), argU64(i), argF64(i), valueError) = 0 Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, valueError)
+        End If
+    Next i
+
+    Dim invokeFn As UXBMIRFfiInvoke10Fn
+    invokeFn = CPtr(UXBMIRFfiInvoke10Fn, bridgeProc)
+    Dim returnU64 As ULongInt
+    Dim returnF64 As Double
+    Dim errorBuffer As ZString * 512
+    errorBuffer = ""
+    Dim invokeOk As Long
+    invokeOk = invokeFn(StrPtr(dllName), StrPtr(symbolName), returnKind, runtimeArgCount, @argKinds(0), @argU64(0), @argF64(0), @returnU64, @returnF64, @errorBuffer, 512)
+    If invokeOk = 0 Then
+        Dim messageText As String
+        messageText = "MIR CALL(DLL) invocation failed"
+        If Len(errorBuffer) > 0 Then messageText &= ": " & errorBuffer
+        Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, messageText)
+    End If
+
+    Dim result As UXBInterpValue
+    Select Case canonicalReturnType
+    Case "VOID"
+        result = UXBInterpValueVoid()
+    Case "I32", "I64"
+        result = UXBInterpValueInt(CLngInt(returnU64))
+        result.typeName = canonicalReturnType
+        If canonicalReturnType = "I32" Then result.kind = UXB_VAL_I32
+    Case "U32", "U64"
+        result = UXBInterpValueUInt(returnU64)
+        result.typeName = canonicalReturnType
+        If canonicalReturnType = "U32" Then result.kind = UXB_VAL_U32
+    Case "F64"
+        result = UXBInterpValueFloat(returnF64)
+    Case "PTR"
+        result = UXBMIRFfiPointerResult(returnU64, canonicalReturnType)
+    Case "STRPTR"
+        If returnU64 = 0 Then
+            result = UXBInterpValueString("")
+        ElseIf bridgeLengthProc = 0 Or bridgeCopyProc = 0 Then
+            result = UXBInterpValueError(UXB_INTERP_ERR_NATIVE_ONLY, "uxffi.dll does not export uxffi_string_length/copy_string")
+        Else
+            Dim lengthFn As UXBMIRFfiStringLengthFn
+            Dim copyStringFn As UXBMIRFfiCopyStringFn
+            lengthFn = CPtr(UXBMIRFfiStringLengthFn, bridgeLengthProc)
+            copyStringFn = CPtr(UXBMIRFfiCopyStringFn, bridgeCopyProc)
+            Dim requiredBytes As Long
+            requiredBytes = lengthFn(CUInt(returnU64))
+            If requiredBytes <= 0 Or requiredBytes > 16777217 Then
+                result = UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "MIR CALL(DLL) invalid or oversized STRPTR result")
+            Else
+                Dim returnTextBuffer As ZString Ptr
+                returnTextBuffer = CAllocate(requiredBytes)
+                If returnTextBuffer = 0 Then
+                    result = UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "MIR CALL(DLL) STRPTR allocation failed")
+                Else
+                    *returnTextBuffer = ""
+                    If copyStringFn(CUInt(returnU64), returnTextBuffer, requiredBytes) = 0 Then
+                        result = UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "MIR CALL(DLL) could not copy STRPTR result")
+                    Else
+                        result = UXBInterpValueString(*returnTextBuffer)
+                    End If
+                    Deallocate(returnTextBuffer)
+                End If
+            End If
+        End If
+    Case Else
+        result = UXBInterpValueError(UXB_INTERP_ERR_TYPE_MISMATCH, "MIR CALL(DLL) result type is unsupported")
+    End Select
+
+    If UXBInterpIsError(result) = 0 And ins.resultName <> "" Then UXBMIRInterpSetVar st, ins.resultName, result
+    Return result
+End Function
+
+Private Function UXBMIRInterpIsFfiCall(ByRef ins As UXBMIRInstructionRecord) As Integer
+    Dim canonicalOp As String
+    canonicalOp = UXBMIRStep4CanonicalOpcode(ins.opcode)
+    If canonicalOp = "MIR_CALL_DLL" Or canonicalOp = "MIR_CALL_API" Then Return 1
+    If canonicalOp <> "MIR_CALL" Or ins.operandCount < 1 Then Return 0
+    Dim targetText As String
+    targetText = UCase(Trim(ins.operands(0)))
+    If Left(targetText, 1) = Chr(34) And Right(targetText, 1) = Chr(34) And Len(targetText) >= 2 Then targetText = Mid(targetText, 2, Len(targetText) - 2)
+    Return IIf(targetText = "DLL" Or targetText = "API", 1, 0)
+End Function
+
+#endif

@@ -1,0 +1,1581 @@
+' Extracted MIRLowerTopLevelStmt
+
+Private Function MIRStmtMemoryMode(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByRef modeOut As String, ByRef offsetOut As Integer) As Integer
+    modeOut = "AUTO"
+    offsetOut = 0
+    Dim firstNode As Integer
+    firstNode = MIRChildAt(ps, stmtIdx, 0)
+    If firstNode = -1 Then Return 1
+    If UCase(ps.ast.nodes(firstNode).kind) = "KEYWORD_REF" Then
+        Dim modeName As String
+        modeName = UCase(Trim(ps.ast.nodes(firstNode).value))
+        If modeName = "VIRTUAL" Or modeName = "NATIVE" Then
+            modeOut = modeName
+            offsetOut = 1
+        End If
+    End If
+    ' S-069: no explicit mode -> AUTO resolves by the address expression's
+    ' static type: a pointer-typed address means a real process address
+    ' (NATIVE); anything else stays AUTO (= VIRTUAL sandbox offset). MEMCOPY
+    ' has two addresses (dst, src): a pointer on EITHER side makes it NATIVE,
+    ' so a plain integer paired with a pointer is then read as a real address
+    ' too and fails closed (checked) if invalid -- write the mode explicitly
+    ' to mix intentionally.
+    If modeOut = "AUTO" Then
+        Dim autoKind As String = UCase(Trim(ps.ast.nodes(stmtIdx).kind))
+        If UXBMemoryAddrIsPointer(ps, MIRChildAt(ps, stmtIdx, offsetOut)) <> 0 Then
+            modeOut = "NATIVE"
+        ElseIf Left(autoKind, 7) = "MEMCOPY" Then
+            If UXBMemoryAddrIsPointer(ps, MIRChildAt(ps, stmtIdx, offsetOut + 1)) <> 0 Then modeOut = "NATIVE"
+        End If
+    End If
+    Return 1
+End Function
+
+Private Function MIRStmtMemoryWidth(ByRef kindName As String) As Integer
+    Select Case UCase(Trim(kindName))
+    Case "POKEB_STMT", "MEMCOPYB_STMT", "MEMFILLB_STMT": Return 1
+    Case "POKEW_STMT", "MEMCOPYW_STMT", "MEMFILLW_STMT": Return 2
+    Case "POKED_STMT", "MEMCOPYD_STMT", "MEMFILLD_STMT": Return 4
+    ' S-055: Q (64-bit) memory family, parallel to B/W/D above.
+    Case "POKEQ_STMT", "MEMCOPYQ_STMT", "MEMFILLQ_STMT": Return 8
+    End Select
+    Return 0
+End Function
+
+Private Function MIRLowerTopLevelStmtIoConsole(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    MIRSetCurrentSourceFromAstNode ps, stmtIdx
+    handledOut = 1
+    If stmtIdx < 0 Or stmtIdx >= ps.ast.count Then handledOut = 0: Return 1
+
+    Dim st As ASTNode
+    st = ps.ast.nodes(stmtIdx)
+    Dim k As String
+    k = UCase(st.kind)
+
+    Select Case k
+    Case "PRINT_STMT"
+        Dim printCount As Integer
+        printCount = MIRChildCount(ps, stmtIdx)
+        If UCase(Trim(st.op)) = "FILE" Then
+            If printCount < 2 Then errText = "mir: PRINT# handle/value missing": Return 0
+            Dim fileHandleName As String
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 0), module, fnIdx, blkIdx, tempSeed, fileHandleName, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 2, "FILE_PRINT_BEGIN", fileHandleName
+
+            Dim filePrintPos As Integer
+            For filePrintPos = 1 To printCount - 1
+                Dim filePrintItem As Integer
+                Dim filePrintExpr As Integer
+                Dim filePrintSep As String
+                filePrintItem = MIRChildAt(ps, stmtIdx, filePrintPos)
+                If filePrintItem = -1 Then errText = "mir: PRINT# item missing": Return 0
+                filePrintSep = ""
+                If UCase(ps.ast.nodes(filePrintItem).kind) = "PRINT_ITEM" Then
+                    filePrintExpr = ps.ast.nodes(filePrintItem).left
+                    filePrintSep = ps.ast.nodes(filePrintItem).op
+                Else
+                    filePrintExpr = filePrintItem
+                    If filePrintPos < printCount - 1 Then filePrintSep = " "
+                End If
+                If filePrintExpr = -1 Then errText = "mir: PRINT# expression missing": Return 0
+                Dim filePrintValueName As String
+                If MIRLowerExprNode(ps, filePrintExpr, module, fnIdx, blkIdx, tempSeed, filePrintValueName, errText) = 0 Then Return 0
+                Dim filePrintSepName As String
+                filePrintSepName = MIRNextTemp(tempSeed)
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, filePrintSepName, 1, Chr(34) & filePrintSep & Chr(34)
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 3, "FILE_PRINT_ITEM", filePrintValueName, filePrintSepName
+            Next filePrintPos
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 1, "FILE_PRINT_END"
+            Return 1
+        End If
+        If printCount = 0 Then
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 1, "PRINTLN"
+            Return 1
+        End If
+        Dim trailingSep As String
+        trailingSep = ""
+        Dim pp As Integer
+        For pp = 0 To printCount - 1
+            Dim pItem As Integer
+            Dim pExpr As Integer
+            pItem = MIRChildAt(ps, stmtIdx, pp)
+            If pItem = -1 Then errText = "mir: PRINT item missing": Return 0
+            trailingSep = ""
+            If UCase(ps.ast.nodes(pItem).kind) = "PRINT_ITEM" Then
+                pExpr = ps.ast.nodes(pItem).left
+                trailingSep = ps.ast.nodes(pItem).op
+            Else
+                pExpr = pItem
+                If pp < printCount - 1 Then trailingSep = " "
+            End If
+            If pExpr = -1 Then errText = "mir: PRINT expression missing": Return 0
+            Dim pName As String
+            If MIRLowerExprNode(ps, pExpr, module, fnIdx, blkIdx, tempSeed, pName, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 2, "PRINT", pName
+            If trailingSep = "," Then
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 1, "PRINT_SEP_COMMA"
+            ElseIf trailingSep = " " Then
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 1, "PRINT_SEP_SPACE"
+            End If
+        Next pp
+        If trailingSep <> ";" And trailingSep <> "," Then
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 1, "PRINTLN"
+        End If
+        Return 1
+
+    Case "CLS_STMT"
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 1, "CLS"
+        Return 1
+
+    Case "LOCATE_STMT"
+        If MIRChildCount(ps, stmtIdx) <> 2 Then errText = "mir: LOCATE iki arguman ister": Return 0
+        Dim locateRowName As String
+        Dim locateColName As String
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 0), module, fnIdx, blkIdx, tempSeed, locateRowName, errText) = 0 Then Return 0
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 1), module, fnIdx, blkIdx, tempSeed, locateColName, errText) = 0 Then Return 0
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 3, "LOCATE", locateRowName, locateColName
+        Return 1
+
+    Case "COLOR_STMT"
+        If MIRChildCount(ps, stmtIdx) <> 2 Then errText = "mir: COLOR iki arguman ister": Return 0
+        Dim colorFgName As String
+        Dim colorBgName As String
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 0), module, fnIdx, blkIdx, tempSeed, colorFgName, errText) = 0 Then Return 0
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 1), module, fnIdx, blkIdx, tempSeed, colorBgName, errText) = 0 Then Return 0
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 3, "COLOR", colorFgName, colorBgName
+        Return 1
+
+    Case "RANDOMIZE_STMT"
+        If MIRChildCount(ps, stmtIdx) = 0 Then
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 1, "RANDOMIZE"
+            Return 1
+        End If
+        Dim randomSeedName As String
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 0), module, fnIdx, blkIdx, tempSeed, randomSeedName, errText) = 0 Then Return 0
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 2, "RANDOMIZE", randomSeedName
+        Return 1
+
+
+
+    Case "SHELL_STMT"
+        If MIRChildCount(ps, stmtIdx) < 1 Then errText = "mir: SHELL command missing": Return 0
+        Dim shellCmdNode As Integer
+        shellCmdNode = MIRChildAt(ps, stmtIdx, 0)
+        Dim shellCmdName As String
+        If MIRLowerExprNode(ps, shellCmdNode, module, fnIdx, blkIdx, tempSeed, shellCmdName, errText) = 0 Then Return 0
+
+        Dim shellOpt As Integer
+        shellOpt = ps.ast.nodes(stmtIdx).firstChild
+        If shellOpt <> -1 Then shellOpt = ps.ast.nodes(shellOpt).nextSibling
+        Do While shellOpt <> -1
+            If UCase(ps.ast.nodes(shellOpt).kind) = "SHELL_OPTION" Then
+                Dim shellOptName As String
+                shellOptName = UCase(Trim(ps.ast.nodes(shellOpt).value))
+                Dim shellPayload As Integer
+                shellPayload = MIRChildAt(ps, shellOpt, 0)
+                If shellPayload = -1 Then shellPayload = ps.ast.nodes(shellOpt).left
+                Select Case shellOptName
+                Case "NOWAIT"
+                    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 1, "SHELL_NOWAIT"
+                Case "TIMEOUT", "RUNPATH", "OUTPATH", "ERRPATH"
+                    If shellPayload <> -1 Then
+                        Dim shellPayloadName As String
+                        If MIRLowerExprNode(ps, shellPayload, module, fnIdx, blkIdx, tempSeed, shellPayloadName, errText) = 0 Then Return 0
+                        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 3, "SHELL_" & shellOptName, shellPayloadName
+                    End If
+                Case "OUTVAR", "ERRVAR", "CODEVAR"
+                    If shellPayload <> -1 Then
+                        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 3, "SHELL_" & shellOptName, ps.ast.nodes(shellPayload).value
+                    End If
+                End Select
+            End If
+            shellOpt = ps.ast.nodes(shellOpt).nextSibling
+        Loop
+
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 2, "SHELL", shellCmdName
+        Return 1
+
+    Case "INPUT_STMT"
+        Dim inputCount As Integer
+        inputCount = MIRChildCount(ps, stmtIdx)
+        If inputCount < 1 Then errText = "mir: INPUT target missing": Return 0
+        Dim inputStartPos As Integer
+        inputStartPos = 0
+        Dim firstInputChild As Integer
+        firstInputChild = MIRChildAt(ps, stmtIdx, 0)
+        If firstInputChild <> -1 And UCase(ps.ast.nodes(firstInputChild).kind) = "PROMPT_EXPR" Then
+            Dim promptExpr As Integer
+            promptExpr = ps.ast.nodes(firstInputChild).left
+            If promptExpr = -1 Then promptExpr = MIRChildAt(ps, firstInputChild, 0)
+            If promptExpr = -1 Then errText = "mir: INPUT prompt missing": Return 0
+            Dim promptName As String
+            If MIRLowerExprNode(ps, promptExpr, module, fnIdx, blkIdx, tempSeed, promptName, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 2, "PRINT", promptName
+            inputStartPos = 1
+        End If
+        If inputStartPos >= inputCount Then errText = "mir: INPUT target missing": Return 0
+        Dim inputPos As Integer
+        For inputPos = inputStartPos To inputCount - 1
+            Dim inputTarget As Integer
+            inputTarget = MIRChildAt(ps, stmtIdx, inputPos)
+            If inputTarget = -1 Or UCase(ps.ast.nodes(inputTarget).kind) <> "IDENT" Then errText = "mir: INPUT target must be IDENT": Return 0
+            Dim inputValueTemp As String
+            inputValueTemp = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, inputValueTemp, 1, "INPUT"
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(inputTarget).value, 1, inputValueTemp
+        Next inputPos
+        Return 1
+
+    Case "INPUT_FILE_STMT"
+        Dim inputFileCount As Integer
+        inputFileCount = MIRChildCount(ps, stmtIdx)
+        If inputFileCount < 2 Then errText = "mir: INPUT# handle/target missing": Return 0
+        Dim inputHandleExpr As Integer
+        inputHandleExpr = MIRChildAt(ps, stmtIdx, 0)
+        If inputHandleExpr = -1 Then errText = "mir: INPUT# handle missing": Return 0
+        Dim inputHandleName As String
+        If MIRLowerExprNode(ps, inputHandleExpr, module, fnIdx, blkIdx, tempSeed, inputHandleName, errText) = 0 Then Return 0
+        Dim inputFilePos As Integer
+        For inputFilePos = 1 To inputFileCount - 1
+            Dim inputFileTarget As Integer
+            inputFileTarget = MIRChildAt(ps, stmtIdx, inputFilePos)
+            If inputFileTarget = -1 Or UCase(ps.ast.nodes(inputFileTarget).kind) <> "IDENT" Then errText = "mir: INPUT# target must be IDENT": Return 0
+            Dim inputFileTemp As String
+            inputFileTemp = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, inputFileTemp, 2, "INPUTF", inputHandleName
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(inputFileTarget).value, 1, inputFileTemp
+        Next inputFilePos
+        Return 1
+
+    Case "OPEN_STMT"
+        Dim openCount As Integer
+        openCount = MIRChildCount(ps, stmtIdx)
+        If openCount < 3 Or openCount > 4 Then errText = "mir: OPEN argument count invalid": Return 0
+        Dim openFileExpr As Integer, openModeExpr As Integer, openHandleExpr As Integer
+        openFileExpr = MIRChildAt(ps, stmtIdx, 0)
+        openModeExpr = MIRChildAt(ps, stmtIdx, 1)
+        openHandleExpr = MIRChildAt(ps, stmtIdx, 2)
+        If openFileExpr = -1 Or openModeExpr = -1 Or openHandleExpr = -1 Then errText = "mir: OPEN args missing": Return 0
+        If UCase(ps.ast.nodes(openModeExpr).kind) <> "MODE_REF" Then errText = "mir: OPEN mode node invalid": Return 0
+        Dim openFileName As String, openHandleName As String
+        If MIRLowerExprNode(ps, openFileExpr, module, fnIdx, blkIdx, tempSeed, openFileName, errText) = 0 Then Return 0
+        If MIRLowerExprNode(ps, openHandleExpr, module, fnIdx, blkIdx, tempSeed, openHandleName, errText) = 0 Then Return 0
+        Dim openModeConst As String
+        openModeConst = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, openModeConst, 1, Chr(34) & ps.ast.nodes(openModeExpr).value & Chr(34)
+        If openCount = 3 Then
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 4, "OPEN", openFileName, openModeConst, openHandleName
+        Else
+            Dim openLenExpr As Integer, openLenName As String
+            openLenExpr = MIRChildAt(ps, stmtIdx, 3)
+            If openLenExpr = -1 Then errText = "mir: OPEN LEN arg missing": Return 0
+            If MIRLowerExprNode(ps, openLenExpr, module, fnIdx, blkIdx, tempSeed, openLenName, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 5, "OPEN", openFileName, openModeConst, openHandleName, openLenName
+        End If
+        Return 1
+
+    Case "CLOSE_STMT"
+        Dim closeCount As Integer
+        closeCount = MIRChildCount(ps, stmtIdx)
+        If closeCount = 0 Then
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 1, "CLOSE"
+            Return 1
+        End If
+        Dim closePos As Integer
+        For closePos = 0 To closeCount - 1
+            Dim closeHandleExpr As Integer, closeHandleName As String
+            closeHandleExpr = MIRChildAt(ps, stmtIdx, closePos)
+            If closeHandleExpr = -1 Then errText = "mir: CLOSE handle missing": Return 0
+            If MIRLowerExprNode(ps, closeHandleExpr, module, fnIdx, blkIdx, tempSeed, closeHandleName, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 2, "CLOSE", closeHandleName
+        Next closePos
+        Return 1
+
+    Case "GET_STMT"
+        Dim getCount As Integer
+        getCount = MIRChildCount(ps, stmtIdx)
+        If getCount < 2 Or getCount > 4 Then errText = "mir: GET argument count invalid": Return 0
+        Dim getHandleExpr As Integer
+        getHandleExpr = MIRChildAt(ps, stmtIdx, 0)
+        If getHandleExpr = -1 Then errText = "mir: GET handle missing": Return 0
+        Dim getHandleName As String
+        If MIRLowerExprNode(ps, getHandleExpr, module, fnIdx, blkIdx, tempSeed, getHandleName, errText) = 0 Then Return 0
+        Dim getTargetExpr As Integer
+        If getCount = 2 Then
+            getTargetExpr = MIRChildAt(ps, stmtIdx, 1)
+        ElseIf getCount = 3 Then
+            getTargetExpr = MIRChildAt(ps, stmtIdx, 2)
+        Else
+            getTargetExpr = MIRChildAt(ps, stmtIdx, 3)
+        End If
+        If getTargetExpr = -1 Or UCase(ps.ast.nodes(getTargetExpr).kind) <> "IDENT" Then errText = "mir: GET target must be IDENT": Return 0
+        Dim getResultTemp As String
+        getResultTemp = MIRNextTemp(tempSeed)
+        If getCount = 2 Then
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, getResultTemp, 2, "GET", getHandleName
+        ElseIf getCount = 3 Then
+            Dim getPositionName As String
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 1), module, fnIdx, blkIdx, tempSeed, getPositionName, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, getResultTemp, 3, "GET", getHandleName, getPositionName
+        Else
+            Dim getPositionName As String, getBytesName As String
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 1), module, fnIdx, blkIdx, tempSeed, getPositionName, errText) = 0 Then Return 0
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 2), module, fnIdx, blkIdx, tempSeed, getBytesName, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, getResultTemp, 4, "GET", getHandleName, getPositionName, getBytesName
+        End If
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, ps.ast.nodes(getTargetExpr).value, 1, getResultTemp
+        Return 1
+
+    Case "PUT_STMT"
+        Dim putCount As Integer
+        putCount = MIRChildCount(ps, stmtIdx)
+        If putCount < 2 Or putCount > 4 Then errText = "mir: PUT argument count invalid": Return 0
+        Dim putHandleExpr As Integer
+        putHandleExpr = MIRChildAt(ps, stmtIdx, 0)
+        If putHandleExpr = -1 Then errText = "mir: PUT handle missing": Return 0
+        Dim putHandleName As String
+        If MIRLowerExprNode(ps, putHandleExpr, module, fnIdx, blkIdx, tempSeed, putHandleName, errText) = 0 Then Return 0
+        If putCount = 2 Then
+            Dim putSourceName As String
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 1), module, fnIdx, blkIdx, tempSeed, putSourceName, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 3, "PUT", putHandleName, putSourceName
+        ElseIf putCount = 3 Then
+            Dim putPositionName As String, putSourceName As String
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 1), module, fnIdx, blkIdx, tempSeed, putPositionName, errText) = 0 Then Return 0
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 2), module, fnIdx, blkIdx, tempSeed, putSourceName, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 4, "PUT", putHandleName, putPositionName, putSourceName
+        Else
+            Dim putPositionName As String, putBytesName As String, putSourceName As String
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 1), module, fnIdx, blkIdx, tempSeed, putPositionName, errText) = 0 Then Return 0
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 2), module, fnIdx, blkIdx, tempSeed, putBytesName, errText) = 0 Then Return 0
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 3), module, fnIdx, blkIdx, tempSeed, putSourceName, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 5, "PUT", putHandleName, putPositionName, putBytesName, putSourceName
+        End If
+        Return 1
+
+    Case "SEEK_STMT"
+        Dim seekCount As Integer
+        seekCount = MIRChildCount(ps, stmtIdx)
+        If seekCount < 1 Or seekCount > 2 Then errText = "mir: SEEK argument count invalid": Return 0
+        Dim seekHandleName As String
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 0), module, fnIdx, blkIdx, tempSeed, seekHandleName, errText) = 0 Then Return 0
+        If seekCount = 1 Then
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 2, "SEEK", seekHandleName
+        Else
+            Dim seekPositionName As String
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, 1), module, fnIdx, blkIdx, tempSeed, seekPositionName, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 3, "SEEK", seekHandleName, seekPositionName
+        End If
+        Return 1
+
+    Case Else
+        handledOut = 0
+        Return 1
+    End Select
+End Function
+
+#include once "mir_lower_slot_lane.fbs"
+
+Private Function MIRLowerTopLevelStmtMemory(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    MIRSetCurrentSourceFromAstNode ps, stmtIdx
+    handledOut = 1
+    If stmtIdx < 0 Or stmtIdx >= ps.ast.count Then handledOut = 0: Return 1
+
+    Dim st As ASTNode
+    st = ps.ast.nodes(stmtIdx)
+    Dim k As String
+    k = UCase(st.kind)
+
+    Select Case k
+    Case "POKES_STMT"
+        Dim psMode As String
+        Dim psOffset As Integer
+        MIRStmtMemoryMode ps, stmtIdx, psMode, psOffset
+        Dim psCount As Integer
+        psCount = MIRChildCount(ps, stmtIdx) - psOffset
+        If psCount <> 2 And psCount <> 3 Then
+            errText = "mir: POKES expects address,text[,length]"
+            Return 0
+        End If
+        Dim psAddrName As String
+        Dim psTextName As String
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, psOffset), module, fnIdx, blkIdx, tempSeed, psAddrName, errText) = 0 Then Return 0
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, psOffset + 1), module, fnIdx, blkIdx, tempSeed, psTextName, errText) = 0 Then Return 0
+        Dim psLenName As String
+        If psCount = 3 Then
+            If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, psOffset + 2), module, fnIdx, blkIdx, tempSeed, psLenName, errText) = 0 Then Return 0
+        Else
+            psLenName = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, psLenName, 2, "LEN", psTextName
+            MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "I64"
+        End If
+        MIRAppendInstruction module, fnIdx, blkIdx, "MIR_MEMORY_WRITE_SEQUENCE", "", 4, psMode, psAddrName, psTextName, psLenName
+        Return 1
+
+    Case "MEMCOPYB_STMT", "MEMCOPYW_STMT", "MEMCOPYD_STMT"
+        Dim mcMode As String
+        Dim mcOffset As Integer
+        MIRStmtMemoryMode ps, stmtIdx, mcMode, mcOffset
+        If MIRChildCount(ps, stmtIdx) - mcOffset <> 3 Then
+            errText = "mir: " & k & " expects dst,src,length"
+            Return 0
+        End If
+        Dim mcSrcName As String
+        Dim mcDstName As String
+        Dim mcLenName As String
+        Dim mcSrcIsRef As Integer
+        Dim mcDstIsRef As Integer
+        Dim mcSrcBytes As LongInt
+        Dim mcDstBytes As LongInt
+        ' Canonical argument order is MEMCOPY* dst, src, len (matches memcpy/CopyMemory).
+        If MIRLowerMemoryOperandPatch4(ps, MIRChildAt(ps, stmtIdx, mcOffset), module, fnIdx, blkIdx, tempSeed, mcDstName, mcDstIsRef, mcDstBytes, errText) = 0 Then Return 0
+        If MIRLowerMemoryOperandPatch4(ps, MIRChildAt(ps, stmtIdx, mcOffset + 1), module, fnIdx, blkIdx, tempSeed, mcSrcName, mcSrcIsRef, mcSrcBytes, errText) = 0 Then Return 0
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, mcOffset + 2), module, fnIdx, blkIdx, tempSeed, mcLenName, errText) = 0 Then Return 0
+        ' S-033 follow-up: force NATIVE mode when either side is a MemoryRef
+        ' (bare array name) -- see the identical comment in the sibling copy
+        ' of this Case in mir_lower_stmt_core_split.fbs.
+        If mcDstIsRef <> 0 Or mcSrcIsRef <> 0 Then mcMode = "NATIVE"
+        ' S-021/S-049: width is a compile-time constant -- emit it as a literal
+        ' operand directly instead of a temp+MIR_OP_LOAD_CONST indirection. The
+        ' x64 emitter resolves this operand with a plain Val(), which returns 0
+        ' (a false "unsupported width") for a temp name; the canonical-MIR
+        ' interpreter's operand resolver already falls back to literal parsing
+        ' when a name isn't a known var/temp, so this is unchanged there.
+        MIRAppendInstruction module, fnIdx, blkIdx, "MIR_MEMORY_COPY", "", 5, mcMode, mcSrcName, mcDstName, mcLenName, LTrim(Str(MIRStmtMemoryWidth(k)))
+        Return 1
+
+    Case "MEMFILLB_STMT", "MEMFILLW_STMT", "MEMFILLD_STMT"
+        Dim mfMode As String
+        Dim mfOffset As Integer
+        MIRStmtMemoryMode ps, stmtIdx, mfMode, mfOffset
+        If MIRChildCount(ps, stmtIdx) - mfOffset <> 3 Then
+            errText = "mir: " & k & " expects address,value,length"
+            Return 0
+        End If
+        Dim mfAddrName As String
+        Dim mfValName As String
+        Dim mfLenName As String
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, mfOffset), module, fnIdx, blkIdx, tempSeed, mfAddrName, errText) = 0 Then Return 0
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, mfOffset + 1), module, fnIdx, blkIdx, tempSeed, mfValName, errText) = 0 Then Return 0
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, mfOffset + 2), module, fnIdx, blkIdx, tempSeed, mfLenName, errText) = 0 Then Return 0
+        ' S-021/S-049: literal width operand -- see MEMCOPY case above for why.
+        MIRAppendInstruction module, fnIdx, blkIdx, "MIR_MEMORY_FILL", "", 5, mfMode, mfAddrName, mfValName, mfLenName, LTrim(Str(MIRStmtMemoryWidth(k)))
+        Return 1
+
+    Case "SETNEWOFFSET_STMT"
+        If MIRChildCount(ps, stmtIdx) <> 2 Then errText = "mir: SETNEWOFFSET expects ident,address": Return 0
+        Dim setOffsetTargetExpr As Integer, setOffsetAddrExpr As Integer, setOffsetAddrName As String
+        setOffsetTargetExpr = MIRChildAt(ps, stmtIdx, 0): setOffsetAddrExpr = MIRChildAt(ps, stmtIdx, 1)
+        If setOffsetTargetExpr = -1 Or setOffsetAddrExpr = -1 Then errText = "mir: SETNEWOFFSET arguments missing": Return 0
+        If UCase(ps.ast.nodes(setOffsetTargetExpr).kind) <> "IDENT" Then errText = "mir: SETNEWOFFSET target must be ident": Return 0
+        If MIRLowerExprNode(ps, setOffsetAddrExpr, module, fnIdx, blkIdx, tempSeed, setOffsetAddrName, errText) = 0 Then Return 0
+        Dim setOffsetNameConst As String
+        setOffsetNameConst = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, setOffsetNameConst, 1, Chr(34) & ps.ast.nodes(setOffsetTargetExpr).value & Chr(34)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", 3, "SETNEWOFFSET", setOffsetNameConst, setOffsetAddrName
+        Return 1
+
+    Case "POKEB_STMT", "POKEW_STMT", "POKED_STMT"
+        Dim pkMode As String
+        Dim pkOffset As Integer
+        MIRStmtMemoryMode ps, stmtIdx, pkMode, pkOffset
+        If MIRChildCount(ps, stmtIdx) - pkOffset <> 2 Then
+            errText = "mir: " & k & " expects address,value"
+            Return 0
+        End If
+        Dim pkAddrName As String
+        Dim pkValName As String
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, pkOffset), module, fnIdx, blkIdx, tempSeed, pkAddrName, errText) = 0 Then Return 0
+        If MIRLowerExprNode(ps, MIRChildAt(ps, stmtIdx, pkOffset + 1), module, fnIdx, blkIdx, tempSeed, pkValName, errText) = 0 Then Return 0
+        ' S-021/S-049: literal width operand -- see MEMCOPY case above for why.
+        MIRAppendInstruction module, fnIdx, blkIdx, "MIR_MEMORY_STORE", "", 4, pkMode, pkAddrName, pkValName, LTrim(Str(MIRStmtMemoryWidth(k)))
+        Return 1
+
+    Case Else
+        handledOut = 0
+        Return 1
+    End Select
+End Function
+
+Private Function MIRLowerTopLevelStmtFlowCore(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    MIRSetCurrentSourceFromAstNode ps, stmtIdx
+    handledOut = 1
+    If stmtIdx < 0 Or stmtIdx >= ps.ast.count Then handledOut = 0: Return 1
+
+    Dim st As ASTNode
+    st = ps.ast.nodes(stmtIdx)
+    Dim k As String
+    k = UCase(st.kind)
+
+    Select Case k
+    Case "RETURN_STMT"
+        Dim retValueName As String
+        Dim retExprNode As Integer
+        retExprNode = MIRChildAt(ps, stmtIdx, 0)
+        If retExprNode = -1 Then
+            retValueName = "__result__"
+        Else
+            If MIRLowerExprNode(ps, retExprNode, module, fnIdx, blkIdx, tempSeed, retValueName, errText) = 0 Then Return 0
+        End If
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_RET, "", 1, retValueName
+        Return 1
+
+    Case "END_STMT"
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_RET, "", 1, "__result__"
+        Return 1
+
+    Case "EXIT_STMT"
+        Dim exitBreakBlock As Integer
+        Dim exitContBlock As Integer
+        Dim exitWantType As String
+        exitWantType = UCase(Trim(st.op))
+        If exitWantType = "IF" Then
+            Dim exitIfEndBlock As Integer
+            If MIRCurrentIfExitTarget(exitIfEndBlock) = 0 Then errText = "mir: EXIT IF used outside IF block": Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(exitIfEndBlock))
+            Return 1
+        End If
+        If exitWantType <> "FOR" And exitWantType <> "DO" Then exitWantType = ""
+        If MIRFindLoopContext(exitWantType, exitBreakBlock, exitContBlock) = 0 Then errText = "mir: EXIT icin uygun loop context yok": Return 0
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(exitBreakBlock))
+        Return 1
+
+    Case Else
+        handledOut = 0
+        Return 1
+    End Select
+End Function
+
+Private Sub MIREmitTryEscalationCheck(ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer)
+    Dim tryTarget As Integer
+    If MIRCurrentTryTarget(tryTarget) = 0 Then Exit Sub
+
+    Dim noExcBlock As Integer
+    noExcBlock = MIRAllocBlock(module, fnIdx)
+
+    Dim excActiveName As String
+    excActiveName = MIRNextTemp(tempSeed)
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_VAR, excActiveName, 1, "__mir_exc_active"
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JZ, "", 2, excActiveName, LTrim(Str(noExcBlock))
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(tryTarget))
+    blkIdx = noExcBlock
+End Sub
+
+Private Function MIRLowerTopLevelStmtCallDispatch(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    MIRSetCurrentSourceFromAstNode ps, stmtIdx
+    handledOut = 1
+    If stmtIdx < 0 Or stmtIdx >= ps.ast.count Then handledOut = 0: Return 1
+
+    Dim st As ASTNode
+    st = ps.ast.nodes(stmtIdx)
+    Dim k As String
+    k = UCase(st.kind)
+    If k <> "CALL_STMT" And k <> "CALL_DLL_STMT" And k <> "CALL_API_STMT" Then handledOut = 0: Return 1
+
+    Dim stmtCallName As String
+    Dim skipFirstStmtCallChild As Integer
+    Dim injectStmtReceiver As Integer
+    Dim stmtReceiverVar As String
+    stmtCallName = UCase(Trim(st.value))
+    skipFirstStmtCallChild = 0
+    injectStmtReceiver = 0
+    stmtReceiverVar = ""
+
+    Dim namespaceStmtTarget As String
+    Dim isNamespaceStmtCall As Integer
+    namespaceStmtTarget = ""
+    isNamespaceStmtCall = MIRResolveNamespaceRoutineCall(ps, stmtCallName, namespaceStmtTarget)
+    If isNamespaceStmtCall = 0 Then isNamespaceStmtCall = MIRResolveEnclosingNamespaceRoutineCall(ps, stmtCallName, namespaceStmtTarget)
+    If isNamespaceStmtCall <> 0 Then stmtCallName = namespaceStmtTarget
+
+    If isNamespaceStmtCall = 0 And st.left <> -1 And InStr(stmtCallName, ".") > 0 Then
+        Dim stmtMethodTemp As String
+        If MIRAppendMethodCallInstruction(ps, stmtIdx, module, fnIdx, blkIdx, tempSeed, stmtMethodTemp, errText) = 0 Then Return 0
+        MIREmitTryEscalationCheck module, fnIdx, blkIdx, tempSeed
+        Return 1
+    End If
+
+    If isNamespaceStmtCall = 0 And InStr(stmtCallName, ".") > 0 Then
+        Dim loweredStmtCallName As String
+        If MIRResolveMethodCallRoute(ps, stmtIdx, stmtCallName, loweredStmtCallName, injectStmtReceiver, stmtReceiverVar) <> 0 Then
+            stmtCallName = loweredStmtCallName
+        End If
+    End If
+
+    If stmtCallName = "CALL" And st.firstChild <> -1 Then
+        Dim stmtMarkerKind As String
+        Dim stmtMarkerValue As String
+        stmtMarkerKind = UCase(Trim(ps.ast.nodes(st.firstChild).kind))
+        stmtMarkerValue = UCase(Trim(ps.ast.nodes(st.firstChild).value))
+        If (stmtMarkerKind = "IDENT" Or stmtMarkerKind = "KEYWORD_REF") And stmtMarkerValue = "DLL" Then
+            stmtCallName = "DLL"
+            skipFirstStmtCallChild = 1
+        ElseIf (stmtMarkerKind = "IDENT" Or stmtMarkerKind = "KEYWORD_REF") And stmtMarkerValue = "API" Then
+            stmtCallName = "API"
+            skipFirstStmtCallChild = 1
+        End If
+    End If
+
+    Dim stmtFfiStubId As Integer
+    Dim stmtFfiArgStart As Integer
+    Dim stmtFfiReturnType As String
+    stmtFfiStubId = 0
+    stmtFfiArgStart = 0
+    stmtFfiReturnType = ""
+    If stmtCallName = "DLL" Or stmtCallName = "API" Then
+        stmtFfiStubId = MIRFfiCallOrdinal(ps, stmtIdx)
+        Dim stmtFfiBasePos As Integer
+        stmtFfiBasePos = IIf(skipFirstStmtCallChild <> 0, 1, 0)
+        Dim stmtFfiReturnNode As Integer
+        stmtFfiReturnNode = MIRChildAt(ps, stmtIdx, stmtFfiBasePos + 2)
+        If stmtFfiReturnNode <> -1 Then stmtFfiReturnType = MIRCanonicalTypeName(ps.ast.nodes(stmtFfiReturnNode).value)
+        stmtFfiArgStart = 5
+        Dim stmtFfiTypeListNode As Integer
+        stmtFfiTypeListNode = MIRChildAt(ps, stmtIdx, stmtFfiBasePos + 4)
+        If stmtFfiTypeListNode <> -1 Then
+            If UCase(Trim(ps.ast.nodes(stmtFfiTypeListNode).kind)) = "STRING" Then
+                If MIRLooksLikeFfiArgTypeList(ps.ast.nodes(stmtFfiTypeListNode).value) <> 0 Then stmtFfiArgStart = 6
+            End If
+        End If
+    End If
+
+    Dim argCount As Integer
+    argCount = MIRChildCount(ps, stmtIdx)
+    If skipFirstStmtCallChild <> 0 And argCount > 0 Then argCount -= 1
+    If injectStmtReceiver <> 0 Then argCount += 1
+
+    Dim c1 As String, c2 As String, c3 As String, c4 As String, c5 As String, c6 As String, c7 As String, c8 As String
+    Dim c9 As String, c10 As String, c11 As String, c12 As String, c13 As String, c14 As String, c15 As String, c16 As String
+    c1 = stmtCallName
+    Dim cPos As Integer
+    Dim cSlot As Integer
+    cSlot = 2
+
+    If injectStmtReceiver <> 0 Then
+        c2 = stmtReceiverVar
+        cSlot = 3
+    End If
+
+    Dim rawArgCount As Integer
+    rawArgCount = MIRChildCount(ps, stmtIdx)
+    For cPos = 0 To rawArgCount - 1
+        If skipFirstStmtCallChild <> 0 And cPos = 0 Then Continue For
+        Dim cArgNode As Integer
+        cArgNode = MIRChildAt(ps, stmtIdx, cPos)
+        If cArgNode = -1 Then errText = "mir: CALL argument missing": Return 0
+
+        Dim cArgName As String
+        If MIRLowerExprNode(ps, cArgNode, module, fnIdx, blkIdx, tempSeed, cArgName, errText) = 0 Then Return 0
+
+        Select Case cSlot
+        Case 2: c2 = cArgName
+        Case 3: c3 = cArgName
+        Case 4: c4 = cArgName
+        Case 5: c5 = cArgName
+        Case 6: c6 = cArgName
+        Case 7: c7 = cArgName
+        Case 8: c8 = cArgName
+        Case 9: c9 = cArgName
+        Case 10: c10 = cArgName
+        Case 11: c11 = cArgName
+        Case 12: c12 = cArgName
+        Case 13: c13 = cArgName
+        Case 14: c14 = cArgName
+        Case 15: c15 = cArgName
+        Case 16: c16 = cArgName
+        Case Else
+            errText = "mir: CALL arguman sayisi limiti asildi"
+            Return 0
+        End Select
+        cSlot += 1
+    Next cPos
+
+    MIRSetCurrentSourceFromAstNode ps, stmtIdx
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_CALL, "", argCount + 1, c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16
+    MIRSetLastInstructionMetadata module, fnIdx, blkIdx, stmtFfiReturnType, stmtFfiStubId, stmtFfiArgStart
+    MIREmitTryEscalationCheck module, fnIdx, blkIdx, tempSeed
+    Return 1
+End Function
+
+Private Function MIRLowerTopLevelStmtErrorFlow(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    MIRSetCurrentSourceFromAstNode ps, stmtIdx
+    handledOut = 1
+    If stmtIdx < 0 Or stmtIdx >= ps.ast.count Then handledOut = 0: Return 1
+
+    Dim st As ASTNode
+    st = ps.ast.nodes(stmtIdx)
+    Dim k As String
+    k = UCase(st.kind)
+
+    Select Case k
+    Case "THROW_STMT"
+        Dim throwExprIdx As Integer
+        throwExprIdx = MIRChildAt(ps, stmtIdx, 0)
+        If throwExprIdx = -1 Then errText = "mir: THROW expression missing": Return 0
+
+        Dim throwName As String
+        If MIRLowerExprNode(ps, throwExprIdx, module, fnIdx, blkIdx, tempSeed, throwName, errText) = 0 Then Return 0
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, "__mir_exc_value", 1, throwName
+        MIRMarkExceptionActive module, fnIdx, blkIdx, tempSeed
+
+        Dim throwTarget As Integer
+        If MIRCurrentTryTarget(throwTarget) <> 0 Then
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(throwTarget))
+            Return 1
+        End If
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_RET, "", 1, "__result__"
+        Return 1
+
+    Case "ASSERT_STMT"
+        Dim asCondIdx As Integer
+        asCondIdx = MIRChildAt(ps, stmtIdx, 0)
+        If asCondIdx = -1 Then errText = "mir: ASSERT condition missing": Return 0
+
+        Dim asCondName As String
+        Dim asCondBool As String
+        If MIRLowerExprNode(ps, asCondIdx, module, fnIdx, blkIdx, tempSeed, asCondName, errText) = 0 Then Return 0
+        MIREnsureBoolVar module, fnIdx, blkIdx, tempSeed, asCondName, asCondBool
+
+        Dim asOkBlock As Integer
+        Dim asFailBlock As Integer
+        asOkBlock = MIRAllocBlock(module, fnIdx)
+        asFailBlock = MIRAllocBlock(module, fnIdx)
+
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JZ, "", 2, asCondBool, LTrim(Str(asFailBlock))
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(asOkBlock))
+
+        Dim asFailCur As Integer
+        asFailCur = asFailBlock
+        Dim asDefaultMsg As String
+        asDefaultMsg = MIRNextTemp(tempSeed)
+        Dim asDefaultText As String
+        asDefaultText = "ASSERT failed"
+        If st.lineNo > 0 Then
+            asDefaultText &= " [line " & LTrim(Str(st.lineNo))
+            If st.colNo > 0 Then asDefaultText &= ":" & LTrim(Str(st.colNo))
+            asDefaultText &= "]"
+        End If
+        MIRAppendInstruction module, fnIdx, asFailCur, MIR_OP_LOAD_CONST, asDefaultMsg, 1, Chr(34) & asDefaultText & Chr(34)
+        MIRAppendInstruction module, fnIdx, asFailCur, MIR_OP_STORE_VAR, "__mir_exc_value", 1, asDefaultMsg
+        If MIRChildCount(ps, stmtIdx) >= 2 Then
+            Dim asMsgIdx As Integer
+            Dim asMsgName As String
+            asMsgIdx = MIRChildAt(ps, stmtIdx, 1)
+            If asMsgIdx <> -1 Then
+                If MIRLowerExprNode(ps, asMsgIdx, module, fnIdx, asFailCur, tempSeed, asMsgName, errText) = 0 Then Return 0
+                MIRAppendInstruction module, fnIdx, asFailCur, MIR_OP_STORE_VAR, "__mir_exc_value", 1, asMsgName
+            End If
+        End If
+        MIRMarkExceptionActive module, fnIdx, asFailCur, tempSeed
+
+        Dim asTarget As Integer
+        If MIRCurrentTryTarget(asTarget) <> 0 Then
+            MIRAppendInstruction module, fnIdx, asFailCur, MIR_OP_JMP, "", 1, LTrim(Str(asTarget))
+        Else
+            MIRAppendInstruction module, fnIdx, asFailCur, MIR_OP_RET, "", 1, "__result__"
+        End If
+
+        blkIdx = asOkBlock
+        Return 1
+
+    Case Else
+        handledOut = 0
+        Return 1
+    End Select
+End Function
+
+Declare Function MIRTryEmitPropertySetterCall(ByRef ps As ParseState, ByVal lhsNode As Integer, ByRef rhsName As String, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+
+' S-130: store `valueName` into a per-object CLASS field (`c.n`, `THIS.n`) as MIR_FIELD_STORE.
+' Returns 1 = stored, 0 = error (errText set), -1 = the target is not a per-object class field (a TYPE
+' field or a STATIC member): the caller stores through the flat pseudo-variable path as before.
+' Plain `=`, compound assignment (`+=`, ...) and `++/--` all end here; the compound and ++/-- paths used to
+' write the flat pseudo-variable `C.N` unconditionally, so on canonical-MIR and native x64 the write of
+' `c.n += 5` / `c.n++` vanished (the field kept its old value).
+Private Function MIRTryEmitClassFieldStore(ByRef ps As ParseState, ByVal lhsNode As Integer, ByRef assignTarget As String, ByRef valueName As String, ByRef module As MIRModule, ByVal fnIdx As Integer, ByVal blkIdx As Integer, ByRef errText As String) As Integer
+    Dim fieldDot As Integer
+    fieldDot = InStr(assignTarget, ".")
+    If fieldDot <= 1 Then Return -1
+    Dim fieldRoot As String
+    Dim fieldMember As String
+    fieldRoot = UCase(Trim(Left(assignTarget, fieldDot - 1)))
+    fieldMember = Trim(Mid(assignTarget, fieldDot + 1))
+    Dim fieldRootType As String
+    Dim fieldFinalType As String
+    Dim fieldFinalNode As Integer
+    Dim fieldOwnerType As String
+    If MIRResolveFieldRootType(ps, lhsNode, fieldRoot, fieldRootType) = 0 Then Return -1
+    If MIRResolveFieldPathTypeOwner(ps, fieldRootType, fieldMember, fieldFinalType, fieldFinalNode, fieldOwnerType) = 0 Then Return -1
+    If fieldFinalNode < 0 Then Return -1
+    If UCase(Trim(ps.ast.nodes(fieldFinalNode).kind)) <> "CLASS_FIELD" Then Return -1
+    If MIRClassFieldHasFlag(ps, fieldFinalNode, "STATIC") <> 0 Then Return -1
+    Dim fieldOffset As Integer
+    Dim fieldOffsetErr As String
+    If TypeLayoutOffsetOf(ps, fieldRootType, fieldMember, fieldOffset, fieldOffsetErr) = 0 Then
+        errText = "mir: class field offset resolve failed " & fieldOffsetErr
+        Return 0
+    End If
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_FIELD_STORE, "", 4, fieldRoot, fieldMember, valueName, LTrim(Str(fieldOffset))
+    ' the field's declared type rides along as the store's type metadata: native x64 must write exactly the
+    ' field's width (an 8-byte store into an I32 field overwrote the NEXT field)
+    If UCase(Trim(fieldFinalType)) <> "" Then MIRSetLastInstructionMetadata module, fnIdx, blkIdx, UCase(Trim(fieldFinalType))
+    Return 1
+End Function
+
+Private Function MIRLowerTopLevelStmtAssignIncDec(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef handledOut As Integer, ByRef errText As String) As Integer
+    MIRSetCurrentSourceFromAstNode ps, stmtIdx
+    handledOut = 1
+    If stmtIdx < 0 Or stmtIdx >= ps.ast.count Then handledOut = 0: Return 1
+
+    Dim st As ASTNode
+    st = ps.ast.nodes(stmtIdx)
+    Dim k As String
+    k = UCase(st.kind)
+
+    Select Case k
+    Case "ASSIGN_STMT"
+        If st.left = -1 Or st.right = -1 Then errText = "mir: assign operands missing": Return 0
+        Dim opText As String
+        opText = Trim(st.op)
+        If opText = "" Then opText = "="
+        Dim rhsName As String
+        If MIRLowerExprNode(ps, st.right, module, fnIdx, blkIdx, tempSeed, rhsName, errText) = 0 Then Return 0
+        Dim lhsKind As String, assignTarget As String, assignIndexName As String, indexedAssign As Integer
+        lhsKind = UCase(ps.ast.nodes(st.left).kind): indexedAssign = 0
+
+        ' S-050: array-of-TYPE field write with a runtime index (pts(i).X = v),
+        ' plain "=" only -- see mir_lower_expr.fbs's MIR_ARRAY_FIELD_LOAD (read
+        ' side) for why the old flat pseudo-variable-name path cannot support a
+        ' runtime index. Compound ops (+=, -=, ...) on an array-of-struct field
+        ' still use the old path below (unchanged from before this fix).
+        If (opText = "=" Or MIRCompoundAssignOpcode(opText, 0, "", 0, "") <> 0) And lhsKind = "FIELD_EXPR" And ps.ast.nodes(st.left).left <> -1 Then
+            Dim arrFieldBaseNode As Integer
+            arrFieldBaseNode = ps.ast.nodes(st.left).left
+            If UCase(Trim(ps.ast.nodes(arrFieldBaseNode).kind)) = "CALL_EXPR" Then
+                Dim arrFieldArrName As String
+                arrFieldArrName = ps.ast.nodes(arrFieldBaseNode).value
+                If InStr(arrFieldArrName, ".") = 0 And MIRIsKnownArray(module, arrFieldArrName) <> 0 And MIRChildCount(ps, arrFieldBaseNode) = 1 Then
+                    Dim arrFieldIdxExpr As Integer
+                    arrFieldIdxExpr = MIRChildAt(ps, arrFieldBaseNode, 0)
+                    Dim arrFieldIdxName As String
+                    If MIRLowerExprNode(ps, arrFieldIdxExpr, module, fnIdx, blkIdx, tempSeed, arrFieldIdxName, errText) = 0 Then Return 0
+                    Dim arrFieldMemberName As String
+                    arrFieldMemberName = UCase(Trim(ps.ast.nodes(st.left).value))
+                    Dim arrFieldElemType As String
+                    arrFieldElemType = MIRArrayElementTypeOf(module, arrFieldArrName)
+                    Dim arrFieldStoreOffset As Integer
+                    Dim arrFieldStoreSize As Integer
+                    Dim arrFieldStoreType As String
+                    Dim arrFieldStoreErr As String
+                    If TypeLayoutResolvePath(ps, arrFieldElemType, arrFieldMemberName, arrFieldStoreOffset, arrFieldStoreType, arrFieldStoreSize, arrFieldStoreErr) = 0 Then
+                        errText = "mir: array field layout resolve failed " & arrFieldStoreErr
+                        Return 0
+                    End If
+                    Dim afStoreValue As String
+                    afStoreValue = rhsName
+                    If opText <> "=" Then
+                        ' S-080: a compound assignment on an array-of-TYPE field is
+                        ' read-modify-write through the same array+object path as the plain
+                        ' store: load the CURRENT field, apply the operator, store the result.
+                        ' It used to fall into the flat pseudo-variable path, which silently
+                        ' dropped the operator (pts(1).X = 5 : pts(1).X += 3 left 5) in
+                        ' canonical-MIR and native x64. The index expression was lowered
+                        ' ONCE above, so pts(i++).X += 1 evaluates i++ a single time.
+                        Dim afCurTmp As String
+                        afCurTmp = MIRNextTemp(tempSeed)
+                        MIRAppendInstruction module, fnIdx, blkIdx, "MIR_ARRAY_FIELD_LOAD", afCurTmp, 6, arrFieldArrName, arrFieldIdxName, arrFieldMemberName, arrFieldElemType, LTrim(Str(arrFieldStoreOffset)), LTrim(Str(arrFieldStoreSize))
+                        MIRSetLastInstructionMetadata module, fnIdx, blkIdx, arrFieldStoreType
+                        Dim afRhsKind As Integer
+                        afRhsKind = MIRInferExprFloatKind(ps, st.right)
+                        If afRhsKind = MIR_UXF_F80 Or UCase(Trim(arrFieldStoreType)) = "F80" Then
+                            errText = "mir: F80 arithmetic not supported"
+                            Return 0
+                        End If
+                        Dim afOpcode As String
+                        If MIRCompoundAssignOpcode(opText, IIf(MIRTypeNameIsFloat64Family(arrFieldStoreType) <> 0 Or afRhsKind <> MIR_UXF_UNKNOWN, 1, 0), arrFieldStoreType, UXBExprIsU64(ps, st.right), afOpcode) = 0 Then
+                            errText = "mir: unsupported assign op " & opText
+                            Return 0
+                        End If
+                        afStoreValue = MIRNextTemp(tempSeed)
+                        MIRAppendInstruction module, fnIdx, blkIdx, afOpcode, afStoreValue, 2, afCurTmp, rhsName
+                        MIRSetLastInstructionMetadata module, fnIdx, blkIdx, arrFieldStoreType
+                    End If
+                    MIRAppendInstruction module, fnIdx, blkIdx, "MIR_ARRAY_FIELD_STORE", "", 7, arrFieldArrName, arrFieldIdxName, arrFieldMemberName, afStoreValue, arrFieldElemType, LTrim(Str(arrFieldStoreOffset)), LTrim(Str(arrFieldStoreSize))
+                    Return 1
+                End If
+            End If
+        End If
+
+        If lhsKind = "IDENT" Then
+            assignTarget = MIRNormalizeTaskResultAlias(module, fnIdx, ps.ast.nodes(st.left).value)
+        ElseIf lhsKind = "FIELD_EXPR" Then
+            If MIRBuildFieldPath(ps, st.left, assignTarget, errText) = 0 Then Return 0
+            If MIRNormalizeFieldPathForAccess(ps, st.left, assignTarget, 1, errText) = 0 Then Return 0
+        ElseIf lhsKind = "CALL_EXPR" And InStr(ps.ast.nodes(st.left).value, ".") = 0 And MIRIsKnownArray(module, ps.ast.nodes(st.left).value) <> 0 And MIRChildCount(ps, st.left) >= 1 Then
+            assignTarget = ps.ast.nodes(st.left).value
+            If MIRLowerFlatArrayIndex(ps, st.left, assignTarget, module, fnIdx, blkIdx, tempSeed, assignIndexName, errText) = 0 Then Return 0
+            indexedAssign = 1
+        Else
+            errText = "mir: assign lhs must be ident, field, or indexed array": Return 0
+        End If
+
+        Select Case opText
+        Case "=", "=+"
+            If lhsKind = "FIELD_EXPR" Then
+                Dim propertySetEq As Integer
+                propertySetEq = MIRTryEmitPropertySetterCall(ps, st.left, rhsName, module, fnIdx, blkIdx, tempSeed, errText)
+                If propertySetEq = 0 Then Return 0
+                If propertySetEq > 0 Then Return 1
+            End If
+            If indexedAssign <> 0 Then
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_INDEXED, "", 3, assignTarget, assignIndexName, rhsName
+            ElseIf lhsKind = "FIELD_EXPR" Then
+                Dim classStoreEq As Integer
+                classStoreEq = MIRTryEmitClassFieldStore(ps, st.left, assignTarget, rhsName, module, fnIdx, blkIdx, errText)
+                If classStoreEq = 0 Then Return 0
+                If classStoreEq < 0 Then MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, assignTarget, 1, rhsName
+            Else
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, assignTarget, 1, rhsName
+            End If
+        Case "=-"
+            Dim negTmp As String
+            negTmp = MIRNextTemp(tempSeed)
+            Dim rkindNeg As Integer
+            rkindNeg = MIRInferExprFloatKind(ps, st.right)
+            If rkindNeg = MIR_UXF_F80 Then errText = "mir: F80 arithmetic not supported": Return 0
+            MIRAppendInstruction module, fnIdx, blkIdx, IIf(rkindNeg <> MIR_UXF_UNKNOWN, MIR_OP_FNEG, MIR_OP_NEG), negTmp, 1, rhsName
+            If lhsKind = "FIELD_EXPR" Then
+                Dim propertySetNeg As Integer
+                propertySetNeg = MIRTryEmitPropertySetterCall(ps, st.left, negTmp, module, fnIdx, blkIdx, tempSeed, errText)
+                If propertySetNeg = 0 Then Return 0
+                If propertySetNeg > 0 Then Return 1
+            End If
+            If indexedAssign <> 0 Then
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_INDEXED, "", 3, assignTarget, assignIndexName, negTmp
+            Else
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, assignTarget, 1, negTmp
+            End If
+        Case "+=", "-=", "*=", "/=", "\=", "%=", "&=", "|=", "^=", "<<=", ">>=", "**=", "ROL=", "ROR="
+            Dim compoundOp As String, compoundTmp As String, compoundLhs As String
+            Dim compoundFloat As Integer, lkind As Integer, rkind As Integer
+            lkind = MIRInferExprFloatKind(ps, st.left): rkind = MIRInferExprFloatKind(ps, st.right)
+            If lkind = MIR_UXF_F80 Or rkind = MIR_UXF_F80 Then errText = "mir: F80 arithmetic not supported": Return 0
+            compoundFloat = IIf(lkind <> MIR_UXF_UNKNOWN Or rkind <> MIR_UXF_UNKNOWN, 1, 0)
+            Select Case opText
+            Case "+=": compoundOp = IIf(compoundFloat <> 0, MIR_OP_FADD, MIR_OP_ADD)
+            Case "-=": compoundOp = IIf(compoundFloat <> 0, MIR_OP_FSUB, MIR_OP_SUB)
+            Case "*=": compoundOp = IIf(compoundFloat <> 0, MIR_OP_FMUL, MIR_OP_MUL)
+            Case "/=": compoundOp = IIf(compoundFloat <> 0, MIR_OP_FDIV, MIR_OP_DIV)
+            Case "\=": compoundOp = MIR_OP_IDIV
+            Case "%=": compoundOp = MIR_OP_MOD
+            Case "&=": compoundOp = MIR_OP_AND
+            Case "|=": compoundOp = MIR_OP_OR
+            Case "^=": compoundOp = MIR_OP_XOR
+            Case "<<=": compoundOp = MIR_OP_SHL
+            Case ">>=": compoundOp = MIR_OP_SHR
+            Case "**=": compoundOp = MIR_OP_POW
+            Case "ROL=": compoundOp = MIR_OP_ROL
+            Case "ROR=": compoundOp = MIR_OP_ROR
+            End Select
+            If opText = ">>=" Then
+                Dim compoundLeftType As String
+                If MIRTryInferExprTypeName(ps, st.left, compoundLeftType) <> 0 Then
+                    If MIRTypeNameIsUnsignedInteger(compoundLeftType) <> 0 Then compoundOp = MIR_OP_USHR
+                End If
+            End If
+            ' S-077: unsigned 64-bit target/operand -> unsigned \= and %=.
+            If (compoundOp = MIR_OP_IDIV Or compoundOp = MIR_OP_MOD) And compoundFloat = 0 Then
+                If UXBExprIsU64(ps, st.left) <> 0 Or UXBExprIsU64(ps, st.right) <> 0 Then compoundOp = IIf(compoundOp = MIR_OP_IDIV, MIR_OP_UIDIV, MIR_OP_UMOD)
+            End If
+            If lhsKind = "FIELD_EXPR" Then
+                If MIRLowerExprNode(ps, st.left, module, fnIdx, blkIdx, tempSeed, compoundLhs, errText) = 0 Then Return 0
+            Else
+                compoundLhs = assignTarget
+            End If
+            If indexedAssign <> 0 And lhsKind <> "FIELD_EXPR" Then
+                compoundLhs = MIRNextTemp(tempSeed)
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_INDEXED, compoundLhs, 2, assignTarget, assignIndexName
+            End If
+            compoundTmp = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, compoundOp, compoundTmp, 2, compoundLhs, rhsName
+            ' S-088: a U32 target's arithmetic result carries the static type (wraps modulo 2^32 even where a
+            ' backend does not narrow on store, e.g. JS).
+            Dim compoundTargetType As String
+            If MIRTryInferExprTypeName(ps, st.left, compoundTargetType) <> 0 Then
+                If UCase(Trim(compoundTargetType)) = "U32" Or UCase(Trim(compoundTargetType)) = "TYPE_U32" Then MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "U32"
+            End If
+            If lhsKind = "FIELD_EXPR" Then
+                Dim propertySetCompound As Integer
+                propertySetCompound = MIRTryEmitPropertySetterCall(ps, st.left, compoundTmp, module, fnIdx, blkIdx, tempSeed, errText)
+                If propertySetCompound = 0 Then Return 0
+                If propertySetCompound > 0 Then Return 1
+            End If
+            If indexedAssign <> 0 Then
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_INDEXED, "", 3, assignTarget, assignIndexName, compoundTmp
+            ElseIf lhsKind = "FIELD_EXPR" Then
+                ' S-130: a per-object class field is written with MIR_FIELD_STORE like plain `=`
+                Dim classStoreCompound As Integer
+                classStoreCompound = MIRTryEmitClassFieldStore(ps, st.left, assignTarget, compoundTmp, module, fnIdx, blkIdx, errText)
+                If classStoreCompound = 0 Then Return 0
+                If classStoreCompound < 0 Then MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, assignTarget, 1, compoundTmp
+            Else
+                MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, assignTarget, 1, compoundTmp
+            End If
+        Case Else
+            errText = "mir: unsupported assign op " & opText: Return 0
+        End Select
+        Return 1
+
+    Case "INCDEC_STMT"
+        If st.left = -1 Then errText = "mir: INCDEC target missing": Return 0
+        Dim incTarget As String, incTmp As String, incOne As String, incSource As String, incIndexName As String, incIndexed As Integer
+        incIndexed = 0
+        If UCase(ps.ast.nodes(st.left).kind) = "IDENT" Then
+            incTarget = MIRNormalizeTaskResultAlias(module, fnIdx, ps.ast.nodes(st.left).value): incSource = incTarget
+        ElseIf UCase(ps.ast.nodes(st.left).kind) = "FIELD_EXPR" Then
+            If MIRBuildFieldPath(ps, st.left, incTarget, errText) = 0 Then Return 0
+            If MIRNormalizeFieldPathForAccess(ps, st.left, incTarget, 1, errText) = 0 Then Return 0
+            If MIRLowerExprNode(ps, st.left, module, fnIdx, blkIdx, tempSeed, incSource, errText) = 0 Then Return 0
+        ElseIf UCase(ps.ast.nodes(st.left).kind) = "CALL_EXPR" And InStr(ps.ast.nodes(st.left).value, ".") = 0 And MIRIsKnownArray(module, ps.ast.nodes(st.left).value) <> 0 And MIRChildCount(ps, st.left) >= 1 Then
+            incTarget = ps.ast.nodes(st.left).value
+            If MIRLowerFlatArrayIndex(ps, st.left, incTarget, module, fnIdx, blkIdx, tempSeed, incIndexName, errText) = 0 Then Return 0
+            incSource = MIRNextTemp(tempSeed)
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_INDEXED, incSource, 2, incTarget, incIndexName
+            incIndexed = 1
+        Else
+            errText = "mir: INCDEC target must be ident, field, or indexed array": Return 0
+        End If
+        incTmp = MIRNextTemp(tempSeed): incOne = MIRNextTemp(tempSeed)
+        Dim incKind As Integer
+        incKind = MIRInferExprFloatKind(ps, st.left)
+        If incKind = MIR_UXF_F80 Then errText = "mir: F80 arithmetic not supported": Return 0
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, incOne, 1, IIf(incKind <> MIR_UXF_UNKNOWN, "1.0", "1")
+        If Trim(st.op) = "--" Then
+            MIRAppendInstruction module, fnIdx, blkIdx, IIf(incKind <> MIR_UXF_UNKNOWN, MIR_OP_FSUB, MIR_OP_SUB), incTmp, 2, incSource, incOne
+        Else
+            MIRAppendInstruction module, fnIdx, blkIdx, IIf(incKind <> MIR_UXF_UNKNOWN, MIR_OP_FADD, MIR_OP_ADD), incTmp, 2, incSource, incOne
+        End If
+        ' S-088: a U32 target's ++/-- result carries the static type (wraps modulo 2^32)
+        Dim incTargetType As String
+        If MIRTryInferExprTypeName(ps, st.left, incTargetType) <> 0 Then
+            If UCase(Trim(incTargetType)) = "U32" Or UCase(Trim(incTargetType)) = "TYPE_U32" Then MIRSetLastInstructionMetadata module, fnIdx, blkIdx, "U32"
+        End If
+        If UCase(ps.ast.nodes(st.left).kind) = "FIELD_EXPR" Then
+            Dim propertySetInc As Integer
+            propertySetInc = MIRTryEmitPropertySetterCall(ps, st.left, incTmp, module, fnIdx, blkIdx, tempSeed, errText)
+            If propertySetInc = 0 Then Return 0
+            If propertySetInc > 0 Then Return 1
+        End If
+        If incIndexed <> 0 Then
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_INDEXED, "", 3, incTarget, incIndexName, incTmp
+        ElseIf UCase(ps.ast.nodes(st.left).kind) = "FIELD_EXPR" Then
+            ' S-130: `c.n++` / `THIS.n--` on a per-object class field -> MIR_FIELD_STORE
+            Dim classStoreInc As Integer
+            classStoreInc = MIRTryEmitClassFieldStore(ps, st.left, incTarget, incTmp, module, fnIdx, blkIdx, errText)
+            If classStoreInc = 0 Then Return 0
+            If classStoreInc < 0 Then MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, incTarget, 1, incTmp
+        Else
+            MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, incTarget, 1, incTmp
+        End If
+        Return 1
+
+    Case Else
+        handledOut = 0
+        Return 1
+    End Select
+End Function
+
+Private Function MIRTryEmitPropertySetterCall(ByRef ps As ParseState, ByVal lhsNode As Integer, ByRef rhsName As String, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    If lhsNode < 0 Or lhsNode >= ps.ast.count Then Return -1
+    If UCase(ps.ast.nodes(lhsNode).kind) <> "FIELD_EXPR" Then Return -1
+
+    Dim fieldPath As String
+    Dim pathErr As String
+    If MIRBuildFieldPath(ps, lhsNode, fieldPath, pathErr) = 0 Then Return -1
+
+    Dim dotPos As Integer
+    dotPos = InStr(fieldPath, ".")
+    If dotPos <= 1 Then Return -1
+
+    Dim rootName As String
+    Dim memberPath As String
+    rootName = UCase(Trim(Left(fieldPath, dotPos - 1)))
+    memberPath = Trim(Mid(fieldPath, dotPos + 1))
+    If rootName = "" Or memberPath = "" Then Return -1
+
+    Dim rootType As String
+    If MIRResolveFieldRootType(ps, lhsNode, rootName, rootType) = 0 Then Return -1
+
+    Dim setterName As String
+    Dim propertyType As String
+    If MIRResolvePropertyAccessorRoutine(ps, lhsNode, rootType, memberPath, "SET", setterName, propertyType) = 0 Then Return -1
+
+    Dim recvName As String
+    Dim recvNode As Integer
+    recvNode = ps.ast.nodes(lhsNode).left
+    Dim propertyOwner As String
+    Dim propertyNode As Integer
+    Dim staticProperty As Integer
+    If MIRFindClassMemberInHierarchy(ps, rootType, memberPath, propertyOwner, propertyNode) <> 0 Then
+        staticProperty = MIRClassPropertyHasFlag(ps, propertyNode, "STATIC")
+    End If
+
+    If staticProperty <> 0 And MIRIsClassNameExpr(ps, recvNode, rootType) <> 0 Then
+        recvName = ""
+    ElseIf recvNode = -1 Then
+        recvName = rootName
+    Else
+        If MIRLowerExprNode(ps, recvNode, module, fnIdx, blkIdx, tempSeed, recvName, errText) = 0 Then Return 0
+    End If
+
+    MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_METHOD_CALL, "", 5, UCase(Trim(setterName)), recvName, MIRFieldPathFirstIdent(memberPath), rootType, rhsName
+    Return 1
+End Function
+
+#include once "mir_lower_stmt_core_split.fbs"
+
+Private Function MIRLowerTopLevelStmt(ByRef ps As ParseState, ByVal stmtIdx As Integer, ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef blkIdx As Integer, ByRef tempSeed As Integer, ByRef errText As String) As Integer
+    MIRSetCurrentSourceFromAstNode ps, stmtIdx
+    If stmtIdx < 0 Or stmtIdx >= ps.ast.count Then Return 1
+
+    Dim st As ASTNode
+    st = ps.ast.nodes(stmtIdx)
+    Dim k As String
+    k = UCase(st.kind)
+
+    Select Case k
+    Case "LABEL_STMT"
+        Dim labelName As String
+        labelName = Trim(st.value)
+        If labelName = "" Then
+            errText = "mir: LABEL name missing"
+            Return 0
+        End If
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LABEL, "", 1, labelName
+        Return 1
+    Case "GOTO_STMT"
+        Dim gotoTarget As String
+        gotoTarget = Trim(st.value)
+        If gotoTarget = "" Then
+            errText = "mir: GOTO target missing"
+            Return 0
+        End If
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_GOTO, "", 1, gotoTarget
+        Return 1
+    Case "GOSUB_STMT"
+        Dim gosubTarget As String
+        gosubTarget = Trim(st.value)
+        If gosubTarget = "" Then
+            errText = "mir: GOSUB target missing"
+            Return 0
+        End If
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_GOSUB, "", 1, gosubTarget
+        Return 1
+    End Select
+
+    If k = "INLINE_STMT" Then
+        Dim inlineHeader As String
+        Dim inlineBody As String
+        Dim inlineLabel As String
+        inlineHeader = Trim(st.value)
+        inlineBody = st.op
+        inlineLabel = "__uxb_inline_" & LTrim(Str(stmtIdx))
+        MIRAppendInstruction module, fnIdx, blkIdx, "INLINE", "", 3, inlineLabel, inlineHeader, inlineBody
+        Return 1
+    End If
+
+    Dim handledIoConsole As Integer
+    handledIoConsole = 0
+    If MIRLowerTopLevelStmtIoConsole(ps, stmtIdx, module, fnIdx, blkIdx, tempSeed, handledIoConsole, errText) = 0 Then Return 0
+    If handledIoConsole <> 0 Then Return 1
+    Dim handledMemoryStmt As Integer
+    handledMemoryStmt = 0
+    If MIRLowerTopLevelStmtMemory(ps, stmtIdx, module, fnIdx, blkIdx, tempSeed, handledMemoryStmt, errText) = 0 Then Return 0
+    If handledMemoryStmt <> 0 Then Return 1
+    Dim handledSlotLane As Integer
+    handledSlotLane = 0
+    If MIRLowerTopLevelSlotLane(ps, stmtIdx, module, fnIdx, blkIdx, tempSeed, handledSlotLane, errText) = 0 Then Return 0
+    If handledSlotLane <> 0 Then Return 1
+    Dim handledFlowCore As Integer
+    handledFlowCore = 0
+    If MIRLowerTopLevelStmtFlowCore(ps, stmtIdx, module, fnIdx, blkIdx, tempSeed, handledFlowCore, errText) = 0 Then Return 0
+    If handledFlowCore <> 0 Then Return 1
+    Dim handledCallDispatch As Integer
+    handledCallDispatch = 0
+    If MIRLowerTopLevelStmtCallDispatch(ps, stmtIdx, module, fnIdx, blkIdx, tempSeed, handledCallDispatch, errText) = 0 Then Return 0
+    If handledCallDispatch <> 0 Then Return 1
+    Dim handledErrorFlow As Integer
+    handledErrorFlow = 0
+    If MIRLowerTopLevelStmtErrorFlow(ps, stmtIdx, module, fnIdx, blkIdx, tempSeed, handledErrorFlow, errText) = 0 Then Return 0
+    If handledErrorFlow <> 0 Then Return 1
+    Dim handledAssignIncDec As Integer
+    handledAssignIncDec = 0
+    If MIRLowerTopLevelStmtAssignIncDec(ps, stmtIdx, module, fnIdx, blkIdx, tempSeed, handledAssignIncDec, errText) = 0 Then Return 0
+    If handledAssignIncDec <> 0 Then Return 1
+
+    Dim handledCoreA As Integer
+    handledCoreA = 0
+    If MIRLowerTopLevelStmtCoreA(ps, stmtIdx, module, fnIdx, blkIdx, tempSeed, handledCoreA, errText) = 0 Then Return 0
+    If handledCoreA <> 0 Then Return 1
+    Dim handledCoreB As Integer
+    handledCoreB = 0
+    If MIRLowerTopLevelStmtCoreB(ps, stmtIdx, module, fnIdx, blkIdx, tempSeed, handledCoreB, errText) = 0 Then Return 0
+    If handledCoreB <> 0 Then Return 1
+    Select Case k
+    Case "IF_STMT"
+        Dim ifCount As Integer
+        ifCount = MIRChildCount(ps, stmtIdx)
+        If ifCount < 1 Then
+            errText = "mir: IF condition missing"
+            Return 0
+        End If
+
+        Dim endBlock As Integer
+        endBlock = MIRAllocBlock(module, fnIdx)
+        MIRPushIfExitTarget endBlock
+
+        Dim condBlock As Integer
+        condBlock = blkIdx
+
+        Dim partPos As Integer
+        partPos = 0
+
+        Do
+            Dim partNode As Integer
+            Dim partKind As String
+            Dim condExpr As Integer
+            Dim bodyStart As Integer
+            Dim bodyEnd As Integer
+            Dim nextPartPos As Integer
+            nextPartPos = -1
+
+            If partPos = 0 Then
+                partNode = stmtIdx
+                partKind = "IF_STMT"
+                condExpr = MIRChildAt(ps, stmtIdx, 0)
+                bodyStart = 1
+
+                bodyEnd = ifCount - 1
+                Dim z As Integer
+                For z = 1 To ifCount - 1
+                    Dim zn As Integer
+                    zn = MIRChildAt(ps, stmtIdx, z)
+                    If zn <> -1 Then
+                        Dim zk As String
+                        zk = UCase(ps.ast.nodes(zn).kind)
+                        If zk = "ELSEIF_PART" Or zk = "ELSE_PART" Then
+                            bodyEnd = z - 1
+                            nextPartPos = z
+                            Exit For
+                        End If
+                    End If
+                Next z
+            Else
+                partNode = MIRChildAt(ps, stmtIdx, partPos)
+                If partNode = -1 Then Exit Do
+                partKind = UCase(ps.ast.nodes(partNode).kind)
+
+                If partKind = "ELSE_PART" Then
+                    If MIRLowerStmtRange(ps, partNode, 0, MIRChildCount(ps, partNode) - 1, module, fnIdx, condBlock, tempSeed, errText) = 0 Then Return 0
+                    MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_JMP, "", 1, LTrim(Str(endBlock))
+                    Exit Do
+                End If
+
+                If partKind <> "ELSEIF_PART" Then Exit Do
+                condExpr = MIRChildAt(ps, partNode, 0)
+                bodyStart = 1
+                bodyEnd = MIRChildCount(ps, partNode) - 1
+
+                Dim followingPartNode As Integer
+                followingPartNode = MIRChildAt(ps, stmtIdx, partPos + 1)
+                If followingPartNode <> -1 Then
+                    Dim followingPartKind As String
+                    followingPartKind = UCase(ps.ast.nodes(followingPartNode).kind)
+                    If followingPartKind = "ELSEIF_PART" Or followingPartKind = "ELSE_PART" Then nextPartPos = partPos + 1
+                End If
+            End If
+
+            If condExpr = -1 Then
+                errText = "mir: IF/ELSEIF condition missing"
+                Return 0
+            End If
+
+            Dim condName As String
+            Dim condBool As String
+            If MIRLowerExprNode(ps, condExpr, module, fnIdx, condBlock, tempSeed, condName, errText) = 0 Then Return 0
+            MIREnsureBoolVar module, fnIdx, condBlock, tempSeed, condName, condBool
+
+            Dim trueBlock As Integer
+            trueBlock = MIRAllocBlock(module, fnIdx)
+
+            Dim falseBlock As Integer
+            falseBlock = endBlock
+
+            If nextPartPos <> -1 Then falseBlock = MIRAllocBlock(module, fnIdx)
+
+            MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_JZ, "", 2, condBool, LTrim(Str(falseBlock))
+            MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_JMP, "", 1, LTrim(Str(trueBlock))
+
+            Dim bodyBlock As Integer
+            bodyBlock = trueBlock
+            If bodyEnd >= bodyStart Then
+                If MIRLowerStmtRange(ps, partNode, bodyStart, bodyEnd, module, fnIdx, bodyBlock, tempSeed, errText) = 0 Then Return 0
+            End If
+            MIRAppendInstruction module, fnIdx, bodyBlock, MIR_OP_JMP, "", 1, LTrim(Str(endBlock))
+
+            If falseBlock = endBlock Then Exit Do
+            condBlock = falseBlock
+            partPos = nextPartPos
+        Loop
+
+        MIRPopIfExitTarget
+        blkIdx = endBlock
+        Return 1
+
+    Case "SELECT_STMT"
+        Dim selCount As Integer
+        selCount = MIRChildCount(ps, stmtIdx)
+        If selCount < 1 Then
+            errText = "mir: SELECT selector missing"
+            Return 0
+        End If
+
+        Dim selectorExpr As Integer
+        Dim selectorName As String
+        selectorExpr = MIRChildAt(ps, stmtIdx, 0)
+        If selectorExpr = -1 Then
+            errText = "mir: SELECT selector missing"
+            Return 0
+        End If
+        If MIRLowerExprNode(ps, selectorExpr, module, fnIdx, blkIdx, tempSeed, selectorName, errText) = 0 Then Return 0
+
+        Dim selEndBlock As Integer
+        selEndBlock = MIRAllocBlock(module, fnIdx)
+
+        Dim caseCondBlock As Integer
+        caseCondBlock = blkIdx
+
+        Dim casePos As Integer
+        For casePos = 1 To selCount - 1
+            Dim caseNode As Integer
+            caseNode = MIRChildAt(ps, stmtIdx, casePos)
+            If caseNode = -1 Then
+                errText = "mir: SELECT case missing"
+                Return 0
+            End If
+
+            Dim caseKind As String
+            caseKind = UCase(ps.ast.nodes(caseNode).kind)
+
+            If caseKind = "CASE_ELSE" Then
+                If MIRLowerStmtRange(ps, caseNode, 0, MIRChildCount(ps, caseNode) - 1, module, fnIdx, caseCondBlock, tempSeed, errText) = 0 Then Return 0
+                MIRAppendInstruction module, fnIdx, caseCondBlock, MIR_OP_JMP, "", 1, LTrim(Str(selEndBlock))
+                Exit For
+            End If
+
+            If caseKind <> "CASE_BLOCK" Then
+                errText = "mir: unexpected SELECT case node " & ps.ast.nodes(caseNode).kind
+                Return 0
+            End If
+
+            Dim caseChildCount As Integer
+            caseChildCount = MIRChildCount(ps, caseNode)
+
+            Dim bodyStart As Integer
+            bodyStart = caseChildCount
+            Dim cp As Integer
+            For cp = 0 To caseChildCount - 1
+                Dim cchild As Integer
+                cchild = MIRChildAt(ps, caseNode, cp)
+                If cchild <> -1 And MIRIsStmtKind(ps.ast.nodes(cchild).kind) <> 0 Then
+                    bodyStart = cp
+                    Exit For
+                End If
+            Next cp
+
+            If bodyStart <= 0 Then
+                errText = "mir: CASE values missing"
+                Return 0
+            End If
+
+            Dim orVar As String
+            orVar = ""
+
+            For cp = 0 To bodyStart - 1
+                Dim cexpr As Integer
+                Dim rhsName As String
+                Dim cmpVar As String
+                Dim cmpOp As String
+
+                cexpr = MIRChildAt(ps, caseNode, cp)
+                If cexpr = -1 Then
+                    errText = "mir: CASE expression missing"
+                    Return 0
+                End If
+
+                cmpOp = MIR_OP_EQ
+                If UCase(ps.ast.nodes(cexpr).kind) = "CASE_IS_VALUE" Then
+                    If ps.ast.nodes(cexpr).left = -1 Then
+                        errText = "mir: CASE IS expression missing"
+                        Return 0
+                    End If
+                    If MIRLowerExprNode(ps, ps.ast.nodes(cexpr).left, module, fnIdx, caseCondBlock, tempSeed, rhsName, errText) = 0 Then Return 0
+
+                    Dim rel As String
+                    rel = Trim(ps.ast.nodes(cexpr).op)
+                    If MIRMapBinaryOpcode(rel, 0, cmpOp) = 0 Then
+                        errText = "mir: CASE IS invalid relop " & rel
+                        Return 0
+                    End If
+                Else
+                    If MIRLowerExprNode(ps, cexpr, module, fnIdx, caseCondBlock, tempSeed, rhsName, errText) = 0 Then Return 0
+                End If
+
+                cmpVar = MIRNextTemp(tempSeed)
+                MIRAppendInstruction module, fnIdx, caseCondBlock, cmpOp, cmpVar, 2, selectorName, rhsName
+
+                If orVar = "" Then
+                    orVar = cmpVar
+                Else
+                    Dim nextOr As String
+                    nextOr = MIRNextTemp(tempSeed)
+                    MIRAppendInstruction module, fnIdx, caseCondBlock, MIR_OP_OR, nextOr, 2, orVar, cmpVar
+                    orVar = nextOr
+                End If
+            Next cp
+
+            If orVar = "" Then
+                errText = "mir: CASE condition assembly failed"
+                Return 0
+            End If
+
+            Dim trueBlock As Integer
+            Dim falseBlock As Integer
+            trueBlock = MIRAllocBlock(module, fnIdx)
+            falseBlock = selEndBlock
+
+            If casePos < selCount - 1 Then
+                falseBlock = MIRAllocBlock(module, fnIdx)
+            End If
+
+            MIRAppendInstruction module, fnIdx, caseCondBlock, MIR_OP_JZ, "", 2, orVar, LTrim(Str(falseBlock))
+            MIRAppendInstruction module, fnIdx, caseCondBlock, MIR_OP_JMP, "", 1, LTrim(Str(trueBlock))
+
+            Dim caseBodyBlock As Integer
+            caseBodyBlock = trueBlock
+            If MIRLowerStmtRange(ps, caseNode, bodyStart, caseChildCount - 1, module, fnIdx, caseBodyBlock, tempSeed, errText) = 0 Then Return 0
+            MIRAppendInstruction module, fnIdx, caseBodyBlock, MIR_OP_JMP, "", 1, LTrim(Str(selEndBlock))
+
+            caseCondBlock = falseBlock
+        Next casePos
+
+        blkIdx = selEndBlock
+        Return 1
+
+    Case "FOR_STMT"
+        Dim forCount As Integer
+        forCount = MIRChildCount(ps, stmtIdx)
+        If forCount < 3 Then
+            errText = "mir: FOR missing start/end/step"
+            Return 0
+        End If
+
+        Dim startExpr As Integer, endExpr As Integer, stepExpr As Integer
+        Dim startName As String, endName As String, stepName As String
+        startExpr = MIRChildAt(ps, stmtIdx, 0)
+        endExpr = MIRChildAt(ps, stmtIdx, 1)
+        stepExpr = MIRChildAt(ps, stmtIdx, 2)
+        If startExpr = -1 Or endExpr = -1 Or stepExpr = -1 Then
+            errText = "mir: FOR header missing"
+            Return 0
+        End If
+
+        If MIRLowerExprNode(ps, startExpr, module, fnIdx, blkIdx, tempSeed, startName, errText) = 0 Then Return 0
+        If MIRLowerExprNode(ps, endExpr, module, fnIdx, blkIdx, tempSeed, endName, errText) = 0 Then Return 0
+        If MIRLowerExprNode(ps, stepExpr, module, fnIdx, blkIdx, tempSeed, stepName, errText) = 0 Then Return 0
+
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_STORE_VAR, st.value, 1, startName
+
+        Dim forFloat As Integer
+        forFloat = 0
+        Dim skind As Integer
+        Dim ekind As Integer
+        Dim tkind As Integer
+        skind = MIRInferExprFloatKind(ps, startExpr)
+        ekind = MIRInferExprFloatKind(ps, endExpr)
+        tkind = MIRInferExprFloatKind(ps, stepExpr)
+        If skind = MIR_UXF_F80 Or ekind = MIR_UXF_F80 Or tkind = MIR_UXF_F80 Then
+            errText = "mir: F80 arithmetic not supported"
+            Return 0
+        End If
+        If skind <> MIR_UXF_UNKNOWN Or ekind <> MIR_UXF_UNKNOWN Or tkind <> MIR_UXF_UNKNOWN Then
+            forFloat = 1
+        Else
+            Dim forTypeName As String
+            If MIRFindNearestDeclaredType(ps, stmtIdx, st.value, forTypeName) <> 0 Then
+                forFloat = MIRIsFloatTypeName(forTypeName)
+            End If
+        End If
+
+        Dim zeroName As String
+        zeroName = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_LOAD_CONST, zeroName, 1, IIf(forFloat <> 0, "0.0", "0")
+
+        Dim condBlock As Integer, bodyBlock As Integer, incBlock As Integer, loopEnd As Integer
+        condBlock = MIRAllocBlock(module, fnIdx)
+        bodyBlock = MIRAllocBlock(module, fnIdx)
+        incBlock = MIRAllocBlock(module, fnIdx)
+        loopEnd = MIRAllocBlock(module, fnIdx)
+
+        MIRAppendInstruction module, fnIdx, blkIdx, MIR_OP_JMP, "", 1, LTrim(Str(condBlock))
+
+        Dim stepPos As String, cmpLe As String, cmpGe As String
+        Dim notStepPos As String, leftCond As String, rightCond As String, loopCond As String
+        stepPos = MIRNextTemp(tempSeed)
+        cmpLe = MIRNextTemp(tempSeed)
+        cmpGe = MIRNextTemp(tempSeed)
+        notStepPos = MIRNextTemp(tempSeed)
+        leftCond = MIRNextTemp(tempSeed)
+        rightCond = MIRNextTemp(tempSeed)
+        loopCond = MIRNextTemp(tempSeed)
+
+        MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_GT, stepPos, 2, stepName, zeroName
+        MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_LE, cmpLe, 2, st.value, endName
+        MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_GE, cmpGe, 2, st.value, endName
+        MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_NOT, notStepPos, 1, stepPos
+        MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_AND, leftCond, 2, stepPos, cmpLe
+        MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_AND, rightCond, 2, notStepPos, cmpGe
+        MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_OR, loopCond, 2, leftCond, rightCond
+        MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_JZ, "", 2, loopCond, LTrim(Str(loopEnd))
+        MIRAppendInstruction module, fnIdx, condBlock, MIR_OP_JMP, "", 1, LTrim(Str(bodyBlock))
+
+        MIRPushLoopContext "FOR", loopEnd, incBlock
+
+        Dim bodyBlk As Integer
+        bodyBlk = bodyBlock
+        If forCount > 3 Then
+            If MIRLowerStmtRange(ps, stmtIdx, 3, forCount - 1, module, fnIdx, bodyBlk, tempSeed, errText) = 0 Then
+                MIRPopLoopContext
+                Return 0
+            End If
+        End If
+        MIRAppendInstruction module, fnIdx, bodyBlk, MIR_OP_JMP, "", 1, LTrim(Str(incBlock))
+
+        Dim nextVal As String
+        nextVal = MIRNextTemp(tempSeed)
+        MIRAppendInstruction module, fnIdx, incBlock, IIf(forFloat <> 0, MIR_OP_FADD, MIR_OP_ADD), nextVal, 2, st.value, stepName
+        MIRAppendInstruction module, fnIdx, incBlock, MIR_OP_STORE_VAR, st.value, 1, nextVal
+        MIRAppendInstruction module, fnIdx, incBlock, MIR_OP_JMP, "", 1, LTrim(Str(condBlock))
+
+        MIRPopLoopContext
+
+        blkIdx = loopEnd
+        Return 1
+
+    Case Else
+        Return 1
+    End Select
+End Function
+
+#include once "mir_tail.fbs"

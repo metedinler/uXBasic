@@ -1,0 +1,615 @@
+#ifndef UXB_JS_STMT_EMIT_FBS
+#define UXB_JS_STMT_EMIT_FBS
+
+Public Function UXBJsBlockLabel(ByVal blockId As Integer) As String
+    Return "B" & Trim(Str(blockId))
+End Function
+
+' S-051: JS backend never implemented BYREF (grep for paramByRef under
+' src/codegen/js returned nothing before this fix) -- generated JS always
+' passed parameters by value, so `SUB BumpVal(BYREF x AS I32)` mutating x
+' never propagated back to the caller (silent wrong result vs. AST/MIR/x64,
+' all three of which already implement real BYREF). Each generated JS
+' function has its OWN `const vars = Object.create(null)` (js_emitter.fbs),
+' so unlike a shared/global namespace, a caller's and callee's `vars` are
+' genuinely different objects -- passing the raw value can never let the
+' callee write back. The fix is the same "getter/setter box" Codex proposed
+' on 2026-09-07 and reuses the exact Object.defineProperty forwarding
+' pattern already used for global variables a few lines below: byref
+' arguments are passed as a tiny accessor object closing over the CALLER's
+' vars slot; the callee defines its parameter as a property that forwards
+' through that accessor instead of copying a value in. Needs the MIR module
+' (for the callee's paramByRef signature by name) which UXBJsEmitInstruction
+' historically was never given -- kept as a module-level pointer set once by
+' UXBJsSetCurrentModule (js_emitter.fbs) rather than threading a new
+' parameter through every JS emit function, to keep the change contained.
+Dim Shared gJsCurrentModulePtr As MIRModule Ptr
+
+Public Sub UXBJsSetCurrentModule(ByRef m As MIRModule)
+    gJsCurrentModulePtr = @m
+End Sub
+
+Private Function UXBJsFindFunctionByName(ByRef nameText As String, ByRef fnOut As MIRFunction Ptr) As Integer
+    fnOut = 0
+    If gJsCurrentModulePtr = 0 Then Return 0
+    Dim target As String
+    target = UCase(Trim(nameText))
+    Dim i As Integer
+    For i = 0 To gJsCurrentModulePtr->functionCount - 1
+        If UCase(Trim(gJsCurrentModulePtr->functions(i).name)) = target Then
+            fnOut = @gJsCurrentModulePtr->functions(i)
+            Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+Private Function UXBJsLooksLikePlainVariableToken(ByRef tokenText As String) As Integer
+    Dim t As String
+    t = Trim(tokenText)
+    If t = "" Then Return 0
+    Dim c0 As String
+    c0 = Mid(t, 1, 1)
+    If (c0 >= "A" And c0 <= "Z") = 0 AndAlso (c0 >= "a" And c0 <= "z") = 0 AndAlso c0 <> "_" Then Return 0
+    Dim i As Integer
+    For i = 1 To Len(t)
+        Dim c As String
+        c = Mid(t, i, 1)
+        Dim isAlnum As Integer
+        isAlnum = IIf((c >= "A" And c <= "Z") Or (c >= "a" And c <= "z") Or (c >= "0" And c <= "9") Or c = "_", 1, 0)
+        If isAlnum = 0 Then Return 0
+    Next i
+    Return 1
+End Function
+
+' Builds the comma-joined argument list for a call to a known user function,
+' boxing each BYREF argument as a get/set accessor over the CALLER's own
+' `vars` slot instead of passing its plain value. Falls back to the normal
+' by-value form for any argument that is not a plain variable token (a
+' non-lvalue at a BYREF position is a semantic-checker bug elsewhere, not
+' something this backend should crash on) and for every non-BYREF parameter.
+Private Function UXBJsBuildCallArgsWithByRef(ByRef ins As MIRIRInstruction, ByRef calleeFn As MIRFunction) As String
+    Dim outText As String
+    outText = ""
+    Dim i As Integer
+    For i = 1 To ins.operandCount - 1
+        If i > 1 Then outText &= ", "
+        Dim paramIdx As Integer
+        paramIdx = i - 1
+        Dim isByRef As Integer
+        isByRef = 0
+        If paramIdx <= UBound(calleeFn.paramByRef) Then isByRef = calleeFn.paramByRef(paramIdx)
+        If isByRef <> 0 AndAlso UXBJsLooksLikePlainVariableToken(ins.operands(i)) <> 0 Then
+            Dim key As String
+            key = UXBJsVarKey(ins.operands(i))
+            outText &= "{ get value() { return vars[" & key & "]; }, set value(v) { vars[" & key & "] = v; } }"
+        Else
+            outText &= UXBJsOperand(ins.operands(i))
+        End If
+    Next i
+    Return outText
+End Function
+
+
+Private Function UXBJsSourceComment(ByRef ins As MIRIRInstruction, ByRef noteText As String = "") As String
+    Dim lineText As String
+    lineText = MIRGetSourceLine(ins)
+    If lineText = "" And Trim(noteText) = "" Then Return ""
+    Dim outText As String
+    outText = "      //"
+    If lineText <> "" Then outText &= " " & lineText
+    outText &= " " & UXBJsCanonicalOpcode(ins.opcode)
+    If Trim(ins.srcLoc.lexemeSnippet) <> "" Then outText &= " lexeme=" & UXBJsQuote(ins.srcLoc.lexemeSnippet)
+    If Trim(noteText) <> "" Then outText &= " " & noteText
+    Return outText & Chr(10)
+End Function
+
+Private Function UXBJsArgsFromInstruction(ByRef ins As MIRIRInstruction, ByVal startIndex As Integer) As String
+    Dim i As Integer
+    Dim args As String
+    args = ""
+    For i = startIndex To ins.operandCount - 1
+        If i > startIndex Then args &= ", "
+        args &= UXBJsOperand(ins.operands(i))
+    Next i
+    Return args
+End Function
+
+Private Function UXBJsRawArgsFromInstruction(ByRef ins As MIRIRInstruction, ByVal startIndex As Integer) As String
+    Dim i As Integer
+    Dim args As String
+    args = ""
+    For i = startIndex To ins.operandCount - 1
+        If i > startIndex Then args &= ", "
+        args &= UXBJsQuote(ins.operands(i))
+    Next i
+    Return args
+End Function
+
+
+Private Function UXBJsIsVirtualMethodTarget(ByRef targetText As String) As Integer
+    Return IIf(Left(UCase(Trim(targetText)), Len("__VT_SLOT__:")) = "__VT_SLOT__:", 1, 0)
+End Function
+
+Private Function UXBJsVirtualSlot(ByRef targetText As String) As Integer
+    Dim p As Integer
+    p = InStrRev(Trim(targetText), ":")
+    If p <= 0 Then Return -1
+    Return Val(Mid(Trim(targetText), p + 1))
+End Function
+
+Private Function UXBJsEmitMethodCall(ByRef ins As MIRIRInstruction, ByRef outText As String, ByRef errText As String) As Integer
+    If ins.operandCount < 4 Then
+        errText = "JS METHOD_CALL requires target, receiver, method and receiver type"
+        Return 0
+    End If
+
+    Dim receiver As String
+    Dim target As String
+    Dim methodName As String
+    Dim args As String
+    receiver = UXBJsOperand(ins.operands(1))
+    target = UCase(Trim(ins.operands(0)))
+    methodName = UCase(Trim(ins.operands(2)))
+    args = UXBJsArgsFromInstruction(ins, 4)
+
+    If Trim(ins.operands(1)) = "" Then
+        If UXBJsIsVirtualMethodTarget(target) <> 0 Then
+            errText = "JS METHOD_CALL static receiver cannot be virtual"
+            Return 0
+        End If
+        If target = "__METHOD_CALL__:" Or target = "" Then
+            errText = "JS STATIC METHOD_CALL unresolved target: " & methodName
+            Return 0
+        End If
+        If Trim(ins.result) <> "" Then
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = await ux.callStaticMethod(" & UXBJsQuote(target)
+        Else
+            outText &= "      await ux.callStaticMethod(" & UXBJsQuote(target)
+        End If
+        If args <> "" Then outText &= ", " & args
+        outText &= ");" & Chr(10)
+        Return 1
+    End If
+
+    If UXBJsIsVirtualMethodTarget(target) <> 0 Then
+        Dim slot As Integer
+        slot = UXBJsVirtualSlot(target)
+        If slot < 0 Then
+            errText = "JS METHOD_CALL invalid virtual slot: " & target
+            Return 0
+        End If
+        If Trim(ins.result) <> "" Then
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = await ux.virtualCall(" & receiver & ", " & Trim(Str(slot))
+        Else
+            outText &= "      await ux.virtualCall(" & receiver & ", " & Trim(Str(slot))
+        End If
+    Else
+        If target = "__METHOD_CALL__:" Or target = "" Then
+            errText = "JS METHOD_CALL unresolved target: " & methodName
+            Return 0
+        End If
+        If Trim(ins.result) <> "" Then
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = await ux.callMethod(" & receiver & ", " & UXBJsQuote(target) 
+        Else
+            outText &= "      await ux.callMethod(" & receiver & ", " & UXBJsQuote(target)
+        End If
+    End If
+
+    If args <> "" Then outText &= ", " & args
+    outText &= ");" & Chr(10)
+    Return 1
+End Function
+
+Private Function UXBJsEmitVirtualMethodCall(ByRef ins As MIRIRInstruction, ByRef outText As String, ByRef errText As String) As Integer
+    If ins.operandCount < 4 Then
+        errText = "JS VIRTUAL_CALL requires target, receiver, method and receiver type"
+        Return 0
+    End If
+    If UXBJsIsVirtualMethodTarget(ins.operands(0)) = 0 Then
+        errText = "JS VIRTUAL_CALL target is not a vtable slot: " & ins.operands(0)
+        Return 0
+    End If
+    Return UXBJsEmitMethodCall(ins, outText, errText)
+End Function
+
+Private Function UXBJsEmitHostCall(ByRef ins As MIRIRInstruction, ByRef outText As String, ByRef callName As String, ByRef args As String) As Integer
+    If Trim(ins.result) <> "" Then
+        outText &= "      " & UXBJsAssignTarget(ins.result) & " = await ux.callHost(" & UXBJsQuote(callName) & ", [" & args & "]);" & Chr(10)
+    Else
+        outText &= "      await ux.callHost(" & UXBJsQuote(callName) & ", [" & args & "]);" & Chr(10)
+    End If
+    Return 1
+End Function
+
+Private Function UXBJsEmitNativeBlocked(ByRef ins As MIRIRInstruction, ByRef outText As String, ByRef callName As String) As Integer
+    outText &= "      throw new Error(" & UXBJsQuote("native-only opcode in JS backend: " & callName) & ");" & Chr(10)
+    Return 1
+End Function
+
+' S-022: the name set UXBJsEmitCall's Case Else must route to ux.builtin(...)
+' instead of a blind ux.callHost(...) — kept in sync with UXBJsEmitRuntimeBuiltin's
+' Select Case below (which stayed unreachable dead code before this fix) and with
+' the same name list implemented in runtime/js/common/ux_runtime_core.js's
+' lang.builtin(name, args).
+Private Function UXBJsIsRuntimeBuiltinName(ByRef callName As String) As Integer
+    Select Case callName
+    Case "ABS", "SQR", "SQRT", "SIN", "COS", "TAN", "ATN", "LOG", "EXP", "FIX", "INT", "SGN", "RND", "TIMER"
+        Return 1
+    Case "ASC", "CHR", "VAL", "STR", "CINT", "CLNG", "CSNG", "CDBL", "LEN", "CPLEN", "LEFT", "RIGHT", "MID", "INSTR", "LCASE", "UCASE", "LTRIM", "RTRIM", "TRIM", "SPACE", "HEX", "OCT", "BIN", "BIGINIT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function UXBJsEmitRuntimeBuiltin(ByRef ins As MIRIRInstruction, ByRef outText As String, ByRef callName As String, ByRef args As String) As Integer
+    Select Case callName
+    Case "ABS", "SQR", "SQRT", "SIN", "COS", "TAN", "ATN", "LOG", "EXP", "FIX", "INT", "SGN", "RND", "TIMER"
+        If Trim(ins.result) <> "" Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.builtin(" & UXBJsQuote(callName) & ", [" & args & "]);" & Chr(10)
+    Case "ASC", "CHR", "VAL", "STR", "CINT", "CLNG", "CSNG", "CDBL", "LEN", "CPLEN", "LEFT", "RIGHT", "MID", "INSTR", "LCASE", "UCASE", "LTRIM", "RTRIM", "TRIM", "SPACE", "HEX", "OCT", "BIN", "BIGINIT"
+        If Trim(ins.result) <> "" Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.builtin(" & UXBJsQuote(callName) & ", [" & args & "]);" & Chr(10)
+    Case Else
+        Return UXBJsEmitHostCall(ins, outText, callName, args)
+    End Select
+    Return 1
+End Function
+
+Private Function UXBJsEmitCall(ByRef ins As MIRIRInstruction, ByRef outText As String, ByRef errText As String) As Integer
+    Dim callName As String
+    Dim args As String
+    If ins.operandCount < 1 Then
+        errText = "JS call target is empty"
+        Return 0
+    End If
+    callName = UXBJsCallName(ins.operands(0))
+    args = UXBJsArgsFromInstruction(ins, 1)
+    If UXBJsNativeOnly(callName) <> 0 Then Return UXBJsEmitNativeBlocked(ins, outText, callName)
+
+    Select Case callName
+    Case "PRINT"
+        outText &= "      ux.print(" & args & ");" & Chr(10)
+    Case "PRINTLN"
+        outText &= "      ux.println(" & args & ");" & Chr(10)
+    Case "INPUT"
+        If Trim(ins.result) <> "" Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = await ux.input(" & args & ");" & Chr(10)
+    Case "CLS"
+        outText &= "      ux.cls();" & Chr(10)
+    Case "COLOR"
+        outText &= "      ux.color(" & args & ");" & Chr(10)
+    Case "LOCATE"
+        outText &= "      ux.locate(" & args & ");" & Chr(10)
+    Case Else
+        If Trim(callName) <> "" Then
+            Dim fallbackExpr As String
+            If UXBJsIsRuntimeBuiltinName(callName) <> 0 Then
+                fallbackExpr = "ux.builtin(" & UXBJsQuote(callName) & ", [" & args & "])"
+            Else
+                fallbackExpr = "await ux.callHost(" & UXBJsQuote(callName) & ", [" & args & "])"
+            End If
+            ' S-051: if callName resolves to a known user function, pass its
+            ' BYREF arguments (if any) as get/set accessor boxes over the
+            ' caller's own vars slots instead of plain values, so writes
+            ' inside the callee are visible here after it returns. Host/
+            ' builtin calls (fallbackExpr above) are unaffected -- BYREF is
+            ' only meaningful for a real uXBasic SUB/FUNCTION.
+            Dim userCallArgs As String
+            userCallArgs = args
+            Dim calleeFn As MIRFunction Ptr
+            If UXBJsFindFunctionByName(callName, calleeFn) <> 0 Then
+                userCallArgs = UXBJsBuildCallArgsWithByRef(ins, *calleeFn)
+            End If
+
+            If Trim(ins.result) <> "" Then
+                outText &= "      if (__uxbUser[" & UXBJsQuote(callName) & "]) {" & UXBJsAssignTarget(ins.result) & " = await __uxbUser[" & UXBJsQuote(callName) & "](" & userCallArgs & "); } else {" & UXBJsAssignTarget(ins.result) & " = " & fallbackExpr & "; }" & Chr(10)
+            Else
+                outText &= "      if (__uxbUser[" & UXBJsQuote(callName) & "]) { await __uxbUser[" & UXBJsQuote(callName) & "](" & userCallArgs & "); } else { " & fallbackExpr & "; }" & Chr(10)
+            End If
+        End If
+    End Select
+    Return 1
+End Function
+
+Private Function UXBJsTargetBlockId(ByRef textValue As String) As Integer
+    Return Val(Trim(textValue))
+End Function
+
+Private Sub UXBJsEmitCompoundAssign(ByRef ins As MIRIRInstruction, ByRef outText As String, ByRef jsop As String)
+    Dim lhs As String
+    Dim rhs As String
+    If ins.operandCount >= 2 Then
+        lhs = UXBJsAssignTarget(ins.operands(0))
+        rhs = UXBJsOperand(ins.operands(1))
+        outText &= "      " & lhs & " = (" & lhs & " " & jsop & " " & rhs & ");" & Chr(10)
+    End If
+End Sub
+
+Private Function UXBJsScalarCastExpression(ByRef sourceExpr As String, ByRef targetTypeRaw As String) As String
+    Dim t As String
+    t = UCase(Trim(targetTypeRaw))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    If t = "BOOL" Then t = "BOOLEAN"
+    Select Case t
+    Case "BOOLEAN": Return "((" & sourceExpr & ") !== 0 ? -1 : 0)"
+    Case "U8": Return "Number(BigInt.asUintN(8, BigInt(Math.trunc(Number(" & sourceExpr & ")))))"
+    Case "U16": Return "Number(BigInt.asUintN(16, BigInt(Math.trunc(Number(" & sourceExpr & ")))))"
+    Case "U32": Return "Number(BigInt.asUintN(32, BigInt(Math.trunc(Number(" & sourceExpr & ")))))"
+    Case "U64": Return "Number(BigInt.asUintN(64, BigInt(Math.trunc(Number(" & sourceExpr & ")))))"
+    Case "I8": Return "Number(BigInt.asIntN(8, BigInt(Math.trunc(Number(" & sourceExpr & ")))))"
+    Case "I16": Return "Number(BigInt.asIntN(16, BigInt(Math.trunc(Number(" & sourceExpr & ")))))"
+    Case "I32": Return "Number(BigInt.asIntN(32, BigInt(Math.trunc(Number(" & sourceExpr & ")))))"
+    Case "I64": Return "Number(BigInt.asIntN(64, BigInt(Math.trunc(Number(" & sourceExpr & ")))))"
+    Case "F32": Return "Math.fround(Number(" & sourceExpr & "))"
+    Case "F64", "PTR": Return "Number(" & sourceExpr & ")"
+    End Select
+    Return "(() => { throw new Error(" & UXBJsQuote("unsupported scalar CAST target: " & t) & "); })()"
+End Function
+
+' S-088: an operation whose instruction carries the static type U32 wraps modulo 2^32 (the
+' temporary too, not only a later store). MUL uses Math.imul so the LOW 32 bits stay exact
+' (a plain double product loses them above 2^53); the others fit a double exactly.
+Private Function UXBJsWrapIfU32(ByRef ins As MIRIRInstruction, ByRef op As String, ByRef lhs As String, ByRef rhs As String, ByRef exprText As String) As String
+    Dim t As String
+    t = UCase(Trim(ins.resultType))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
+    If t <> "U32" Then Return exprText
+    Select Case op
+    Case "MUL"
+        Return "(Math.imul(Number(" & lhs & "), Number(" & rhs & ")) >>> 0)"
+    Case "ADD", "SUB", "SHL", "AND", "OR", "XOR", "NEG", "NOT", "NAND", "NOR", "XNOR", "IMP", "CIMP", "NIMP", "NCIMP", "NOTA", "NOTB", "ROL", "ROR"
+        Return "((" & exprText & ") >>> 0)"
+    End Select
+    Return exprText
+End Function
+
+Public Function UXBJsEmitInstruction(ByRef ins As MIRIRInstruction, ByRef outText As String, ByRef errText As String) As Integer
+    Dim op As String
+    Dim jsop As String
+    Dim cond As String
+    Dim targetLabel As String
+    Dim args As String
+    Dim lhs As String
+    Dim rhs As String
+
+    op = UXBJsCanonicalOpcode(ins.opcode)
+    outText &= UXBJsSourceComment(ins)
+
+    If UXBJsSurfaceIsMetadata(op) <> 0 Then
+        outText &= "      ;" & Chr(10)
+        Return 1
+    End If
+
+    If UXBJsNativeOnly(op) <> 0 Then
+        Return UXBJsEmitNativeBlocked(ins, outText, op)
+    End If
+
+    Select Case op
+    Case "LOAD_CONST"
+        If Trim(ins.result) <> "" And ins.operandCount >= 1 Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = " & UXBJsOperand(ins.operands(0)) & ";" & Chr(10)
+
+    Case "LOAD_VAR"
+        If Trim(ins.result) <> "" And ins.operandCount >= 1 Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = " & UXBJsOperand(ins.operands(0)) & ";" & Chr(10)
+
+    Case "STORE_VAR"
+        If ins.operandCount >= 2 Then
+            outText &= "      " & UXBJsAssignTarget(ins.operands(0)) & " = " & UXBJsOperand(ins.operands(1)) & ";" & Chr(10)
+        ElseIf ins.operandCount >= 1 And Trim(ins.result) <> "" Then
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = " & UXBJsOperand(ins.operands(0)) & ";" & Chr(10)
+        End If
+
+    Case "INC"
+        If ins.operandCount >= 1 Then outText &= "      " & UXBJsAssignTarget(ins.operands(0)) & " = (" & UXBJsOperand(ins.operands(0)) & " + 1);" & Chr(10)
+    Case "DEC"
+        If ins.operandCount >= 1 Then outText &= "      " & UXBJsAssignTarget(ins.operands(0)) & " = (" & UXBJsOperand(ins.operands(0)) & " - 1);" & Chr(10)
+
+    Case "ADD_ASSIGN": UXBJsEmitCompoundAssign ins, outText, "+"
+    Case "SUB_ASSIGN": UXBJsEmitCompoundAssign ins, outText, "-"
+    Case "MUL_ASSIGN": UXBJsEmitCompoundAssign ins, outText, "*"
+    Case "DIV_ASSIGN": UXBJsEmitCompoundAssign ins, outText, "/"
+    Case "IDIV_ASSIGN": UXBJsEmitCompoundAssign ins, outText, "/"
+    Case "MOD_ASSIGN": UXBJsEmitCompoundAssign ins, outText, "%"
+    Case "SHL_ASSIGN": UXBJsEmitCompoundAssign ins, outText, "<<"
+    Case "SHR_ASSIGN": UXBJsEmitCompoundAssign ins, outText, ">>"
+    Case "OR_ASSIGN": UXBJsEmitCompoundAssign ins, outText, "|"
+    Case "XOR_ASSIGN": UXBJsEmitCompoundAssign ins, outText, "^"
+
+    Case "NEG"
+        If Trim(ins.result) <> "" And ins.operandCount >= 1 Then
+            lhs = UXBJsOperand(ins.operands(0))
+            rhs = ""
+            Dim negExpr As String = "-(" & lhs & ")"
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = " & UXBJsWrapIfU32(ins, op, lhs, rhs, negExpr) & ";" & Chr(10)
+        End If
+    Case "NOT"
+        If Trim(ins.result) <> "" And ins.operandCount >= 1 Then
+            lhs = UXBJsOperand(ins.operands(0))
+            rhs = ""
+            Dim notExpr As String = "Number(BigInt.asIntN(64, ~BigInt(" & lhs & ")))"
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = " & UXBJsWrapIfU32(ins, op, lhs, rhs, notExpr) & ";" & Chr(10)
+        End If
+    Case "ROL", "ROR", "POW"
+        If Trim(ins.result) <> "" And ins.operandCount >= 2 Then
+            lhs = UXBJsOperand(ins.operands(0))
+            rhs = UXBJsOperand(ins.operands(1))
+            outText &= "      " & UXBJsAssignTarget(ins.result) & " = " & UXBJsBinaryExpression(op, lhs, rhs) & ";" & Chr(10)
+        End If
+
+    Case "CAST", "COERCE"
+        If Trim(ins.result) = "" Or ins.operandCount <> 1 Or Trim(ins.resultType) = "" Then
+            errText = "JS CAST requires one operand, result and target type"
+            Return 0
+        End If
+        lhs = UXBJsOperand(ins.operands(0))
+        outText &= "      " & UXBJsAssignTarget(ins.result) & " = " & UXBJsScalarCastExpression(lhs, ins.resultType) & ";" & Chr(10)
+    Case "TYPEOF"
+        If Trim(ins.result) <> "" And ins.operandCount >= 1 Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.typeOf(" & UXBJsOperand(ins.operands(0)) & ");" & Chr(10)
+    Case "SIZEOF"
+        If Trim(ins.result) <> "" Then
+            If ins.operandCount >= 1 Then
+                outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.sizeOf(" & UXBJsQuote(ins.operands(0)) & ");" & Chr(10)
+            Else
+                outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.sizeOf(" & UXBJsQuote("") & ");" & Chr(10)
+            End If
+        End If
+    Case "OFFSETOF"
+        If Trim(ins.result) <> "" Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.offsetOf(" & UXBJsRawArgsFromInstruction(ins, 0) & ");" & Chr(10)
+    Case "CODEPTR", "LPTR", "ADDR_OF"
+        If Trim(ins.result) <> "" And ins.operandCount >= 1 Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.pointerOf(" & UXBJsQuote(op) & ", " & UXBJsQuote(ins.operands(0)) & ");" & Chr(10)
+
+    Case "CALL", "CALL_BUILTIN", "CALL_RUNTIME", "CALL_EXTERNAL", "CALL_DLL", "CALL_API"
+        If UXBJsEmitCall(ins, outText, errText) = 0 Then Return 0
+
+    Case "PRINT"
+        args = UXBJsArgsFromInstruction(ins, 0)
+        outText &= "      ux.print(" & args & ");" & Chr(10)
+    Case "INPUT"
+        args = UXBJsArgsFromInstruction(ins, 0)
+        If Trim(ins.result) <> "" Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = await ux.input(" & args & ");" & Chr(10)
+    Case "CLS"
+        outText &= "      ux.cls();" & Chr(10)
+    Case "COLOR"
+        outText &= "      ux.color(" & UXBJsArgsFromInstruction(ins, 0) & ");" & Chr(10)
+    Case "LOCATE"
+        outText &= "      ux.locate(" & UXBJsArgsFromInstruction(ins, 0) & ");" & Chr(10)
+    Case "RANDOMIZE"
+        outText &= "      ux.randomize(" & UXBJsArgsFromInstruction(ins, 0) & ");" & Chr(10)
+    Case "TIMER", "RND"
+        If Trim(ins.result) <> "" Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.builtin(" & UXBJsQuote(op) & ", []);" & Chr(10)
+
+    Case "JMP"
+        If ins.operandCount >= 1 Then
+            targetLabel = UXBJsBlockLabel(UXBJsTargetBlockId(ins.operands(0)))
+            outText &= "      pc = " & UXBJsQuote(targetLabel) & "; continue;" & Chr(10)
+        End If
+    Case "JZ"
+        If ins.operandCount >= 2 Then
+            cond = UXBJsOperand(ins.operands(0))
+            targetLabel = UXBJsBlockLabel(UXBJsTargetBlockId(ins.operands(1)))
+            outText &= "      if (!(" & cond & ")) { pc = " & UXBJsQuote(targetLabel) & "; continue; }" & Chr(10)
+        End If
+    Case "JNZ"
+        If ins.operandCount >= 2 Then
+            cond = UXBJsOperand(ins.operands(0))
+            targetLabel = UXBJsBlockLabel(UXBJsTargetBlockId(ins.operands(1)))
+            outText &= "      if (" & cond & ") { pc = " & UXBJsQuote(targetLabel) & "; continue; }" & Chr(10)
+        End If
+    Case "RET"
+        If ins.operandCount >= 1 Then
+            outText &= "      return " & UXBJsOperand(ins.operands(0)) & ";" & Chr(10)
+        ElseIf Trim(ins.result) <> "" Then
+            outText &= "      return " & UXBJsOperand(ins.result) & ";" & Chr(10)
+        Else
+            outText &= "      return;" & Chr(10)
+        End If
+
+    Case "METHOD_CALL"
+        Return UXBJsEmitMethodCall(ins, outText, errText)
+
+    Case "VIRTUAL_CALL"
+        Return UXBJsEmitVirtualMethodCall(ins, outText, errText)
+
+    Case "MEMORY_REF"
+        If ins.operandCount <> 4 Or Trim(ins.result) = "" Then errText = "JS MIR_MEMORY_REF requires kind,name,elementBytes,byteLength and result": Return 0
+        If UCase(Trim(ins.operands(0))) <> "ARRAY" Then errText = "JS MIR_MEMORY_REF unsupported kind: " & ins.operands(0): Return 0
+        outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.memoryRefArray(" & UXBJsOperand(ins.operands(1)) & ", " & UXBJsOperand(ins.operands(2)) & ");" & Chr(10)
+    Case "ARRAY_SIZEOF"
+        If ins.operandCount <> 3 Or Trim(ins.result) = "" Then errText = "JS MIR_ARRAY_SIZEOF requires name,elementBytes,elementCount and result": Return 0
+        outText &= "      " & UXBJsAssignTarget(ins.result) & " = (" & UXBJsOperand(ins.operands(1)) & " * " & UXBJsOperand(ins.operands(2)) & ");" & Chr(10)
+    Case "ARRAY_LBOUND", "ARRAY_UBOUND"
+        ' S-101: run-time bounds of a 1-D array (REDIM'd / array parameter); static bounds are constants.
+        If ins.operandCount <> 2 Or Trim(ins.result) = "" Then errText = "JS MIR_ARRAY_LBOUND/UBOUND requires name,dimension and result": Return 0
+        If Trim(ins.operands(1)) <> "1" Then errText = "JS MIR_ARRAY_LBOUND/UBOUND dimension must be 1 for run-time bounds: " & ins.operands(0): Return 0
+        outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux." & IIf(op = "ARRAY_UBOUND", "arrayUBound", "arrayLBound") & "(" & UXBJsOperand(ins.operands(0)) & ");" & Chr(10)
+
+    Case "MEMORY_LOAD", "MIR_MEMORY_LOAD", "MIR_MEM_LOAD", "MIR_PEEK"
+        If ins.operandCount <> 3 Or Trim(ins.result) = "" Then errText = "JS MEMORY_LOAD requires mode,address,width": Return 0
+        outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.memoryLoad(" & UXBJsQuote(ins.operands(0)) & ", " & UXBJsOperand(ins.operands(1)) & ", " & UXBJsOperand(ins.operands(2)) & ");" & Chr(10)
+    Case "MEMORY_STORE", "MIR_MEMORY_STORE", "MIR_MEM_STORE", "MIR_POKE"
+        If ins.operandCount <> 4 Then errText = "JS MEMORY_STORE requires mode,address,value,width": Return 0
+        outText &= "      ux.memoryStore(" & UXBJsQuote(ins.operands(0)) & ", " & UXBJsOperand(ins.operands(1)) & ", " & UXBJsOperand(ins.operands(2)) & ", " & UXBJsOperand(ins.operands(3)) & ");" & Chr(10)
+    Case "MEMORY_COPY", "MIR_MEMORY_COPY", "MIR_MEM_COPY"
+        If ins.operandCount <> 5 Then errText = "JS MEMORY_COPY requires mode,src,dst,count,width": Return 0
+        outText &= "      ux.memoryCopy(" & UXBJsQuote(ins.operands(0)) & ", " & UXBJsOperand(ins.operands(1)) & ", " & UXBJsOperand(ins.operands(2)) & ", " & UXBJsOperand(ins.operands(3)) & ", " & UXBJsOperand(ins.operands(4)) & ");" & Chr(10)
+    Case "MEMORY_FILL", "MIR_MEMORY_FILL", "MIR_MEM_FILL"
+        If ins.operandCount <> 5 Then errText = "JS MEMORY_FILL requires mode,dst,value,count,width": Return 0
+        outText &= "      ux.memoryFill(" & UXBJsQuote(ins.operands(0)) & ", " & UXBJsOperand(ins.operands(1)) & ", " & UXBJsOperand(ins.operands(2)) & ", " & UXBJsOperand(ins.operands(3)) & ", " & UXBJsOperand(ins.operands(4)) & ");" & Chr(10)
+    Case "MEMORY_READ_SEQUENCE", "MIR_MEMORY_READ_SEQUENCE"
+        If ins.operandCount <> 3 Or Trim(ins.result) = "" Then errText = "JS MEMORY_READ_SEQUENCE requires mode,address,length,result": Return 0
+        outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.memoryReadSequence(" & UXBJsQuote(ins.operands(0)) & ", " & UXBJsOperand(ins.operands(1)) & ", " & UXBJsOperand(ins.operands(2)) & ");" & Chr(10)
+    Case "MEMORY_WRITE_SEQUENCE", "MIR_MEMORY_WRITE_SEQUENCE"
+        If ins.operandCount <> 4 Then errText = "JS MEMORY_WRITE_SEQUENCE requires mode,dst,source,length": Return 0
+        outText &= "      ux.memoryWriteSequence(" & UXBJsQuote(ins.operands(0)) & ", " & UXBJsOperand(ins.operands(1)) & ", " & UXBJsOperand(ins.operands(2)) & ", " & UXBJsOperand(ins.operands(3)) & ");" & Chr(10)
+    Case "DELETE_OBJECT"
+        If ins.operandCount < 1 Then
+            errText = "JS DELETE_OBJECT requires object operand"
+            Return 0
+        End If
+        outText &= "      await ux.objectDelete(" & UXBJsOperand(ins.operands(0)) & ");" & Chr(10)
+
+    Case "DIM"
+        ' DIM only ever reaches MIR as an instruction for array declarations (var, lowerBound,
+        ' upperBound) -- a plain scalar DIM never emits one (see mir_lower_stmt_core_split.fbs),
+        ' so this is always the array form. Allocates the real backing array that ARRAY_LOAD/
+        ' ARRAY_STORE below need; the lower bound rides along on the array object itself so
+        ' indexed access stays correct for non-zero-based DIMs without any extra bookkeeping here.
+        If ins.operandCount >= 3 Then
+            Dim dimLower As String
+            Dim dimUpper As String
+            dimLower = UXBJsOperand(ins.operands(1))
+            dimUpper = UXBJsOperand(ins.operands(2))
+            outText &= "      " & UXBJsAssignTarget(ins.operands(0)) & " = ux.arrayNew((" & dimUpper & ") - (" & dimLower & ") + 1, 0, " & dimLower & ");" & Chr(10)
+        End If
+    Case "REDIM"
+        If ins.operandCount >= 3 Then
+            Dim redimTarget As String
+            Dim redimLower As String
+            Dim redimUpper As String
+            Dim redimPreserve As String
+            redimTarget = UXBJsAssignTarget(ins.operands(0))
+            redimLower = UXBJsOperand(ins.operands(1))
+            redimUpper = UXBJsOperand(ins.operands(2))
+            redimPreserve = IIf(ins.operandCount >= 4 And Trim(ins.operands(3)) = "1", "true", "false")
+            outText &= "      " & redimTarget & " = ux.arrayResize(" & redimTarget & ", (" & redimUpper & ") - (" & redimLower & ") + 1, 0, " & redimLower & ", " & redimPreserve & ");" & Chr(10)
+        End If
+
+    Case "ARRAY_NEW"
+        If Trim(ins.result) <> "" Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.arrayNew(" & UXBJsArgsFromInstruction(ins, 0) & ");" & Chr(10)
+    Case "ARRAY_LOAD"
+        If Trim(ins.result) <> "" And ins.operandCount >= 2 Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.arrayLoad(" & UXBJsOperand(ins.operands(0)) & ", " & UXBJsOperand(ins.operands(1)) & ");" & Chr(10)
+    Case "ARRAY_STORE"
+        If ins.operandCount >= 3 Then outText &= "      ux.arrayStore(" & UXBJsOperand(ins.operands(0)) & ", " & UXBJsOperand(ins.operands(1)) & ", " & UXBJsOperand(ins.operands(2)) & ");" & Chr(10)
+    Case "OBJECT_NEW"
+        If Trim(ins.result) <> "" Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = await ux.objectNew(" & UXBJsQuote(ins.operands(0)) & IIf(UXBJsArgsFromInstruction(ins, 2) <> "", ", " & UXBJsArgsFromInstruction(ins, 2), "") & ");" & Chr(10)
+    Case "FIELD_LOAD"
+        If Trim(ins.result) <> "" And ins.operandCount >= 2 Then outText &= "      " & UXBJsAssignTarget(ins.result) & " = ux.fieldLoad(" & UXBJsOperand(ins.operands(0)) & ", " & UXBJsQuote(ins.operands(1)) & ");" & Chr(10)
+    Case "FIELD_STORE"
+        If ins.operandCount >= 3 Then outText &= "      ux.fieldStore(" & UXBJsOperand(ins.operands(0)) & ", " & UXBJsQuote(ins.operands(1)) & ", " & UXBJsOperand(ins.operands(2)) & ");" & Chr(10)
+
+    Case "OPEN", "CLOSE", "GET", "PUT", "SEEK", "DELETE", "EOF", "LOF", "MEMCOPY", "MEMFILL", "PEEK", "POKE", "BROWSER_CALL", "HOST_CALL", "LIBRARY_CALL", "JS_CALL", "EXTFP_CALL", "JSON", "REGEX", "HTTP", "OS", "STRINGX", "LLAMA", "LUA", "PROLOG", "SQLITE", "CURL", "CRYPTO", "ARCHIVE", "IMAGE", "AUDIO", "GRAPHICS", "SERVER", "ONNX", "WEBGPU", "CANVAS"
+        args = UXBJsArgsFromInstruction(ins, 0)
+        UXBJsEmitHostCall ins, outText, op, args
+
+    Case "NATIVE_ONLY", "WASM_UNSUPPORTED", "DIAGNOSTIC_ONLY", "RESERVED_NODE", "BROKEN_NODE"
+        Return UXBJsEmitNativeBlocked(ins, outText, op)
+
+    Case Else
+        If UXBJsIsBinaryOpcode(op) <> 0 Then
+            jsop = UXBJsBinaryOp(op)
+            If Trim(ins.result) <> "" And ins.operandCount >= 2 Then
+                lhs = UXBJsOperand(ins.operands(0))
+                rhs = UXBJsOperand(ins.operands(1))
+                If op = "IDIV" Then
+                    outText &= "      " & UXBJsAssignTarget(ins.result) & " = Math.trunc((" & lhs & ") / (" & rhs & "));" & Chr(10)
+                Else
+                    Dim binExpr As String = UXBJsBinaryExpression(op, lhs, rhs)
+                    outText &= "      " & UXBJsAssignTarget(ins.result) & " = " & UXBJsWrapIfU32(ins, op, lhs, rhs, binExpr) & ";" & Chr(10)
+                End If
+            End If
+        Else
+            args = UXBJsArgsFromInstruction(ins, 0)
+            UXBJsEmitHostCall ins, outText, op, args
+        End If
+    End Select
+    Return 1
+End Function
+
+#endif

@@ -1,0 +1,166 @@
+#ifndef UXB_AST_INTERP_STMT_FBS
+#define UXB_AST_INTERP_STMT_FBS
+
+#include once "../../parser/ast.fbs"
+#include once "../common/interp_context.fbs"
+#include once "../../runtime/runtime_service_dispatch.fbs"
+#include once "ast_interp_expr.fbs"
+#include once "ast_interp_decl.fbs"
+#include once "ast_interp_call.fbs"
+#include once "ast_interp_file.fbs"
+#include once "ast_interp_memory.fbs"
+#include once "ast_interp_type_class.fbs"
+#include once "ast_interp_ffi.fbs"
+#include once "ast_interp_control.fbs"
+#include once "ast_interp_lvalue.fbs"
+#include once "ast_interp_helpers.fbs"
+#include once "ast_interp_fail_closed.fbs"
+
+Private Function UXBAstInterpExecChildren(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    Return UXBAstInterpExecSequenceChildren(ast, nodeIdx, ctx)
+End Function
+
+Function UXBAstInterpExecRuntimeStmt(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    Dim n As ASTNode = ast.nodes(nodeIdx)
+    Dim stmtKind As String
+    stmtKind = UCase(Trim(n.kind))
+
+    If stmtKind = ASTK_EVENT_STMT Or stmtKind = ASTK_PIPE_STMT Or stmtKind = ASTK_THREAD_STMT Or stmtKind = ASTK_PARALEL_STMT Then
+        If Trim(n.value) <> "" Then UXBInterpContextRegisterRoutine ctx, n.value, n.kind, nodeIdx
+        Return UXBInterpValueVoid()
+    End If
+
+    If stmtKind = ASTK_TRIGGER_STMT Then
+        Dim targetNode As Integer
+        targetNode = n.firstChild
+        If targetNode = AST_NULL Then Return UXBInterpValueError(UXB_INTERP_ERR_SYMBOL_NOT_FOUND, "TRIGGER target missing")
+        Dim targetName As String
+        targetName = ast.nodes(targetNode).symbolName
+        If Trim(targetName) = "" Then targetName = ast.nodes(targetNode).value
+        Dim taskRoutineIdx As Integer
+        taskRoutineIdx = UXBInterpContextFindRoutine(ctx, targetName)
+        If taskRoutineIdx < 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_SYMBOL_NOT_FOUND, "TRIGGER task not found: " & targetName)
+        Dim taskResult As UXBInterpValue
+        taskResult = UXBAstInterpRunTaskRoutine(ast, taskRoutineIdx, nodeIdx, ctx)
+        If UXBInterpIsError(taskResult) <> 0 Then Return taskResult
+        Dim resolvedTaskNode As Integer
+        resolvedTaskNode = taskRoutineIdx
+        If resolvedTaskNode >= 0 And resolvedTaskNode < ast.count Then
+            If UCase(Trim(ast.nodes(resolvedTaskNode).kind)) = ASTK_PIPE_STMT Then
+                UXBInterpContextSetSymbol ctx, "OUTPUT", taskResult, ast.nodes(resolvedTaskNode).typeName
+            End If
+        End If
+        Return taskResult
+    End If
+
+    Dim sid As String = UXBAstInterpServiceForStmtKind(n.kind)
+    If sid = "" Then Return UXBInterpValueVoid()
+    Dim args As UXBRuntimeArgList
+    UXBRuntimeArgListInit args
+    If n.firstChild = AST_NULL And n.value <> "" Then UXBRuntimeArgListAdd args, UXBInterpValueString(n.value)
+    Dim ch As Integer = n.firstChild
+    Do While ch <> AST_NULL
+        Dim av As UXBInterpValue = UXBAstInterpEvalExpr(ast, ch, ctx)
+        If UXBInterpIsError(av) <> 0 Then Return av
+        UXBRuntimeArgListAdd args, av
+        ch = ast.nodes(ch).nextSibling
+    Loop
+    Dim res As UXBInterpValue = UXBRuntimeDispatch(ctx.runtime, sid, args)
+    ctx.result.runtimeServiceCalls = ctx.runtime.serviceCallCount
+    ctx.result.stdoutText = ctx.runtime.stdoutText
+    Return res
+End Function
+
+Private Function UXBAstInterpExecAssign(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    Dim n As ASTNode = ast.nodes(nodeIdx)
+    Dim targetIdx As Integer = n.left
+    If targetIdx = AST_NULL Then targetIdx = UXBAstInterpChildByRole(ast, nodeIdx, "TARGET")
+    If targetIdx = AST_NULL Then targetIdx = UXBAstInterpChild(ast, nodeIdx, 0)
+    Dim exprIdx As Integer = n.right
+    If exprIdx = AST_NULL Then exprIdx = UXBAstInterpChildByRole(ast, nodeIdx, "VALUE")
+    If exprIdx = AST_NULL Then exprIdx = UXBAstInterpChild(ast, nodeIdx, 1)
+    Dim v As UXBInterpValue
+    If exprIdx <> AST_NULL Then v = UXBAstInterpEvalExpr(ast, exprIdx, ctx) Else v = UXBInterpValueFromLiteral(n.value, n.typeName)
+    If UXBInterpIsError(v) <> 0 Then Return v
+    Dim assignOp As String = UCase(Trim(n.op))
+    If assignOp <> "" And assignOp <> "=" Then
+        If targetIdx = AST_NULL Then Return UXBInterpValueError(UXB_INTERP_ERR_SYMBOL_NOT_FOUND, "compound assignment target missing")
+        Dim currentValue As UXBInterpValue = UXBAstInterpEvalExpr(ast, targetIdx, ctx)
+        If UXBInterpIsError(currentValue) <> 0 Then Return currentValue
+        Dim binaryOp As String
+        Select Case assignOp
+        Case "+=", "=+": binaryOp = "+"
+        Case "-=", "=-": binaryOp = "-"
+        Case "*=": binaryOp = "*"
+        Case "/=": binaryOp = "/"
+        Case "\=": binaryOp = "\"
+        Case "%=": binaryOp = "%"
+        Case "&=": binaryOp = "&"
+        Case "|=": binaryOp = "|"
+        Case "^=": binaryOp = "^"
+        Case "<<=": binaryOp = "SHL"
+        Case ">>=": binaryOp = "SHR"
+        Case "**=": binaryOp = "**"
+        Case "ROL=": binaryOp = "ROL"
+        Case "ROR=": binaryOp = "ROR"
+        Case Else
+            Return UXBInterpValueError(UXB_INTERP_ERR_NODE_NOT_EXECUTABLE, "compound assignment operator not executable: " & n.op)
+        End Select
+        v = UXBAstInterpBinary(binaryOp, currentValue, v)
+        If UXBInterpIsError(v) <> 0 Then Return v
+    End If
+    If targetIdx <> AST_NULL Then Return UXBAstInterpSetLValue(ast, targetIdx, ctx, v)
+    If Trim(n.value) <> "" Then
+        UXBInterpContextAssignSymbol ctx, n.value, v, n.typeName
+        If ctx.lastErrorCode <> 0 Then Return UXBInterpValueError(ctx.lastErrorCode, ctx.lastError)
+        Return UXBInterpValueVoid()
+    End If
+    Return UXBInterpValueError(UXB_INTERP_ERR_SYMBOL_NOT_FOUND, "assignment target missing")
+End Function
+
+Function UXBAstInterpExecStmt(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    If nodeIdx < 0 Or nodeIdx >= ast.count Then Return UXBInterpValueVoid()
+    Dim n As ASTNode = ast.nodes(nodeIdx)
+    ctx.result.executedSteps += 1
+    If ctx.stepLimit > 0 And ctx.result.executedSteps > ctx.stepLimit Then Return UXBInterpValueError(UXB_INTERP_ERR_LIMIT, "AST interpreter step limit exceeded (--max-steps " & LTrim(Str(ctx.stepLimit)) & ")")
+    UXBInterpTraceAdd ctx.trace, "EXEC", "AST", n.kind, "", n.value, "", n.lineNo, n.colNo
+    Select Case UCase(Trim(n.kind))
+    Case ASTK_PROGRAM, ASTK_BLOCK
+        Return UXBAstInterpExecChildren(ast, nodeIdx, ctx)
+    Case ASTK_DIM_STMT, ASTK_DIM_DECL, ASTK_CONST_STMT, ASTK_CONST_DECL, ASTK_PARAM_DECL, ASTK_REDIM_STMT, ASTK_REDIM_DECL, ASTK_SUB_STMT, ASTK_FUNCTION_STMT, ASTK_EVENT_STMT, ASTK_PIPE_STMT, ASTK_THREAD_STMT, ASTK_PARALEL_STMT, ASTK_DECLARE_SUB_STMT, ASTK_DECLARE_FUNCTION_STMT
+        Return UXBAstInterpExecDecl(ast, nodeIdx, ctx)
+    Case ASTK_ASSIGN_STMT
+        Return UXBAstInterpExecAssign(ast, nodeIdx, ctx)
+    Case ASTK_EXPR_STMT
+        If n.firstChild <> AST_NULL Then Return UXBAstInterpEvalExpr(ast, n.firstChild, ctx)
+        Return UXBAstInterpEvalExpr(ast, nodeIdx, ctx)
+    Case ASTK_BINARY, ASTK_UNARY, ASTK_CALL_EXPR, ASTK_CAST_EXPR, ASTK_INDEX_EXPR, ASTK_FIELD_EXPR, ASTK_MEMBER_EXPR, ASTK_TERNARY_EXPR, ASTK_IDENTIFIER, ASTK_KEYWORD_REF, ASTK_NUMBER, ASTK_STRING
+        Return UXBAstInterpEvalExpr(ast, nodeIdx, ctx)
+    Case ASTK_PRINT_STMT, ASTK_PRINT_ITEM, ASTK_INPUT_STMT, ASTK_CLS_STMT, ASTK_COLOR_STMT, ASTK_LOCATE_STMT, ASTK_RANDOMIZE_STMT, ASTK_SLOT_STMT, ASTK_TRIGGER_STMT
+        Return UXBAstInterpExecRuntimeStmt(ast, nodeIdx, ctx)
+    Case ASTK_CALL_STMT
+        Return UXBAstInterpExecCall(ast, nodeIdx, ctx)
+    Case ASTK_RETURN_STMT
+        Dim rv As UXBInterpValue = UXBInterpValueVoid()
+        If n.firstChild <> AST_NULL Then rv = UXBAstInterpEvalExpr(ast, n.firstChild, ctx)
+        ctx.result.returnValue = rv
+        ctx.result.statusText = "RETURN"
+        Return rv
+    Case ASTK_END_STMT
+        ctx.result.statusText = "END"
+        Return UXBInterpValueVoid()
+    Case ASTK_OPEN_STMT, ASTK_CLOSE_STMT, ASTK_GET_STMT, ASTK_PUT_STMT, ASTK_SEEK_STMT, ASTK_DELETE_STMT, ASTK_INPUT_FILE_STMT, ASTK_INPUTF_STMT, "PRINT_FILE_STMT"
+        Return UXBAstInterpExecFile(ast, nodeIdx, ctx)
+    Case ASTK_POKEB_STMT, ASTK_POKEW_STMT, ASTK_POKED_STMT, ASTK_POKES_STMT, ASTK_MEMCOPYB_STMT, ASTK_MEMCOPYW_STMT, ASTK_MEMCOPYD_STMT, ASTK_MEMFILLB_STMT, ASTK_MEMFILLW_STMT, ASTK_MEMFILLD_STMT, ASTK_SETNEWOFFSET_STMT
+        Return UXBAstInterpExecMemory(ast, nodeIdx, ctx)
+    Case ASTK_CLASS_STMT, ASTK_TYPE_STMT, ASTK_INTERFACE_STMT, ASTK_CLASS_FIELD, ASTK_TYPE_FIELD, ASTK_CLASS_METHOD_DECL, ASTK_INTERFACE_METHOD_DECL, ASTK_CLASS_PROPERTY_DECL, ASTK_CLASS_OPERATOR_DECL, ASTK_CLASS_CONSTRUCTOR_DECL, ASTK_CLASS_DESTRUCTOR_DECL, ASTK_NEW_EXPR, ASTK_FIELD_EXPR, ASTK_MEMBER_EXPR, ASTK_INDEX_EXPR
+        Return UXBAstInterpExecTypeClass(ast, nodeIdx, ctx)
+    Case ASTK_INLINE_STMT
+        Return UXBAstInterpExecFfi(ast, nodeIdx, ctx)
+    End Select
+    If UXBAstContractIsControlNode(n.kind) <> 0 Or UXBAstContractIsErrorNode(n.kind) <> 0 Then Return UXBAstInterpExecControl(ast, nodeIdx, ctx)
+    If UXBAstContractIsCompileTimeNode(n.kind) <> 0 Then Return UXBInterpValueVoid()
+    Return UXBAstInterpFailClosed(ctx, n.kind, UXBAstInterpDecisionForNode(n.kind))
+End Function
+
+#endif

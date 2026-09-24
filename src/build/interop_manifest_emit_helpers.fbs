@@ -1,0 +1,147 @@
+' Extracted helper block for EmitInteropArtifacts modularization
+
+Private Sub InteropCloseArtifacts(ByVal mf As Integer, ByVal rf As Integer, ByVal pf As Integer, ByVal bf As Integer, ByVal lf As Integer, ByVal kf As Integer, ByVal tf As Integer)
+    If tf > 0 Then Close #tf
+    If kf > 0 Then Close #kf
+    If lf > 0 Then Close #lf
+    If bf > 0 Then Close #bf
+    If pf > 0 Then Close #pf
+    If rf > 0 Then Close #rf
+    If mf > 0 Then Close #mf
+End Sub
+
+Private Function InteropOpenArtifacts(ByRef outputDir As String, ByRef manifestPath As String, ByRef linkRspPath As String, ByRef linkPlanPath As String, ByRef buildBatPath As String, ByRef linkBatPath As String, ByRef makefilePath As String, ByRef toolchainEnvPath As String, ByRef mf As Integer, ByRef rf As Integer, ByRef pf As Integer, ByRef bf As Integer, ByRef lf As Integer, ByRef kf As Integer, ByRef tf As Integer, ByRef errText As String) As Integer
+    mf = FreeFile
+    Open manifestPath For Output As #mf
+    If Err <> 0 Then
+        errText = "interop emit: cannot write " & manifestPath
+        Return 0
+    End If
+
+    rf = FreeFile
+    Open linkRspPath For Output As #rf
+    If Err <> 0 Then
+        InteropCloseArtifacts mf, rf, 0, 0, 0, 0, 0
+        errText = "interop emit: cannot write " & linkRspPath
+        Return 0
+    End If
+
+    pf = FreeFile
+    Open linkPlanPath For Output As #pf
+    If Err <> 0 Then
+        InteropCloseArtifacts mf, rf, pf, 0, 0, 0, 0
+        errText = "interop emit: cannot write " & linkPlanPath
+        Return 0
+    End If
+
+    bf = FreeFile
+    Open buildBatPath For Output As #bf
+    If Err <> 0 Then
+        InteropCloseArtifacts mf, rf, pf, bf, 0, 0, 0
+        errText = "interop emit: cannot write " & buildBatPath
+        Return 0
+    End If
+
+    lf = FreeFile
+    Open linkBatPath For Output As #lf
+    If Err <> 0 Then
+        InteropCloseArtifacts mf, rf, pf, bf, lf, 0, 0
+        errText = "interop emit: cannot write " & linkBatPath
+        Return 0
+    End If
+
+    kf = FreeFile
+    Open makefilePath For Output As #kf
+    If Err <> 0 Then
+        InteropCloseArtifacts mf, rf, pf, bf, lf, kf, 0
+        errText = "interop emit: cannot write " & makefilePath
+        Return 0
+    End If
+
+    tf = FreeFile
+    Open toolchainEnvPath For Output As #tf
+    If Err <> 0 Then
+        InteropCloseArtifacts mf, rf, pf, bf, lf, kf, tf
+        errText = "interop emit: cannot write " & toolchainEnvPath
+        Return 0
+    End If
+    Return 1
+End Function
+
+Private Sub InteropWriteToolchainEnv(ByVal tf As Integer, ByRef toolchain As InteropToolchainConfig)
+    Print #tf, "@echo off"
+    Print #tf, "set UXB_CC=" & toolchain.cc
+    Print #tf, "set UXB_CXX=" & toolchain.cxx
+    Print #tf, "set UXB_ASM=" & toolchain.asmCompiler
+    Print #tf, "set UXB_LINK=" & toolchain.linker
+    Print #tf, "set UXB_CC_PATH=" & toolchain.ccPath
+    Print #tf, "set UXB_CXX_PATH=" & toolchain.cxxPath
+    Print #tf, "set UXB_ASM_PATH=" & toolchain.asmPath
+    Print #tf, "set UXB_LINK_PATH=" & toolchain.linkPath
+    Print #tf, "set UXB_TARGET_ARCH=" & toolchain.targetArch
+    Print #tf, "set UXB_CC_CMD=%UXB_CC%"
+    Print #tf, "set UXB_CXX_CMD=%UXB_CXX%"
+    Print #tf, "set UXB_ASM_CMD=%UXB_ASM%"
+    Print #tf, "set UXB_LINK_CMD=%UXB_LINK%"
+    Print #tf, "if not ""%UXB_CC_PATH%""=="""" set UXB_CC_CMD=%UXB_CC_PATH%\%UXB_CC%"
+    Print #tf, "if not ""%UXB_CXX_PATH%""=="""" set UXB_CXX_CMD=%UXB_CXX_PATH%\%UXB_CXX%"
+    Print #tf, "if not ""%UXB_ASM_PATH%""=="""" set UXB_ASM_CMD=%UXB_ASM_PATH%\%UXB_ASM%"
+    Print #tf, "if not ""%UXB_LINK_PATH%""=="""" set UXB_LINK_CMD=%UXB_LINK_PATH%\%UXB_LINK%"
+    Print #tf, "if /I ""%UXB_CC%""==""gcc"" if exist ""C:\Program Files\CodeBlocks\MinGW\bin\gcc.exe"" set UXB_CC_CMD=C:\Program Files\CodeBlocks\MinGW\bin\gcc.exe"
+    Print #tf, "if /I ""%UXB_CXX%""==""g++"" if exist ""C:\Program Files\CodeBlocks\MinGW\bin\g++.exe"" set UXB_CXX_CMD=C:\Program Files\CodeBlocks\MinGW\bin\g++.exe"
+    Print #tf, "if /I ""%UXB_ASM%""==""nasm"" if exist ""C:\Program Files\CodeBlocks\MinGW\bin\nasm.exe"" set UXB_ASM_CMD=C:\Program Files\CodeBlocks\MinGW\bin\nasm.exe"
+    Print #tf, "if /I ""%UXB_LINK%""==""gcc"" if exist ""C:\Program Files\CodeBlocks\MinGW\bin\gcc.exe"" set UXB_LINK_CMD=C:\Program Files\CodeBlocks\MinGW\bin\gcc.exe"
+    Print #tf, "exit /b 0"
+End Sub
+
+Private Function InteropWriteImportSteps(ByRef manifest As InteropManifest, ByRef outputDir As String, ByVal mf As Integer, ByVal rf As Integer, ByVal pf As Integer, ByVal bf As Integer) As Integer
+    Dim i As Integer
+    Dim importCount As Integer
+    importCount = 0
+
+    Print #pf, "# Import compile steps"
+    Print #bf, "@echo off"
+    Print #bf, "setlocal EnableExtensions"
+    Print #bf, "pushd ""%~dp0\..\..\.."""
+    Print #bf, "if errorlevel 1 exit /b 1"
+    Print #bf, "call ""%~dp0toolchain.env.bat"""
+    Print #bf, "if errorlevel 1 exit /b 1"
+    Print #bf, "if not exist ""%~dp0import_objs"" mkdir ""%~dp0import_objs"""
+    Print #bf, "echo [interop] toolchain source: " & manifest.toolchain.sourceTag
+    Print #bf, "echo [interop] cc=%UXB_CC_CMD% cxx=%UXB_CXX_CMD% asm=%UXB_ASM_CMD% link=%UXB_LINK_CMD%"
+    Print #bf, "echo [interop] compiling imports..."
+
+    For i = 0 To manifest.importCount - 1
+        importCount += 1
+        Dim objPath As String
+        objPath = BuildObjectPath(outputDir, importCount, manifest.imports(i).importPath)
+
+        Dim compileCmd As String
+        compileCmd = BuildCompileCommand(manifest.imports(i).language, manifest.imports(i).importPath, objPath, manifest.toolchain)
+
+        Print #mf, "IMPORT," & CsvEscape(manifest.imports(i).language) & "," & CsvEscape(manifest.imports(i).sourceFile) & "," & CsvEscape(manifest.imports(i).importPath) & "," & CsvEscape(objPath) & "," & CsvEscape(compileCmd) & "," & CsvEscape(objPath) & "," & CsvEscape(manifest.toolchain.sourceTag)
+        Print #rf, BuildRspArgPath(objPath)
+        Print #pf, compileCmd
+
+        If compileCmd <> "" Then
+            Print #bf, compileCmd
+            Print #bf, "if errorlevel 1 ("
+            Print #bf, "  echo [interop] compile failed at step " & LTrim(Str(importCount))
+            Print #bf, "  popd"
+            Print #bf, "  exit /b 1"
+            Print #bf, ")"
+        Else
+            Print #bf, "echo [interop] unsupported import language at step " & LTrim(Str(importCount))
+            Print #bf, "popd"
+            Print #bf, "exit /b 1"
+        End If
+    Next i
+
+    Print #pf, ""
+    Print #pf, "# Link response file"
+    Print #pf, PathNormalize(outputDir & "\import_link_args.rsp")
+    Print #bf, "echo [interop] import compile complete."
+    Print #bf, "popd"
+    Print #bf, "exit /b 0"
+    Return 1
+End Function

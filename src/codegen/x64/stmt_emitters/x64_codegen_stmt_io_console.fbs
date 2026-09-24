@@ -1,0 +1,612 @@
+' Extracted from code_generator.fbs for wave-14 modular split
+' Scope: console/io statement emitters
+
+Private Function X64EmitClsStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: CLS"
+    X64EmitCall0 cg, "__uxb_runtime_cls"
+    Return 1
+End Function
+
+Private Function X64EmitLocateStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim rowExpr As Integer
+    Dim colExpr As Integer
+    rowExpr = X64ChildAt(ps, nodeIdx, 0)
+    colExpr = X64ChildAt(ps, nodeIdx, 1)
+    If rowExpr = -1 Or colExpr = -1 Then
+        errText = "x64-codegen: LOCATE missing row/col"
+        Return 0
+    End If
+
+    X64EmitComment cg, "stmt: LOCATE"
+    If X64EmitExprToRax(ps, rowExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, colExpr, cg, errText) = 0 Then Return 0
+    X64EmitCall2 cg, "__uxb_runtime_locate"
+    Return 1
+End Function
+
+Private Function X64EmitColorStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim fgExpr As Integer
+    Dim bgExpr As Integer
+    fgExpr = X64ChildAt(ps, nodeIdx, 0)
+    bgExpr = X64ChildAt(ps, nodeIdx, 1)
+    If fgExpr = -1 Or bgExpr = -1 Then
+        errText = "x64-codegen: COLOR missing fg/bg"
+        Return 0
+    End If
+
+    X64EmitComment cg, "stmt: COLOR"
+    If X64EmitExprToRax(ps, fgExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, bgExpr, cg, errText) = 0 Then Return 0
+    X64EmitCall2 cg, "__uxb_runtime_color"
+    Return 1
+End Function
+
+Private Function X64EmitRandomizeStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim seedExpr As Integer
+    seedExpr = X64ChildAt(ps, nodeIdx, 0)
+
+    X64EmitComment cg, "stmt: RANDOMIZE"
+    If seedExpr = -1 Then
+        X64EmitCall0 cg, "__uxb_runtime_randomize_auto"
+        Return 1
+    End If
+
+    If X64EmitExprToRax(ps, seedExpr, cg, errText) = 0 Then Return 0
+    X64EmitCall1 cg, "__uxb_runtime_randomize_seed"
+    Return 1
+End Function
+
+Private Function X64EmitInputFileStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim childCount As Integer
+    childCount = X64ChildCount(ps, nodeIdx)
+    If childCount < 2 Then
+        errText = "x64-codegen: INPUT# handle/target missing"
+        Return 0
+    End If
+
+    Dim handleExpr As Integer
+    handleExpr = X64ChildAt(ps, nodeIdx, 0)
+    If handleExpr = -1 Then
+        errText = "x64-codegen: INPUT# handle missing"
+        Return 0
+    End If
+
+    Dim inputPos As Integer
+    For inputPos = 1 To childCount - 1
+        Dim targetExpr As Integer
+        targetExpr = X64ChildAt(ps, nodeIdx, inputPos)
+        If targetExpr = -1 Then
+            errText = "x64-codegen: INPUT# target missing"
+            Return 0
+        End If
+        If X64Upper(ps.ast.nodes(targetExpr).kind) <> "IDENT" Then
+            errText = "x64-codegen: INPUT# target must be IDENT"
+            Return 0
+        End If
+
+        Dim targetType As String
+        targetType = ""
+        If X64TryGetVarType(cg, ps.ast.nodes(targetExpr).value, targetType) = 0 Then
+            X64FindDeclaredTypeName ps, ps.ast.nodes(targetExpr).value, targetType
+        End If
+        targetType = X64Upper(Trim(targetType))
+
+        If X64EmitExprToRax(ps, handleExpr, cg, errText) = 0 Then Return 0
+        X64EmitText cg, "    push rax"
+        If X64EmitAddrOfVar(cg, ps.ast.nodes(targetExpr).value, errText) = 0 Then Return 0
+        X64EmitText cg, "    mov r9, rax"
+        X64EmitText cg, "    xor r8d, r8d"
+        X64EmitText cg, "    mov rdx, -1"
+        X64EmitText cg, "    pop rcx"
+        If X64TypeNameIsStringLike(targetType) <> 0 Then
+            X64EmitCall0 cg, "__uxb_file_input_str"
+        ElseIf targetType = "F64" Or targetType = "DOUBLE" Then
+            X64EmitCall0 cg, "__uxb_file_input_f64"
+        ElseIf targetType = "F32" Or targetType = "SINGLE" Then
+            X64EmitCall0 cg, "__uxb_file_input_f32"
+        Else
+            X64EmitCall0 cg, "__uxb_file_input_i32"
+        End If
+    Next inputPos
+
+    Return 1
+End Function
+
+Private Function X64EmitInputStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim childCount As Integer
+    childCount = X64ChildCount(ps, nodeIdx)
+    If childCount < 1 Then
+        errText = "x64-codegen: INPUT target missing"
+        Return 0
+    End If
+
+    Dim startPos As Integer
+    startPos = 0
+
+    Dim firstChild As Integer
+    firstChild = X64ChildAt(ps, nodeIdx, 0)
+    If firstChild <> -1 And X64Upper(ps.ast.nodes(firstChild).kind) = "PROMPT_EXPR" Then
+        Dim promptExpr As Integer
+        promptExpr = ps.ast.nodes(firstChild).left
+        If promptExpr = -1 Then promptExpr = X64ChildAt(ps, firstChild, 0)
+        If promptExpr = -1 Then
+            errText = "x64-codegen: INPUT prompt missing"
+            Return 0
+        End If
+
+        If X64EmitExprToRax(ps, promptExpr, cg, errText) = 0 Then Return 0
+        X64EmitText cg, "    mov rcx, rax"
+        X64EmitCall0 cg, "__uxb_runtime_input_prompt"
+        startPos = 1
+    End If
+
+    If startPos >= childCount Then
+        errText = "x64-codegen: INPUT target missing"
+        Return 0
+    End If
+
+    Dim inputPos As Integer
+    For inputPos = startPos To childCount - 1
+        Dim targetNode As Integer
+        targetNode = X64ChildAt(ps, nodeIdx, inputPos)
+        If targetNode = -1 Then
+            errText = "x64-codegen: INPUT target missing"
+            Return 0
+        End If
+        If X64Upper(ps.ast.nodes(targetNode).kind) <> "IDENT" Then
+            errText = "x64-codegen: INPUT target must be IDENT"
+            Return 0
+        End If
+        Dim targetType As String
+        targetType = ""
+        X64FindDeclaredTypeName ps, ps.ast.nodes(targetNode).value, targetType
+        targetType = X64Upper(Trim(targetType))
+        If X64EmitAddrOfVar(cg, ps.ast.nodes(targetNode).value, errText) = 0 Then Return 0
+        X64EmitText cg, "    mov rcx, rax"
+        If targetType = "STRING" Then
+            X64EmitCall0 cg, "__uxb_runtime_input_str"
+        ElseIf targetType = "F64" Or targetType = "DOUBLE" Then
+            X64EmitCall0 cg, "__uxb_runtime_input_f64"
+        ElseIf targetType = "F32" Or targetType = "SINGLE" Then
+            X64EmitCall0 cg, "__uxb_runtime_input_f32"
+        Else
+            X64EmitCall0 cg, "__uxb_runtime_input_i32"
+        End If
+    Next inputPos
+
+    Return 1
+End Function
+
+' S-062: detect an optional VIRTUAL/NATIVE mode-prefix keyword as a memory
+' builtin's first AST child (mirrors MIRMemoryModeFromArgs,
+' semantic/mir_lower_expr.fbs, and the AST interpreter's own inline
+' KEYWORD_REF checks) -- this legacy `--x64-mode AST` backend previously
+' never looked for this prefix at all: an explicit VIRTUAL/NATIVE prefix
+' just tripped a wrong-argument-count compile error, and the no-prefix
+' default form always routed through the unchecked, mode-blind
+' `__uxb_mem_resolve`, which treats ANY address >= 1MiB as a raw pointer to
+' dereference with zero validation -- a real arbitrary-memory-access hazard,
+' not merely an S-057-class "silent 0". Returns the numeric mode value the
+' `_mode`-suffixed runtime helpers (already fully implemented and correct,
+' just never called by this backend) expect: 1=VIRTUAL, 2=NATIVE; no prefix
+' (AUTO) also resolves to 1, matching every other engine's own
+' AUTO-behaves-like-VIRTUAL convention (UXBRuntimeMemoryMode in
+' runtime_memory.fbs treats unrecognized/AUTO as mode 0, which every VIRTUAL/
+' NATIVE dispatch in that file treats the same as VIRTUAL).
+Private Sub X64MemModeFromArgs(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef modeValueOut As Integer, ByRef argOffsetOut As Integer)
+    modeValueOut = 1
+    argOffsetOut = 0
+    Dim firstNode As Integer
+    firstNode = X64ChildAt(ps, nodeIdx, 0)
+    If firstNode = -1 Then Exit Sub
+    If UCase(ps.ast.nodes(firstNode).kind) = "KEYWORD_REF" Then
+        Dim modeName As String
+        modeName = UCase(Trim(ps.ast.nodes(firstNode).value))
+        If modeName = "NATIVE" Then
+            modeValueOut = 2
+            argOffsetOut = 1
+        ElseIf modeName = "VIRTUAL" Then
+            modeValueOut = 1
+            argOffsetOut = 1
+        End If
+    End If
+    ' S-069: no explicit mode -> AUTO by the address expression's static type
+    ' (UXBMemoryAddrIsPointer): pointer -> NATIVE (2), otherwise the VIRTUAL
+    ' default (1) already set above. MEMCOPY: a pointer on either side wins.
+    If argOffsetOut = 0 Then
+        If UXBMemoryAddrIsPointer(ps, X64ChildAt(ps, nodeIdx, 0)) <> 0 Then
+            modeValueOut = 2
+        ElseIf Left(UCase(Trim(ps.ast.nodes(nodeIdx).kind)), 7) = "MEMCOPY" Then
+            If UXBMemoryAddrIsPointer(ps, X64ChildAt(ps, nodeIdx, 1)) <> 0 Then modeValueOut = 2
+        End If
+    End If
+End Sub
+
+Private Function X64EmitPokeStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String, ByVal helperName As String, ByVal stmtName As String) As Integer
+    Dim modeValue As Integer
+    Dim argOffset As Integer
+    X64MemModeFromArgs ps, nodeIdx, modeValue, argOffset
+
+    If X64ChildCount(ps, nodeIdx) <> argOffset + 2 Then
+        errText = "x64-codegen: " & stmtName & " expects [mode,]address,value"
+        Return 0
+    End If
+
+    Dim addrExpr As Integer
+    Dim valueExpr As Integer
+    addrExpr = X64ChildAt(ps, nodeIdx, argOffset)
+    valueExpr = X64ChildAt(ps, nodeIdx, argOffset + 1)
+    If addrExpr = -1 Or valueExpr = -1 Then
+        errText = "x64-codegen: " & stmtName & " arguments missing"
+        Return 0
+    End If
+
+    If X64EmitExprToRax(ps, addrExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, valueExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    mov rdx, rax"
+    X64EmitText cg, "    pop rcx"
+    X64EmitText cg, "    mov r8, " & X64ToStr(modeValue)
+    X64EmitCall0 cg, helperName
+    Return 1
+End Function
+
+Private Function X64EmitPokesStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim modeValue As Integer
+    Dim argOffset As Integer
+    X64MemModeFromArgs ps, nodeIdx, modeValue, argOffset
+
+    Dim childTotal As Integer
+    childTotal = X64ChildCount(ps, nodeIdx)
+    If childTotal <> argOffset + 2 And childTotal <> argOffset + 3 Then
+        errText = "x64-codegen: POKES expects [mode,]address,text[,length]"
+        Return 0
+    End If
+
+    Dim addrExpr As Integer
+    Dim textExpr As Integer
+    Dim lenExpr As Integer
+    addrExpr = X64ChildAt(ps, nodeIdx, argOffset)
+    textExpr = X64ChildAt(ps, nodeIdx, argOffset + 1)
+    lenExpr = X64ChildAt(ps, nodeIdx, argOffset + 2)
+    If addrExpr = -1 Or textExpr = -1 Then
+        errText = "x64-codegen: POKES arguments missing"
+        Return 0
+    End If
+
+    If X64EmitExprToRax(ps, addrExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, textExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If lenExpr <> -1 Then
+        If X64EmitExprToRax(ps, lenExpr, cg, errText) = 0 Then Return 0
+        X64EmitText cg, "    mov r8, rax"
+    Else
+        ' No explicit length: write up to the source text's own NUL-terminated
+        ' length, matching the previous (mode-less) __uxb_mem_pokes contract.
+        X64EmitText cg, "    mov rax, [rsp]"
+        X64EmitText cg, "    mov rcx, rax"
+        X64EmitText cg, "    sub rsp, 32"
+        X64EmitText cg, "    call strlen"
+        X64EmitText cg, "    add rsp, 32"
+        X64EmitText cg, "    mov r8, rax"
+    End If
+    X64EmitText cg, "    pop rdx"
+    X64EmitText cg, "    pop rcx"
+    X64EmitText cg, "    mov r9, " & X64ToStr(modeValue)
+    X64EmitCall0 cg, "__uxb_mem_pokes_mode"
+    Return 1
+End Function
+
+Private Function X64EmitMemCopyStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String, ByVal helperName As String, ByVal stmtName As String) As Integer
+    Dim modeValue As Integer
+    Dim argOffset As Integer
+    X64MemModeFromArgs ps, nodeIdx, modeValue, argOffset
+
+    If X64ChildCount(ps, nodeIdx) <> argOffset + 3 Then
+        errText = "x64-codegen: " & stmtName & " expects [mode,]dst,src,len"
+        Return 0
+    End If
+
+    Dim elemBytes As Integer
+    Select Case stmtName
+    Case "MEMCOPYW": elemBytes = 2
+    Case "MEMCOPYD": elemBytes = 4
+    Case "MEMCOPYQ": elemBytes = 8
+    Case Else: elemBytes = 1
+    End Select
+
+    ' Canonical argument order is MEMCOPY* dst, src, len (matches memcpy/CopyMemory);
+    ' __uxb_mem_copy_mode's runtime body treats its first arg (rcx) as src,
+    ' second (rdx) as dst (it forwards them to memmove(dst=rdx-resolved,
+    ' src=rcx-resolved, len)), so map dst->arg2/src->arg1 here.
+    Dim srcExpr As Integer
+    Dim dstExpr As Integer
+    Dim lenExpr As Integer
+    dstExpr = X64ChildAt(ps, nodeIdx, argOffset)
+    srcExpr = X64ChildAt(ps, nodeIdx, argOffset + 1)
+    lenExpr = X64ChildAt(ps, nodeIdx, argOffset + 2)
+    If srcExpr = -1 Or dstExpr = -1 Or lenExpr = -1 Then
+        errText = "x64-codegen: " & stmtName & " arguments missing"
+        Return 0
+    End If
+
+    If X64EmitExprToRax(ps, srcExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, dstExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, lenExpr, cg, errText) = 0 Then Return 0
+    If elemBytes > 1 Then X64EmitText cg, "    imul rax, " & X64ToStr(elemBytes)
+    X64EmitText cg, "    mov r8, rax"
+    X64EmitText cg, "    pop rdx"
+    X64EmitText cg, "    pop rcx"
+    X64EmitText cg, "    mov r9, " & X64ToStr(modeValue)
+    X64EmitCall0 cg, "__uxb_mem_copy_mode"
+    Return 1
+End Function
+
+Private Function X64EmitMemFillStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String, ByVal helperName As String, ByVal stmtName As String) As Integer
+    Dim modeValue As Integer
+    Dim argOffset As Integer
+    X64MemModeFromArgs ps, nodeIdx, modeValue, argOffset
+
+    If X64ChildCount(ps, nodeIdx) <> argOffset + 3 Then
+        errText = "x64-codegen: " & stmtName & " expects [mode,]address,value,len"
+        Return 0
+    End If
+
+    Dim fillWidth As Integer
+    Select Case stmtName
+    Case "MEMFILLW": fillWidth = 2
+    Case "MEMFILLD": fillWidth = 4
+    Case "MEMFILLQ": fillWidth = 8
+    Case Else: fillWidth = 1
+    End Select
+
+    Dim addrExpr As Integer
+    Dim valueExpr As Integer
+    Dim lenExpr As Integer
+    addrExpr = X64ChildAt(ps, nodeIdx, argOffset)
+    valueExpr = X64ChildAt(ps, nodeIdx, argOffset + 1)
+    lenExpr = X64ChildAt(ps, nodeIdx, argOffset + 2)
+    If addrExpr = -1 Or valueExpr = -1 Or lenExpr = -1 Then
+        errText = "x64-codegen: " & stmtName & " arguments missing"
+        Return 0
+    End If
+
+    If X64EmitExprToRax(ps, addrExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, valueExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, lenExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    mov r8, rax"
+    X64EmitText cg, "    pop rdx"
+    X64EmitText cg, "    pop rcx"
+    X64EmitText cg, "    mov r9, " & X64ToStr(modeValue)
+    X64EmitText cg, "    mov r10, " & X64ToStr(fillWidth)
+    X64EmitCall0 cg, "__uxb_mem_fill_mode"
+    Return 1
+End Function
+
+Private Function X64EmitSetNewOffsetStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    If X64ChildCount(ps, nodeIdx) <> 2 Then
+        errText = "x64-codegen: SETNEWOFFSET expects ident,address"
+        Return 0
+    End If
+
+    Dim targetNode As Integer
+    Dim addrExpr As Integer
+    targetNode = X64ChildAt(ps, nodeIdx, 0)
+    addrExpr = X64ChildAt(ps, nodeIdx, 1)
+    If targetNode = -1 Or addrExpr = -1 Then
+        errText = "x64-codegen: SETNEWOFFSET arguments missing"
+        Return 0
+    End If
+
+    Dim targetKind As String
+    targetKind = X64Upper(ps.ast.nodes(targetNode).kind)
+    If targetKind <> "IDENT" And targetKind <> "IDENTIFIER" Then
+        errText = "x64-codegen: SETNEWOFFSET target must be IDENT"
+        Return 0
+    End If
+
+    If X64EmitAddrOfVar(cg, ps.ast.nodes(targetNode).value, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, addrExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    mov rdx, rax"
+    X64EmitText cg, "    pop rcx"
+    X64EmitCall0 cg, "__uxb_set_new_offset"
+    Return 1
+End Function
+
+Private Function X64EmitSlotLaneStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Return X64EmitSlotLaneStmtCore(ps, nodeIdx, cg, errText)
+End Function
+
+Private Function X64EmitOpenStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim fileExpr As Integer
+    Dim modeNode As Integer
+    Dim handleExpr As Integer
+    fileExpr = X64ChildAt(ps, nodeIdx, 0)
+    modeNode = X64ChildAt(ps, nodeIdx, 1)
+    handleExpr = X64ChildAt(ps, nodeIdx, 2)
+    If fileExpr = -1 Or modeNode = -1 Or handleExpr = -1 Then
+        errText = "x64-codegen: OPEN args missing"
+        Return 0
+    End If
+
+    Dim modeCode As Integer
+    modeCode = X64ModeCodeFromText(ps.ast.nodes(modeNode).value)
+    If modeCode = 0 Then
+        errText = "x64-codegen: OPEN invalid mode"
+        Return 0
+    End If
+
+    If X64EmitExprToRax(ps, fileExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    mov [rel __uxb_file_tmp_path], rax"
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, handleExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+
+    Dim lenExpr As Integer
+    lenExpr = X64ChildAt(ps, nodeIdx, 3)
+    If lenExpr <> -1 Then
+        If X64EmitExprToRax(ps, lenExpr, cg, errText) = 0 Then Return 0
+    Else
+        X64EmitText cg, "    xor eax, eax"
+    End If
+
+    X64EmitText cg, "    mov r9, rax"
+    X64EmitText cg, "    pop r8"
+    X64EmitText cg, "    mov edx, " & X64ToStr(modeCode)
+    X64EmitText cg, "    pop rcx"
+    X64EmitCall0 cg, "__uxb_file_open"
+    Return 1
+End Function
+
+Private Function X64EmitCloseStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim childCount As Integer
+    childCount = X64ChildCount(ps, nodeIdx)
+    If childCount = 0 Then Return 1
+
+    Dim closePos As Integer
+    For closePos = 0 To childCount - 1
+        Dim handleExpr As Integer
+        handleExpr = X64ChildAt(ps, nodeIdx, closePos)
+        If handleExpr = -1 Then
+            errText = "x64-codegen: CLOSE handle missing"
+            Return 0
+        End If
+        If X64EmitExprToRax(ps, handleExpr, cg, errText) = 0 Then Return 0
+        X64EmitText cg, "    mov rcx, rax"
+        X64EmitCall0 cg, "__uxb_file_close"
+    Next closePos
+
+    Return 1
+End Function
+
+Private Function X64EmitGetStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim childCount As Integer
+    childCount = X64ChildCount(ps, nodeIdx)
+    If childCount < 2 Or childCount > 4 Then
+        errText = "x64-codegen: GET argument count invalid"
+        Return 0
+    End If
+
+    Dim handleExpr As Integer, targetExpr As Integer
+    Dim posExpr As Integer, bytesExpr As Integer
+    handleExpr = X64ChildAt(ps, nodeIdx, 0)
+    If handleExpr = -1 Then errText = "x64-codegen: GET handle missing": Return 0
+
+    If childCount = 2 Then
+        targetExpr = X64ChildAt(ps, nodeIdx, 1)
+    ElseIf childCount = 3 Then
+        posExpr = X64ChildAt(ps, nodeIdx, 1)
+        targetExpr = X64ChildAt(ps, nodeIdx, 2)
+    Else
+        posExpr = X64ChildAt(ps, nodeIdx, 1)
+        bytesExpr = X64ChildAt(ps, nodeIdx, 2)
+        targetExpr = X64ChildAt(ps, nodeIdx, 3)
+    End If
+
+    If targetExpr = -1 Or X64Upper(ps.ast.nodes(targetExpr).kind) <> "IDENT" Then
+        errText = "x64-codegen: GET target must be IDENT"
+        Return 0
+    End If
+
+    If X64EmitExprToRax(ps, handleExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If posExpr <> -1 Then
+        If X64EmitExprToRax(ps, posExpr, cg, errText) = 0 Then Return 0
+    Else
+        X64EmitText cg, "    mov rax, -1"
+    End If
+    X64EmitText cg, "    push rax"
+    If bytesExpr <> -1 Then
+        If X64EmitExprToRax(ps, bytesExpr, cg, errText) = 0 Then Return 0
+    Else
+        X64EmitText cg, "    xor eax, eax"
+    End If
+    X64EmitText cg, "    push rax"
+    If X64EmitAddrOfVar(cg, ps.ast.nodes(targetExpr).value, errText) = 0 Then Return 0
+    X64EmitText cg, "    mov r9, rax"
+    X64EmitText cg, "    pop r8"
+    X64EmitText cg, "    pop rdx"
+    X64EmitText cg, "    pop rcx"
+    X64EmitCall0 cg, "__uxb_file_get_i32"
+    Return 1
+End Function
+
+Private Function X64EmitPutStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim childCount As Integer
+    childCount = X64ChildCount(ps, nodeIdx)
+    If childCount < 2 Or childCount > 4 Then
+        errText = "x64-codegen: PUT argument count invalid"
+        Return 0
+    End If
+
+    Dim handleExpr As Integer, sourceExpr As Integer
+    Dim posExpr As Integer, bytesExpr As Integer
+    handleExpr = X64ChildAt(ps, nodeIdx, 0)
+    If handleExpr = -1 Then errText = "x64-codegen: PUT handle missing": Return 0
+
+    If childCount = 2 Then
+        sourceExpr = X64ChildAt(ps, nodeIdx, 1)
+    ElseIf childCount = 3 Then
+        posExpr = X64ChildAt(ps, nodeIdx, 1)
+        sourceExpr = X64ChildAt(ps, nodeIdx, 2)
+    Else
+        posExpr = X64ChildAt(ps, nodeIdx, 1)
+        bytesExpr = X64ChildAt(ps, nodeIdx, 2)
+        sourceExpr = X64ChildAt(ps, nodeIdx, 3)
+    End If
+    If sourceExpr = -1 Then errText = "x64-codegen: PUT source missing": Return 0
+
+    If X64EmitExprToRax(ps, handleExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+    If posExpr <> -1 Then
+        If X64EmitExprToRax(ps, posExpr, cg, errText) = 0 Then Return 0
+    Else
+        X64EmitText cg, "    mov rax, -1"
+    End If
+    X64EmitText cg, "    push rax"
+    If bytesExpr <> -1 Then
+        If X64EmitExprToRax(ps, bytesExpr, cg, errText) = 0 Then Return 0
+    Else
+        X64EmitText cg, "    xor eax, eax"
+    End If
+    X64EmitText cg, "    push rax"
+    If X64EmitExprToRax(ps, sourceExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    mov r9, rax"
+    X64EmitText cg, "    pop r8"
+    X64EmitText cg, "    pop rdx"
+    X64EmitText cg, "    pop rcx"
+    X64EmitCall0 cg, "__uxb_file_put_i32"
+    Return 1
+End Function
+
+Private Function X64EmitSeekStmt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    Dim handleExpr As Integer
+    handleExpr = X64ChildAt(ps, nodeIdx, 0)
+    If handleExpr = -1 Then
+        errText = "x64-codegen: SEEK handle missing"
+        Return 0
+    End If
+    If X64EmitExprToRax(ps, handleExpr, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    push rax"
+
+    Dim posExpr As Integer
+    posExpr = X64ChildAt(ps, nodeIdx, 1)
+    If posExpr <> -1 Then
+        If X64EmitExprToRax(ps, posExpr, cg, errText) = 0 Then Return 0
+    Else
+        X64EmitText cg, "    mov rax, -1"
+    End If
+    X64EmitText cg, "    mov rdx, rax"
+    X64EmitText cg, "    pop rcx"
+    X64EmitCall0 cg, "__uxb_file_seek"
+    Return 1
+End Function
+

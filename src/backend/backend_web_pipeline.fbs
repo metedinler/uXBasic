@@ -1,0 +1,230 @@
+#ifndef UXB_BACKEND_WEB_PIPELINE_FBS
+#define UXB_BACKEND_WEB_PIPELINE_FBS
+
+#include once "backend_web_cli_args.fbs"
+#include once "backend_web_context_builder.fbs"
+#include once "backend_native_surface_scan.fbs"
+#include once "backend_web_coverage_gate_adim26.fbs"
+#include once "uxb_backend_web_gate_adim14.fbs"
+#include once "uxb_backend_web_report_adim14.fbs"
+#include once "common/backend_result.fbs"
+#include once "../common/report_writer.fbs"
+#include once "../semantic/mir_verification_gate.fbs"
+#include once "../codegen/js/uxb_js_backend_strict_adim14.fbs"
+#include once "../codegen/wasm/uxb_wasm_backend_strict_adim14.fbs"
+#include once "../codegen/wasm/wasm_codegen.fbs"
+#include once "../codegen/browser/uxb_browser_artifact_adim14.fbs"
+
+Type UXBBackendWebPipelineResult
+    ok As Integer
+    target As String
+    result As UXBBackendResult
+    context As UXBBackendContext
+    errorsText As String
+    warningsText As String
+End Type
+
+Sub UXBBackendWebPipelineResultInit(ByRef r As UXBBackendWebPipelineResult)
+    r.ok = 0
+    r.target = ""
+    r.errorsText = ""
+    r.warningsText = ""
+End Sub
+
+
+Private Function UXBWebReportSiblingPath(ByRef reportPath As String, ByRef fileName As String) As String
+    Dim i As Integer
+    For i = Len(reportPath) To 1 Step -1
+        Dim ch As String
+        ch = Mid(reportPath, i, 1)
+        If ch = "/" Or ch = Chr(92) Then Return Left(reportPath, i) & fileName
+    Next i
+    If Trim(reportPath) = "" Then Return fileName
+    Return fileName
+End Function
+
+Private Function UXBWebWriteResultReport(ByRef ctx As UXBBackendContext, ByRef r As UXBBackendResult, ByRef errText As String) As Integer
+    errText = ""
+    If Trim(ctx.backendReportOutPath) = "" Then Return 1
+    Return UXBReportWriteText(ctx.backendReportOutPath, UXBBackendResultToJson(r), errText)
+End Function
+
+Private Function UXBWebEmitWatOnly(ByRef m As MIRModule, ByRef ctx As UXBBackendContext, ByRef result As UXBBackendResult) As Integer
+    Dim errText As String
+    result = UXBBackendResultMake(UXB_TARGET_WAT)
+    If UXBBackendContextReadyForEmit(ctx, errText) = 0 Then
+        UXBBackendResultFail result, UXB_BACKEND_E_VERIFY_BLOCK, errText
+        Return 0
+    End If
+    If UXBWasmEmitWatFromMIR(m, ctx.watOutPath, ctx.manifestOutPath, errText) = 0 Then
+        UXBBackendResultFail result, UXB_BACKEND_E_EMIT, errText
+        Return 0
+    End If
+    UXBBackendResultPass result, ctx.watOutPath, "WAT emitted"
+    Return 1
+End Function
+
+Function UXBBackendRunWebPipeline( _
+    ByRef astPool As ASTPool, _
+    ByVal rootIdx As Integer, _
+    ByRef mirModule As MIRModule, _
+    ByVal mirReady As Integer, _
+    ByRef cli As UXBBackendWebCliArgs, _
+    ByRef outResult As UXBBackendWebPipelineResult _
+) As Integer
+    UXBBackendWebPipelineResultInit outResult
+    UXBBackendWebCliArgsNormalizeTarget cli
+    outResult.target = UXBBackendNormalizeTarget(cli.target)
+
+    If UXBBackendWebCliArgsAnyRequested(cli) = 0 Then
+        outResult.ok = 1
+        Return 1
+    End If
+
+    If mirReady = 0 Then
+        outResult.errorsText = "web backend icin MIR hazir degil"
+        outResult.result = UXBBackendResultMake(outResult.target)
+        UXBBackendResultFail outResult.result, UXB_BACKEND_E_VERIFY_BLOCK, outResult.errorsText
+        Return 0
+    End If
+
+    Dim nativeErr As String
+    If UXBNativeSurfaceWebTargetGate(astPool, rootIdx, mirModule, mirReady, outResult.target, nativeErr) = 0 Then
+        outResult.errorsText = nativeErr
+        outResult.result = UXBBackendResultMake(outResult.target)
+        UXBBackendResultFail outResult.result, UXB_BACKEND_E_TARGET, nativeErr
+        Return 0
+    End If
+
+    Dim gateResult As UXBMIRGateResult
+    Dim gateErr As String
+    If UXBMIRMandatoryGate(mirModule, gateResult, gateErr) = 0 Then
+        outResult.errorsText = "MIR gate failed before web backend: " & gateErr
+        outResult.result = UXBBackendResultMake(outResult.target)
+        UXBBackendResultFail outResult.result, UXB_BACKEND_E_VERIFY_BLOCK, outResult.errorsText
+        Return 0
+    End If
+    cli.verifyAlreadyPassed = 1
+
+    Dim coverageErr As String
+    Dim coverageReportPath As String
+    coverageReportPath = cli.webGateReportOutPath
+    If Trim(coverageReportPath) = "" Then coverageReportPath = UXBWebReportSiblingPath(cli.backendReportOutPath, "opcode_coverage.csv")
+    If Trim(coverageReportPath) = "" Then
+        outResult.errorsText = "web coverage report path is empty"
+        outResult.result = UXBBackendResultMake(outResult.target)
+        UXBBackendResultFail outResult.result, UXB_BACKEND_E_VERIFY_BLOCK, outResult.errorsText
+        Return 0
+    End If
+    If outResult.target = UXB_TARGET_WAT Or outResult.target = UXB_TARGET_WASM Then
+        Dim wasmSurfaceCsv As String
+        Dim wasmSurfaceErr As String
+        If UXBWasmSurfaceMatrixCsv(wasmSurfaceCsv) <> 0 Then
+            If UXBReportWriteText(UXBWebReportSiblingPath(coverageReportPath, "wasm_surface_matrix.csv"), wasmSurfaceCsv, wasmSurfaceErr) = 0 Then
+                outResult.errorsText = wasmSurfaceErr
+                outResult.result = UXBBackendResultMake(outResult.target)
+                UXBBackendResultFail outResult.result, UXB_BACKEND_E_VERIFY_BLOCK, outResult.errorsText
+                Return 0
+            End If
+        End If
+    End If
+    If UXBBackendWebCoverageGateAdim26(mirModule, outResult.target, coverageReportPath, coverageErr) = 0 Then
+        Dim coverageCode As String
+        coverageCode = UXBBackendWebCoverageDiagnosticCodeAdim26(outResult.target)
+        outResult.errorsText = coverageCode & ": " & coverageErr
+        outResult.result = UXBBackendResultMake(outResult.target)
+        UXBBackendResultFail outResult.result, UXB_BACKEND_E_VERIFY_BLOCK, outResult.errorsText
+        Return 0
+    End If
+
+    Dim webGate As UXBAdim14WebGateResult
+    If UXBAdim14RunWebGate(outResult.target, cli.codegenSourceMode, cli.wat2wasmPath, cli.requireWasmBinary, webGate) = 0 Then
+        outResult.errorsText = webGate.errorText
+        outResult.result = UXBBackendResultMake(outResult.target)
+        UXBBackendResultFail outResult.result, UXB_BACKEND_E_TARGET, outResult.errorsText
+        Return 0
+    End If
+
+    Dim ctxErr As String
+    If UXBBackendWebContextFromCliArgs(outResult.context, cli, ctxErr) = 0 Then
+        outResult.errorsText = ctxErr
+        outResult.result = UXBBackendResultMake(outResult.target)
+        UXBBackendResultFail outResult.result, UXB_BACKEND_E_TARGET, ctxErr
+        Return 0
+    End If
+
+    Select Case outResult.target
+    Case UXB_TARGET_JS
+        If UXBAdim14JsBackendEmitStrict(mirModule, outResult.context, outResult.result) = 0 Then
+            outResult.errorsText = outResult.result.errorText
+            UXBWebWriteResultReport outResult.context, outResult.result, ctxErr
+            Return 0
+        End If
+    Case UXB_TARGET_WAT
+        If UXBWebEmitWatOnly(mirModule, outResult.context, outResult.result) = 0 Then
+            outResult.errorsText = outResult.result.errorText
+            UXBWebWriteResultReport outResult.context, outResult.result, ctxErr
+            Return 0
+        End If
+    Case UXB_TARGET_WASM
+        If cli.wasmEmitMode <> 0 Then
+            If UXBAdim14WasmBackendEmitStrict(mirModule, outResult.context, outResult.result) = 0 Then
+                outResult.errorsText = outResult.result.errorText
+                UXBWebWriteResultReport outResult.context, outResult.result, ctxErr
+                Return 0
+            End If
+        Else
+            If UXBWebEmitWatOnly(mirModule, outResult.context, outResult.result) = 0 Then
+                outResult.errorsText = outResult.result.errorText
+                UXBWebWriteResultReport outResult.context, outResult.result, ctxErr
+                Return 0
+            End If
+        End If
+    Case UXB_TARGET_BROWSER
+        ' Browser hedefinde JS zorunludur. WAT/WASM ayrica istendiyse ayni
+        ' dogrulanmis MIR modulu kullanilarak gercek artefaktlar da uretilir.
+        Dim jsResult As UXBBackendResult
+        If UXBAdim14JsBackendEmitStrict(mirModule, outResult.context, jsResult) = 0 Then
+            outResult.result = jsResult
+            outResult.errorsText = jsResult.errorText
+            UXBWebWriteResultReport outResult.context, outResult.result, ctxErr
+            Return 0
+        End If
+
+        If cli.wasmEmitMode <> 0 Then
+            Dim wasmResult As UXBBackendResult
+            If UXBAdim14WasmBackendEmitStrict(mirModule, outResult.context, wasmResult) = 0 Then
+                outResult.result = wasmResult
+                outResult.errorsText = wasmResult.errorText
+                UXBWebWriteResultReport outResult.context, outResult.result, ctxErr
+                Return 0
+            End If
+        ElseIf cli.watEmitMode <> 0 Then
+            Dim watResult As UXBBackendResult
+            If UXBWebEmitWatOnly(mirModule, outResult.context, watResult) = 0 Then
+                outResult.result = watResult
+                outResult.errorsText = watResult.errorText
+                UXBWebWriteResultReport outResult.context, outResult.result, ctxErr
+                Return 0
+            End If
+        End If
+
+        outResult.result = jsResult
+        If UXBAdim14BrowserBackendEmit(mirModule, outResult.context, outResult.result) = 0 Then
+            outResult.errorsText = outResult.result.errorText
+            UXBWebWriteResultReport outResult.context, outResult.result, ctxErr
+            Return 0
+        End If
+    Case Else
+        outResult.errorsText = "web backend target bagli degil: " & outResult.target
+        outResult.result = UXBBackendResultMake(outResult.target)
+        UXBBackendResultFail outResult.result, UXB_BACKEND_E_TARGET, outResult.errorsText
+        Return 0
+    End Select
+
+    outResult.ok = 1
+    UXBWebWriteResultReport outResult.context, outResult.result, ctxErr
+    Return 1
+End Function
+
+#endif

@@ -1,0 +1,1210 @@
+Private Function IsProgramStructureDeclKind(ByRef kindText As String) As Integer
+    Select Case UCase(kindText)
+    Case "MAIN_STMT", "NAMESPACE_STMT", "MODULE_STMT", "USING_STMT", "ALIAS_STMT"
+        Return 1
+    Case "DECLARE_SUB_STMT", "DECLARE_FUNCTION_STMT", "SUB_STMT", "FUNCTION_STMT"
+        Return 1
+    Case "TYPE_STMT", "CLASS_STMT", "CONST_STMT", "DIM_STMT", "REDIM_STMT"
+        Return 1
+    Case "DEFTYPE_STMT", "SETSTRINGSIZE_STMT", "INCLUDE_STMT", "IMPORT_STMT"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function ValidateMainProgramSemantics(ByRef ps As ParseState) As Integer
+    Dim ch As Integer
+    Dim mainCount As Integer
+
+    ch = ps.ast.nodes(ps.rootNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "MAIN_STMT" Then
+            mainCount += 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    If mainCount > 1 Then
+        ps.lastError = "MAIN: multiple MAIN blocks are not allowed"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+#include once "parser_stmt_using_alias_semantics.fbs"
+
+#include once "parser_stmt_dispatch_class_access.fbs"
+
+Private Function ValidateExitIfSemanticsNode(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal inIfContext As Integer) As Integer
+    If nodeIdx = -1 Then Return 1
+
+    Dim nodeKind As String
+    nodeKind = UCase(ps.ast.nodes(nodeIdx).kind)
+
+    If nodeKind = "EXIT_STMT" Then
+        If UCase(Trim(ps.ast.nodes(nodeIdx).op)) = "IF" And inIfContext = 0 Then
+            ps.lastError = "EXIT IF used outside IF block"
+            Return 0
+        End If
+    End If
+
+    Dim childInIfContext As Integer
+    childInIfContext = inIfContext
+    If nodeKind = "IF_STMT" Then childInIfContext = 1
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If ValidateExitIfSemanticsNode(ps, ps.ast.nodes(nodeIdx).left, childInIfContext) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If ValidateExitIfSemanticsNode(ps, ps.ast.nodes(nodeIdx).right, childInIfContext) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ValidateExitIfSemanticsNode(ps, ch, childInIfContext) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidateExitIfSemantics(ByRef ps As ParseState) As Integer
+    If ps.rootNode = -1 Then Return 1
+    Return ValidateExitIfSemanticsNode(ps, ps.rootNode, 0)
+End Function
+
+Private Function IsFlowSemanticsStmtKind(ByRef kindText As String) As Integer
+    Dim k As String
+    k = UCase(Trim(kindText))
+    If Len(k) >= 5 Then
+        If Right(k, 5) = "_STMT" Then Return 1
+    End If
+    Return 0
+End Function
+
+Private Function IsIfConditionMissingLike(ByRef ps As ParseState, ByVal exprNode As Integer) As Integer
+    If exprNode = -1 Then Return 1
+
+    If UCase(ps.ast.nodes(exprNode).kind) = "KEYWORD_REF" Then
+        Dim kw As String
+        kw = UCase(Trim(ps.ast.nodes(exprNode).value))
+        If kw = "THEN" Or kw = "ELSE" Or kw = "ELSEIF" Then Return 1
+    End If
+
+    Return 0
+End Function
+
+Private Function IsSelectSelectorMissingLike(ByRef ps As ParseState, ByVal exprNode As Integer) As Integer
+    If exprNode = -1 Then Return 1
+
+    If UCase(ps.ast.nodes(exprNode).kind) = "KEYWORD_REF" Then
+        Dim kw As String
+        kw = UCase(Trim(ps.ast.nodes(exprNode).value))
+        If kw = "CASE" Or kw = "ELSE" Or kw = "END" Or kw = "SELECT" Then Return 1
+    End If
+
+    Return 0
+End Function
+
+Private Function ValidateSelectCaseBlockSemantics(ByRef ps As ParseState, ByVal caseNode As Integer) As Integer
+    Dim hasValue As Integer
+    Dim hasBody As Integer
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(caseNode).firstChild
+    Do While ch <> -1
+        If IsFlowSemanticsStmtKind(ps.ast.nodes(ch).kind) <> 0 Then
+            hasBody = 1
+        Else
+            hasValue = 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    If hasValue = 0 Then
+        ps.lastError = "SELECT CASE: CASE block values are required"
+        Return 0
+    End If
+
+    If hasBody = 0 Then
+        ps.lastError = "SELECT CASE: CASE block body cannot be empty"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function ValidateSelectElseBlockSemantics(ByRef ps As ParseState, ByVal caseElseNode As Integer) As Integer
+    If ps.ast.nodes(caseElseNode).firstChild = -1 Then
+        ps.lastError = "SELECT CASE: CASE ELSE body cannot be empty"
+        Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(caseElseNode).firstChild
+    Do While ch <> -1
+        If IsFlowSemanticsStmtKind(ps.ast.nodes(ch).kind) = 0 Then
+            ps.lastError = "SELECT CASE: CASE ELSE contains non-statement item"
+            Return 0
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidateIfSelectSemanticsNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx = -1 Then Return 1
+
+    Dim nodeKind As String
+    nodeKind = UCase(ps.ast.nodes(nodeIdx).kind)
+
+    If nodeKind = "IF_STMT" Then
+        Dim ifCond As Integer
+        ifCond = ps.ast.nodes(nodeIdx).firstChild
+        If IsIfConditionMissingLike(ps, ifCond) <> 0 Then
+            ps.lastError = "IF: condition is required"
+            Return 0
+        End If
+    ElseIf nodeKind = "ELSEIF_PART" Then
+        Dim elseifCond As Integer
+        elseifCond = ps.ast.nodes(nodeIdx).firstChild
+        If IsIfConditionMissingLike(ps, elseifCond) <> 0 Then
+            ps.lastError = "ELSEIF: condition is required"
+            Return 0
+        End If
+    ElseIf nodeKind = "SELECT_STMT" Then
+        Dim selector As Integer
+        selector = ps.ast.nodes(nodeIdx).firstChild
+        If IsSelectSelectorMissingLike(ps, selector) <> 0 Then
+            ps.lastError = "SELECT CASE: selector expression is required"
+            Return 0
+        End If
+
+        Dim caseCount As Integer
+        Dim ch As Integer
+        ch = selector
+        If ch <> -1 Then ch = ps.ast.nodes(ch).nextSibling
+
+        Do While ch <> -1
+            Dim caseKind As String
+            caseKind = UCase(ps.ast.nodes(ch).kind)
+
+            If caseKind <> "CASE_BLOCK" And caseKind <> "CASE_ELSE" Then
+                ps.lastError = "SELECT CASE: invalid case node " & ps.ast.nodes(ch).kind
+                Return 0
+            End If
+
+            caseCount += 1
+
+            If caseKind = "CASE_BLOCK" Then
+                If ValidateSelectCaseBlockSemantics(ps, ch) = 0 Then Return 0
+            Else
+                If ValidateSelectElseBlockSemantics(ps, ch) = 0 Then Return 0
+            End If
+
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+
+        If caseCount = 0 Then
+            ps.lastError = "SELECT CASE: at least one CASE block is required"
+            Return 0
+        End If
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If ValidateIfSelectSemanticsNode(ps, ps.ast.nodes(nodeIdx).left) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If ValidateIfSelectSemanticsNode(ps, ps.ast.nodes(nodeIdx).right) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ValidateIfSelectSemanticsNode(ps, ch) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidateIfSelectSemantics(ByRef ps As ParseState) As Integer
+    If ps.rootNode = -1 Then Return 1
+    Return ValidateIfSelectSemanticsNode(ps, ps.rootNode)
+End Function
+
+#include once "parser_stmt_semantic_extra.fbs"
+
+Private Function NodeChildAt(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByVal childPos As Integer) As Integer
+    Dim i As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return -1
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If i = childPos Then Return ch
+        i += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return -1
+End Function
+
+Private Function NodeChildCount(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim count As Integer
+    Dim ch As Integer
+
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        count += 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return count
+End Function
+
+' UXB_FFI_CONTRACT_FIX_20260728:
+' Parser, AST runtime, MIR runtime and x64 codegen use one public ABI10 surface.
+' Actual runtime types are intentionally limited to the types implemented by
+' uxffi.dll v1.20: VOID/I32/U32/I64/U64/F64/PTR/STRPTR plus legacy BYREF/BYVAL.
+
+Private Function IsValidDllSignatureToken(ByRef signatureText As String) As Integer
+    Dim s As String
+    s = UCase(Trim(signatureText))
+
+    Select Case s
+    Case "VOID", "I32", "U32", "I64", "U64", "F64", "PTR", "STRPTR", "BYREF", "BYVAL"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function IsValidDllArgumentTypeToken(ByRef typeText As String) As Integer
+    Dim s As String
+    s = UCase(Trim(typeText))
+    Select Case s
+    Case "I32", "U32", "I64", "U64", "F64", "PTR", "STRPTR"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function IsDllTypeTokenNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    Dim k As String
+    k = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    Select Case k
+    Case "KEYWORD_REF", "IDENT", "IDENTIFIER", "TYPE_REF", "VAR_REF"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function ResolveCallDllLayout( _
+    ByRef ps As ParseState, _
+    ByVal callNode As Integer, _
+    ByRef callKindOut As String, _
+    ByRef basePosOut As Integer _
+) As Integer
+    callKindOut = ""
+    basePosOut = 0
+    If callNode < 0 Or callNode >= ps.ast.count Then Return 0
+
+    Dim nodeKind As String
+    Dim nodeValue As String
+    nodeKind = UCase(Trim(ps.ast.nodes(callNode).kind))
+    nodeValue = UCase(Trim(ps.ast.nodes(callNode).value))
+
+    Select Case nodeKind
+    Case "CALL_DLL_STMT"
+        callKindOut = "DLL"
+        Return 1
+    Case "CALL_API_STMT"
+        callKindOut = "API"
+        Return 1
+    Case "CALL_STMT", "CALL_EXPR", "CALL"
+        If nodeValue = "DLL" Or nodeValue = "API" Then
+            callKindOut = nodeValue
+            Return 1
+        End If
+        If nodeValue <> "CALL" Then Return 0
+    Case Else
+        Return 0
+    End Select
+
+    Dim markerNode As Integer
+    markerNode = NodeChildAt(ps, callNode, 0)
+    If markerNode < 0 Or markerNode >= ps.ast.count Then Return 0
+    If IsDllTypeTokenNode(ps, markerNode) = 0 Then Return 0
+
+    Dim markerText As String
+    markerText = UCase(Trim(ps.ast.nodes(markerNode).value))
+    If markerText <> "DLL" And markerText <> "API" Then Return 0
+
+    callKindOut = markerText
+    basePosOut = 1
+    Return 1
+End Function
+
+Private Function ParseDllArgTypeListForValidation( _
+    ByRef listText As String, _
+    ByRef typeCountOut As Integer, _
+    ByRef errText As String _
+) As Integer
+    Const UXB_FFI_MAX_RUNTIME_ARGS As Integer = 10
+    typeCountOut = 0
+    errText = ""
+
+    Dim sourceText As String
+    sourceText = Trim(listText)
+    If sourceText = "" Then Return 0
+
+    Dim cursor As Integer
+    cursor = 1
+    Do
+        Dim commaPos As Integer
+        Dim partText As String
+        commaPos = InStr(cursor, sourceText, ",")
+        If commaPos = 0 Then
+            partText = Trim(Mid(sourceText, cursor))
+        Else
+            partText = Trim(Mid(sourceText, cursor, commaPos - cursor))
+        End If
+
+        If partText = "" Then
+            errText = "CALL(DLL): empty argument type in type-list"
+            Return -1
+        End If
+        If IsValidDllArgumentTypeToken(partText) = 0 Then
+            If InStr(sourceText, ",") > 0 Then
+                errText = "CALL(DLL): invalid argument type-list token: " & partText
+                Return -1
+            End If
+            Return 0
+        End If
+
+        typeCountOut += 1
+        If typeCountOut > UXB_FFI_MAX_RUNTIME_ARGS Then
+            errText = "CALL(DLL): argument type-list exceeds the ABI10 limit"
+            Return -1
+        End If
+
+        If commaPos = 0 Then Exit Do
+        cursor = commaPos + 1
+    Loop
+
+    If typeCountOut > 0 Then Return 1
+    Return 0
+End Function
+
+Private Function IsValidDllCallingConventionToken(ByRef conventionText As String) As Integer
+    Dim s As String
+    s = UCase(Trim(conventionText))
+
+    Select Case s
+    Case "CDECL", "STDCALL"
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function IsAddressableByRefArgNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 0
+    Return UCase(ps.ast.nodes(nodeIdx).kind) = "IDENT"
+End Function
+
+Private Function IsKnownUnsupportedDllConvention(ByRef conventionText As String) As Integer
+    Dim s As String
+    s = UCase(Trim(conventionText))
+    Select Case s
+    Case "FASTCALL", "THISCALL", "VECTORCALL", "WIN64", "SYSTEM"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function ValidateCallDllSemanticsForNode(ByRef ps As ParseState, ByVal callNode As Integer) As Integer
+    Const UXB_FFI_MAX_RUNTIME_ARGS As Integer = 10
+    ' Marker form CALL(DLL,...) has one additional child:
+    ' marker + library + symbol + return + convention + type-list + 10 args = 16.
+    Const UXB_FFI_MAX_CALL_CHILDREN As Integer = UXB_FFI_MAX_RUNTIME_ARGS + 6
+
+    Dim callKind As String
+    Dim basePos As Integer
+    If ResolveCallDllLayout(ps, callNode, callKind, basePos) = 0 Then Return 1
+
+    Dim argCount As Integer
+    argCount = NodeChildCount(ps, callNode)
+    If argCount > UXB_FFI_MAX_CALL_CHILDREN Then
+        ps.lastError = "CALL(" & callKind & "): call metadata plus arguments exceed the ABI10 limit"
+        Return 0
+    End If
+
+    ' Preserve the existing legacy short form:
+    ' CALL(DLL/API, library, symbol [, convention] [, runtime args...]).
+    ' The standard typed form additionally supplies return type and type-list.
+    If argCount < basePos + 2 Then
+        ps.lastError = "CALL(" & callKind & "): expects library and symbol"
+        Return 0
+    End If
+
+    Dim libraryNode As Integer
+    Dim symbolNode As Integer
+    libraryNode = NodeChildAt(ps, callNode, basePos)
+    symbolNode = NodeChildAt(ps, callNode, basePos + 1)
+
+    If libraryNode = -1 Or UCase(Trim(ps.ast.nodes(libraryNode).kind)) <> "STRING" Then
+        ps.lastError = "CALL(" & callKind & "): library must be string literal"
+        Return 0
+    End If
+    If Len(Trim(ps.ast.nodes(libraryNode).value)) = 0 Then
+        ps.lastError = "CALL(" & callKind & "): library cannot be empty"
+        Return 0
+    End If
+
+    If symbolNode = -1 Or UCase(Trim(ps.ast.nodes(symbolNode).kind)) <> "STRING" Then
+        ps.lastError = "CALL(" & callKind & "): symbol must be string literal"
+        Return 0
+    End If
+    If Len(Trim(ps.ast.nodes(symbolNode).value)) = 0 Then
+        ps.lastError = "CALL(" & callKind & "): symbol cannot be empty"
+        Return 0
+    End If
+
+    Dim signatureText As String
+    Dim explicitSignature As Integer
+    Dim argStartPos As Integer
+    Dim signatureNode As Integer
+    signatureText = ""
+    explicitSignature = 0
+    argStartPos = basePos + 2
+    signatureNode = NodeChildAt(ps, callNode, basePos + 2)
+
+    If signatureNode <> -1 And IsDllTypeTokenNode(ps, signatureNode) <> 0 Then
+        Dim candidateText As String
+        candidateText = UCase(Trim(ps.ast.nodes(signatureNode).value))
+
+        If IsValidDllSignatureToken(candidateText) <> 0 Then
+            explicitSignature = 1
+            signatureText = candidateText
+            argStartPos = basePos + 3
+        ElseIf IsValidDllCallingConventionToken(candidateText) <> 0 Then
+            ' Legacy statement/API form with implicit VOID return.
+            argStartPos = basePos + 3
+        ElseIf IsKnownUnsupportedDllConvention(candidateText) <> 0 Then
+            ps.lastError = "CALL(" & callKind & "): invalid calling convention token: " & candidateText
+            Return 0
+        End If
+    End If
+
+    Dim typeListCount As Integer
+    Dim hasTypeList As Integer
+    hasTypeList = 0
+
+    If explicitSignature <> 0 Then
+        ' Optional convention after the explicit return type.
+        If argCount > argStartPos Then
+            Dim conventionNode As Integer
+            conventionNode = NodeChildAt(ps, callNode, argStartPos)
+            If conventionNode <> -1 Then
+                Dim conventionKind As String
+                Dim conventionText As String
+                conventionKind = UCase(Trim(ps.ast.nodes(conventionNode).kind))
+                conventionText = UCase(Trim(ps.ast.nodes(conventionNode).value))
+                If IsValidDllCallingConventionToken(conventionText) <> 0 Then
+                    argStartPos += 1
+                ElseIf conventionKind = "KEYWORD_REF" Or IsKnownUnsupportedDllConvention(conventionText) <> 0 Then
+                    ps.lastError = "CALL(" & callKind & "): invalid calling convention token: " & conventionText
+                    Return 0
+                End If
+            End If
+        End If
+
+        ' Optional per-argument ABI type-list.
+        If argCount > argStartPos Then
+            Dim typeListNode As Integer
+            typeListNode = NodeChildAt(ps, callNode, argStartPos)
+            If typeListNode <> -1 And UCase(Trim(ps.ast.nodes(typeListNode).kind)) = "STRING" Then
+                Dim typeListError As String
+                Dim typeListStatus As Integer
+                typeListStatus = ParseDllArgTypeListForValidation( _
+                    ps.ast.nodes(typeListNode).value, _
+                    typeListCount, _
+                    typeListError _
+                )
+                If typeListStatus < 0 Then
+                    ps.lastError = typeListError
+                    Return 0
+                End If
+                If typeListStatus > 0 Then
+                    hasTypeList = 1
+                    argStartPos += 1
+                End If
+            End If
+        End If
+    End If
+
+    Dim runtimeArgCount As Integer
+    runtimeArgCount = argCount - argStartPos
+    If runtimeArgCount < 0 Then runtimeArgCount = 0
+    If runtimeArgCount > UXB_FFI_MAX_RUNTIME_ARGS Then
+        ps.lastError = "CALL(" & callKind & "): supports at most 10 runtime arguments"
+        Return 0
+    End If
+
+    If hasTypeList <> 0 And typeListCount <> runtimeArgCount Then
+        ps.lastError = "CALL(" & callKind & "): argument type-list count mismatch expected=" & _
+            LTrim(Str(typeListCount)) & " actual=" & LTrim(Str(runtimeArgCount))
+        Return 0
+    End If
+
+    If explicitSignature <> 0 And signatureText = "BYREF" Then
+        Dim byrefNode As Integer
+        byrefNode = NodeChildAt(ps, callNode, argStartPos)
+        If byrefNode = -1 Or IsAddressableByRefArgNode(ps, byrefNode) = 0 Then
+            ps.lastError = "CALL(" & callKind & "): BYREF requires addressable target argument"
+            Return 0
+        End If
+    End If
+
+    Return 1
+End Function
+
+Private Function ValidateCallDllSemanticsNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx = -1 Then Return 1
+
+    Dim callNodeKind As String
+    callNodeKind = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    Select Case callNodeKind
+    Case "CALL_STMT", "CALL_EXPR", "CALL", "CALL_DLL_STMT", "CALL_API_STMT"
+        If ValidateCallDllSemanticsForNode(ps, nodeIdx) = 0 Then Return 0
+    End Select
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If ValidateCallDllSemanticsNode(ps, ps.ast.nodes(nodeIdx).left) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If ValidateCallDllSemanticsNode(ps, ps.ast.nodes(nodeIdx).right) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ValidateCallDllSemanticsNode(ps, ch) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidateCallDllSemantics(ByRef ps As ParseState) As Integer
+    If ps.rootNode = -1 Then Return 1
+    Return ValidateCallDllSemanticsNode(ps, ps.rootNode)
+End Function
+
+
+Private Function ValidateSetNewOffsetNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx = -1 Then Return 1
+
+    If UCase(ps.ast.nodes(nodeIdx).kind) = "SETNEWOFFSET_STMT" Then
+        Dim argc As Integer
+        argc = NodeChildCount(ps, nodeIdx)
+        If argc <> 2 Then
+            ps.lastError = "SETNEWOFFSET: expects exactly 2 arguments"
+            Return 0
+        End If
+
+        Dim targetNode As Integer
+        targetNode = NodeChildAt(ps, nodeIdx, 0)
+        If targetNode = -1 Or UCase(ps.ast.nodes(targetNode).kind) <> "IDENT" Then
+            ps.lastError = "SETNEWOFFSET: first child must be IDENT"
+            Return 0
+        End If
+
+        Dim valueNode As Integer
+        valueNode = NodeChildAt(ps, nodeIdx, 1)
+        If valueNode = -1 Then
+            ps.lastError = "SETNEWOFFSET: second child is missing"
+            Return 0
+        End If
+
+        If UCase(ps.ast.nodes(valueNode).kind) = "STRING" Then
+            ps.lastError = "SETNEWOFFSET: second child cannot be STRING"
+            Return 0
+        End If
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If ValidateSetNewOffsetNode(ps, ps.ast.nodes(nodeIdx).left) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If ValidateSetNewOffsetNode(ps, ps.ast.nodes(nodeIdx).right) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ValidateSetNewOffsetNode(ps, ch) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidateSetNewOffsetSemantics(ByRef ps As ParseState) As Integer
+    If ps.rootNode = -1 Then Return 1
+    Return ValidateSetNewOffsetNode(ps, ps.rootNode)
+End Function
+
+Private Function ValidatePokesNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx = -1 Then Return 1
+
+    If UCase(ps.ast.nodes(nodeIdx).kind) = "POKES_STMT" Then
+        Dim argc As Integer
+        argc = NodeChildCount(ps, nodeIdx)
+        Dim firstNode As Integer
+        firstNode = NodeChildAt(ps, nodeIdx, 0)
+        Dim modeOffset As Integer
+        modeOffset = 0
+        If firstNode <> -1 And UCase(ps.ast.nodes(firstNode).kind) = "KEYWORD_REF" Then
+            Dim modeName As String
+            modeName = UCase(Trim(ps.ast.nodes(firstNode).value))
+            If modeName = "VIRTUAL" Or modeName = "NATIVE" Then modeOffset = 1
+        End If
+        If argc < 2 + modeOffset Or argc > 3 + modeOffset Then
+            ps.lastError = "POKES: expects address,text[,length]"
+            Return 0
+        End If
+
+        Dim addrNode As Integer
+        addrNode = NodeChildAt(ps, nodeIdx, modeOffset)
+        If addrNode = -1 Then
+            ps.lastError = "POKES: address argument is missing"
+            Return 0
+        End If
+
+        If UCase(ps.ast.nodes(addrNode).kind) = "STRING" Then
+            ps.lastError = "POKES: address argument cannot be STRING"
+            Return 0
+        End If
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If ValidatePokesNode(ps, ps.ast.nodes(nodeIdx).left) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If ValidatePokesNode(ps, ps.ast.nodes(nodeIdx).right) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ValidatePokesNode(ps, ch) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidatePokesSemantics(ByRef ps As ParseState) As Integer
+    If ps.rootNode = -1 Then Return 1
+    Return ValidatePokesNode(ps, ps.rootNode)
+End Function
+
+Private Function ValidateInputSemanticsNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx = -1 Then Return 1
+
+    Dim nodeKind As String
+    nodeKind = UCase(ps.ast.nodes(nodeIdx).kind)
+
+    If nodeKind = "INPUT_STMT" Then
+        Dim inputArgc As Integer
+        inputArgc = NodeChildCount(ps, nodeIdx)
+        If inputArgc = 0 Then
+            ps.lastError = "INPUT: at least one target is required"
+            Return 0
+        End If
+
+        Dim firstTargetPos As Integer
+        firstTargetPos = 0
+
+        Dim firstChild As Integer
+        firstChild = NodeChildAt(ps, nodeIdx, 0)
+        If firstChild <> -1 Then
+            If UCase(ps.ast.nodes(firstChild).kind) = "PROMPT_EXPR" Then firstTargetPos = 1
+        End If
+
+        If inputArgc <= firstTargetPos Then
+            ps.lastError = "INPUT: at least one target is required"
+            Return 0
+        End If
+
+        Dim i As Integer
+        For i = firstTargetPos To inputArgc - 1
+            Dim targetNode As Integer
+            targetNode = NodeChildAt(ps, nodeIdx, i)
+            If targetNode = -1 Or UCase(ps.ast.nodes(targetNode).kind) <> "IDENT" Then
+                ps.lastError = "INPUT: targets must be IDENT"
+                Return 0
+            End If
+        Next i
+    ElseIf nodeKind = "INPUT_FILE_STMT" Or nodeKind = "INPUTF_STMT" Then
+        Dim inputfArgc As Integer
+        inputfArgc = NodeChildCount(ps, nodeIdx)
+
+        Dim channelNode As Integer
+        channelNode = NodeChildAt(ps, nodeIdx, 0)
+        If inputfArgc = 0 Or channelNode = -1 Then
+            ps.lastError = "INPUT#: channel argument is required"
+            Return 0
+        End If
+
+        If inputfArgc <= 1 Then
+            ps.lastError = "INPUT#: at least one target is required"
+            Return 0
+        End If
+
+        Dim j As Integer
+        For j = 1 To inputfArgc - 1
+            Dim targetNode As Integer
+            targetNode = NodeChildAt(ps, nodeIdx, j)
+            If targetNode = -1 Or UCase(ps.ast.nodes(targetNode).kind) <> "IDENT" Then
+                ps.lastError = "INPUT#: targets must be IDENT"
+                Return 0
+            End If
+        Next j
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If ValidateInputSemanticsNode(ps, ps.ast.nodes(nodeIdx).left) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If ValidateInputSemanticsNode(ps, ps.ast.nodes(nodeIdx).right) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ValidateInputSemanticsNode(ps, ch) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidateInputSemantics(ByRef ps As ParseState) As Integer
+    If ps.rootNode = -1 Then Return 1
+    Return ValidateInputSemanticsNode(ps, ps.rootNode)
+End Function
+
+Private Function HasConstDeclName(ByRef ps As ParseState, ByRef symbolName As String) As Integer
+    Dim normalized As String
+    normalized = UCase(Trim(symbolName))
+    If normalized = "" Then Return 0
+
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(ps.ast.nodes(i).kind) = "CONST_DECL" Then
+            If UCase(Trim(ps.ast.nodes(i).value)) = normalized Then Return 1
+        End If
+    Next i
+
+    Return 0
+End Function
+
+Private Function ValidatePointerIntrinsicCallNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim nodeKind As String
+    nodeKind = UCase(ps.ast.nodes(nodeIdx).kind)
+    If nodeKind <> "CALL_STMT" And nodeKind <> "CALL_EXPR" Then Return 1
+
+    Dim callName As String
+    callName = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+    If callName <> "VARPTR" And callName <> "SADD" And callName <> "LPTR" And callName <> "CODEPTR" Then Return 1
+
+    Dim argc As Integer
+    argc = NodeChildCount(ps, nodeIdx)
+    If argc <> 1 Then
+        ps.lastError = callName & " expects exactly 1 argument"
+        Return 0
+    End If
+
+    Dim argNode As Integer
+    argNode = NodeChildAt(ps, nodeIdx, 0)
+    If argNode = -1 Then
+        ps.lastError = callName & " expects exactly 1 argument"
+        Return 0
+    End If
+
+    Dim argKind As String
+    argKind = UCase(ps.ast.nodes(argNode).kind)
+
+    Select Case callName
+    Case "VARPTR"
+        If argKind <> "IDENT" And argKind <> "CALL_EXPR" Then
+            ps.lastError = "VARPTR expects an identifier or an array element argument"
+            Return 0
+        End If
+
+        If argKind = "IDENT" And HasConstDeclName(ps, ps.ast.nodes(argNode).value) <> 0 Then
+            ps.lastError = "VARPTR expects a mutable variable identifier"
+            Return 0
+        End If
+
+    Case "SADD"
+        If argKind <> "STRING" And argKind <> "IDENT" Then
+            ps.lastError = "SADD expects a string literal or identifier argument"
+            Return 0
+        End If
+
+    Case "LPTR", "CODEPTR"
+        If argKind <> "IDENT" And argKind <> "KEYWORD_REF" Then
+            ps.lastError = callName & " expects an identifier argument"
+            Return 0
+        End If
+    End Select
+
+    Return 1
+End Function
+
+Private Function ValidatePointerIntrinsicSemanticsNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx = -1 Then Return 1
+
+    If ValidatePointerIntrinsicCallNode(ps, nodeIdx) = 0 Then Return 0
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If ValidatePointerIntrinsicSemanticsNode(ps, ps.ast.nodes(nodeIdx).left) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If ValidatePointerIntrinsicSemanticsNode(ps, ps.ast.nodes(nodeIdx).right) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ValidatePointerIntrinsicSemanticsNode(ps, ch) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidatePointerIntrinsicSemantics(ByRef ps As ParseState) As Integer
+    If ps.rootNode = -1 Then Return 1
+    Return ValidatePointerIntrinsicSemanticsNode(ps, ps.rootNode)
+End Function
+
+Private Function IsRoutineNodeKind(ByRef kindText As String) As Integer
+    Select Case UCase(kindText)
+    Case "SUB_STMT", "FUNCTION_STMT", "DECLARE_SUB_STMT", "DECLARE_FUNCTION_STMT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function IsFunctionNodeKind(ByRef kindText As String) As Integer
+    Select Case UCase(kindText)
+    Case "FUNCTION_STMT", "DECLARE_FUNCTION_STMT"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function ValidateRoutineSignatureSemanticsForNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    Dim nodeKind As String
+    nodeKind = UCase(ps.ast.nodes(nodeIdx).kind)
+
+    If IsRoutineNodeKind(nodeKind) = 0 Then Return 1
+
+    Dim paramNames() As String
+    Dim paramCount As Integer
+    Dim hasReturnType As Integer
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        Dim childKind As String
+        childKind = UCase(ps.ast.nodes(ch).kind)
+
+        If childKind = "PARAM_DECL" Then
+            Dim paramName As String
+            paramName = UCase(Trim(ps.ast.nodes(ch).value))
+            If paramName = "" Then
+                ps.lastError = nodeKind & ": parameter name cannot be empty"
+                Return 0
+            End If
+
+            If StringArrayIndexOf(paramNames(), paramCount, paramName) <> -1 Then
+                ps.lastError = nodeKind & ": duplicate parameter name " & paramName
+                Return 0
+            End If
+
+            StringArrayAppend paramNames(), paramCount, paramName
+        ElseIf childKind = "RETURN_TYPE" Then
+            hasReturnType = 1
+            If Trim(ps.ast.nodes(ch).value) = "" Then
+                ps.lastError = nodeKind & ": return type cannot be empty"
+                Return 0
+            End If
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    If IsFunctionNodeKind(nodeKind) <> 0 Then
+        If hasReturnType = 0 Then
+            ps.lastError = nodeKind & ": return type is required"
+            Return 0
+        End If
+    End If
+
+    Return 1
+End Function
+
+Private Function ValidateRoutineSignatureSemanticsNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx = -1 Then Return 1
+
+    If ValidateRoutineSignatureSemanticsForNode(ps, nodeIdx) = 0 Then Return 0
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If ValidateRoutineSignatureSemanticsNode(ps, ps.ast.nodes(nodeIdx).left) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If ValidateRoutineSignatureSemanticsNode(ps, ps.ast.nodes(nodeIdx).right) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ValidateRoutineSignatureSemanticsNode(ps, ch) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidateRoutineSignatureSemantics(ByRef ps As ParseState) As Integer
+    If ps.rootNode = -1 Then Return 1
+    Return ValidateRoutineSignatureSemanticsNode(ps, ps.rootNode)
+End Function
+
+Private Function ValidateConstRhsSemanticsNode(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If nodeIdx = -1 Then Return 1
+
+    If UCase(ps.ast.nodes(nodeIdx).kind) = "CONST_STMT" Then
+        Dim ch As Integer
+        ch = ps.ast.nodes(nodeIdx).firstChild
+        Do While ch <> -1
+            If UCase(ps.ast.nodes(ch).kind) = "CONST_DECL" Then
+                If ps.ast.nodes(ch).left = -1 Then
+                    ps.lastError = "CONST: RHS expression is required for " & UCase(Trim(ps.ast.nodes(ch).value))
+                    Return 0
+                End If
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If ValidateConstRhsSemanticsNode(ps, ps.ast.nodes(nodeIdx).left) = 0 Then Return 0
+    End If
+
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If ValidateConstRhsSemanticsNode(ps, ps.ast.nodes(nodeIdx).right) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If ValidateConstRhsSemanticsNode(ps, ch) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function ValidateConstRhsSemantics(ByRef ps As ParseState) As Integer
+    If ps.rootNode = -1 Then Return 1
+    Return ValidateConstRhsSemanticsNode(ps, ps.rootNode)
+End Function
+
+Private Sub ParserAppendParseError(ByRef ps As ParseState, ByRef tk As Token, ByRef detailText As String)
+    Dim msg As String
+    msg = Trim(detailText)
+    If msg = "" Then msg = "statement parse failed"
+
+    msg = "[" & LTrim(Str(tk.lineNo)) & ":" & LTrim(Str(tk.colNo)) & "] " & msg
+
+    If ps.parseErrorCount = 0 Then
+        ReDim ps.parseErrors(0)
+    Else
+        ReDim Preserve ps.parseErrors(ps.parseErrorCount)
+    End If
+
+    ps.parseErrors(ps.parseErrorCount) = msg
+    ps.parseErrorCount += 1
+    ParserDiag ps, "[PDBG] ParserAppendParseError: " & msg
+End Sub
+
+Private Sub ParserRecoverToNextStatement(ByRef ps As ParseState)
+    Do While CurToken(ps).kind <> "EOF"
+        Dim tk As Token
+        tk = CurToken(ps)
+
+        If tk.kind = "EOL" Then Exit Do
+        If tk.kind = "OP" And tk.lexeme = ":" Then
+            AdvanceTok ps
+            Exit Do
+        End If
+
+        AdvanceTok ps
+    Loop
+End Sub
+
+Sub ParserInit(ByRef ps As ParseState, ByRef lx As LexerState)
+    ps.lx = lx
+    ps.cursorIndex = 0
+    ps.lastError = ""
+    ps.parseErrorCount = 0
+    Erase ps.parseErrors
+    ASTPoolInit ps.ast
+    ps.rootNode = -1
+    ps.namespaceDepth = 0
+    ps.moduleDepth = 0
+    ps.mainDepth = 0
+    ps.taskScopeDepth = 0
+    Erase ps.taskScopeNames
+    ResetTypeValidationState
+End Sub
+
+Function ParseProgram(ByRef ps As ParseState) As Integer
+    If ps.lx.preprocessFailed <> 0 Then
+        ps.lastError = ps.lx.preprocessError
+        If ps.lastError = "" Then ps.lastError = "preprocess fail"
+        Return 0
+    End If
+
+    If ps.lx.tokens.count = 0 Then
+        ps.lastError = "empty token stream"
+        Return 0
+    End If
+
+    Dim rootTok As Token
+    rootTok = CurToken(ps)
+    ps.rootNode = ASTNewNode(ps.ast, "PROGRAM", "", "", rootTok.lineNo, rootTok.colNo, rootTok.sourceFile, rootTok.kind, rootTok.lexemeLength, rootTok.lexeme, rootTok.offset)
+
+    SkipSeparators ps
+
+    Do While CurToken(ps).kind <> "EOF"
+        Dim stmt As Integer
+        stmt = ParseSimpleStatement(ps)
+
+        If stmt = -1 Then
+            Dim errTok As Token
+            errTok = CurToken(ps)
+            UXBParserAppendError ps, errTok, "PARSER_STMT_FAIL", ps.lastError
+            UXBParserRecoverToNextStatement ps
+            SkipSeparators ps
+            Continue Do
+        End If
+
+        ASTAddChild ps.ast, ps.rootNode, stmt
+        SkipSeparators ps
+    Loop
+
+    If ps.parseErrorCount > 0 Then
+        Dim summary As String
+        summary = "parse failed with " & LTrim(Str(ps.parseErrorCount)) & " error(s)"
+        If ps.parseErrorCount > 0 Then
+            Dim firstErr As String
+            firstErr = Trim(ps.parseErrors(0))
+            If firstErr <> "" Then summary &= "; first: " & firstErr
+        End If
+        ps.lastError = summary
+        Return 0
+    End If
+
+    Dim vres As Integer
+    vres = ValidateMainProgramSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateMainProgramSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateIfSelectSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateIfSelectSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateUsingAliasSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateUsingAliasSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateClassAccessFriendSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateClassAccessFriendSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateDefTypeSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateDefTypeSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateSetStringSizeSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateSetStringSizeSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateSetNewOffsetSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateSetNewOffsetSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidatePokesSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidatePokesSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateInputSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateInputSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateCallDllSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateCallDllSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidatePointerIntrinsicSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidatePointerIntrinsicSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateRoutineSignatureSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateRoutineSignatureSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateConstRhsSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateConstRhsSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateTypeReferences(ps)
+    ParserDiag ps, "[PDBG] ValidateTypeReferences result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = BuildTypeLayoutTable(ps)
+    ParserDiag ps, "[PDBG] BuildTypeLayoutTable result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    vres = ValidateLayoutIntrinsicSemantics(ps)
+    ParserDiag ps, "[PDBG] ValidateLayoutIntrinsicSemantics result=" & Str(vres)
+    If vres = 0 Then Return 0
+
+    ParserBackfillAstSourceOffsets ps
+    Return 1
+End Function

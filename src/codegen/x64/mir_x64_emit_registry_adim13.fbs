@@ -1,0 +1,216 @@
+#ifndef UXB_MIR_X64_EMIT_REGISTRY_ADIM13_FBS
+#define UXB_MIR_X64_EMIT_REGISTRY_ADIM13_FBS
+
+#include once "../../backend/common/backend_emit_policy.fbs"
+#include once "../../semantic/mir_model.fbs"
+#include once "mir_x64_capability.fbs"
+#include once "../../common/report_writer.fbs"
+
+Function UXBMIRX64DecisionForOpcode(ByVal opcodeText As String) As String
+    Dim op As String
+    op = UCase(Trim(opcodeText))
+    Select Case op
+    Case "INLINE"
+        Return UXB_EMIT_IMPLEMENTED
+    End Select
+    Return UXBBackendTargetDecisionForOpcode(opcodeText, UXB_TARGET_X64)
+End Function
+
+Function UXBMIRX64ReasonForOpcode(ByVal opcodeText As String) As String
+    Dim d As String
+    d = UXBMIRX64DecisionForOpcode(opcodeText)
+    Select Case d
+    Case UXB_EMIT_IMPLEMENTED
+        If UCase(Trim(opcodeText)) = "INLINE" Then Return "native inline block emitted into x64 asm and sidecar source"
+        Return "native emitter or scalar lowering"
+    Case UXB_EMIT_RUNTIME_CALL
+        Return "runtime-backed route required"
+    Case UXB_EMIT_COMPILE_TIME_ONLY
+        Return "metadata/preprocess only; no native instruction"
+    Case Else
+        Return "blocked or unsupported for x64"
+    End Select
+End Function
+
+Function UXBMIRX64RegistryGateCheckModule(ByRef m As MIRModule, ByRef errText As String) As Integer
+    errText = ""
+    Dim fi As Integer
+    For fi = 0 To m.functionCount - 1
+        Dim bi As Integer
+        For bi = 0 To m.functions(fi).blockCount - 1
+            Dim ii As Integer
+            For ii = 0 To m.functions(fi).blocks(bi).instructionCount - 1
+                Dim op As String
+                op = UCase(Trim(m.functions(fi).blocks(bi).instructions(ii).opcode))
+                If op = "" Then op = "NOP"
+                Dim d As String
+                d = UXBMIRX64DecisionForOpcode(op)
+                If d = UXB_EMIT_BLOCKED Or d = UXB_EMIT_BROWSER_ONLY Or d = UXB_EMIT_WASM_UNSUPPORTED Then
+                    errText = "x64 emitter registry: opcode blocked: " & op & " decision=" & d
+                    Return 0
+                End If
+            Next ii
+        Next bi
+    Next fi
+    Return 1
+End Function
+
+
+Function UXBMIRX64RequiredOpcodeSet() As String
+    Dim s As String
+    ' This set is intentionally broader than the old minimum plan. Do not shrink it:
+    ' it is the native MIR x64 confidence surface used before NASM emission.
+    s = "LOAD_CONST,LOAD_VAR,STORE_VAR,MOVE,ASSIGN,DIM,REDIM,CONST,TRUE,FALSE,"
+    s &= "ADD,SUB,MUL,DIV,IDIV,MOD,NEG,INC,DEC,FADD,FSUB,FMUL,FDIV,FNEG,"
+    s &= "EQ,NE,LT,LE,GT,GE,AND,OR,XOR,NOT,BIT_NOT,NAND,NOR,XNOR,IMP,CIMP,NIMP,NCIMP,IDA,IDB,NOTA,NOTB,"
+    s &= "SHL,SHR,USHR,UIDIV,UMOD,ULT,ULE,UGT,UGE,ROL,ROR,POW,ADD_ASSIGN,SUB_ASSIGN,MUL_ASSIGN,DIV_ASSIGN,IDIV_ASSIGN,MOD_ASSIGN,AND_ASSIGN,OR_ASSIGN,XOR_ASSIGN,SHL_ASSIGN,SHR_ASSIGN,POW_ASSIGN,"
+    s &= "LABEL,JMP,JZ,JNZ,JMP_IF_FALSE,JMP_IF_TRUE,GOTO,GOSUB,FOR_EACH_BEGIN,FOR_EACH_NEXT,UNTIL_CHECK,BREAK,CONTINUE,TRY,CATCH,FINALLY,THROW,ASSERT,"
+    s &= "CALL,CALL_RUNTIME,CALL_BUILTIN,CALL_EXTERNAL,CALL_DLL,CALL_API,HOST_CALL,LIBRARY_CALL,EXTFP_CALL,IMPORT,INLINE,RETURN,RET,"
+    s &= "PRINT,INPUT,INPUTF,CLS,COLOR,LOCATE,RANDOMIZE,TIMER,RND,GETKEY,INKEY,ON,OFF,"
+    s &= "STRING_CONST,STR_NEW,STR_ASSIGN,STR_CONCAT,STR_CONCAT_ASSIGN,CONCAT,STR_COMPARE,LEFT,RIGHT,MID,LEN,LCASE,UCASE,LTRIM,RTRIM,TRIM,SPACE,INSTR,ASC,CHR,VAL,STR,HEX,OCT,BIN,"
+    s &= "CINT,CLNG,CSNG,CDBL,FIX,INT,SGN,ABS,SQR,SQRT,SIN,COS,TAN,ATN,LOG,EXP,BIGINIT,"
+    s &= "LOAD_INDEXED,STORE_INDEXED,NEW,LOAD_FIELD,STORE_FIELD,METHOD_CALL,VIRTUAL_CALL,DELETE_OBJECT,TYPE_DECL,CLASS_DECL,INTERFACE_DECL,METHOD_DECL,PROPERTY_DECL,OPERATOR_DECL,CONSTRUCTOR_DECL,DESTRUCTOR_DECL,IMPLEMENTS_DECL,"
+    s &= "MEMCOPY,MEMFILL,PEEK,POKE,SETNEWOFFSET,OPEN,CLOSE,GET,PUT,SEEK,DELETE_FILE,EOF,LOF,PRINT_FILE,INPUT_FILE,LINE_INPUT_FILE,"
+    s &= "EVENT,THREAD,PIPE,SLOT,TRIGGER,DECORATOR,MAGIC,MIXIN,OVERRIDE,VIRTUAL,PARALEL_HINT,METADATA_ONLY"
+    Return s
+End Function
+
+Private Function UXBMIRX64CsvItem(ByRef csvText As String, ByVal itemIndex As Integer) As String
+    Dim cur As String
+    Dim idx As Integer
+    Dim i As Integer
+    cur = ""
+    idx = 0
+    For i = 1 To Len(csvText)
+        Dim ch As String
+        ch = Mid(csvText, i, 1)
+        If ch = "," Then
+            If idx = itemIndex Then Return Trim(cur)
+            idx += 1
+            cur = ""
+        Else
+            cur &= ch
+        End If
+    Next i
+    If idx = itemIndex Then Return Trim(cur)
+    Return ""
+End Function
+
+Private Function UXBMIRX64GateJsonEscape(ByRef rawText As String) As String
+    Dim s As String
+    s = ""
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        Select Case ch
+        Case Chr(34)
+            s &= "\" & Chr(34)
+        Case "\"
+            s &= "\\"
+        Case Chr(10)
+            s &= "\n"
+        Case Chr(13)
+            s &= "\r"
+        Case Else
+            s &= ch
+        End Select
+    Next i
+    Return s
+End Function
+
+Function UXBMIRX64RequiredOpcodeGate(ByRef m As MIRModule, ByRef jsonOut As String, ByRef errText As String) As Integer
+    errText = ""
+    Dim required As String
+    required = UXBMIRX64RequiredOpcodeSet()
+
+    Dim failCount As Integer
+    Dim checkedCount As Integer
+    Dim rows As String
+    rows = ""
+
+    Dim idx As Integer
+    idx = 0
+    Do
+        Dim op As String
+        op = UXBMIRX64CsvItem(required, idx)
+        If op = "" Then Exit Do
+        checkedCount += 1
+        Dim decision As String
+        decision = UXBMIRX64DecisionForOpcode(op)
+        Dim supported As Integer
+        supported = MIRX64OpcodeSupported(op)
+        Dim routable As Integer
+        routable = MIRX64OpcodeHasEmitterRoute(op)
+        Dim ok As Integer
+        ok = IIf((decision = UXB_EMIT_IMPLEMENTED Or decision = UXB_EMIT_RUNTIME_CALL Or decision = UXB_EMIT_COMPILE_TIME_ONLY) And supported <> 0 And routable <> 0, 1, 0)
+        If ok = 0 Then
+            failCount += 1
+            If errText <> "" Then errText &= Chr(10)
+            errText &= "UXB_MIR_X64_OPCODE_EMITTER_MISSING: " & op & " decision=" & decision
+        End If
+        rows &= "    {" & Chr(34) & "opcode" & Chr(34) & ":" & Chr(34) & UXBMIRX64GateJsonEscape(op) & Chr(34) & "," & Chr(34) & "decision" & Chr(34) & ":" & Chr(34) & UXBMIRX64GateJsonEscape(decision) & Chr(34) & "," & Chr(34) & "supported" & Chr(34) & ":" & IIf(supported <> 0, "true", "false") & "," & Chr(34) & "routable" & Chr(34) & ":" & IIf(routable <> 0, "true", "false") & "," & Chr(34) & "ok" & Chr(34) & ":" & IIf(ok <> 0, "true", "false") & "}"
+        idx += 1
+        If UXBMIRX64CsvItem(required, idx) <> "" Then rows &= ","
+        rows &= Chr(10)
+    Loop
+
+    Dim fi As Integer
+    For fi = 0 To m.functionCount - 1
+        Dim bi As Integer
+        For bi = 0 To m.functions(fi).blockCount - 1
+            Dim ii As Integer
+            For ii = 0 To m.functions(fi).blocks(bi).instructionCount - 1
+                Dim mop As String
+                mop = UCase(Trim(m.functions(fi).blocks(bi).instructions(ii).opcode))
+                If mop <> "" Then
+                    Dim md As String
+                    md = UXBMIRX64DecisionForOpcode(mop)
+                    If md = UXB_EMIT_BLOCKED Or md = UXB_EMIT_BROWSER_ONLY Or md = UXB_EMIT_WASM_UNSUPPORTED Then
+                        failCount += 1
+                        If errText <> "" Then errText &= Chr(10)
+                        errText &= "UXB_MIR_X64_OPCODE_EMITTER_MISSING: module opcode " & mop & " decision=" & md
+                    ElseIf MIRX64OpcodeHasEmitterRoute(mop) = 0 Then
+                        failCount += 1
+                        If errText <> "" Then errText &= Chr(10)
+                        errText &= "UXB_MIR_X64_OPCODE_EMITTER_MISSING: module opcode " & mop & " has no concrete MIR x64 route"
+                    End If
+                End If
+            Next ii
+        Next bi
+    Next fi
+
+    jsonOut = "{" & Chr(10)
+    jsonOut &= "  " & Chr(34) & "schema" & Chr(34) & ": " & Chr(34) & "uxb.mir_x64.required_opcode_gate.v1" & Chr(34) & "," & Chr(10)
+    jsonOut &= "  " & Chr(34) & "ok" & Chr(34) & ": " & IIf(failCount = 0, "true", "false") & "," & Chr(10)
+    jsonOut &= "  " & Chr(34) & "checked_count" & Chr(34) & ": " & LTrim(Str(checkedCount)) & "," & Chr(10)
+    jsonOut &= "  " & Chr(34) & "fail_count" & Chr(34) & ": " & LTrim(Str(failCount)) & "," & Chr(10)
+    jsonOut &= "  " & Chr(34) & "errors" & Chr(34) & ": " & Chr(34) & UXBMIRX64GateJsonEscape(errText) & Chr(34) & "," & Chr(10)
+    jsonOut &= "  " & Chr(34) & "required" & Chr(34) & ": [" & Chr(10)
+    jsonOut &= rows
+    jsonOut &= "  ]" & Chr(10)
+    jsonOut &= "}" & Chr(10)
+
+    Return IIf(failCount = 0, 1, 0)
+End Function
+
+Function UXBMIRX64RequiredOpcodeGateWriteJson(ByRef m As MIRModule, ByRef outPath As String, ByRef errText As String) As Integer
+    errText = ""
+    If Trim(outPath) = "" Then Return 1
+    Dim j As String
+    Dim gateErr As String
+    Dim ok As Integer
+    ok = UXBMIRX64RequiredOpcodeGate(m, j, gateErr)
+    Dim writeErr As String
+    If UXBReportWriteText(outPath, j, writeErr) = 0 Then
+        errText = writeErr
+        Return 0
+    End If
+    If ok = 0 Then
+        errText = gateErr
+        Return 0
+    End If
+    Return 1
+End Function
+
+#endif

@@ -1,0 +1,196 @@
+#ifndef UXB_BACKEND_NATIVE_SURFACE_SCAN_FBS
+#define UXB_BACKEND_NATIVE_SURFACE_SCAN_FBS
+
+' AST + MIR native-only tespiti.
+' Bu dosya JS/WAT/WASM/BROWSER hedeflerinde CALL(DLL/API), IMPORT(C/CPP/ASM), INLINE,
+' external DECLARE ve FFI runtime call yuzeylerini tek helper ile yakalar.
+
+#include once "backend_native_only_diagnostics_adim15.fbs"
+#include once "../parser/ast.fbs"
+#include once "../semantic/mir_model.fbs"
+
+Type UXBNativeSurfaceScanResult
+    ok As Integer
+    count As Integer
+    firstSurface As String
+    firstKind As String
+    message As String
+End Type
+
+Sub UXBNativeSurfaceScanInit(ByRef r As UXBNativeSurfaceScanResult)
+    r.ok = 1
+    r.count = 0
+    r.firstSurface = ""
+    r.firstKind = ""
+    r.message = ""
+End Sub
+
+Private Function UXBNativeTextHas(ByRef textValue As String, ByRef needle As String) As Integer
+    If InStr(UCase(Trim(textValue)), UCase(Trim(needle))) > 0 Then Return 1
+    Return 0
+End Function
+
+Function UXBAstNodeRequiresNativeTarget(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef surfaceOut As String, ByRef kindOut As String) As Integer
+    surfaceOut = ""
+    kindOut = ""
+    If nodeIdx < 0 Or nodeIdx >= p.count Then Return 0
+
+    Dim k As String
+    Dim v As String
+    Dim opv As String
+    Dim tn As String
+    k = UCase(Trim(p.nodes(nodeIdx).kind))
+    v = UCase(Trim(p.nodes(nodeIdx).value))
+    opv = UCase(Trim(p.nodes(nodeIdx).op))
+    tn = UCase(Trim(p.nodes(nodeIdx).typeName))
+
+    kindOut = k
+
+    Select Case k
+    Case "CALL_DLL_STMT", "CALL_API_STMT", "CALL_EXTERNAL_STMT", "CALL_DLL_EXPR", "CALL_API_EXPR", "CALL_EXTERNAL_EXPR"
+        surfaceOut = k
+        Return 1
+    Case "INLINE_STMT", "ASM_INLINE_STMT", "C_INLINE_STMT", "CPP_INLINE_STMT"
+        surfaceOut = k
+        Return 1
+    Case "IMPORT_STMT", "IMPORT_DECL"
+        If UXBNativeTextHas(v, "C") <> 0 Or UXBNativeTextHas(v, "CPP") <> 0 Or UXBNativeTextHas(v, "ASM") <> 0 Or UXBNativeTextHas(opv, "C") <> 0 Or UXBNativeTextHas(opv, "CPP") <> 0 Or UXBNativeTextHas(opv, "ASM") <> 0 Then
+            surfaceOut = "IMPORT_NATIVE"
+            Return 1
+        End If
+    Case "DECLARE_STMT", "DECLARE_SUB_STMT", "DECLARE_FUNCTION_STMT", "DECLARE_FUNCTION_DECL", "DECLARE_SUB_DECL"
+        If UXBNativeTextHas(v, "LIB") <> 0 Or UXBNativeTextHas(opv, "LIB") <> 0 Or UXBNativeTextHas(tn, "LIB") <> 0 Or UXBNativeTextHas(v, "ALIAS") <> 0 Or UXBNativeTextHas(opv, "ALIAS") <> 0 Or UXBNativeTextHas(tn, "ALIAS") <> 0 Then
+            surfaceOut = "DECLARE_EXTERNAL"
+            Return 1
+        End If
+    Case "CALL_STMT", "CALL_EXPR"
+        If UXBNativeTextHas(v, "DLL") <> 0 Or UXBNativeTextHas(v, "API") <> 0 Or UXBNativeTextHas(v, "CALL_DLL") <> 0 Or UXBNativeTextHas(v, "CALL_API") <> 0 Or UXBNativeTextHas(v, "CALL_EXTERNAL") <> 0 Then
+            surfaceOut = "CALL_NATIVE"
+            Return 1
+        End If
+        If UXBNativeTextHas(opv, "DLL") <> 0 Or UXBNativeTextHas(opv, "API") <> 0 Then
+            surfaceOut = "CALL_NATIVE"
+            Return 1
+        End If
+    End Select
+
+    Return 0
+End Function
+
+Private Sub UXBNativeSurfaceScanMark(ByRef r As UXBNativeSurfaceScanResult, ByRef surfaceText As String, ByRef kindText As String)
+    r.ok = 0
+    r.count += 1
+    If r.firstSurface = "" Then r.firstSurface = surfaceText
+    If r.firstKind = "" Then r.firstKind = kindText
+    r.message = "native-only surface detected: " & r.firstSurface & " kind=" & r.firstKind
+End Sub
+
+Private Sub UXBNativeSurfaceScanAstNode(ByRef p As ASTPool, ByVal nodeIdx As Integer, ByRef r As UXBNativeSurfaceScanResult)
+    If nodeIdx < 0 Or nodeIdx >= p.count Then Exit Sub
+
+    Dim surfaceText As String
+    Dim kindText As String
+    If UXBAstNodeRequiresNativeTarget(p, nodeIdx, surfaceText, kindText) <> 0 Then
+        UXBNativeSurfaceScanMark r, surfaceText, kindText
+    End If
+
+    If p.nodes(nodeIdx).left <> -1 Then UXBNativeSurfaceScanAstNode p, p.nodes(nodeIdx).left, r
+    If p.nodes(nodeIdx).right <> -1 Then UXBNativeSurfaceScanAstNode p, p.nodes(nodeIdx).right, r
+
+    Dim safety As Integer
+    Dim ch As Integer
+    ch = p.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        UXBNativeSurfaceScanAstNode p, ch, r
+        If ch < 0 Or ch >= p.count Then Exit Do
+        ch = p.nodes(ch).nextSibling
+        safety += 1
+        If safety > p.count Then Exit Do
+    Loop
+End Sub
+
+Function UXBNativeSurfaceScanAst(ByRef p As ASTPool, ByVal rootIdx As Integer, ByRef r As UXBNativeSurfaceScanResult) As Integer
+    UXBNativeSurfaceScanInit r
+    If rootIdx < 0 Or rootIdx >= p.count Then Return 1
+    UXBNativeSurfaceScanAstNode p, rootIdx, r
+    Return r.ok
+End Function
+
+Function UXBMIRInstructionRequiresNative(ByRef inst As MIRIRInstruction, ByRef surfaceOut As String) As Integer
+    surfaceOut = ""
+    Dim op As String
+    op = UCase(Trim(inst.opcode))
+    If UXBNativeTextHas(op, "FFI") <> 0 Or UXBNativeTextHas(op, "DLL") <> 0 Or UXBNativeTextHas(op, "API") <> 0 Or UXBNativeTextHas(op, "IMPORT_NATIVE") <> 0 Then
+        surfaceOut = op
+        Return 1
+    End If
+
+    Dim i As Integer
+    For i = 0 To inst.operandCount - 1
+        Dim operandText As String
+        operandText = UCase(Trim(inst.operands(i)))
+        If UXBNativeTextHas(operandText, "CALL_DLL") <> 0 Or UXBNativeTextHas(operandText, "CALL_API") <> 0 Or UXBNativeTextHas(operandText, "NATIVE") <> 0 Or UXBNativeTextHas(operandText, "FFI") <> 0 Then
+            surfaceOut = operandText
+            Return 1
+        End If
+    Next i
+    Return 0
+End Function
+
+Function UXBNativeSurfaceScanMir(ByRef m As MIRModule, ByRef r As UXBNativeSurfaceScanResult) As Integer
+    UXBNativeSurfaceScanInit r
+    Dim fi As Integer
+    For fi = 0 To m.functionCount - 1
+        Dim fn As MIRFunction Ptr
+        fn = @m.functions(fi)
+        Dim bi As Integer
+        For bi = 0 To fn->blockCount - 1
+            Dim bl As MIRBasicBlock Ptr
+            bl = @fn->blocks(bi)
+            Dim ii As Integer
+            For ii = 0 To bl->instructionCount - 1
+                Dim surfaceText As String
+                If UXBMIRInstructionRequiresNative(bl->instructions(ii), surfaceText) <> 0 Then
+                    UXBNativeSurfaceScanMark r, surfaceText, "MIR_INSTRUCTION"
+                End If
+            Next ii
+        Next bi
+    Next fi
+    Return r.ok
+End Function
+
+Function UXBNativeSurfaceWebTargetGate( _
+    ByRef p As ASTPool, _
+    ByVal rootIdx As Integer, _
+    ByRef m As MIRModule, _
+    ByVal mirReady As Integer, _
+    ByRef targetText As String, _
+    ByRef errText As String _
+) As Integer
+    errText = ""
+    If UXBBackendTargetIsWeb(targetText) = 0 Then Return 1
+
+    Dim astScan As UXBNativeSurfaceScanResult
+    UXBNativeSurfaceScanAst p, rootIdx, astScan
+    If astScan.ok = 0 Then
+        Dim d As UXBNativeOnlyDiagnosticAdim15
+        UXBBackendNativeOnlyDiagnosticAdim15 astScan.firstSurface, targetText, d
+        errText = UXBBackendNativeOnlyDiagnosticJsonAdim15(d)
+        Return 0
+    End If
+
+    If mirReady <> 0 Then
+        Dim mirScan As UXBNativeSurfaceScanResult
+        UXBNativeSurfaceScanMir m, mirScan
+        If mirScan.ok = 0 Then
+            Dim d2 As UXBNativeOnlyDiagnosticAdim15
+            UXBBackendNativeOnlyDiagnosticAdim15 mirScan.firstSurface, targetText, d2
+            errText = UXBBackendNativeOnlyDiagnosticJsonAdim15(d2)
+            Return 0
+        End If
+    End If
+
+    Return 1
+End Function
+
+#endif

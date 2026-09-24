@@ -1,0 +1,410 @@
+' VIRTUAL memory sandbox for the AST interpreter (S-036/S-049 locked design,
+' point #5): a RAM-backed region [0, sizeBytes) plus an optional disk-backed
+' EXTENSION [sizeBytes, sizeBytes+diskBytes) mapped from a real Windows
+' memory-mapped temp file (CreateFileA/CreateFileMappingA/MapViewOfFile).
+' Every VMemPeek*/VMemPoke*/VMemCopy*/VMemFill* call goes through the single
+' VMemByteAt() pointer indirection below, so callers never need to know which
+' backing store a given address falls in.
+Declare Function CreateFileA Lib "kernel32.dll" Alias "CreateFileA" (ByVal lpFileName As ZString Ptr, ByVal dwDesiredAccess As ULong, ByVal dwShareMode As ULong, ByVal lpSecurityAttributes As Any Ptr, ByVal dwCreationDisposition As ULong, ByVal dwFlagsAndAttributes As ULong, ByVal hTemplateFile As Any Ptr) As Any Ptr
+Declare Function CreateFileMappingA Lib "kernel32.dll" Alias "CreateFileMappingA" (ByVal hFile As Any Ptr, ByVal lpAttributes As Any Ptr, ByVal flProtect As ULong, ByVal dwMaximumSizeHigh As ULong, ByVal dwMaximumSizeLow As ULong, ByVal lpName As ZString Ptr) As Any Ptr
+Declare Function MapViewOfFile Lib "kernel32.dll" Alias "MapViewOfFile" (ByVal hFileMappingObject As Any Ptr, ByVal dwDesiredAccess As ULong, ByVal dwFileOffsetHigh As ULong, ByVal dwFileOffsetLow As ULong, ByVal dwNumberOfBytesToMap As ULongInt) As Any Ptr
+Declare Function UnmapViewOfFile Lib "kernel32.dll" Alias "UnmapViewOfFile" (ByVal lpBaseAddress As Any Ptr) As Long
+Declare Function CloseHandleVMem Lib "kernel32.dll" Alias "CloseHandle" (ByVal hObject As Any Ptr) As Long
+Declare Function GetTempPathA Lib "kernel32.dll" Alias "GetTempPathA" (ByVal nBufferLength As ULong, ByVal lpBuffer As ZString Ptr) As ULong
+Declare Function GetTempFileNameA Lib "kernel32.dll" Alias "GetTempFileNameA" (ByVal lpPathName As ZString Ptr, ByVal lpPrefixString As ZString Ptr, ByVal uUnique As ULong, ByVal lpTempFileName As ZString Ptr) As ULong
+
+Const VMEM_GENERIC_READ As ULong = &h80000000
+Const VMEM_GENERIC_WRITE As ULong = &h40000000
+Const VMEM_CREATE_ALWAYS As ULong = 2
+Const VMEM_FILE_ATTRIBUTE_TEMPORARY As ULong = &h100
+Const VMEM_FILE_FLAG_DELETE_ON_CLOSE As ULong = &h4000000
+Const VMEM_PAGE_READWRITE As ULong = 4
+Const VMEM_FILE_MAP_ALL_ACCESS As ULong = &hF001F
+
+Type VMemState
+    data(Any) As UByte      ' RAM-backed portion, addresses [0, sizeBytes)
+    sizeBytes As UInteger    ' RAM portion size
+    textBase As UInteger
+    textCols As Integer
+    textRows As Integer
+    active As Integer
+    diskBytes As ULongInt    ' disk-backed extension size, addresses [sizeBytes, sizeBytes+diskBytes)
+    diskBasePtr As Any Ptr   ' mapped view base, or 0 if no disk extension configured
+    diskFileHandle As Any Ptr
+    diskMapHandle As Any Ptr
+End Type
+
+Dim Shared g_vmem As VMemState
+
+Private Function VMemTotalSize() As ULongInt
+    Return CULngInt(g_vmem.sizeBytes) + g_vmem.diskBytes
+End Function
+
+Private Function VMemInRange(ByVal addr As UInteger, ByVal byteCount As UInteger) As Integer
+    If g_vmem.active = 0 Then Return 0
+    If byteCount = 0 Then Return 0
+    Dim total As ULongInt = VMemTotalSize()
+    If CULngInt(addr) >= total Then Return 0
+    If CULngInt(addr) + CULngInt(byteCount) > total Then Return 0
+    Return 1
+End Function
+
+' Single point of truth for "where does this VIRTUAL address really live":
+' below g_vmem.sizeBytes it's the RAM array, at/above it it's the disk-backed
+' mapped view (see the S-036/S-049 locked design's disk-backed VIRTUAL point).
+Private Function VMemByteAt(ByVal addr As UInteger) As UByte Ptr
+    If addr < g_vmem.sizeBytes Then
+        Return @g_vmem.data(addr)
+    End If
+    Return CPtr(UByte Ptr, g_vmem.diskBasePtr) + (CULngInt(addr) - CULngInt(g_vmem.sizeBytes))
+End Function
+
+Private Sub VMemBlitTextCell(ByVal addr As UInteger)
+    If g_vmem.active = 0 Then Exit Sub
+
+    If addr < g_vmem.textBase Then Exit Sub
+
+    Dim textBytes As UInteger
+    textBytes = CUInt(g_vmem.textCols * g_vmem.textRows * 2)
+    If addr >= g_vmem.textBase + textBytes Then Exit Sub
+
+    Dim rel As UInteger
+    rel = addr - g_vmem.textBase
+
+    Dim cellIdx As UInteger
+    cellIdx = rel \ 2
+
+    Dim row As Integer
+    Dim col As Integer
+    row = CInt(cellIdx \ g_vmem.textCols) + 1
+    col = CInt(cellIdx Mod g_vmem.textCols) + 1
+
+    Dim charAddr As UInteger
+    charAddr = g_vmem.textBase + cellIdx * 2
+
+    If VMemInRange(charAddr, 2) = 0 Then Exit Sub
+
+    Dim ch As UByte
+    Dim attr As UByte
+    ch = *VMemByteAt(charAddr)
+    attr = *VMemByteAt(charAddr + 1)
+
+    Dim fg As Integer
+    Dim bg As Integer
+    fg = (attr And &h0F)
+    bg = ((attr Shr 4) And &h0F)
+
+    Locate row, col
+    Color fg, bg
+    Print Chr(ch);
+End Sub
+
+' Releases any disk-backed mapping from a previous VMemInit call. Safe to
+' call when nothing is mapped (diskBasePtr = 0).
+Private Sub VMemReleaseDisk()
+    If g_vmem.diskBasePtr <> 0 Then
+        UnmapViewOfFile g_vmem.diskBasePtr
+        g_vmem.diskBasePtr = 0
+    End If
+    If g_vmem.diskMapHandle <> 0 Then
+        CloseHandleVMem g_vmem.diskMapHandle
+        g_vmem.diskMapHandle = 0
+    End If
+    If g_vmem.diskFileHandle <> 0 Then
+        CloseHandleVMem g_vmem.diskFileHandle
+        g_vmem.diskFileHandle = 0
+    End If
+    g_vmem.diskBytes = 0
+End Sub
+
+' Creates a fresh Windows memory-mapped temp file of exactly diskBytes bytes
+' and maps it into this process's address space. The backing file is marked
+' TEMPORARY + DELETE_ON_CLOSE, so the OS cleans it up automatically once
+' every handle to it closes (process exit, or the next VMemReleaseDisk call).
+Private Function VMemCreateDiskBacking(ByVal diskBytes As ULongInt, ByRef errText As String) As Integer
+    Dim tempPathBuf As String = Space(260)
+    Dim pathLen As ULong
+    pathLen = GetTempPathA(260, StrPtr(tempPathBuf))
+    If pathLen = 0 Then
+        errText = "VIRTUAL: gecici dizin alinamadi"
+        Return 0
+    End If
+
+    Dim tempFileBuf As String = Space(260)
+    Dim madeName As ULong
+    madeName = GetTempFileNameA(StrPtr(tempPathBuf), StrPtr("uxbv"), 0, StrPtr(tempFileBuf))
+    If madeName = 0 Then
+        errText = "VIRTUAL: gecici dosya adi uretilemedi"
+        Return 0
+    End If
+
+    Dim nulPos As Integer
+    nulPos = InStr(tempFileBuf, Chr(0))
+    Dim tempFileName As String
+    If nulPos > 0 Then
+        tempFileName = Left(tempFileBuf, nulPos - 1)
+    Else
+        tempFileName = Trim(tempFileBuf)
+    End If
+
+    Dim hFile As Any Ptr
+    hFile = CreateFileA(StrPtr(tempFileName), VMEM_GENERIC_READ Or VMEM_GENERIC_WRITE, 0, 0, VMEM_CREATE_ALWAYS, VMEM_FILE_ATTRIBUTE_TEMPORARY Or VMEM_FILE_FLAG_DELETE_ON_CLOSE, 0)
+    If hFile = Cast(Any Ptr, -1) Or hFile = 0 Then
+        errText = "VIRTUAL: disk destekli bellek icin dosya acilamadi: " & tempFileName
+        Return 0
+    End If
+
+    Dim sizeHigh As ULong
+    Dim sizeLow As ULong
+    sizeHigh = CULng((diskBytes Shr 32) And &hFFFFFFFFULL)
+    sizeLow = CULng(diskBytes And &hFFFFFFFFULL)
+
+    Dim hMap As Any Ptr
+    hMap = CreateFileMappingA(hFile, 0, VMEM_PAGE_READWRITE, sizeHigh, sizeLow, 0)
+    If hMap = 0 Then
+        CloseHandleVMem hFile
+        errText = "VIRTUAL: disk destekli bellek haritasi olusturulamadi (boyut cok buyuk olabilir)"
+        Return 0
+    End If
+
+    Dim basePtr As Any Ptr
+    basePtr = MapViewOfFile(hMap, VMEM_FILE_MAP_ALL_ACCESS, 0, 0, diskBytes)
+    If basePtr = 0 Then
+        CloseHandleVMem hMap
+        CloseHandleVMem hFile
+        errText = "VIRTUAL: disk destekli bellek gorunumu haritalanamadi"
+        Return 0
+    End If
+
+    g_vmem.diskFileHandle = hFile
+    g_vmem.diskMapHandle = hMap
+    g_vmem.diskBasePtr = basePtr
+    g_vmem.diskBytes = diskBytes
+    Return 1
+End Function
+
+' (Re)configures the VIRTUAL sandbox: ramBytes real RAM + an optional
+' diskBytes disk-backed extension immediately following it in the address
+' space. Re-issuing this (e.g. from a VIRTUAL statement) destroys prior
+' contents, matching REDIM-without-PRESERVE semantics (S-036/S-049 point #5)
+' -- deliberately not preserving data across a resize keeps this simple.
+Function VMemInit(ByVal ramBytes As UInteger = 1048576, ByVal diskBytes As ULongInt = 0, ByRef errText As String = "", ByVal textBase As UInteger = &hB8000, ByVal textCols As Integer = 80, ByVal textRows As Integer = 25) As Integer
+    If ramBytes < 65536 Then ramBytes = 65536
+
+    VMemReleaseDisk()
+
+    ReDim g_vmem.data(ramBytes - 1)
+    g_vmem.sizeBytes = ramBytes
+    g_vmem.textBase = textBase
+    g_vmem.textCols = textCols
+    g_vmem.textRows = textRows
+    g_vmem.active = 1
+
+    If diskBytes > 0 Then
+        If VMemCreateDiskBacking(diskBytes, errText) = 0 Then
+            ' RAM portion stays usable even if the disk extension failed --
+            ' report the failure but don't tear down what already succeeded.
+            Return 0
+        End If
+    End If
+
+    Return 1
+End Function
+
+Function VMemPeekB(ByVal addr As UInteger) As Integer
+    If VMemInRange(addr, 1) = 0 Then Return -1
+    Return *VMemByteAt(addr)
+End Function
+
+Function VMemPeekW(ByVal addr As UInteger) As Integer
+    If VMemInRange(addr, 2) = 0 Then Return -1
+    Return *VMemByteAt(addr) Or (*VMemByteAt(addr + 1) Shl 8)
+End Function
+
+Function VMemPeekD(ByVal addr As UInteger) As Integer
+    If VMemInRange(addr, 4) = 0 Then Return -1
+    Dim v As UInteger
+    v = *VMemByteAt(addr)
+    v Or= (CUInt(*VMemByteAt(addr + 1)) Shl 8)
+    v Or= (CUInt(*VMemByteAt(addr + 2)) Shl 16)
+    v Or= (CUInt(*VMemByteAt(addr + 3)) Shl 24)
+    Return CInt(v)
+End Function
+
+Function VMemPeekQ(ByVal addr As UInteger) As LongInt
+    If VMemInRange(addr, 8) = 0 Then Return 0
+    Return CLngInt(*CPtr(ULongInt Ptr, VMemByteAt(addr)))
+End Function
+
+Function VMemPokeB(ByVal addr As UInteger, ByVal value As Integer) As Integer
+    If VMemInRange(addr, 1) = 0 Then Return 0
+    *VMemByteAt(addr) = CByte(value And &hFF)
+    VMemBlitTextCell(addr)
+    Return 1
+End Function
+
+Function VMemPokeW(ByVal addr As UInteger, ByVal value As Integer) As Integer
+    If VMemInRange(addr, 2) = 0 Then Return 0
+    *VMemByteAt(addr) = CByte(value And &hFF)
+    *VMemByteAt(addr + 1) = CByte((value Shr 8) And &hFF)
+    VMemBlitTextCell(addr)
+    VMemBlitTextCell(addr + 1)
+    Return 1
+End Function
+
+Function VMemPokeD(ByVal addr As UInteger, ByVal value As Integer) As Integer
+    If VMemInRange(addr, 4) = 0 Then Return 0
+    *VMemByteAt(addr) = CByte(value And &hFF)
+    *VMemByteAt(addr + 1) = CByte((value Shr 8) And &hFF)
+    *VMemByteAt(addr + 2) = CByte((value Shr 16) And &hFF)
+    *VMemByteAt(addr + 3) = CByte((value Shr 24) And &hFF)
+    VMemBlitTextCell(addr)
+    VMemBlitTextCell(addr + 1)
+    VMemBlitTextCell(addr + 2)
+    VMemBlitTextCell(addr + 3)
+    Return 1
+End Function
+
+Function VMemPokeQ(ByVal addr As UInteger, ByVal value As LongInt) As Integer
+    If VMemInRange(addr, 8) = 0 Then Return 0
+    *CPtr(ULongInt Ptr, VMemByteAt(addr)) = CULngInt(value)
+    Return 1
+End Function
+
+Function VMemPeekS(ByVal addr As UInteger, ByVal lengthValue As UInteger) As String
+    If lengthValue = 0 Then Return ""
+    If VMemInRange(addr, lengthValue) = 0 Then Return ""
+    Dim outText As String = String(CLng(lengthValue), Chr(0))
+    Dim i As UInteger
+    For i = 0 To lengthValue - 1
+        Mid(outText, i + 1, 1) = Chr(*VMemByteAt(addr + i))
+    Next i
+    Return outText
+End Function
+
+Function VMemPokeSLength(ByVal addr As UInteger, ByRef textValue As String, ByVal lengthValue As UInteger) As Integer
+    If lengthValue > CUInt(Len(textValue)) Then Return 0
+    If lengthValue = 0 Then Return 1
+    If VMemInRange(addr, lengthValue) = 0 Then Return 0
+    Dim i As UInteger
+    For i = 1 To lengthValue
+        *VMemByteAt(addr + i - 1) = CByte(Asc(Mid(textValue, i, 1)) And &hFF)
+        VMemBlitTextCell(addr + i - 1)
+    Next i
+    Return 1
+End Function
+
+Function VMemPokeS(ByVal addr As UInteger, ByRef textValue As String) As Integer
+    Dim n As UInteger
+    n = CUInt(Len(textValue))
+
+    If n = 0 Then Return 1
+    If VMemInRange(addr, n) = 0 Then Return 0
+
+    Dim i As UInteger
+    For i = 1 To n
+        *VMemByteAt(addr + i - 1) = CByte(Asc(Mid(textValue, i, 1)) And &hFF)
+        VMemBlitTextCell(addr + i - 1)
+    Next i
+
+    Return 1
+End Function
+
+Function VMemCopyB(ByVal src As UInteger, ByVal dst As UInteger, ByVal n As UInteger) As Integer
+    If n = 0 Then Return 1
+    If VMemInRange(src, n) = 0 Then Return 0
+    If VMemInRange(dst, n) = 0 Then Return 0
+
+    Dim i As UInteger
+    If dst > src And dst < src + n Then
+        For i = n To 1 Step -1
+            *VMemByteAt(dst + i - 1) = *VMemByteAt(src + i - 1)
+            VMemBlitTextCell(dst + i - 1)
+        Next i
+    Else
+        For i = 0 To n - 1
+            *VMemByteAt(dst + i) = *VMemByteAt(src + i)
+            VMemBlitTextCell(dst + i)
+        Next i
+    End If
+
+    Return 1
+End Function
+
+Function VMemCopyW(ByVal src As UInteger, ByVal dst As UInteger, ByVal nWords As UInteger) As Integer
+    If nWords = 0 Then Return 1
+    Return VMemCopyB(src, dst, nWords Shl 1)
+End Function
+
+Function VMemCopyD(ByVal src As UInteger, ByVal dst As UInteger, ByVal nDWords As UInteger) As Integer
+    If nDWords = 0 Then Return 1
+    Return VMemCopyB(src, dst, nDWords Shl 2)
+End Function
+
+' S-055: Q (64-bit) memory family, parallel to VMemCopyB/W/D above.
+Function VMemCopyQ(ByVal src As UInteger, ByVal dst As UInteger, ByVal nQWords As UInteger) As Integer
+    If nQWords = 0 Then Return 1
+    Return VMemCopyB(src, dst, nQWords Shl 3)
+End Function
+
+Function VMemFillB(ByVal addr As UInteger, ByVal value As Integer, ByVal n As UInteger) As Integer
+    If n = 0 Then Return 1
+    If VMemInRange(addr, n) = 0 Then Return 0
+
+    Dim b As UByte
+    b = CByte(value And &hFF)
+
+    Dim i As UInteger
+    For i = 0 To n - 1
+        *VMemByteAt(addr + i) = b
+        VMemBlitTextCell(addr + i)
+    Next i
+
+    Return 1
+End Function
+
+Function VMemFillW(ByVal addr As UInteger, ByVal value As Integer, ByVal nWords As UInteger) As Integer
+    If nWords = 0 Then Return 1
+
+    Dim i As UInteger
+    For i = 0 To nWords - 1
+        If VMemPokeW(addr + (i Shl 1), value) = 0 Then Return 0
+    Next i
+
+    Return 1
+End Function
+
+Function VMemFillD(ByVal addr As UInteger, ByVal value As Integer, ByVal nDWords As UInteger) As Integer
+    If nDWords = 0 Then Return 1
+
+    Dim i As UInteger
+    For i = 0 To nDWords - 1
+        If VMemPokeD(addr + (i Shl 2), value) = 0 Then Return 0
+    Next i
+
+    Return 1
+End Function
+
+' S-055: Q (64-bit) memory family, parallel to VMemFillB/W/D above.
+Function VMemFillQ(ByVal addr As UInteger, ByVal value As LongInt, ByVal nQWords As UInteger) As Integer
+    If nQWords = 0 Then Return 1
+
+    Dim i As UInteger
+    For i = 0 To nQWords - 1
+        If VMemPokeQ(addr + (i Shl 3), value) = 0 Then Return 0
+    Next i
+
+    Return 1
+End Function
+
+Sub VMemBlitTextWindow()
+    If g_vmem.active = 0 Then Exit Sub
+
+    Dim cellCount As Integer
+    cellCount = g_vmem.textCols * g_vmem.textRows
+
+    Dim i As Integer
+    For i = 0 To cellCount - 1
+        VMemBlitTextCell(g_vmem.textBase + CUInt(i) * 2)
+    Next i
+End Sub

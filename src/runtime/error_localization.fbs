@@ -1,0 +1,168 @@
+#include once "file_io.fbs"
+
+Private Function UxbExtractErrorCode(ByRef rawText As String) As Integer
+    Dim startPos As Integer
+    Dim endPos As Integer
+    startPos = Instr(rawText, "(")
+    If startPos <= 0 Then Return 0
+
+    endPos = Instr(startPos + 1, rawText, ")")
+    If endPos <= startPos + 1 Then Return 0
+
+    Dim codeText As String
+    codeText = Mid(rawText, startPos + 1, endPos - startPos - 1)
+
+    Dim i As Integer
+    For i = 1 To Len(codeText)
+        Dim ch As Integer
+        ch = Asc(Mid(codeText, i, 1))
+        If ch < 48 Or ch > 57 Then Return 0
+    Next i
+
+    Return ValInt(codeText)
+End Function
+
+Private Function UxbFileErrorTextTr(ByVal errorCode As Integer) As String
+    Select Case errorCode
+    Case UXB_FILE_OK
+        Return "Islem basarili"
+    Case UXB_FILE_ERR_BAD_CHANNEL
+        Return "Kanal numarasi gecersiz"
+    Case UXB_FILE_ERR_CHANNEL_NOT_OPEN
+        Return "Kanal acik degil"
+    Case UXB_FILE_ERR_CHANNEL_ALREADY_OPEN
+        Return "Kanal zaten acik"
+    Case UXB_FILE_ERR_INVALID_MODE
+        Return "Dosya modu gecersiz"
+    Case UXB_FILE_ERR_INVALID_ARGUMENT
+        Return "Gecersiz arguman"
+    Case UXB_FILE_ERR_MODE_NOT_READABLE
+        Return "Okuma modu uygun degil"
+    Case UXB_FILE_ERR_MODE_NOT_WRITABLE
+        Return "Yazma modu uygun degil"
+    Case UXB_FILE_ERR_SEEK_NOT_ALLOWED
+        Return "Bu modda konumlandirma desteklenmiyor"
+    Case UXB_FILE_ERR_SEEK_OUT_OF_RANGE
+        Return "Konum aralik disi"
+    Case UXB_FILE_ERR_IO
+        Return "Dosya giris cikis hatasi"
+    Case UXB_FILE_ERR_EOF
+        Return "Dosya sonuna ulasildi"
+    Case UXB_FILE_ERR_NOT_FOUND
+        Return "Dosya bulunamadi"
+    Case UXB_FILE_ERR_ACCESS_DENIED
+        Return "Dosya erisimi engellendi"
+    Case Else
+        Return "Bilinmeyen dosya hatasi"
+    End Select
+End Function
+
+Private Function UxbFileOpPrefixTr(ByRef rawUpper As String) As String
+    If Instr(rawUpper, "OPEN FAILED") > 0 Then Return "Dosya acma hatasi"
+    If Instr(rawUpper, "CLOSE FAILED") > 0 Then Return "Dosya kapatma hatasi"
+    If Instr(rawUpper, "GET FAILED") > 0 Then Return "Dosya okuma hatasi"
+    If Instr(rawUpper, "PUT FAILED") > 0 Then Return "Dosya yazma hatasi"
+    If Instr(rawUpper, "SEEK FAILED") > 0 Then Return "Dosya konumlama hatasi"
+    Return ""
+End Function
+
+Private Function UxbErrorTailAfterPrefix(ByRef rawText As String, ByRef prefixText As String) As String
+    Dim prefixLen As Integer
+    prefixLen = Len(prefixText)
+    If prefixLen <= 0 Then Return Trim(rawText)
+    If Len(rawText) <= prefixLen Then Return ""
+    Return Trim(Mid(rawText, prefixLen + 1))
+End Function
+
+Function UxbYerellestirHata(ByRef rawText As String) As String
+    Dim u As String
+    u = UCase(rawText)
+
+    If Instr(u, "SOURCE FILE PATH NOT PROVIDED") > 0 Then Return "Kaynak dosya yolu verilmedi"
+    If Instr(u, "SOURCE ARGUMENT MISSING VALUE") > 0 Then Return "Kaynak dosya parametresi eksik"
+    If Instr(u, "EXECMEM AND INTEROP MODES CANNOT BE COMBINED") > 0 Then Return "--execmem ve --interop birlikte kullanilamaz"
+
+    If Left(u, 9) = "SEMANTIC:" Then
+        Dim semanticTail As String
+        semanticTail = UxbErrorTailAfterPrefix(rawText, "semantic:")
+        If semanticTail = "" Then Return "Semantik hata"
+        Return "Semantik hata: " & semanticTail
+    End If
+
+    If Left(u, 4) = "MIR:" Then
+        Dim mirTail As String
+        mirTail = UxbErrorTailAfterPrefix(rawText, "mir:")
+        If mirTail = "" Then Return "MIR hata"
+        Return "MIR hata: " & mirTail
+    End If
+
+    If Left(u, 12) = "X64-CODEGEN:" Then
+        Dim cgTail As String
+        cgTail = UxbErrorTailAfterPrefix(rawText, "x64-codegen:")
+        If cgTail = "" Then Return "x64 kod uretim hatasi"
+        Return "x64 kod uretim hatasi: " & cgTail
+    End If
+
+    If Left(u, 8) = "FFI-X64:" Then
+        Dim ffi64Tail As String
+        ffi64Tail = UxbErrorTailAfterPrefix(rawText, "ffi-x64:")
+        If ffi64Tail = "" Then Return "FFI x64 kod uretim hatasi"
+        Return "FFI x64 kod uretim hatasi: " & ffi64Tail
+    End If
+
+    If Left(u, 8) = "FFI-X86:" Then
+        Dim ffi86Tail As String
+        ffi86Tail = UxbErrorTailAfterPrefix(rawText, "ffi-x86:")
+        If ffi86Tail = "" Then Return "FFI x86 kod uretim hatasi"
+        Return "FFI x86 kod uretim hatasi: " & ffi86Tail
+    End If
+
+    Dim fileCode As Integer
+    fileCode = UxbExtractErrorCode(rawText)
+    If fileCode >= UXB_FILE_ERR_BAD_CHANNEL And fileCode <= UXB_FILE_ERR_ACCESS_DENIED Then
+        Dim opPrefix As String
+        opPrefix = UxbFileOpPrefixTr(u)
+
+        Dim trDetail As String
+        trDetail = UxbFileErrorTextTr(fileCode)
+
+        If opPrefix <> "" Then
+            Return opPrefix & ": " & trDetail & " (" & LTrim(Str(fileCode)) & ")"
+        End If
+
+        Return "Dosya I/O hatasi: " & trDetail & " (" & LTrim(Str(fileCode)) & ")"
+    End If
+
+    If Instr(u, "UNSUPPORTED CALL") > 0 Then Return "Desteklenmeyen cagir"
+    If Instr(u, "CALL(API)") > 0 Then Return "API cagrisi hatasi"
+    If Instr(u, "POLICY LOAD FAILED") > 0 Then Return "Politika yukleme basarisiz"
+    If Instr(u, "ATTESTATION REQUIRED") > 0 Then Return "Politika imza/hash dogrulamasi gerekiyor"
+    If Instr(u, "HASH EXTRACTION FAILED") > 0 Then Return "Politika hash cikarimi basarisiz"
+    If Instr(u, "SIGNER EXTRACTION FAILED") > 0 Then Return "Politika signer cikarimi basarisiz"
+    If Instr(u, "HASH MISMATCH") > 0 Then Return "Politika hash dogrulamasi basarisiz"
+    If Instr(u, "SIGNER MISMATCH") > 0 Then Return "Politika imza dogrulamasi basarisiz"
+    If Instr(u, "DENIED BY POLICY") > 0 Then Return "Politika nedeniyle cagri engellendi"
+    If Instr(u, "PATH SEGMENTS NOT ALLOWED") > 0 Then Return "DLL yol parcasi kullanimi yasak"
+    If Instr(u, "MUST NOT BE ABSOLUTE PATH") > 0 Then Return "Mutlak DLL yolu kullanimi yasak"
+    If Instr(u, "CONTAINS INVALID CHARS") > 0 Then Return "DLL adinda gecersiz karakter var"
+    If Instr(u, "ARG MISSING") > 0 Then Return "Eksik parametre"
+    If Instr(u, "OUT OF RANGE") > 0 Then Return "Aralik disi erisim"
+    If Instr(u, "SLOT TARGET NOT FOUND") > 0 Then Return "Slot hedefi bulunamadi"
+    If Instr(u, "INVALID SLOT KIND") > 0 Then Return "Slot turu gecersiz"
+    If Instr(u, "SLOT ID OUT OF BYTE RANGE") > 0 Then Return "Slot kimligi byte araligi disinda"
+    If Instr(u, "SLOT LANE NAME CANNOT BE EMPTY") > 0 Then Return "Slot lane adi bos olamaz"
+    If Instr(u, "MIXIN CLASS NOT FOUND") > 0 Then Return "MIXIN sinifi bulunamadi"
+    If Instr(u, "CLASS SUPPORTS AT MOST ONE MIXIN") > 0 Then Return "Bu fazda en fazla bir MIXIN desteklenir"
+    If Instr(u, "DECORATOR NAME CANNOT BE EMPTY") > 0 Then Return "DECORATOR adi bos olamaz"
+    If Instr(u, "DIVISION BY ZERO") > 0 Then Return "Sifira bolme hatasi"
+    If Instr(u, "MODULO BY ZERO") > 0 Then Return "Sifira gore mod alma hatasi"
+    If Instr(u, "OPEN FAILED") > 0 Then Return "Dosya acma hatasi"
+    If Instr(u, "CLOSE FAILED") > 0 Then Return "Dosya kapatma hatasi"
+    If Instr(u, "GET FAILED") > 0 Then Return "Dosya okuma hatasi"
+    If Instr(u, "PUT FAILED") > 0 Then Return "Dosya yazma hatasi"
+    If Instr(u, "SEEK FAILED") > 0 Then Return "Dosya konumlama hatasi"
+    If Instr(u, "PARSE") > 0 Then Return "Sozdizimi cozumleme hatasi"
+    If Instr(u, "INVALID") > 0 Then Return "Gecersiz deger"
+
+    Return "Isletim hatasi"
+End Function

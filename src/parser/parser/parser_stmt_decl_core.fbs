@@ -1,0 +1,1666 @@
+Private Function EndsWithCI(ByRef textValue As String, ByRef suffixValue As String) As Integer
+    If Len(textValue) < Len(suffixValue) Then Return 0
+    Return LCase(Right(textValue, Len(suffixValue))) = LCase(suffixValue)
+End Function
+
+Private Function HasUnsafePathChars(ByRef pathText As String) As Integer
+    Dim i As Integer
+    For i = 1 To Len(pathText)
+        Dim ch As String
+        ch = Mid(pathText, i, 1)
+
+        If Asc(ch) < 32 Then Return 1
+
+        Select Case ch
+        Case "|", "&", ";", "`", "<", ">"
+            Return 1
+        End Select
+    Next i
+    Return 0
+End Function
+
+Private Function IsValidIncludePath(ByRef pathText As String) As Integer
+    Dim p As String
+    p = Trim(pathText)
+    If p = "" Then Return 0
+    If HasUnsafePathChars(p) Then Return 0
+    If Instr(p, ":") > 0 Then Return 0
+    If Left(p, 1) = "\" Or Left(p, 1) = "/" Then Return 0
+    Dim pNorm As String
+    Dim i As Integer
+    pNorm = ""
+    For i = 1 To Len(p)
+        Dim ch As String
+        ch = Mid(p, i, 1)
+        If ch = "\" Then ch = "/"
+        pNorm &= ch
+    Next i
+    If Instr("/" & pNorm & "/", "/../") > 0 Then Return 0
+    If EndsWithCI(p, ".bas") <> 0 Then Return 1
+    If EndsWithCI(p, ".uxb") <> 0 Then Return 1
+    If EndsWithCI(p, ".uxbh") <> 0 Then Return 1
+    If EndsWithCI(p, ".bi") <> 0 Then Return 1
+    If EndsWithCI(p, ".inc") <> 0 Then Return 1
+    Return 0
+End Function
+
+Private Function IsValidImportPath(ByRef langText As String, ByRef pathText As String) As Integer
+    If pathText = "" Then Return 0
+    If HasUnsafePathChars(pathText) Then Return 0
+
+    Select Case UCase(langText)
+    Case "C"
+        Return EndsWithCI(pathText, ".c")
+    Case "CPP"
+        Return EndsWithCI(pathText, ".cpp") Or EndsWithCI(pathText, ".cc") Or EndsWithCI(pathText, ".cxx")
+    Case "ASM"
+        Return EndsWithCI(pathText, ".asm") Or EndsWithCI(pathText, ".s")
+    End Select
+
+    Return 0
+End Function
+
+#include once "parser_stmt_decl_dim_redim.fbs"
+
+Private Function IsEndTypeStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "TYPE")
+End Function
+
+' UXB_C_ABI_RECORDS_20260728:
+' STRUCT/UNION reuse TYPE_STMT so all existing field access and lowering paths stay valid.
+Private Function IsEndRecordStart(ByRef ps As ParseState, ByRef recordKeyword As String) As Integer
+    Return IsKw(ps, "END") And _
+           ((LookToken(ps, 1).kind = "KEYWORD") Or (LookToken(ps, 1).kind = "IDENT")) And _
+           (UCase(Trim(LookToken(ps, 1).lexeme)) = UCase(Trim(recordKeyword)))
+End Function
+
+Private Function IsRecordOptionToken(ByRef tk As Token, ByRef optionName As String) As Integer
+    If tk.kind <> "KEYWORD" And tk.kind <> "IDENT" Then Return 0
+    Return UCase(Trim(tk.lexeme)) = UCase(Trim(optionName))
+End Function
+
+Private Function IsValidRecordAlignment(ByVal valueIn As Integer) As Integer
+    Select Case valueIn
+    Case 1, 2, 4, 8, 16, 32, 64
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function IsEndClassStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "CLASS")
+End Function
+
+Private Function IsEndConstructorStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "CONSTRUCTOR")
+End Function
+
+Private Function IsEndDestructorStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "DESTRUCTOR")
+End Function
+
+Private Function IsEndMethodStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "METHOD")
+End Function
+
+Private Function IsEndOperatorStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And ((LookToken(ps, 1).kind = "KEYWORD") Or (LookToken(ps, 1).kind = "IDENT")) And (UCase(LookToken(ps, 1).lexeme) = "OPERATOR")
+End Function
+
+Private Function IsEndGetStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And ((LookToken(ps, 1).kind = "KEYWORD") Or (LookToken(ps, 1).kind = "IDENT")) And (UCase(LookToken(ps, 1).lexeme) = "GET")
+End Function
+
+Private Function IsEndSetStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And ((LookToken(ps, 1).kind = "KEYWORD") Or (LookToken(ps, 1).kind = "IDENT")) And (UCase(LookToken(ps, 1).lexeme) = "SET")
+End Function
+
+Private Function IsCtorBodyEndStart(ByRef ps As ParseState) As Integer
+    If IsEndConstructorStart(ps) <> 0 Then Return 1
+    If IsEndMethodStart(ps) <> 0 Then Return 1
+    Return 0
+End Function
+
+Private Function IsDtorBodyEndStart(ByRef ps As ParseState) As Integer
+    ' Yama 0: DESTRUCTOR bloklari yalniz END DESTRUCTOR ile kapanir.
+    ' END METHOD, destructor icin sessiz uyumluluk kapisi olarak kabul edilmez.
+    If IsEndDestructorStart(ps) <> 0 Then Return 1
+    Return 0
+End Function
+
+Private Function IsEndInterfaceStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "INTERFACE")
+End Function
+
+Private Function IsEndEnumStart(ByRef ps As ParseState) As Integer
+    Return IsKw(ps, "END") And (LookToken(ps, 1).kind = "KEYWORD") And (UCase(LookToken(ps, 1).lexeme) = "ENUM")
+End Function
+
+Private Function IsClassMemberTerminator(ByRef tk As Token) As Integer
+    If tk.kind = "EOF" Or tk.kind = "EOL" Then Return 1
+    If tk.kind = "OP" And tk.lexeme = ":" Then Return 1
+    Return 0
+End Function
+
+Private Function IsClassNamedMemberKind(ByRef kindText As String) As Integer
+    Select Case UCase(kindText)
+    Case ASTK_CLASS_FIELD, ASTK_CLASS_METHOD_DECL, ASTK_CLASS_PROPERTY_DECL
+        Return 1
+    End Select
+
+    Return 0
+End Function
+
+Private Function HasClassNamedMember(ByRef ps As ParseState, ByVal classNode As Integer, ByRef rawName As String) As Integer
+    Dim targetName As String
+    targetName = UCase(Trim(rawName))
+    If targetName = "" Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        Dim kindText As String
+        kindText = UCase(ps.ast.nodes(ch).kind)
+        If IsClassNamedMemberKind(kindText) Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = targetName Then Return 1
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function HasClassConstructorDecl(ByRef ps As ParseState, ByVal classNode As Integer) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_CONSTRUCTOR_DECL" Then Return 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function HasClassDestructorDecl(ByRef ps As ParseState, ByVal classNode As Integer) As Integer
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        If UCase(ps.ast.nodes(ch).kind) = "CLASS_DESTRUCTOR_DECL" Then Return 1
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+
+Private Function UXBClassDeclTokenTextIs(ByRef tk As Token, ByRef textValue As String) As Integer
+    Return UCase(Trim(tk.lexeme)) = UCase(Trim(textValue))
+End Function
+
+Private Function UXBClassDeclMatchKeywordLike(ByRef ps As ParseState, ByRef kw As String) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+    If (tk.kind = "KEYWORD" Or tk.kind = "IDENT") And UXBClassDeclTokenTextIs(tk, kw) <> 0 Then
+        AdvanceTok ps
+        Return 1
+    End If
+    Return 0
+End Function
+
+Private Function UXBClassDeclTokenCanBeParamName(ByRef tk As Token) As Integer
+    If tk.kind <> "IDENT" And tk.kind <> "KEYWORD" Then Return 0
+    Dim u As String
+    u = UCase(Trim(tk.lexeme))
+    Select Case u
+    Case "AS", "BYVAL", "BYREF", "LIB", "ALIAS", "CDECL", "STDCALL", "FUNCTION", "SUB", "DECLARE", "METHOD", "PROPERTY", "OPERATOR", "CONSTRUCTOR", "DESTRUCTOR"
+        Return 0
+    End Select
+    Return 1
+End Function
+
+Private Function ParseClassMemberParamDeclarator(ByRef ps As ParseState) As Integer
+    Dim modeText As String
+    modeText = ""
+
+    Dim modeTok As Token
+    modeTok = CurToken(ps)
+    If modeTok.kind = "KEYWORD" Or modeTok.kind = "IDENT" Then
+        Dim modeUpper As String
+        modeUpper = UCase(Trim(modeTok.lexeme))
+        If modeUpper = "BYREF" Or modeUpper = "BYVAL" Then
+            modeText = modeUpper
+            AdvanceTok ps
+        End If
+    End If
+
+    Dim identTok As Token
+    identTok = CurToken(ps)
+    If UXBClassDeclTokenCanBeParamName(identTok) = 0 Then
+        ps.lastError = "CLASS: parameter identifier expected"
+        Return -1
+    End If
+    ' S-128: a keyword cannot name a method/constructor parameter either.
+    If ParserTokenIsReservedName(identTok) <> 0 Then
+        ParserSetReservedNameError ps, identTok, "parameter", "parameter"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim paramNode As Integer
+    paramNode = MakeNodeFromToken(ps, "PARAM_DECL", identTok.lexeme, "", identTok)
+    If modeText <> "" Then
+        ps.ast.nodes(paramNode).op = modeText
+    End If
+
+    If UXBClassDeclMatchKeywordLike(ps, "AS") Then
+        Dim typeTok As Token
+        typeTok = CurToken(ps)
+        If ValidateTypeToken(ps, typeTok) = 0 Then
+            If ps.lastError = "" Then ps.lastError = "CLASS: parameter type expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim typeNode As Integer
+        Dim canonicalParamType As String
+        canonicalParamType = CanonicalTypeNameForParser(typeTok.lexeme)
+        typeNode = MakeNodeFromToken(ps, "TYPE_REF", canonicalParamType, "", typeTok)
+        ASTAddChild ps.ast, paramNode, typeNode
+    End If
+
+    Return paramNode
+End Function
+
+Private Function ParseClassMemberParamList(ByRef ps As ParseState, ByVal ownerNode As Integer, ByRef memberLabel As String) As Integer
+    If MatchOp(ps, "(") = 0 Then
+        ps.lastError = memberLabel & ": missing ( in signature"
+        Return 0
+    End If
+
+    SkipSeparators ps
+    If MatchOp(ps, ")") Then Return 1
+
+    Do
+        SkipSeparators ps
+        Dim paramNode As Integer
+        paramNode = ParseClassMemberParamDeclarator(ps)
+        If paramNode = -1 Then Return 0
+        ASTAddChild ps.ast, ownerNode, paramNode
+
+        SkipSeparators ps
+        If MatchOp(ps, ",") = 0 Then Exit Do
+        SkipSeparators ps
+    Loop
+
+    SkipSeparators ps
+    If MatchOp(ps, ")") = 0 Then
+        ps.lastError = memberLabel & ": missing ) in signature"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Private Function IsClassAccessKeyword(ByRef ps As ParseState, ByRef accessOut As String) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+    If tk.kind <> "KEYWORD" And tk.kind <> "IDENT" Then Return 0
+
+    accessOut = UCase(tk.lexeme)
+    Select Case accessOut
+    Case "PUBLIC", "PRIVATE", "PROTECTED", "RESTRICTED"
+        Return 1
+    End Select
+
+    accessOut = ""
+    Return 0
+End Function
+
+Private Function ParseFriendQualifiedName(ByRef ps As ParseState, ByRef nameOut As String) As Integer
+    Dim tk As Token
+    tk = CurToken(ps)
+    If tk.kind <> "IDENT" Then
+        Return 0
+    End If
+
+    nameOut = tk.lexeme
+    AdvanceTok ps
+
+    Do While MatchOp(ps, ".")
+        tk = CurToken(ps)
+        If tk.kind <> "IDENT" Then
+            ps.lastError = "FRIEND: identifier expected after ."
+            Return 0
+        End If
+
+        nameOut &= "." & tk.lexeme
+        AdvanceTok ps
+    Loop
+
+    Return 1
+End Function
+
+Private Function ParseClassAccessSection(ByRef ps As ParseState, ByRef currentAccess As String) As Integer
+    Dim accessName As String
+    If IsClassAccessKeyword(ps, accessName) = 0 Then
+        Return 0
+    End If
+
+    AdvanceTok ps
+    If MatchOp(ps, ":") Then
+        ' optional access section marker
+    End If
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = accessName & ": unexpected trailing tokens"
+        Return -1
+    End If
+
+    currentAccess = accessName
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassFriendStmt(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    If IsKw(ps, "FRIEND") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "FRIEND") Then
+        Return 0
+    End If
+
+    Dim friendTok As Token
+    friendTok = CurToken(ps)
+    AdvanceTok ps
+
+    Dim friendNode As Integer
+    friendNode = MakeNodeFromToken(ps, "CLASS_FRIEND_STMT", currentAccess, "", friendTok)
+
+    Do
+        Dim friendName As String
+        If ParseFriendQualifiedName(ps, friendName) = 0 Then
+            If ps.lastError = "" Then ps.lastError = "FRIEND: qualified module name expected"
+            Return -1
+        End If
+
+        Dim itemNode As Integer
+        itemNode = MakeNodeFromToken(ps, "FRIEND_ITEM", friendName, "", friendTok)
+        ASTAddChild ps.ast, friendNode, itemNode
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "FRIEND: unexpected trailing tokens"
+        Return -1
+    End If
+
+    ASTAddChild ps.ast, classNode, friendNode
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassMixinDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    If IsKw(ps, "MIXIN") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "MIXIN") Then
+        Return 0
+    End If
+
+    Dim mixinTok As Token
+    mixinTok = CurToken(ps)
+    AdvanceTok ps
+
+    Do
+        Dim refTok As Token
+        refTok = CurToken(ps)
+        If refTok.kind <> "IDENT" Then
+            ps.lastError = "MIXIN: class name expected"
+            Return -1
+        End If
+
+        Dim mixinNode As Integer
+        mixinNode = MakeNodeFromToken(ps, "CLASS_MIXIN_REF", refTok.lexeme, currentAccess, mixinTok)
+        ASTAddChild ps.ast, classNode, mixinNode
+        AdvanceTok ps
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "MIXIN: unexpected trailing tokens"
+        Return -1
+    End If
+
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassDecoratorDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    If IsKw(ps, "DECORATOR") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "DECORATOR") Then
+        Return 0
+    End If
+
+    Dim decoratorTok As Token
+    decoratorTok = CurToken(ps)
+    AdvanceTok ps
+
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" And nameTok.kind <> "KEYWORD" Then
+        ps.lastError = "DECORATOR: name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim decoratorNode As Integer
+    decoratorNode = MakeNodeFromToken(ps, "CLASS_DECORATOR_REF", nameTok.lexeme, currentAccess, decoratorTok)
+
+    If MatchOp(ps, "(") <> 0 Then
+        If MatchOp(ps, ")") = 0 Then
+            Do
+                Dim argExpr As Integer
+                argExpr = ParseExpression(ps)
+                If argExpr = -1 Then
+                    ps.lastError = "DECORATOR: argument expression expected"
+                    Return -1
+                End If
+                ASTAddChild ps.ast, decoratorNode, argExpr
+                If MatchOp(ps, ",") = 0 Then Exit Do
+            Loop
+
+            If MatchOp(ps, ")") = 0 Then
+                ps.lastError = "DECORATOR: missing )"
+                Return -1
+            End If
+        End If
+    End If
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "DECORATOR: unexpected trailing tokens"
+        Return -1
+    End If
+
+    ASTAddChild ps.ast, classNode, decoratorNode
+    SkipSeparators ps
+    Return 1
+End Function
+
+#include once "parser_stmt_decl_class_method.fbs"
+
+Private Function ParseClassConstructorDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    If IsKw(ps, "CONSTRUCTOR") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "CONSTRUCTOR") Then
+        Return 0
+    End If
+
+    If HasClassConstructorDecl(ps, classNode) Then
+        ps.lastError = "CLASS: duplicate CONSTRUCTOR declaration"
+        Return -1
+    End If
+
+    Dim ctorTok As Token
+    ctorTok = CurToken(ps)
+    AdvanceTok ps
+
+    If CurToken(ps).kind = "IDENT" Then
+        ps.lastError = "CONSTRUCTOR: name is not allowed"
+        Return -1
+    End If
+
+    Dim ctorNode As Integer
+    ctorNode = MakeNodeFromToken(ps, "CLASS_CONSTRUCTOR_DECL", "", currentAccess, ctorTok)
+
+    If ParseClassMemberParamList(ps, ctorNode, "CONSTRUCTOR") = 0 Then Return -1
+
+    If UXBClassDeclMatchKeywordLike(ps, "AS") Then
+        ps.lastError = "CONSTRUCTOR: return type is not allowed"
+        Return -1
+    End If
+
+    Dim accessNode As Integer
+    accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", ctorTok)
+    ASTAddChild ps.ast, ctorNode, accessNode
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "CONSTRUCTOR: unexpected trailing tokens"
+        Return -1
+    End If
+
+    SkipSeparators ps
+
+    If IsCtorBodyEndStart(ps) Then
+        AdvanceTok ps
+        AdvanceTok ps
+    ElseIf IsClassMemberHeaderStart(ps) = 0 Then
+        Do While CurToken(ps).kind <> "EOF"
+            If IsCtorBodyEndStart(ps) Then Exit Do
+            If IsEndClassStart(ps) Then
+                ps.lastError = "CONSTRUCTOR: missing END CONSTRUCTOR"
+                Return -1
+            End If
+
+            Dim st As Integer
+            st = ParseSimpleStatement(ps)
+            If st = -1 Then Return -1
+            ASTAddChild ps.ast, ctorNode, st
+            SkipSeparators ps
+        Loop
+
+        If IsCtorBodyEndStart(ps) = 0 Then
+            ps.lastError = "CONSTRUCTOR: missing END CONSTRUCTOR"
+            Return -1
+        End If
+        AdvanceTok ps
+        AdvanceTok ps
+    End If
+
+    ASTAddChild ps.ast, classNode, ctorNode
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassDestructorDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    If IsKw(ps, "DESTRUCTOR") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "DESTRUCTOR") Then
+        Return 0
+    End If
+
+    If HasClassDestructorDecl(ps, classNode) Then
+        ps.lastError = "CLASS: duplicate DESTRUCTOR declaration"
+        Return -1
+    End If
+
+    Dim dtorTok As Token
+    dtorTok = CurToken(ps)
+    AdvanceTok ps
+
+    ' DESTRUCTOR supports both canonical uXBasic form:
+    '     DESTRUCTOR() ... END DESTRUCTOR
+    ' and compatibility form often written by BASIC programmers:
+    '     DESTRUCTOR ClassName() ... END DESTRUCTOR
+    ' The class name is metadata only; it is not a parameter.
+    If CurToken(ps).kind = "IDENT" Then
+        Dim dtorOptionalName As String
+        dtorOptionalName = UCase(Trim(CurToken(ps).lexeme))
+        If dtorOptionalName <> UCase(Trim(ps.ast.nodes(classNode).value)) Then
+            ps.lastError = "DESTRUCTOR: optional name must match class name"
+            Return -1
+        End If
+        AdvanceTok ps
+    End If
+
+    Dim dtorNode As Integer
+    dtorNode = MakeNodeFromToken(ps, "CLASS_DESTRUCTOR_DECL", "", currentAccess, dtorTok)
+
+    If ParseClassMemberParamList(ps, dtorNode, "DESTRUCTOR") = 0 Then Return -1
+
+    If ps.ast.nodes(dtorNode).firstChild <> -1 Then
+        ps.lastError = "DESTRUCTOR: parameters are not allowed"
+        Return -1
+    End If
+
+    If UXBClassDeclMatchKeywordLike(ps, "AS") Then
+        ps.lastError = "DESTRUCTOR: return type is not allowed"
+        Return -1
+    End If
+
+    Dim accessNode As Integer
+    accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", dtorTok)
+    ASTAddChild ps.ast, dtorNode, accessNode
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "DESTRUCTOR: unexpected trailing tokens"
+        Return -1
+    End If
+
+    SkipSeparators ps
+
+    If IsDtorBodyEndStart(ps) Then
+        AdvanceTok ps
+        AdvanceTok ps
+    ElseIf IsClassMemberHeaderStart(ps) = 0 Then
+        Do While CurToken(ps).kind <> "EOF"
+            If IsDtorBodyEndStart(ps) Then Exit Do
+            If IsEndClassStart(ps) Then
+                ps.lastError = "DESTRUCTOR: missing END DESTRUCTOR"
+                Return -1
+            End If
+
+            Dim st As Integer
+            st = ParseSimpleStatement(ps)
+            If st = -1 Then Return -1
+            ASTAddChild ps.ast, dtorNode, st
+            SkipSeparators ps
+        Loop
+
+        If IsDtorBodyEndStart(ps) = 0 Then
+            ps.lastError = "DESTRUCTOR: missing END DESTRUCTOR"
+            Return -1
+        End If
+        AdvanceTok ps
+        AdvanceTok ps
+    End If
+
+    ASTAddChild ps.ast, classNode, dtorNode
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassFieldDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    Dim hasStaticFlag As Integer
+    Dim mutabilityFlag As String
+    mutabilityFlag = ""
+    Do
+        Dim curUpper As String
+        curUpper = UCase(CurToken(ps).lexeme)
+        If curUpper = "STATIC" Then
+            If hasStaticFlag <> 0 Then
+                ps.lastError = "CLASS: duplicate STATIC field modifier"
+                Return -1
+            End If
+            hasStaticFlag = 1
+            AdvanceTok ps
+            Continue Do
+        End If
+        If curUpper = "READONLY" Or curUpper = "MUTABLE" Or curUpper = "IMMUTABLE" Then
+            If mutabilityFlag <> "" Then
+                ps.lastError = "CLASS: duplicate mutability field modifier"
+                Return -1
+            End If
+            mutabilityFlag = curUpper
+            AdvanceTok ps
+            Continue Do
+        End If
+        Exit Do
+    Loop
+
+    ' Allow BASIC-style class field declarations: DIM fieldName AS Type
+    If IsKw(ps, "DIM") Or (CurToken(ps).kind = "IDENT" And UCase(CurToken(ps).lexeme) = "DIM") Then
+        AdvanceTok ps
+    End If
+
+    Dim fieldTok As Token
+    fieldTok = CurToken(ps)
+    If fieldTok.kind <> "IDENT" Then
+        ps.lastError = "CLASS: field identifier expected"
+        Return -1
+    End If
+
+    If HasClassNamedMember(ps, classNode, fieldTok.lexeme) Then
+        ps.lastError = "CLASS: duplicate member name: " & UCase(Trim(fieldTok.lexeme))
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim fieldBoundsNode As Integer
+    fieldBoundsNode = -1
+    If MatchOp(ps, "(") Then
+        fieldBoundsNode = ASTNewNode(ps.ast, "DIM_BOUNDS", "", "", fieldTok.lineNo, fieldTok.colNo)
+
+        Do
+            Dim fieldBoundExpr As Integer
+            fieldBoundExpr = ParseDimBound(ps)
+            If fieldBoundExpr = -1 Then
+                ps.lastError = "CLASS: invalid field array bound"
+                Return -1
+            End If
+            ASTAddChild ps.ast, fieldBoundsNode, fieldBoundExpr
+
+            If MatchOp(ps, ",") = 0 Then Exit Do
+        Loop
+
+        If MatchOp(ps, ")") = 0 Then
+            ps.lastError = "CLASS: missing ) in field bounds"
+            Return -1
+        End If
+    End If
+
+    If UXBClassDeclMatchKeywordLike(ps, "AS") = 0 Then
+        ps.lastError = "CLASS: missing AS in field declaration"
+        Return -1
+    End If
+
+    Dim fieldTypeTok As Token
+    fieldTypeTok = CurToken(ps)
+    If ValidateTypeToken(ps, fieldTypeTok) = 0 Then
+        If ps.lastError = "" Then ps.lastError = "CLASS: field type expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim fieldNode As Integer
+    fieldNode = MakeNodeFromToken(ps, "CLASS_FIELD", fieldTok.lexeme, "", fieldTok)
+
+    Dim fieldTypeNode As Integer
+    Dim canonicalFieldType As String
+    canonicalFieldType = CanonicalTypeNameForParser(fieldTypeTok.lexeme)
+    fieldTypeNode = MakeNodeFromToken(ps, "TYPE_REF", canonicalFieldType, "", fieldTypeTok)
+    ASTAddChild ps.ast, fieldNode, fieldTypeNode
+    If fieldBoundsNode <> -1 Then ASTAddChild ps.ast, fieldNode, fieldBoundsNode
+
+    Dim accessNode As Integer
+    accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", fieldTok)
+    ASTAddChild ps.ast, fieldNode, accessNode
+
+    If hasStaticFlag <> 0 Then
+        Dim staticFieldFlag As Integer
+        staticFieldFlag = MakeNodeFromToken(ps, "CLASS_FIELD_FLAG", "STATIC", "", fieldTok)
+        ASTAddChild ps.ast, fieldNode, staticFieldFlag
+    End If
+
+    If mutabilityFlag <> "" Then
+        Dim mutabilityNode As Integer
+        mutabilityNode = MakeNodeFromToken(ps, "CLASS_FIELD_FLAG", mutabilityFlag, "", fieldTok)
+        ASTAddChild ps.ast, fieldNode, mutabilityNode
+    End If
+
+    ASTAddChild ps.ast, classNode, fieldNode
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassPropertyDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    Dim hasStaticFlag As Integer
+    If UCase(Trim(CurToken(ps).lexeme)) = "STATIC" Then
+        Dim staticNext As Token
+        staticNext = LookToken(ps, 1)
+        If UCase(Trim(staticNext.lexeme)) <> "PROPERTY" Then Return 0
+        hasStaticFlag = 1
+        AdvanceTok ps
+    End If
+
+    If IsKw(ps, "PROPERTY") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "PROPERTY") Then
+        Return 0
+    End If
+
+    Dim propertyTok As Token
+    propertyTok = CurToken(ps)
+    AdvanceTok ps
+
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "PROPERTY: name expected"
+        Return -1
+    End If
+    If HasClassNamedMember(ps, classNode, nameTok.lexeme) Then
+        ps.lastError = "CLASS: duplicate member name: " & UCase(Trim(nameTok.lexeme))
+        Return -1
+    End If
+    AdvanceTok ps
+
+    If UXBClassDeclMatchKeywordLike(ps, "AS") = 0 Then
+        ps.lastError = "PROPERTY: AS type expected"
+        Return -1
+    End If
+
+    Dim typeTok As Token
+    typeTok = CurToken(ps)
+    If ValidateTypeToken(ps, typeTok) = 0 Then
+        If ps.lastError = "" Then ps.lastError = "PROPERTY: type expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim hasGetFlag As Integer
+    Dim hasSetFlag As Integer
+    Do
+        Dim accessorUpper As String
+        accessorUpper = UCase(Trim(CurToken(ps).lexeme))
+        If accessorUpper = "GET" Then
+            If hasGetFlag <> 0 Then
+                ps.lastError = "PROPERTY: duplicate GET accessor"
+                Return -1
+            End If
+            hasGetFlag = 1
+            AdvanceTok ps
+            Continue Do
+        ElseIf accessorUpper = "SET" Then
+            If hasSetFlag <> 0 Then
+                ps.lastError = "PROPERTY: duplicate SET accessor"
+                Return -1
+            End If
+            hasSetFlag = 1
+            AdvanceTok ps
+            Continue Do
+        End If
+        Exit Do
+    Loop
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "PROPERTY: unexpected trailing tokens"
+        Return -1
+    End If
+
+    Dim propertyNode As Integer
+    propertyNode = MakeNodeFromToken(ps, ASTK_CLASS_PROPERTY_DECL, nameTok.lexeme, currentAccess, propertyTok)
+    Dim typeNode As Integer
+    Dim canonicalPropertyType As String
+    canonicalPropertyType = CanonicalTypeNameForParser(typeTok.lexeme)
+    typeNode = MakeNodeFromToken(ps, "TYPE_REF", canonicalPropertyType, "", typeTok)
+    ASTAddChild ps.ast, propertyNode, typeNode
+
+    Dim accessNode As Integer
+    accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", propertyTok)
+    ASTAddChild ps.ast, propertyNode, accessNode
+
+    If hasStaticFlag <> 0 Then
+        Dim staticPropertyFlag As Integer
+        staticPropertyFlag = MakeNodeFromToken(ps, "CLASS_PROPERTY_FLAG", "STATIC", "", propertyTok)
+        ASTAddChild ps.ast, propertyNode, staticPropertyFlag
+    End If
+
+    If hasGetFlag <> 0 Then
+        Dim getFlagNode As Integer
+        getFlagNode = MakeNodeFromToken(ps, "CLASS_PROPERTY_FLAG", "GET", "", propertyTok)
+        ASTAddChild ps.ast, propertyNode, getFlagNode
+    End If
+
+    If hasSetFlag <> 0 Then
+        Dim setFlagNode As Integer
+        setFlagNode = MakeNodeFromToken(ps, "CLASS_PROPERTY_FLAG", "SET", "", propertyTok)
+        ASTAddChild ps.ast, propertyNode, setFlagNode
+    End If
+
+    SkipSeparators ps
+
+    Dim hasGetBody As Integer
+    Dim hasSetBody As Integer
+    Do While CurToken(ps).kind <> "EOF"
+        Dim accessorStart As String
+        accessorStart = UCase(Trim(CurToken(ps).lexeme))
+        If accessorStart <> "GET" And accessorStart <> "SET" Then Exit Do
+
+        Dim accTok As Token
+        accTok = CurToken(ps)
+        AdvanceTok ps
+
+        If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+            ps.lastError = "PROPERTY " & accessorStart & ": unexpected trailing tokens"
+            Return -1
+        End If
+        SkipSeparators ps
+
+        Dim blockNode As Integer
+        If accessorStart = "GET" Then
+            If hasGetBody <> 0 Then
+                ps.lastError = "PROPERTY: duplicate GET body"
+                Return -1
+            End If
+            hasGetBody = 1
+            hasGetFlag = 1
+            blockNode = MakeNodeFromToken(ps, ASTK_CLASS_PROPERTY_GET_STMT, "", "", accTok)
+        Else
+            If hasSetBody <> 0 Then
+                ps.lastError = "PROPERTY: duplicate SET body"
+                Return -1
+            End If
+            hasSetBody = 1
+            hasSetFlag = 1
+            blockNode = MakeNodeFromToken(ps, ASTK_CLASS_PROPERTY_SET_STMT, "", "", accTok)
+        End If
+
+        Dim foundAccessorEnd As Integer
+        Do While CurToken(ps).kind <> "EOF"
+            If accessorStart = "GET" Then
+                If IsEndGetStart(ps) Then
+                    AdvanceTok ps
+                    AdvanceTok ps
+                    foundAccessorEnd = 1
+                    Exit Do
+                End If
+            Else
+                If IsEndSetStart(ps) Then
+                    AdvanceTok ps
+                    AdvanceTok ps
+                    foundAccessorEnd = 1
+                    Exit Do
+                End If
+            End If
+
+            If IsEndClassStart(ps) Then
+                ps.lastError = "PROPERTY " & accessorStart & ": missing END " & accessorStart
+                Return -1
+            End If
+
+            Dim accStmt As Integer
+            accStmt = ParseSimpleStatement(ps)
+            If accStmt = -1 Then Return -1
+            ASTAddChild ps.ast, blockNode, accStmt
+            SkipSeparators ps
+        Loop
+
+        If foundAccessorEnd = 0 Then
+            ps.lastError = "PROPERTY " & accessorStart & ": missing END " & accessorStart
+            Return -1
+        End If
+
+        ASTAddChild ps.ast, propertyNode, blockNode
+        SkipSeparators ps
+    Loop
+
+    If hasGetFlag = 0 And hasSetFlag = 0 Then
+        hasGetFlag = 1
+        hasSetFlag = 1
+    End If
+
+    Dim nodeHasGetFlag As Integer
+    Dim nodeHasSetFlag As Integer
+    Dim flagCh As Integer
+    flagCh = ps.ast.nodes(propertyNode).firstChild
+    Do While flagCh <> -1
+        If UCase(ps.ast.nodes(flagCh).kind) = "CLASS_PROPERTY_FLAG" Then
+            Dim flagValue As String
+            flagValue = UCase(Trim(ps.ast.nodes(flagCh).value))
+            If flagValue = "GET" Then nodeHasGetFlag = 1
+            If flagValue = "SET" Then nodeHasSetFlag = 1
+        End If
+        flagCh = ps.ast.nodes(flagCh).nextSibling
+    Loop
+
+    If hasGetFlag <> 0 And nodeHasGetFlag = 0 Then
+        Dim finalGetFlag As Integer
+        finalGetFlag = MakeNodeFromToken(ps, "CLASS_PROPERTY_FLAG", "GET", "", propertyTok)
+        ASTAddChild ps.ast, propertyNode, finalGetFlag
+    End If
+
+    If hasSetFlag <> 0 And nodeHasSetFlag = 0 Then
+        Dim finalSetFlag As Integer
+        finalSetFlag = MakeNodeFromToken(ps, "CLASS_PROPERTY_FLAG", "SET", "", propertyTok)
+        ASTAddChild ps.ast, propertyNode, finalSetFlag
+    End If
+
+    ASTAddChild ps.ast, classNode, propertyNode
+    SkipSeparators ps
+    Return 1
+End Function
+
+Private Function ParseClassOperatorDecl(ByRef ps As ParseState, ByVal classNode As Integer, ByRef currentAccess As String) As Integer
+    If IsKw(ps, "OPERATOR") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "OPERATOR") Then
+        Return 0
+    End If
+
+    Dim operatorTok As Token
+    operatorTok = CurToken(ps)
+    AdvanceTok ps
+
+    Dim opName As String
+    If CurToken(ps).kind = "OP" Then
+        opName = Trim(CurToken(ps).lexeme)
+        AdvanceTok ps
+    ElseIf CurToken(ps).kind = "KEYWORD" Or CurToken(ps).kind = "IDENT" Then
+        opName = UCase(Trim(CurToken(ps).lexeme))
+        AdvanceTok ps
+    Else
+        ps.lastError = "OPERATOR: operator token expected"
+        Return -1
+    End If
+
+    If opName = "" Then
+        ps.lastError = "OPERATOR: operator token expected"
+        Return -1
+    End If
+
+    Dim opNode As Integer
+    opNode = MakeNodeFromToken(ps, ASTK_CLASS_OPERATOR_DECL, UCase(opName), currentAccess, operatorTok)
+
+    If ParseClassMemberParamList(ps, opNode, "OPERATOR") = 0 Then Return -1
+
+    If UXBClassDeclMatchKeywordLike(ps, "AS") Then
+        Dim retTok As Token
+        retTok = CurToken(ps)
+        If ValidateTypeToken(ps, retTok) = 0 Then
+            ps.lastError = "OPERATOR: return type expected after AS"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim retNode As Integer
+        Dim canonicalOperatorRet As String
+        canonicalOperatorRet = CanonicalTypeNameForParser(retTok.lexeme)
+        retNode = MakeNodeFromToken(ps, "RETURN_TYPE", canonicalOperatorRet, "", retTok)
+        ASTAddChild ps.ast, opNode, retNode
+    End If
+
+    Dim accessNode As Integer
+    accessNode = MakeNodeFromToken(ps, "CLASS_ACCESS", currentAccess, "", operatorTok)
+    ASTAddChild ps.ast, opNode, accessNode
+
+    If IsClassMemberTerminator(CurToken(ps)) = 0 Then
+        ps.lastError = "OPERATOR: unexpected trailing tokens"
+        Return -1
+    End If
+    SkipSeparators ps
+
+    If IsEndOperatorStart(ps) Then
+        AdvanceTok ps
+        AdvanceTok ps
+    ElseIf IsClassMemberHeaderStart(ps) = 0 Then
+        Do While CurToken(ps).kind <> "EOF"
+            If IsEndOperatorStart(ps) Then Exit Do
+            If IsEndClassStart(ps) Then
+                ps.lastError = "OPERATOR: missing END OPERATOR"
+                Return -1
+            End If
+
+            Dim st As Integer
+            st = ParseSimpleStatement(ps)
+            If st = -1 Then Return -1
+            ASTAddChild ps.ast, opNode, st
+            SkipSeparators ps
+        Loop
+
+        If IsEndOperatorStart(ps) = 0 Then
+            ps.lastError = "OPERATOR: missing END OPERATOR"
+            Return -1
+        End If
+        AdvanceTok ps
+        AdvanceTok ps
+    End If
+
+    ASTAddChild ps.ast, classNode, opNode
+    SkipSeparators ps
+    Return 1
+End Function
+
+Function ParseTypeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim recordKeyword As String
+    Dim recordKind As String
+    Dim abiKind As String
+    Dim packBytes As Integer
+    Dim explicitAlign As Integer
+
+    recordKeyword = UCase(Trim(firstTok.lexeme))
+    If recordKeyword <> "STRUCT" And recordKeyword <> "UNION" Then recordKeyword = "TYPE"
+    recordKind = recordKeyword
+    abiKind = IIf(recordKind = "TYPE", "UX", "C")
+    packBytes = 0
+    explicitAlign = 0
+
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = recordKeyword & ": name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+    RegisterDeclaredTypeName nameTok.lexeme
+
+    ' Optional declaration contract:
+    '   STRUCT Name [ABI C] [PACK n] [ALIGN n]
+    '   UNION  Name [ABI C] [PACK n] [ALIGN n]
+    Do While CurToken(ps).kind <> "EOF" And CurToken(ps).kind <> "EOL"
+        Dim optionTok As Token
+        optionTok = CurToken(ps)
+
+        If IsRecordOptionToken(optionTok, "ABI") Then
+            AdvanceTok ps
+            Dim abiTok As Token
+            abiTok = CurToken(ps)
+            If abiTok.kind <> "IDENT" And abiTok.kind <> "KEYWORD" Then
+                ps.lastError = recordKeyword & ": ABI name expected"
+                Return -1
+            End If
+            abiKind = UCase(Trim(abiTok.lexeme))
+            If abiKind <> "C" And abiKind <> "UX" Then
+                ps.lastError = recordKeyword & ": ABI must be C or UX"
+                Return -1
+            End If
+            AdvanceTok ps
+        ElseIf IsRecordOptionToken(optionTok, "PACK") Then
+            AdvanceTok ps
+            Dim packTok As Token
+            packTok = CurToken(ps)
+            If packTok.kind <> "NUMBER" Then
+                ps.lastError = recordKeyword & ": PACK integer expected"
+                Return -1
+            End If
+            packBytes = ValInt(packTok.lexeme)
+            If IsValidRecordAlignment(packBytes) = 0 Then
+                ps.lastError = recordKeyword & ": PACK must be 1,2,4,8,16,32 or 64"
+                Return -1
+            End If
+            AdvanceTok ps
+        ElseIf IsRecordOptionToken(optionTok, "ALIGN") Then
+            AdvanceTok ps
+            Dim alignTok As Token
+            alignTok = CurToken(ps)
+            If alignTok.kind <> "NUMBER" Then
+                ps.lastError = recordKeyword & ": ALIGN integer expected"
+                Return -1
+            End If
+            explicitAlign = ValInt(alignTok.lexeme)
+            If IsValidRecordAlignment(explicitAlign) = 0 Then
+                ps.lastError = recordKeyword & ": ALIGN must be 1,2,4,8,16,32 or 64"
+                Return -1
+            End If
+            AdvanceTok ps
+        Else
+            ps.lastError = recordKeyword & ": unknown declaration option '" & optionTok.lexeme & "'"
+            Return -1
+        End If
+    Loop
+
+    If recordKind <> "TYPE" And abiKind <> "C" Then
+        ps.lastError = recordKeyword & ": STRUCT/UNION declarations require ABI C"
+        Return -1
+    End If
+    If recordKind = "TYPE" And abiKind <> "UX" Then
+        ps.lastError = "TYPE: use STRUCT for ABI C records"
+        Return -1
+    End If
+    If recordKind = "TYPE" And (packBytes <> 0 Or explicitAlign <> 0) Then
+        ps.lastError = "TYPE: PACK/ALIGN are reserved for STRUCT/UNION ABI C"
+        Return -1
+    End If
+
+    Dim recordContract As String
+    recordContract = recordKind & ";ABI=" & abiKind & ";PACK=" & LTrim(Str(packBytes)) & ";ALIGN=" & LTrim(Str(explicitAlign))
+
+    Dim typeNode As Integer
+    typeNode = MakeNodeFromToken(ps, "TYPE_STMT", nameTok.lexeme, recordContract, firstTok)
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndRecordStart(ps, recordKeyword) Then Exit Do
+
+        Dim fieldTok As Token
+        fieldTok = CurToken(ps)
+        If fieldTok.kind <> "IDENT" Then
+            ps.lastError = recordKeyword & ": field identifier expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim fieldBoundsNode As Integer
+        fieldBoundsNode = -1
+        If MatchOp(ps, "(") Then
+            fieldBoundsNode = ASTNewNode(ps.ast, "DIM_BOUNDS", "", "", fieldTok.lineNo, fieldTok.colNo)
+
+            Do
+                Dim fieldBoundExpr As Integer
+                fieldBoundExpr = ParseDimBound(ps)
+                If fieldBoundExpr = -1 Then
+                    ps.lastError = recordKeyword & ": invalid field array bound"
+                    Return -1
+                End If
+                ASTAddChild ps.ast, fieldBoundsNode, fieldBoundExpr
+
+                If MatchOp(ps, ",") = 0 Then Exit Do
+            Loop
+
+            If MatchOp(ps, ")") = 0 Then
+                ps.lastError = recordKeyword & ": missing ) in field bounds"
+                Return -1
+            End If
+        End If
+
+        If UXBClassDeclMatchKeywordLike(ps, "AS") = 0 Then
+            ps.lastError = recordKeyword & ": missing AS in field declaration"
+            Return -1
+        End If
+
+        Dim fieldTypeTok As Token
+        fieldTypeTok = CurToken(ps)
+        If ValidateTypeToken(ps, fieldTypeTok) = 0 Then
+            If ps.lastError = "" Then ps.lastError = recordKeyword & ": field type expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim fieldNode As Integer
+        fieldNode = MakeNodeFromToken(ps, "TYPE_FIELD", fieldTok.lexeme, "", fieldTok)
+
+        Dim fieldTypeNode As Integer
+        Dim canonicalTypeField As String
+        canonicalTypeField = CanonicalTypeNameForParser(fieldTypeTok.lexeme)
+        fieldTypeNode = MakeNodeFromToken(ps, "TYPE_REF", canonicalTypeField, "", fieldTypeTok)
+        ASTAddChild ps.ast, fieldNode, fieldTypeNode
+        If fieldBoundsNode <> -1 Then ASTAddChild ps.ast, fieldNode, fieldBoundsNode
+        ASTAddChild ps.ast, typeNode, fieldNode
+
+        SkipSeparators ps
+    Loop
+
+    If IsEndRecordStart(ps, recordKeyword) = 0 Then
+        ps.lastError = "missing END " & recordKeyword
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    Return typeNode
+End Function
+
+Function ParseEnumStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "ENUM: name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    Dim enumNode As Integer
+    enumNode = MakeNodeFromToken(ps, ASTK_ENUM_STMT, nameTok.lexeme, "", firstTok)
+
+    ' Optional base type: ENUM Name AS I32
+    If UXBClassDeclMatchKeywordLike(ps, "AS") Then
+        Dim baseTok As Token
+        baseTok = CurToken(ps)
+        If ValidateTypeToken(ps, baseTok) = 0 Then
+            ps.lastError = "ENUM: base type expected after AS"
+            Return -1
+        End If
+        AdvanceTok ps
+        Dim baseNode As Integer
+        baseNode = MakeNodeFromToken(ps, ASTK_ENUM_BASE_TYPE, CanonicalTypeNameForParser(baseTok.lexeme), "", baseTok)
+        ASTAddChild ps.ast, enumNode, baseNode
+    End If
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndEnumStart(ps) Then Exit Do
+
+        Dim itemTok As Token
+        itemTok = CurToken(ps)
+        If itemTok.kind <> "IDENT" And itemTok.kind <> "KEYWORD" Then
+            ps.lastError = "ENUM: item identifier expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim itemNode As Integer
+        itemNode = MakeNodeFromToken(ps, ASTK_ENUM_ITEM, itemTok.lexeme, "", itemTok)
+
+        If MatchOp(ps, "=") Then
+            Dim valueExpr As Integer
+            valueExpr = ParseExpression(ps)
+            If valueExpr = -1 Then
+                ps.lastError = "ENUM: constant expression expected"
+                Return -1
+            End If
+            ASTAddRoleChild ps.ast, itemNode, valueExpr, "VALUE"
+        End If
+
+        ASTAddChild ps.ast, enumNode, itemNode
+
+        If MatchOp(ps, ",") Then
+            SkipSeparators ps
+        Else
+            SkipSeparators ps
+        End If
+    Loop
+
+    If IsEndEnumStart(ps) = 0 Then
+        ps.lastError = "missing END ENUM"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    Return enumNode
+End Function
+
+Function ParseClassStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim classFlagText As String
+    classFlagText = ""
+    Select Case UCase(Trim(firstTok.lexeme))
+    Case "ABSTRACT"
+        classFlagText = "ABSTRACT"
+    Case "FINAL"
+        classFlagText = "FINAL"
+    Case "SEALED"
+        classFlagText = "SEALED"
+    End Select
+
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "CLASS: name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+    RegisterDeclaredTypeName nameTok.lexeme
+
+    Dim classNode As Integer
+    classNode = MakeNodeFromToken(ps, "CLASS_STMT", nameTok.lexeme, "", firstTok)
+
+    If classFlagText <> "" Then
+        Dim flagNode As Integer
+        flagNode = MakeNodeFromToken(ps, "CLASS_FLAG", classFlagText, "", firstTok)
+        ASTAddChild ps.ast, classNode, flagNode
+    End If
+
+    Dim baseClassName As String
+    baseClassName = ""
+    
+    If IsKw(ps, "EXTENDS") Or (CurToken(ps).kind = "IDENT" And UCase(CurToken(ps).lexeme) = "EXTENDS") Then
+        AdvanceTok ps
+        Dim baseTok As Token
+        baseTok = CurToken(ps)
+        If baseTok.kind <> "IDENT" Then
+            ps.lastError = "CLASS: base class name expected after EXTENDS"
+            Return -1
+        End If
+        baseClassName = baseTok.lexeme
+        AdvanceTok ps
+        
+        Dim baseRefNode As Integer
+        baseRefNode = MakeNodeFromToken(ps, "CLASS_BASE_REF", baseClassName, "", baseTok)
+        ASTAddChild ps.ast, classNode, baseRefNode
+    End If
+
+    If IsKw(ps, "IMPLEMENTS") Or (CurToken(ps).kind = "IDENT" And UCase(CurToken(ps).lexeme) = "IMPLEMENTS") Then
+        AdvanceTok ps
+
+        Do
+            Dim ifTok As Token
+            ifTok = CurToken(ps)
+            If ifTok.kind <> "IDENT" Then
+                ps.lastError = "CLASS: interface name expected after IMPLEMENTS"
+                Return -1
+            End If
+
+            Dim ifRefNode As Integer
+            ifRefNode = MakeNodeFromToken(ps, "CLASS_IMPLEMENTS_REF", ifTok.lexeme, "", ifTok)
+            ASTAddChild ps.ast, classNode, ifRefNode
+            AdvanceTok ps
+
+            If MatchOp(ps, ",") = 0 Then Exit Do
+        Loop
+    End If
+
+    ' S-105 (Mete's decision, 2026-09-20): a class member with no access specifier is
+    ' PUBLIC (the FreeBASIC/OOP-plan convention; it used to be PRIVATE here while the
+    ' engines applied it inconsistently). PRIVATE/PROTECTED/RESTRICTED stay explicit.
+    Dim currentAccess As String
+    currentAccess = "PUBLIC"
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndClassStart(ps) Then Exit Do
+
+        Dim parseResult As Integer
+
+        parseResult = ParseClassAccessSection(ps, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
+
+        parseResult = ParseClassFriendStmt(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
+
+        parseResult = ParseClassMixinDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
+
+        parseResult = ParseClassDecoratorDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
+
+        parseResult = ParseClassMethodDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
+
+        parseResult = ParseClassOperatorDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
+
+        parseResult = ParseClassConstructorDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
+
+        parseResult = ParseClassDestructorDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
+
+        parseResult = ParseClassPropertyDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+        If parseResult = 1 Then Continue Do
+
+        parseResult = ParseClassFieldDecl(ps, classNode, currentAccess)
+        If parseResult = -1 Then Return -1
+    Loop
+
+    If IsEndClassStart(ps) = 0 Then
+        ps.lastError = "missing END CLASS"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    Return classNode
+End Function
+
+Function ParseInterfaceStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim nameTok As Token
+    nameTok = CurToken(ps)
+    If nameTok.kind <> "IDENT" Then
+        ps.lastError = "INTERFACE: name expected"
+        Return -1
+    End If
+    AdvanceTok ps
+    RegisterDeclaredTypeName nameTok.lexeme
+
+    Dim interfaceNode As Integer
+    interfaceNode = MakeNodeFromToken(ps, "INTERFACE_STMT", nameTok.lexeme, "", firstTok)
+
+    SkipSeparators ps
+    Do While CurToken(ps).kind <> "EOF"
+        If IsEndInterfaceStart(ps) Then Exit Do
+
+        If IsKw(ps, "METHOD") = 0 And (CurToken(ps).kind <> "IDENT" Or UCase(CurToken(ps).lexeme) <> "METHOD") Then
+            ps.lastError = "INTERFACE: only METHOD declarations are allowed"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim methodNameTok As Token
+        methodNameTok = CurToken(ps)
+        If methodNameTok.kind <> "IDENT" Then
+            ps.lastError = "INTERFACE METHOD: name expected"
+            Return -1
+        End If
+        AdvanceTok ps
+
+        Dim methodNode As Integer
+        methodNode = MakeNodeFromToken(ps, "INTERFACE_METHOD_DECL", methodNameTok.lexeme, "", methodNameTok)
+
+        ' INTERFACE signatures must preserve PARAM_DECL/TYPE_REF and RETURN_TYPE nodes.
+        ' Eski parser sadece parantezi atliyordu; semantic katman imza kontrolu yapamiyordu.
+        If ParseClassMemberParamList(ps, methodNode, "INTERFACE METHOD") = 0 Then Return -1
+
+        If IsKw(ps, "AS") Then
+            AdvanceTok ps
+            If ValidateTypeToken(ps, CurToken(ps)) = 0 Then
+                If ps.lastError = "" Then ps.lastError = "INTERFACE METHOD: return type expected"
+                Return -1
+            End If
+
+            Dim retTok As Token
+            retTok = CurToken(ps)
+            Dim retNode As Integer
+            Dim canonicalInterfaceRet As String
+            canonicalInterfaceRet = CanonicalTypeNameForParser(retTok.lexeme)
+            retNode = MakeNodeFromToken(ps, "RETURN_TYPE", canonicalInterfaceRet, "", retTok)
+            ASTAddChild ps.ast, methodNode, retNode
+            AdvanceTok ps
+        End If
+
+        If IsDeclStmtTerminator(CurToken(ps)) = 0 Then
+            ps.lastError = "INTERFACE METHOD: unexpected trailing tokens"
+            Return -1
+        End If
+
+        ASTAddChild ps.ast, interfaceNode, methodNode
+        SkipSeparators ps
+    Loop
+
+    If IsEndInterfaceStart(ps) = 0 Then
+        ps.lastError = "missing END INTERFACE"
+        Return -1
+    End If
+
+    AdvanceTok ps
+    AdvanceTok ps
+    Return interfaceNode
+End Function
+
+Function ParseDefTypeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim defNode As Integer
+    defNode = MakeNodeFromToken(ps, "DEFTYPE_STMT", "", UCase(firstTok.lexeme), firstTok)
+
+    Dim tk As Token
+    tk = CurToken(ps)
+    If tk.kind = "EOF" Or tk.kind = "EOL" Or (tk.kind = "OP" And tk.lexeme = ":") Then
+        ps.lastError = UCase(firstTok.lexeme) & ": range expression expected"
+        Return -1
+    End If
+
+    Do
+        Dim rangeExpr As Integer
+        rangeExpr = ParseExpression(ps)
+        If rangeExpr = -1 Then
+            ps.lastError = UCase(firstTok.lexeme) & ": invalid range expression"
+            Return -1
+        End If
+        ASTAddChild ps.ast, defNode, rangeExpr
+
+        If MatchOp(ps, ",") = 0 Then Exit Do
+    Loop
+
+    Return defNode
+End Function
+
+Function ParseSetStringSizeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim setNode As Integer
+    setNode = MakeNodeFromToken(ps, "SETSTRINGSIZE_STMT", "", "", firstTok)
+
+    Dim sizeExpr As Integer
+    sizeExpr = ParseExpression(ps)
+    If sizeExpr = -1 Then
+        ps.lastError = "SETSTRINGSIZE: size expression expected"
+        Return -1
+    End If
+
+    ASTAddChild ps.ast, setNode, sizeExpr
+    Return setNode
+End Function
+
+Function ParseIncludeStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim includeNode As Integer
+    includeNode = MakeNodeFromToken(ps, "INCLUDE_STMT", "", "", firstTok)
+
+    Dim pathTok As Token
+    pathTok = CurToken(ps)
+    If pathTok.kind <> "STRING" Then
+        ps.lastError = "INCLUDE: path string expected"
+        Return -1
+    End If
+
+    Dim includeErr As String
+    includeErr = ""
+    If ParserPathIsValidIncludePath(pathTok.lexeme) = 0 Or UXBParserValidateImportIncludeAdim15("INCLUDE", pathTok.lexeme, includeErr) = 0 Then
+        If Trim(includeErr) = "" Then includeErr = "INCLUDE: unsafe or unsupported path"
+        ps.lastError = includeErr
+        Return -1
+    End If
+
+    Dim pathNode As Integer
+    pathNode = MakeNodeFromToken(ps, "STRING", pathTok.lexeme, "", pathTok)
+    ASTAddChild ps.ast, includeNode, pathNode
+    AdvanceTok ps
+
+    Return includeNode
+End Function
+
+Function ParseLibraryTypeManifestStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    Dim libTypeNode As Integer
+    libTypeNode = MakeNodeFromToken(ps, "INCLUDE_STMT", "LIBTYPE", "LIBTYPE", firstTok)
+
+    Dim pathTok As Token
+    pathTok = CurToken(ps)
+    If pathTok.kind <> "STRING" Then
+        ps.lastError = "LIBTYPE: manifest path string expected"
+        Return -1
+    End If
+
+    Dim pathErr As String
+    pathErr = ""
+    If ParserPathIsValidLibraryTypeManifestPath(pathTok.lexeme) = 0 Or UXBParserValidateImportIncludeAdim15("INCLUDE", pathTok.lexeme, pathErr) = 0 Then
+        If Trim(pathErr) = "" Then pathErr = "LIBTYPE: unsafe or unsupported manifest path"
+        ps.lastError = pathErr
+        Return -1
+    End If
+
+    Dim manifestType As UXBLibraryTypeContract
+    If UXBLibraryTypeReadManifestForSource(pathTok.lexeme, firstTok.sourceFile, manifestType, pathErr) = 0 Then
+        ps.lastError = "LIBTYPE: " & pathErr
+        Return -1
+    End If
+    Dim canonicalType As String = CanonicalTypeNameForParser(manifestType.typeName)
+    If IsBuiltinTypeKeyword(canonicalType) <> 0 Then
+        ps.lastError = "LIBTYPE: manifest cannot replace builtin type " & manifestType.typeName
+        Return -1
+    End If
+    RegisterDeclaredTypeName manifestType.typeName
+
+    Dim pathNode As Integer
+    pathNode = MakeNodeFromToken(ps, "STRING", pathTok.lexeme, "", pathTok)
+    ASTAddChild ps.ast, libTypeNode, pathNode
+    AdvanceTok ps
+
+    Return libTypeNode
+End Function
+
+Function ParseImportStmt(ByRef ps As ParseState, ByRef firstTok As Token) As Integer
+    If MatchOp(ps, "(") = 0 Then
+        ps.lastError = "IMPORT: expected syntax IMPORT(<LANG>, file)"
+        Return -1
+    End If
+
+    Dim langTok As Token
+    langTok = CurToken(ps)
+    If langTok.kind <> "IDENT" And langTok.kind <> "KEYWORD" Then
+        ps.lastError = "IMPORT: language expected (C|CPP|ASM)"
+        Return -1
+    End If
+
+    Dim langText As String
+    langText = UCase(langTok.lexeme)
+    If langText <> "C" And langText <> "CPP" And langText <> "ASM" Then
+        ps.lastError = "IMPORT: unsupported language (use C, CPP or ASM)"
+        Return -1
+    End If
+    AdvanceTok ps
+
+    If MatchOp(ps, ",") = 0 Then
+        ps.lastError = "IMPORT: missing comma after language"
+        Return -1
+    End If
+
+    Dim fileTok As Token
+    fileTok = CurToken(ps)
+    If fileTok.kind <> "STRING" Then
+        ps.lastError = "IMPORT: file path string expected"
+        Return -1
+    End If
+
+    Dim importErr As String
+    importErr = ""
+    If ParserPathIsValidImportPath(langText, fileTok.lexeme) = 0 Or UXBParserValidateImportIncludeAdim15(langText, fileTok.lexeme, importErr) = 0 Then
+        If Trim(importErr) = "" Then importErr = "IMPORT: unsafe path or invalid extension for language"
+        ps.lastError = importErr
+        Return -1
+    End If
+
+    Dim importNode As Integer
+    importNode = MakeNodeFromToken(ps, "IMPORT_STMT", "", langText, firstTok)
+
+    Dim fileNode As Integer
+    fileNode = MakeNodeFromToken(ps, "STRING", fileTok.lexeme, "", fileTok)
+    ASTAddChild ps.ast, importNode, fileNode
+    AdvanceTok ps
+
+    If MatchOp(ps, ")") = 0 Then
+        ps.lastError = "IMPORT: missing )"
+        Return -1
+    End If
+
+    Return importNode
+End Function

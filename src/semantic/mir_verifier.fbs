@@ -1,0 +1,560 @@
+#ifndef UXB_MIR_VERIFIER_FBS
+#define UXB_MIR_VERIFIER_FBS
+
+#include once "../mir/mir_registry.fbs"
+
+Type UXBMIRVerifyStats
+    functionCount As Integer
+    blockCount As Integer
+    instructionCount As Integer
+    emptyFunctionCount As Integer
+    emptyBlockCount As Integer
+    invalidOpcodeCount As Integer
+    missingTypeCount As Integer
+    invalidEdgeCount As Integer
+End Type
+
+Type UXBMIRVerifyResult
+    ok As Integer
+    errorCount As Integer
+    warningCount As Integer
+    errorsText As String
+    warningsText As String
+    stats As UXBMIRVerifyStats
+End Type
+
+Sub UXBMIRVerifyInit(ByRef r As UXBMIRVerifyResult)
+    r.ok = 1
+    r.errorCount = 0
+    r.warningCount = 0
+    r.errorsText = ""
+    r.warningsText = ""
+    r.stats.functionCount = 0
+    r.stats.blockCount = 0
+    r.stats.instructionCount = 0
+    r.stats.emptyFunctionCount = 0
+    r.stats.emptyBlockCount = 0
+    r.stats.invalidOpcodeCount = 0
+    r.stats.missingTypeCount = 0
+    r.stats.invalidEdgeCount = 0
+End Sub
+
+Sub UXBMIRVerifyAddError(ByRef r As UXBMIRVerifyResult, ByRef msg As String)
+    r.ok = 0
+    r.errorCount += 1
+    If Len(r.errorsText) > 0 Then r.errorsText &= Chr(10)
+    r.errorsText &= msg
+End Sub
+
+Sub UXBMIRVerifyAddWarning(ByRef r As UXBMIRVerifyResult, ByRef msg As String)
+    r.warningCount += 1
+    If Len(r.warningsText) > 0 Then r.warningsText &= Chr(10)
+    r.warningsText &= msg
+End Sub
+
+Function UXBMIRVerifyOpcodeNameIsValid(ByRef opName As String) As Integer
+    Return UXBMIRStep4OpcodeKnown(opName)
+End Function
+
+Private Function UXBMIRVerifyTryParseInt(ByRef textValue As String, ByRef valueOut As Integer) As Integer
+    Dim t As String
+    t = Trim(textValue)
+    If t = "" Then Return 0
+
+    Dim startPos As Integer
+    startPos = 1
+    If Left(t, 1) = "+" Or Left(t, 1) = "-" Then startPos = 2
+    If startPos > Len(t) Then Return 0
+
+    Dim i As Integer
+    For i = startPos To Len(t)
+        Dim ch As String
+        ch = Mid(t, i, 1)
+        If ch < "0" Or ch > "9" Then Return 0
+    Next i
+
+    valueOut = Val(t)
+    Return 1
+End Function
+
+Private Function UXBMIRFindBlockById(ByRef fn As MIRFunction, ByVal blockId As Integer) As Integer
+    Dim bi As Integer
+    For bi = 0 To fn.blockCount - 1
+        If fn.blocks(bi).id = blockId Then Return bi
+    Next bi
+    Return -1
+End Function
+
+Private Sub UXBMIRVerifyBranchTarget(ByRef fn As MIRFunction, ByRef inst As MIRIRInstruction, ByVal operandIndex As Integer, ByVal fi As Integer, ByVal bi As Integer, ByVal ii As Integer, ByRef r As UXBMIRVerifyResult)
+    If inst.operandCount <= operandIndex Then
+        r.stats.invalidEdgeCount += 1
+        Dim e As String
+        e = "MIR branch target missing (fn=" & LTrim(Str(fi)) & ", block=" & LTrim(Str(bi)) & ", inst=" & LTrim(Str(ii)) & ")"
+        UXBMIRVerifyAddError r, e
+        Exit Sub
+    End If
+
+    Dim targetId As Integer
+    If UXBMIRVerifyTryParseInt(inst.operands(operandIndex), targetId) = 0 Then
+        r.stats.invalidEdgeCount += 1
+        Dim e As String
+        e = "MIR branch target is not integer (fn=" & LTrim(Str(fi)) & ", block=" & LTrim(Str(bi)) & ", inst=" & LTrim(Str(ii)) & ")"
+        UXBMIRVerifyAddError r, e
+        Exit Sub
+    End If
+
+    If UXBMIRFindBlockById(fn, targetId) = -1 Then
+        r.stats.invalidEdgeCount += 1
+        Dim e As String
+        e = "MIR branch target block not found (target=" & LTrim(Str(targetId)) & ", fn=" & LTrim(Str(fi)) & ")"
+        UXBMIRVerifyAddError r, e
+    End If
+End Sub
+
+Function UXBMIRVerifyModule(ByRef m As MIRModule, ByRef r As UXBMIRVerifyResult, ByRef errText As String) As Integer
+    UXBMIRVerifyInit(r)
+    errText = ""
+
+    If m.functionCount <= 0 Then
+        UXBMIRVerifyAddError r, "MIR module has no function"
+        Return 1
+    End If
+
+    Dim fi As Integer
+    For fi = 0 To m.functionCount - 1
+        Dim fn As MIRFunction Ptr
+        fn = @m.functions(fi)
+
+        r.stats.functionCount += 1
+
+        If Trim(fn->name) = "" Then
+            UXBMIRVerifyAddError r, "MIR function name is empty at index " & LTrim(Str(fi))
+        End If
+
+        If fn->blockCount <= 0 Then
+            r.stats.emptyFunctionCount += 1
+            UXBMIRVerifyAddError r, "MIR function has no block: " & IIf(Trim(fn->name) = "", "<unnamed>", fn->name)
+            Continue For
+        End If
+
+        Dim bi As Integer
+        For bi = 0 To fn->blockCount - 1
+            Dim blk As MIRBasicBlock Ptr
+            blk = @fn->blocks(bi)
+
+            r.stats.blockCount += 1
+
+            If blk->instructionCount <= 0 Then
+                r.stats.emptyBlockCount += 1
+                Dim w As String
+                w = "MIR block has no instruction (fn=" & IIf(Trim(fn->name) = "", "<unnamed>", fn->name) & ", blockId=" & LTrim(Str(blk->id)) & ")"
+                UXBMIRVerifyAddWarning r, w
+                Continue For
+            End If
+
+            Dim ii As Integer
+            For ii = 0 To blk->instructionCount - 1
+                Dim inst As MIRIRInstruction Ptr
+                inst = @blk->instructions(ii)
+
+                r.stats.instructionCount += 1
+
+                If Trim(inst->opcode) = "" Then
+                    r.stats.invalidOpcodeCount += 1
+                    UXBMIRVerifyAddError r, "MIR instruction opcode is empty (fn=" & LTrim(Str(fi)) & ", block=" & LTrim(Str(bi)) & ", inst=" & LTrim(Str(ii)) & ")"
+                    Continue For
+                End If
+
+                If UXBMIRVerifyOpcodeNameIsValid(inst->opcode) = 0 Then
+                    r.stats.invalidOpcodeCount += 1
+                    UXBMIRVerifyAddError r, "MIR instruction opcode is invalid: " & inst->opcode
+                End If
+
+                If UXBMIRStep4OpcodeIsFailClosed(inst->opcode) <> 0 Then
+                    r.stats.invalidOpcodeCount += 1
+                    UXBMIRVerifyAddError r, "MIR fail-closed opcode reached executable path: " & inst->opcode
+                End If
+
+                If UXBMIRStep4HasVerifyRule(inst->opcode) = 0 Then
+                    r.stats.invalidOpcodeCount += 1
+                    UXBMIRVerifyAddError r, "MIR verify rule is missing for opcode: " & inst->opcode
+                End If
+
+                Dim op As String
+                op = UCase(Trim(inst->opcode))
+
+                Select Case op
+                Case MIR_OP_JMP
+                    UXBMIRVerifyBranchTarget *fn, *inst, 0, fi, bi, ii, r
+
+                Case MIR_OP_JZ, MIR_OP_JNZ
+                    UXBMIRVerifyBranchTarget *fn, *inst, 1, fi, bi, ii, r
+
+                Case MIR_OP_CALL
+                    If inst->operandCount < 1 Or Trim(inst->operands(0)) = "" Then
+                        UXBMIRVerifyAddError r, "MIR CALL target missing (fn=" & LTrim(Str(fi)) & ", block=" & LTrim(Str(bi)) & ", inst=" & LTrim(Str(ii)) & ")"
+                    End If
+
+                Case MIR_OP_LOAD_VAR
+                    If inst->operandCount < 1 Or Trim(inst->operands(0)) = "" Then
+                        UXBMIRVerifyAddError r, "MIR LOAD_VAR source symbol missing"
+                    End If
+                    If Trim(inst->result) = "" Then
+                        UXBMIRVerifyAddError r, "MIR LOAD_VAR result symbol missing"
+                    End If
+
+                Case MIR_OP_STORE_VAR
+                    If inst->operandCount < 1 Or Trim(inst->operands(0)) = "" Then
+                        UXBMIRVerifyAddError r, "MIR STORE_VAR source symbol missing"
+                    End If
+                    If Trim(inst->result) = "" Then
+                        UXBMIRVerifyAddError r, "MIR STORE_VAR target symbol missing"
+                    End If
+
+                Case MIR_OP_LOAD_INDEXED
+                    If inst->operandCount < 2 Then
+                        UXBMIRVerifyAddError r, "MIR LOAD_INDEXED requires array and index operands"
+                    Else
+                        If Trim(inst->operands(0)) = "" Then UXBMIRVerifyAddError r, "MIR LOAD_INDEXED array symbol missing"
+                        If Trim(inst->operands(1)) = "" Then UXBMIRVerifyAddError r, "MIR LOAD_INDEXED index symbol missing"
+                    End If
+                    If Trim(inst->result) = "" Then
+                        UXBMIRVerifyAddError r, "MIR LOAD_INDEXED result symbol missing"
+                    End If
+
+                Case MIR_OP_STORE_INDEXED
+                    If inst->operandCount < 3 Then
+                        UXBMIRVerifyAddError r, "MIR STORE_INDEXED requires array,index,value operands"
+                    Else
+                        If Trim(inst->operands(0)) = "" Then UXBMIRVerifyAddError r, "MIR STORE_INDEXED array symbol missing"
+                        If Trim(inst->operands(1)) = "" Then UXBMIRVerifyAddError r, "MIR STORE_INDEXED index symbol missing"
+                        If Trim(inst->operands(2)) = "" Then UXBMIRVerifyAddError r, "MIR STORE_INDEXED value symbol missing"
+                    End If
+                End Select
+
+                If Trim(inst->result) <> "" Then
+                    If Trim(inst->resultType) = "" Then r.stats.missingTypeCount += 1
+                End If
+            Next ii
+        Next bi
+    Next fi
+
+    If r.stats.missingTypeCount > 0 Then
+        Dim w As String
+        w = "MIR type metadata missing for result-carrying instructions: " & LTrim(Str(r.stats.missingTypeCount))
+        UXBMIRVerifyAddWarning r, w
+    End If
+
+    errText = ""
+    Return 1
+End Function
+
+#endif
+
+
+' ADIM07: canonical MIR verify surface contract bridge.
+#include once "../surface/uxb_surface_layer_bridge.fbs"
+Function UXBMIRVerifySurfaceContractStatus(ByRef surfaceText As String) As String
+    Dim layerText As String = "MIR_VERIFY"
+    Select Case UCase(Trim(surfaceText))
+    Case "ABS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ASC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ATN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CDBL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CHR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CINT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "COS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CSNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DECORATOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EVENT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EXP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FIX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GETKEY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INKEY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INLINE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LCASE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LEN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LTRIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MAGIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MID": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MIXIN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OFF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ON": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OVERRIDE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PARALEL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PARALEL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PIPE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RANDOMIZE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RTRIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SETSTRINGSIZE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SGN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MAGIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SIN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SLOT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SPACE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SQR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SQRT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STRPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TAN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THREAD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THREAD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TIMER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TRUE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FALSE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ZERO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ONE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TRIGGER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "UCASE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "VAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NATIVE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "VIRTUAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ARRAY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DICT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LIST": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SET": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ABSTRACT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ALIAS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BYREF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BYVAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CDECL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FINAL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FRIEND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMMUTABLE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMPORT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INCLUDE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MODULE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MUTABLE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NAMESPACE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PRIVATE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PROTECTED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PUBLIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "READONLY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RESTRICTED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SEALED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STATIC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STDCALL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "USING": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CASE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EACH": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ELSE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ELSEIF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "END": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EXIT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GOSUB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GOTO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOOP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NEXT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "RETURN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SELECT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STEP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THEN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "UNTIL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "WHILE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "AS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CONST": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFBYT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFDBL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFEXT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFINT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFLNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFSNG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEFSTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "REDIM": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ASSERT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CATCH": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FINALLY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "THROW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TRY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".ast.json": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".bas": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".bi": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".h": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".hx": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".js": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".json": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".mir.json": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxb": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxbasic": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxm": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".uxmh": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".wasm": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".wat": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLOSE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "COLOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GET": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INPUT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LOCATE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OPEN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PRINT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PUT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SEEK": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ARCHIVE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "AUDIO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BROWSER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CANVAS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CRYPTO": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CURL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "GRAPHICS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "HTTP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMAGE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "JSON": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LLAMA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LUA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MATH": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ONNX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PROLOG": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "REGEX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SERVER": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SQLITE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STRINGX": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "WEBGPU": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CODEPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DEC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INC": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMCOPYW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MEMFILLW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OFFSETOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PEEKW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKEB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKED": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKEQ": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKES": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "POKEW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SADD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SETNEWOFFSET": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SIZEOF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "VARPTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "LBOUND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "UBOUND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MAIN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "%": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "%=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "&": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "&=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "(": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ")": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "*": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "*=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "**": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "**=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "+": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "++": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "+=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ",": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "-": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "--": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "-=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ".": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "/": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "/=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ":": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<<": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<<=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "<>": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "==": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">>": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case ">>=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "@": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "AND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "MOD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NOT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ROL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "ROR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SHL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SHR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "XOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NAND": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "XNOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CIMP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NIMP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NCIMP": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IDA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IDB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NOTA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NOTB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NXOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EQV": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "EQA": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IFF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "[": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "\": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "\=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "]": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "^": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "^=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "|": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "|=": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CALL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CLASS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "CONSTRUCTOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DECLARE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DELETE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "DESTRUCTOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "FUNCTION": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "IMPLEMENTS": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "INTERFACE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "METHOD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "NEW": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OPERATOR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PROPERTY": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "SUB": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "TYPE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BALL": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BIGD": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BIGF": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BOOLEAN": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "BYTE": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F128": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F32": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F64": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "F80": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I16": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I32": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I64": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "I8": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "OBJECT": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "PTR": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "STRING": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U16": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U32": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U64": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    Case "U8": Return UXBSurfaceLayerStatus(surfaceText, layerText)
+    End Select
+    Return "MISSING"
+End Function

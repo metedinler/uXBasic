@@ -1,0 +1,203 @@
+' Extracted from code_generator.fbs for wave-14 modular split
+' Scope: core statement flow emitters (call/if/for/select/do/loop control)
+
+Private Function GenerateCall(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: CALL"
+    Return X64EmitCallStmt(ps, nodeIdx, cg, errText)
+End Function
+
+Private Function GenerateIf(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: IF"
+    Dim condNode As Integer
+    condNode = X64ChildAt(ps, nodeIdx, 0)
+    If condNode = -1 Then
+        errText = "x64-codegen: IF without condition"
+        Return 0
+    End If
+
+    Dim lblThen As String
+    Dim lblElse As String
+    Dim lblEnd As String
+
+    lblThen = X64NextLabel(cg, "if_then")
+    lblElse = X64NextLabel(cg, "if_else")
+    lblEnd = X64NextLabel(cg, "if_end")
+    If gX64IfDepth > 255 Then
+        errText = "x64-codegen: IF nesting too deep"
+        Return 0
+    End If
+    gX64IfEndLabels(gX64IfDepth) = lblEnd
+    gX64IfDepth += 1
+
+    If X64EmitExprToRax(ps, condNode, cg, errText) = 0 Then Return 0
+    X64EmitText cg, "    cmp rax, 0"
+    X64EmitText cg, "    je " & lblElse
+    X64EmitText cg, "    jmp " & lblThen
+
+    X64EmitLabel cg, lblThen
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    If ch <> -1 Then ch = ps.ast.nodes(ch).nextSibling
+
+    Do While ch <> -1
+        Dim kindText As String
+        kindText = X64Upper(ps.ast.nodes(ch).kind)
+        If kindText = "ELSEIF_PART" Or kindText = "ELSE_PART" Then Exit Do
+        If X64EmitNode(ps, ch, cg, errText) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    X64EmitText cg, "    jmp " & lblEnd
+    X64EmitLabel cg, lblElse
+
+    Do While ch <> -1
+        Dim kindText As String
+        kindText = X64Upper(ps.ast.nodes(ch).kind)
+
+        If kindText = "ELSEIF_PART" Then
+            Dim elseifCond As Integer
+            elseifCond = X64ChildAt(ps, ch, 0)
+            If elseifCond = -1 Then
+                errText = "x64-codegen: ELSEIF without condition"
+                Return 0
+            End If
+
+            Dim lblElseIfThen As String
+            Dim lblElseIfNext As String
+            lblElseIfThen = X64NextLabel(cg, "elseif_then")
+            lblElseIfNext = X64NextLabel(cg, "elseif_next")
+
+            If X64EmitExprToRax(ps, elseifCond, cg, errText) = 0 Then Return 0
+            X64EmitText cg, "    cmp rax, 0"
+            X64EmitText cg, "    je " & lblElseIfNext
+            X64EmitText cg, "    jmp " & lblElseIfThen
+
+            X64EmitLabel cg, lblElseIfThen
+
+            Dim partChild As Integer
+            partChild = ps.ast.nodes(ch).firstChild
+            If partChild <> -1 Then partChild = ps.ast.nodes(partChild).nextSibling
+            Do While partChild <> -1
+                If X64EmitNode(ps, partChild, cg, errText) = 0 Then Return 0
+                partChild = ps.ast.nodes(partChild).nextSibling
+            Loop
+
+            X64EmitText cg, "    jmp " & lblEnd
+            X64EmitLabel cg, lblElseIfNext
+        ElseIf kindText = "ELSE_PART" Then
+            Dim elseChild As Integer
+            elseChild = ps.ast.nodes(ch).firstChild
+            Do While elseChild <> -1
+                If X64EmitNode(ps, elseChild, cg, errText) = 0 Then Return 0
+                elseChild = ps.ast.nodes(elseChild).nextSibling
+            Loop
+        End If
+
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    X64EmitLabel cg, lblEnd
+    gX64IfDepth -= 1
+    gX64IfEndLabels(gX64IfDepth) = ""
+    Return 1
+End Function
+
+Private Function GenerateFor(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
+    X64EmitComment cg, "stmt: FOR"
+
+    Dim loopVar As String
+    loopVar = Trim(ps.ast.nodes(nodeIdx).value)
+    If loopVar = "" Then loopVar = X64NextLabel(cg, "forv")
+
+    Dim startExpr As Integer
+    Dim endExpr As Integer
+    Dim stepExpr As Integer
+    Dim bodyNode As Integer
+    startExpr = X64ChildAt(ps, nodeIdx, 0)
+    endExpr = X64ChildAt(ps, nodeIdx, 1)
+    stepExpr = X64ChildAt(ps, nodeIdx, 2)
+    bodyNode = X64ChildAt(ps, nodeIdx, 3)
+
+    If startExpr = -1 Or endExpr = -1 Then
+        errText = "x64-codegen: FOR missing start/end"
+        Return 0
+    End If
+
+    If bodyNode = -1 And stepExpr <> -1 Then
+        bodyNode = stepExpr
+        stepExpr = -1
+    End If
+
+    Dim lblStart As String
+    Dim lblEnd As String
+    lblStart = X64NextLabel(cg, "for_start")
+    lblEnd = X64NextLabel(cg, "for_end")
+
+    Dim stepVar As String
+    Dim limitVar As String
+    stepVar = X64NextLabel(cg, "for_step_tmp")
+    limitVar = X64NextLabel(cg, "for_limit_tmp")
+
+    If X64EmitExprToRax(ps, startExpr, cg, errText) = 0 Then Return 0
+    X64EmitStoreVar cg, loopVar
+
+    If X64EmitExprToRax(ps, endExpr, cg, errText) = 0 Then Return 0
+    X64EmitStoreVar cg, limitVar
+
+    If stepExpr <> -1 Then
+        If X64EmitExprToRax(ps, stepExpr, cg, errText) = 0 Then Return 0
+    Else
+        X64EmitText cg, "    mov rax, 1"
+    End If
+    X64EmitStoreVar cg, stepVar
+
+    cg.loopDepth += 1
+    If cg.loopDepth > 255 Then
+        errText = "x64-codegen: loop nesting too deep"
+        Return 0
+    End If
+    gX64LoopVars(cg.loopDepth - 1) = loopVar
+    gX64LoopStartLabels(cg.loopDepth - 1) = lblStart
+    gX64LoopEndLabels(cg.loopDepth - 1) = lblEnd
+    gX64LoopStepLabels(cg.loopDepth - 1) = lblStart
+
+    X64EmitLabel cg, lblStart
+
+    X64EmitLoadVar cg, loopVar
+    X64EmitText cg, "    mov rbx, rax"
+    X64EmitLoadVar cg, limitVar
+    X64EmitText cg, "    mov rcx, rax"
+    X64EmitLoadVar cg, stepVar
+    X64EmitText cg, "    cmp rax, 0"
+    X64EmitText cg, "    jl " & lblStart & "_neg"
+    X64EmitText cg, "    cmp rbx, rcx"
+    X64EmitText cg, "    jg " & lblEnd
+    X64EmitText cg, "    jmp " & lblStart & "_body"
+    X64EmitLabel cg, lblStart & "_neg"
+    X64EmitText cg, "    cmp rbx, rcx"
+    X64EmitText cg, "    jl " & lblEnd
+    X64EmitLabel cg, lblStart & "_body"
+
+    Do While bodyNode <> -1
+        If X64EmitNode(ps, bodyNode, cg, errText) = 0 Then Return 0
+        bodyNode = ps.ast.nodes(bodyNode).nextSibling
+    Loop
+
+    X64EmitLoadVar cg, loopVar
+    X64EmitText cg, "    mov rbx, rax"
+    X64EmitLoadVar cg, stepVar
+    X64EmitText cg, "    add rbx, rax"
+    X64EmitText cg, "    mov rax, rbx"
+    X64EmitStoreVar cg, loopVar
+
+    X64EmitText cg, "    jmp " & lblStart
+    X64EmitLabel cg, lblEnd
+    gX64LoopVars(cg.loopDepth - 1) = ""
+    gX64LoopStartLabels(cg.loopDepth - 1) = ""
+    gX64LoopEndLabels(cg.loopDepth - 1) = ""
+    gX64LoopStepLabels(cg.loopDepth - 1) = ""
+    cg.loopDepth -= 1
+    Return 1
+End Function
+

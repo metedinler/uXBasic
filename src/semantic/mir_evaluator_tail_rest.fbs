@@ -1,0 +1,672 @@
+' Extracted post-controlflow evaluator block
+
+Private Function MIREvaluateDeclarationInstruction(ByRef state As MIREvaluatorState, ByRef errMsg As String) As Integer
+    Select Case gMirInstr.opcode
+        Case MIR_OP_DIM
+            If gMirInstr.operandCount < 3 Then
+                errMsg = "MIR: DIM için değişken adı yok"
+                Return 0
+            End If
+
+            Dim dimName As String
+            dimName = gMirInstr.operands(0)
+            Dim dimLowerValue As MIRValue
+            Dim dimUpperValue As MIRValue
+            Dim dimLower As LongInt
+            Dim dimUpper As LongInt
+            If MIREvalOperandValue(state, gMirInstr.operands(1), dimLowerValue) = 0 Then
+                errMsg = "MIR: DIM lower bound cozumlene medi"
+                Return 0
+            End If
+            If MIREvalOperandValue(state, gMirInstr.operands(2), dimUpperValue) = 0 Then
+                errMsg = "MIR: DIM upper bound cozumlene medi"
+                Return 0
+            End If
+            If MIRAsInteger(dimLowerValue, dimLower) = 0 Or MIRAsInteger(dimUpperValue, dimUpper) = 0 Then
+                errMsg = "MIR: DIM bounds sayisal olmali"
+                Return 0
+            End If
+
+            Dim dimVal As MIRValue
+            dimVal.valueType = "ARRAY"
+            dimVal.arrayId = -1
+            If MIRResizeArrayValue(state, dimVal, dimLower, dimUpper, 0) = 0 Then
+                errMsg = "MIR: DIM array allocation failed"
+                Return 0
+            End If
+            If MIRSetVarValue(state, dimName, dimVal) = 0 Then
+                errMsg = "MIR: DIM değişkeni yazılamadı"
+                Return 0
+            End If
+
+            Return 1
+
+        Case MIR_OP_REDIM
+            If gMirInstr.operandCount < 4 Then
+                errMsg = "MIR: REDIM için değişken adı yok"
+                Return 0
+            End If
+
+            Dim redimVal As MIRValue
+            If MIRGetVarValue(state, gMirInstr.operands(0), redimVal) = 0 Then
+                errMsg = "MIR: REDIM hedefi bulunamadı"
+                Return 0
+            End If
+            If redimVal.valueType <> "ARRAY" Then
+                errMsg = "MIR: REDIM yalnızca ARRAY için"
+                Return 0
+            End If
+
+            Dim redimLowerValue As MIRValue
+            Dim redimUpperValue As MIRValue
+            Dim preserveValue As MIRValue
+            Dim redimLower As LongInt
+            Dim redimUpper As LongInt
+            Dim preserveMode As LongInt
+            If MIREvalOperandValue(state, gMirInstr.operands(1), redimLowerValue) = 0 Then errMsg = "MIR: REDIM lower bound cozumlene medi": Return 0
+            If MIREvalOperandValue(state, gMirInstr.operands(2), redimUpperValue) = 0 Then errMsg = "MIR: REDIM upper bound cozumlene medi": Return 0
+            If MIREvalOperandValue(state, gMirInstr.operands(3), preserveValue) = 0 Then errMsg = "MIR: REDIM preserve cozumlene medi": Return 0
+            If MIRAsInteger(redimLowerValue, redimLower) = 0 Or MIRAsInteger(redimUpperValue, redimUpper) = 0 Or MIRAsInteger(preserveValue, preserveMode) = 0 Then
+                errMsg = "MIR: REDIM bounds sayisal olmali"
+                Return 0
+            End If
+            If MIRResizeArrayValue(state, redimVal, redimLower, redimUpper, preserveMode) = 0 Then
+                errMsg = "MIR: REDIM resize failed"
+                Return 0
+            End If
+
+            If MIRSetVarValue(state, gMirInstr.operands(0), redimVal) = 0 Then
+                errMsg = "MIR: REDIM sonucu yazılamadı"
+                Return 0
+            End If
+
+            Return 1
+
+        Case MIR_OP_CONST
+            ' operand1 = const name, operand2 = value
+            If gMirInstr.operandCount < 2 Then
+                errMsg = "MIR: CONST için yeterli operand yok"
+                Return 0
+            End If
+
+            Dim constVal As MIRValue
+            If MIRValueFromString(gMirInstr.operands(1), constVal) = 0 Then
+                errMsg = "MIR: CONST değeri çözümlenemedi"
+                Return 0
+            End If
+
+            If MIRSetVarValue(state, gMirInstr.operands(0), constVal) = 0 Then
+                errMsg = "MIR: CONST değişkeni yazılamadı"
+                Return 0
+            End If
+
+            Return 1
+
+        Case MIR_OP_DEF_TYPE
+            ' operand1 = type char, operand2 = type name
+            If gMirInstr.operandCount < 2 Then
+                errMsg = "MIR: DEF_TYPE için yeterli operand yok"
+                Return 0
+            End If
+
+            ' MIR runtime'da tip default haritalama metadata olarak tutulur.
+            Dim typeMeta As MIRValue
+            typeMeta.valueType = "STRING"
+            typeMeta.stringValue = UCase(Trim(gMirInstr.operands(1)))
+            MIRSetVarValue state, "__def_type_" & UCase(Trim(gMirInstr.operands(0))), typeMeta
+            Return 1
+
+        Case MIR_OP_SETSTRINGSIZE
+            ' operand1 = size
+            If gMirInstr.operandCount < 1 Then
+                errMsg = "MIR: SETSTRINGSIZE için boyut yok"
+                Return 0
+            End If
+
+            Dim strSizeVal As MIRValue
+            If MIREvalOperandValue(state, gMirInstr.operands(0), strSizeVal) = 0 Then
+                errMsg = "MIR: SETSTRINGSIZE boyutu cozumlene medi"
+                Return 0
+            End If
+
+            Dim strSize As LongInt
+            If MIRAsInteger(strSizeVal, strSize) = 0 Then
+                errMsg = "MIR: SETSTRINGSIZE sayisal boyut ister"
+                Return 0
+            End If
+            If strSize < 0 Then
+                errMsg = "MIR: SETSTRINGSIZE negatif olamaz"
+                Return 0
+            End If
+
+            Dim strMeta As MIRValue
+            strMeta.valueType = "INTEGER"
+            strMeta.intValue = strSize
+            MIRSetVarValue state, "__string_size__", strMeta
+            Return 1
+
+        Case Else
+            errMsg = "MIR: Bilinmeyen opcode: " & gMirInstr.opcode
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Function MIREvaluateInstruction(ByRef state As MIREvaluatorState, ByRef errMsg As String) As Integer
+    Select Case gMirInstr.opcode
+        Case MIR_OP_LOAD_CONST, MIR_OP_LOAD_VAR, MIR_OP_STORE_VAR, MIR_OP_CAST, MIR_OP_LOAD_INDEXED, MIR_OP_STORE_INDEXED, MIR_OP_NEW, MIR_OP_OBJECT_NEW
+            Return MIREvaluateLoadStoreInstruction(state, errMsg)
+
+        Case MIR_OP_ADD, MIR_OP_SUB, MIR_OP_MUL, MIR_OP_DIV, MIR_OP_IDIV, MIR_OP_MOD, MIR_OP_POW, MIR_OP_SHL, MIR_OP_SHR, MIR_OP_USHR, MIR_OP_UIDIV, MIR_OP_UMOD, MIR_OP_ROL, MIR_OP_ROR, MIR_OP_NAND, MIR_OP_NOR, MIR_OP_XNOR, MIR_OP_IMP, MIR_OP_CIMP, MIR_OP_NIMP, MIR_OP_NCIMP, MIR_OP_IDA, MIR_OP_IDB, MIR_OP_NOTA, MIR_OP_NOTB, MIR_OP_NEG, MIR_OP_FADD, MIR_OP_FSUB, MIR_OP_FMUL, MIR_OP_FDIV, MIR_OP_FNEG
+            Return MIREvaluateArithmeticInstruction(state, errMsg)
+
+        Case MIR_OP_EQ, MIR_OP_NE, MIR_OP_LT, MIR_OP_LE, MIR_OP_GT, MIR_OP_GE, MIR_OP_ULT, MIR_OP_ULE, MIR_OP_UGT, MIR_OP_UGE, MIR_OP_AND, MIR_OP_OR, MIR_OP_XOR, MIR_OP_NOT
+            Return MIREvaluateCompareLogicalInstruction(state, errMsg)
+
+        Case MIR_OP_CALL, MIR_OP_RET, MIR_OP_JMP, MIR_OP_JZ, MIR_OP_JNZ
+            Return MIREvaluateControlFlowInstruction(state, errMsg)
+
+        Case MIR_OP_DIM, MIR_OP_REDIM, MIR_OP_CONST, MIR_OP_DEF_TYPE, MIR_OP_SETSTRINGSIZE
+            Return MIREvaluateDeclarationInstruction(state, errMsg)
+
+        Case Else
+            errMsg = "MIR: Bilinmeyen opcode: " & gMirInstr.opcode
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Function MIRGetVarValue(ByRef state As MIREvaluatorState, ByRef varName As String, ByRef value As MIRValue) As Integer
+    Dim i As Integer
+    For i = 0 To state.varCount - 1
+        If UCase(state.varValues(i).nameText) = UCase(varName) Then
+            value = state.varValues(i).value
+            Return 1
+        End If
+    Next
+    Return 0
+End Function
+
+Function MIRSetVarValue(ByRef state As MIREvaluatorState, ByRef varName As String, ByRef value As MIRValue) As Integer
+    Dim i As Integer
+    For i = 0 To state.varCount - 1
+        If UCase(state.varValues(i).nameText) = UCase(varName) Then
+            state.varValues(i).value = value
+            Return 1
+        End If
+    Next
+    ' New variable
+    If state.varCount = 0 Then
+        ReDim state.varValues(0)
+    Else
+        ReDim Preserve state.varValues(state.varCount)
+    End If
+    state.varValues(state.varCount).nameText = varName
+    state.varValues(state.varCount).value = value
+    state.varCount += 1
+    Return 1
+End Function
+
+Private Function MIRApplyLogic16Int(ByRef op As String, ByVal A As LongInt, ByVal B As LongInt) As LongInt
+    ' BASIC/Logic16 full-width bit formulas. TRUE is -1, FALSE is 0.
+    Select Case UCase(Trim(op))
+    Case MIR_OP_NAND: Return Not (A And B)
+    Case MIR_OP_NOR: Return Not (A Or B)
+    Case MIR_OP_XNOR: Return Not (A Xor B)
+    Case MIR_OP_IMP: Return (Not A) Or B
+    Case MIR_OP_CIMP: Return A Or (Not B)
+    Case MIR_OP_NIMP: Return A And (Not B)
+    Case MIR_OP_NCIMP: Return (Not A) And B
+    Case MIR_OP_IDA: Return A
+    Case MIR_OP_IDB: Return B
+    Case MIR_OP_NOTA: Return Not A
+    Case MIR_OP_NOTB: Return Not B
+    End Select
+    Return 0
+End Function
+
+Function MIRBinaryOp(ByRef op As String, ByRef lhs As MIRValue, ByRef rhs As MIRValue, ByRef result As MIRValue, ByRef errMsg As String) As Integer
+    Dim opUpper As String
+    opUpper = UCase(Trim(op))
+
+    Dim forceFloat As Integer
+    forceFloat = IIf(opUpper = MIR_OP_FADD Or opUpper = MIR_OP_FSUB Or opUpper = MIR_OP_FMUL Or opUpper = MIR_OP_FDIV, 1, 0)
+
+    If forceFloat <> 0 Then
+        Dim lhsFloat As Double
+        Dim rhsFloat As Double
+
+        If lhs.valueType = "FLOAT" Then
+            lhsFloat = lhs.floatValue
+        ElseIf lhs.valueType = "INTEGER" Then
+            lhsFloat = CDbl(lhs.intValue)
+        Else
+            errMsg = "MIR: Float opcode sol operand sayi olmali"
+            Return 0
+        End If
+
+        If rhs.valueType = "FLOAT" Then
+            rhsFloat = rhs.floatValue
+        ElseIf rhs.valueType = "INTEGER" Then
+            rhsFloat = CDbl(rhs.intValue)
+        Else
+            errMsg = "MIR: Float opcode sag operand sayi olmali"
+            Return 0
+        End If
+
+        result.valueType = "FLOAT"
+        Select Case opUpper
+            Case MIR_OP_FADD
+                result.floatValue = lhsFloat + rhsFloat
+            Case MIR_OP_FSUB
+                result.floatValue = lhsFloat - rhsFloat
+            Case MIR_OP_FMUL
+                result.floatValue = lhsFloat * rhsFloat
+            Case MIR_OP_FDIV
+                If rhsFloat = 0 Then
+                    errMsg = "MIR: Sıfıra bölme hatası"
+                    Return 0
+                End If
+                result.floatValue = lhsFloat / rhsFloat
+            Case Else
+                errMsg = "MIR: Bilinmeyen float işlemi: " & op
+                Return 0
+        End Select
+        Return 1
+    End If
+
+    If lhs.valueType <> rhs.valueType Then
+        If (lhs.valueType = "INTEGER" Or lhs.valueType = "FLOAT") And (rhs.valueType = "INTEGER" Or rhs.valueType = "FLOAT") Then
+            Dim mixedLhs As Double
+            Dim mixedRhs As Double
+            If lhs.valueType = "FLOAT" Then mixedLhs = lhs.floatValue Else mixedLhs = CDbl(lhs.intValue)
+            If rhs.valueType = "FLOAT" Then mixedRhs = rhs.floatValue Else mixedRhs = CDbl(rhs.intValue)
+
+            result.valueType = "FLOAT"
+            Select Case opUpper
+                Case MIR_OP_ADD: result.floatValue = mixedLhs + mixedRhs
+                Case MIR_OP_SUB: result.floatValue = mixedLhs - mixedRhs
+                Case MIR_OP_MUL: result.floatValue = mixedLhs * mixedRhs
+                Case MIR_OP_POW: result.floatValue = mixedLhs ^ mixedRhs
+                Case MIR_OP_DIV:
+                    If mixedRhs = 0 Then
+                        errMsg = "MIR: Sıfıra bölme hatası"
+                        Return 0
+                    End If
+                    result.floatValue = mixedLhs / mixedRhs
+                Case Else:
+                    errMsg = "MIR: Karisik sayisal işlem desteklenmiyor: " & op
+                    Return 0
+            End Select
+            Return 1
+        End If
+
+        errMsg = "MIR: İkili işlem operand tipleri uyumsuz"
+        Return 0
+    End If
+
+    result.valueType = lhs.valueType
+
+    If lhs.valueType = "INTEGER" Then
+        Select Case opUpper
+            Case MIR_OP_ADD: result.intValue = lhs.intValue + rhs.intValue
+            Case MIR_OP_SUB: result.intValue = lhs.intValue - rhs.intValue
+            Case MIR_OP_MUL: result.intValue = lhs.intValue * rhs.intValue
+            Case MIR_OP_DIV, MIR_OP_IDIV:
+                If rhs.intValue = 0 Then
+                    errMsg = "MIR: Sıfıra bölme hatası"
+                    Return 0
+                End If
+                result.intValue = lhs.intValue \ rhs.intValue
+            Case MIR_OP_POW:
+                If rhs.intValue < 0 Then
+                    errMsg = "MIR: integer exponent cannot be negative"
+                    Return 0
+                End If
+                Dim powBase As LongInt
+                Dim powExponent As ULongInt
+                Dim powResult As LongInt
+                powBase = lhs.intValue
+                powExponent = CULngInt(rhs.intValue)
+                powResult = 1
+                Do While powExponent <> 0
+                    If (powExponent And 1) <> 0 Then powResult *= powBase
+                    powExponent = powExponent Shr 1
+                    If powExponent <> 0 Then powBase *= powBase
+                Loop
+                result.intValue = powResult
+            Case MIR_OP_AND:
+                result.intValue = lhs.intValue And rhs.intValue
+            Case MIR_OP_OR:
+                result.intValue = lhs.intValue Or rhs.intValue
+            Case MIR_OP_XOR:
+                result.intValue = lhs.intValue Xor rhs.intValue
+            Case MIR_OP_NAND, MIR_OP_NOR, MIR_OP_XNOR, MIR_OP_IMP, MIR_OP_CIMP, MIR_OP_NIMP, MIR_OP_NCIMP, MIR_OP_IDA, MIR_OP_IDB, MIR_OP_NOTA, MIR_OP_NOTB:
+                result.intValue = MIRApplyLogic16Int(opUpper, lhs.intValue, rhs.intValue)
+            Case MIR_OP_MOD:
+                If rhs.intValue = 0 Then
+                    errMsg = "MIR: Sıfıra mod hatası"
+                    Return 0
+                End If
+                result.intValue = lhs.intValue Mod rhs.intValue
+            Case MIR_OP_UIDIV:
+                ' S-077: the 64 bits are an unsigned quantity.
+                If rhs.intValue = 0 Then
+                    errMsg = "MIR: Sıfıra bölme hatası"
+                    Return 0
+                End If
+                result.intValue = CLngInt(CULngInt(lhs.intValue) \ CULngInt(rhs.intValue))
+            Case MIR_OP_UMOD:
+                If rhs.intValue = 0 Then
+                    errMsg = "MIR: Sıfıra mod hatası"
+                    Return 0
+                End If
+                result.intValue = CLngInt(CULngInt(lhs.intValue) Mod CULngInt(rhs.intValue))
+            Case MIR_OP_SHL:
+                result.intValue = CLngInt(CULngInt(lhs.intValue) Shl (rhs.intValue And 63))
+            Case MIR_OP_SHR:
+                result.intValue = MIRArithmeticShr64(lhs.intValue, rhs.intValue)
+            Case MIR_OP_USHR:
+                result.intValue = CLngInt(CULngInt(lhs.intValue) Shr (rhs.intValue And 63))
+            Case MIR_OP_ROL:
+                result.intValue = CLngInt(MIRRol64(CULngInt(lhs.intValue), rhs.intValue))
+            Case MIR_OP_ROR:
+                result.intValue = CLngInt(MIRRor64(CULngInt(lhs.intValue), rhs.intValue))
+            Case Else:
+                errMsg = "MIR: Bilinmeyen tamsayı işlemi: " & op
+                Return 0
+        End Select
+    ElseIf lhs.valueType = "FLOAT" Then
+        Select Case opUpper
+            Case MIR_OP_ADD: result.floatValue = lhs.floatValue + rhs.floatValue
+            Case MIR_OP_SUB: result.floatValue = lhs.floatValue - rhs.floatValue
+            Case MIR_OP_MUL: result.floatValue = lhs.floatValue * rhs.floatValue
+            Case MIR_OP_POW: result.floatValue = lhs.floatValue ^ rhs.floatValue
+            Case MIR_OP_DIV:
+                If rhs.floatValue = 0 Then
+                    errMsg = "MIR: Sıfıra bölme hatası"
+                    Return 0
+                End If
+                result.floatValue = lhs.floatValue / rhs.floatValue
+            Case MIR_OP_MOD:
+                errMsg = "MIR: Float mod işlemi desteklenmiyor"
+                Return 0
+            Case Else:
+                errMsg = "MIR: Bilinmeyen float işlemi: " & op
+                Return 0
+        End Select
+    Else
+        errMsg = "MIR: İkili işlem sadece sayı tipleri için"
+        Return 0
+    End If
+
+    Return 1
+End Function
+
+Function MIRCompareOp(ByRef op As String, ByRef lhs As MIRValue, ByRef rhs As MIRValue, ByRef result As Integer, ByRef errMsg As String) As Integer
+    ' S-077: unsigned 64-bit ordering (ULT/ULE/UGT/UGE) compares the raw bits.
+    Select Case UCase(Trim(op))
+    Case MIR_OP_ULT, MIR_OP_ULE, MIR_OP_UGT, MIR_OP_UGE
+        If lhs.valueType <> "INTEGER" Or rhs.valueType <> "INTEGER" Then
+            errMsg = "MIR: İşaretsiz karşılaştırma yalnız tamsayı operand ister"
+            Return 0
+        End If
+        Dim ul As ULongInt = CULngInt(lhs.intValue)
+        Dim ur As ULongInt = CULngInt(rhs.intValue)
+        Select Case UCase(Trim(op))
+        Case MIR_OP_ULT: result = IIf(ul < ur, -1, 0)
+        Case MIR_OP_ULE: result = IIf(ul <= ur, -1, 0)
+        Case MIR_OP_UGT: result = IIf(ul > ur, -1, 0)
+        Case MIR_OP_UGE: result = IIf(ul >= ur, -1, 0)
+        End Select
+        Return 1
+    End Select
+
+    If lhs.valueType <> rhs.valueType Then
+        If (lhs.valueType = "INTEGER" Or lhs.valueType = "FLOAT") And (rhs.valueType = "INTEGER" Or rhs.valueType = "FLOAT") Then
+            Dim mixedLhs As Double
+            Dim mixedRhs As Double
+            If lhs.valueType = "FLOAT" Then mixedLhs = lhs.floatValue Else mixedLhs = CDbl(lhs.intValue)
+            If rhs.valueType = "FLOAT" Then mixedRhs = rhs.floatValue Else mixedRhs = CDbl(rhs.intValue)
+
+            Select Case UCase(Trim(op))
+                Case MIR_OP_EQ: result = IIf(mixedLhs = mixedRhs, -1, 0)
+                Case MIR_OP_NE: result = IIf(mixedLhs <> mixedRhs, -1, 0)
+                Case MIR_OP_LT: result = IIf(mixedLhs < mixedRhs, -1, 0)
+                Case MIR_OP_LE: result = IIf(mixedLhs <= mixedRhs, -1, 0)
+                Case MIR_OP_GT: result = IIf(mixedLhs > mixedRhs, -1, 0)
+                Case MIR_OP_GE: result = IIf(mixedLhs >= mixedRhs, -1, 0)
+                Case Else
+                    errMsg = "MIR: Bilinmeyen karşılaştırma işlemi: " & op
+                    Return 0
+            End Select
+            Return 1
+        End If
+
+        errMsg = "MIR: Karşılaştırma operand tipleri uyumsuz"
+        Return 0
+    End If
+
+    Dim cmp As Integer
+    If lhs.valueType = "INTEGER" Then
+        If lhs.intValue < rhs.intValue Then cmp = -1
+        If lhs.intValue = rhs.intValue Then cmp = 0
+        If lhs.intValue > rhs.intValue Then cmp = 1
+    ElseIf lhs.valueType = "FLOAT" Then
+        If lhs.floatValue < rhs.floatValue Then cmp = -1
+        If lhs.floatValue = rhs.floatValue Then cmp = 0
+        If lhs.floatValue > rhs.floatValue Then cmp = 1
+    ElseIf lhs.valueType = "STRING" Then
+        If lhs.stringValue < rhs.stringValue Then
+            cmp = -1
+        ElseIf lhs.stringValue > rhs.stringValue Then
+            cmp = 1
+        Else
+            cmp = 0
+        End If
+    Else
+        errMsg = "MIR: Karşılaştırma bu tip için desteklenmiyor"
+        Return 0
+    End If
+
+    Select Case op
+        Case MIR_OP_EQ: result = (cmp = 0)
+        Case MIR_OP_NE: result = (cmp <> 0)
+        Case MIR_OP_LT: result = (cmp < 0)
+        Case MIR_OP_LE: result = (cmp <= 0)
+        Case MIR_OP_GT: result = (cmp > 0)
+        Case MIR_OP_GE: result = (cmp >= 0)
+        Case Else:
+            errMsg = "MIR: Bilinmeyen karşılaştırma: " & op
+            Return 0
+    End Select
+
+    Return 1
+End Function
+
+Private Function MIRLooksNumeric(ByRef textValue As String) As Integer
+    Dim i As Integer
+    Dim ch As String
+    Dim seenDigit As Integer
+
+    If Len(textValue) = 0 Then Return 0
+
+    seenDigit = 0
+    For i = 1 To Len(textValue)
+        ch = Mid(textValue, i, 1)
+        If ch >= "0" And ch <= "9" Then
+            seenDigit = 1
+        ElseIf ch = "." Or ch = "E" Or ch = "e" Or ch = "+" Or ch = "-" Then
+            ' izinli sayisal karakterler
+        Else
+            Return 0
+        End If
+    Next i
+
+    Return seenDigit
+End Function
+
+Function MIRValueFromString(ByRef sourceText As String, ByRef valueOut As MIRValue) As Integer
+    Dim s As String
+    s = Trim(sourceText)
+
+    If UCase(s) = "TRUE" Then
+        valueOut.valueType = "INTEGER"
+        valueOut.intValue = -1
+        Return 1
+    End If
+
+    If UCase(s) = "FALSE" Then
+        valueOut.valueType = "INTEGER"
+        valueOut.intValue = 0
+        Return 1
+    End If
+
+    ' Simple constant parsing - integers and floats
+    If MIRLooksNumeric(s) <> 0 Then
+        If InStr(s, ".") > 0 Or InStr(UCase(s), "E") > 0 Then
+            valueOut.valueType = "FLOAT"
+            valueOut.floatValue = Val(s)
+        Else
+            valueOut.valueType = "INTEGER"
+            valueOut.intValue = Val(s)
+        End If
+        Return 1
+    End If
+
+    ' String constants (quoted)
+    If Left(s, 1) = Chr(34) And Right(s, 1) = Chr(34) Then
+        valueOut.valueType = "STRING"
+        valueOut.stringValue = Mid(s, 2, Len(s) - 2)
+        Return 1
+    End If
+
+    Return 0
+End Function
+
+Private Function MIRFindFunctionIndex(ByRef module As MIRModule, ByRef functionName As String) As Integer
+    Dim i As Integer
+    For i = 0 To module.functionCount - 1
+        If UCase(Trim(module.functions(i).name)) = UCase(Trim(functionName)) Then Return i
+    Next i
+    Return -1
+End Function
+
+Function MIRRunModule(ByRef module As MIRModule, ByRef resultOut As MIRValue, ByRef errMsg As String) As Integer
+    errMsg = ""
+
+    Dim state As MIREvaluatorState
+    MIREvaluatorStateInit state
+    state.module = module
+
+    If module.functionCount <= 0 Then
+        errMsg = "MIR: module icinde fonksiyon yok"
+        Return 0
+    End If
+
+    state.currentFunction = 0
+    state.currentBlock = module.functions(0).entryBlock
+    state.currentInstruction = 0
+
+    Dim stepGuard As Integer
+    stepGuard = 0
+
+    Do While state.exitRequested = 0
+        stepGuard += 1
+        If stepGuard > 1000000 Then
+            errMsg = "MIR: execution guard exceeded"
+            Return 0
+        End If
+
+        If state.currentFunction < 0 Or state.currentFunction >= module.functionCount Then
+            errMsg = "MIR: current function index out of range"
+            Return 0
+        End If
+
+        Dim fn As MIRFunction
+        fn = module.functions(state.currentFunction)
+        If fn.blockCount <= 0 Then
+            state.exitRequested = 1
+            Exit Do
+        End If
+
+        If state.currentBlock < 0 Or state.currentBlock >= fn.blockCount Then
+            errMsg = "MIR: current block index out of range"
+            Return 0
+        End If
+
+        Dim blk As MIRBasicBlock
+        blk = fn.blocks(state.currentBlock)
+
+        If state.currentInstruction < 0 Then state.currentInstruction = 0
+
+        If state.currentInstruction >= blk.instructionCount Then
+            If blk.successorCount > 0 Then
+                state.currentBlock = blk.successors(0)
+                state.currentInstruction = 0
+                Continue Do
+            End If
+            state.exitRequested = 1
+            Exit Do
+        End If
+
+        gMirInstr = blk.instructions(state.currentInstruction)
+
+        If MIREvaluateInstruction(state, errMsg) = 0 Then Return 0
+
+        If state.exitRequested = 0 Then
+            state.currentInstruction += 1
+        End If
+    Loop
+
+    Dim excActive As MIRValue
+    If MIRGetVarValue(state, "__mir_exc_active", excActive) <> 0 Then
+        Dim excFlag As LongInt
+        If MIRAsInteger(excActive, excFlag) <> 0 Then
+            If excFlag <> 0 Then
+                Dim excVal As MIRValue
+                If MIRGetVarValue(state, "__mir_exc_value", excVal) <> 0 Then
+                    errMsg = "MIR: uncaught THROW/ASSERT " & MIRValueToText(excVal)
+                Else
+                    errMsg = "MIR: uncaught THROW/ASSERT"
+                End If
+                Return 0
+            End If
+        End If
+    End If
+
+    If MIRGetVarValue(state, "__result__", resultOut) = 0 Then
+        resultOut.valueType = "NULL"
+        resultOut.intValue = 0
+        resultOut.floatValue = 0
+        resultOut.stringValue = ""
+        resultOut.arraySize = 0
+    End If
+
+    Return 1
+End Function
+
+Function MIRWriteOpcodeSurfaceJson(ByRef outPath As String, ByRef errMsg As String) As Integer
+    Dim jsonText As String
+    jsonText = "{" & Chr(10)
+    jsonText &= "  ""mir_supported_opcodes"": ["
+    jsonText &= """LOAD_CONST"", ""LOAD_VAR"", ""STORE_VAR"", ""LOAD_INDEXED"", ""STORE_INDEXED"", ""ADD"", ""SUB"", ""MUL"", ""DIV"", ""FADD"", ""FSUB"", ""FMUL"", ""FDIV"", ""MOD"", ""NEG"", ""FNEG"", "
+    jsonText &= """EQ"", ""NE"", ""LT"", ""LE"", ""GT"", ""GE"", ""AND"", ""OR"", ""XOR"", ""SHL"", ""SHR"", ""ROL"", ""ROR"", ""NOT"", "
+    jsonText &= """CALL"", ""RET"", ""JMP"", ""JZ"", ""JNZ"", ""NEW"", ""DIM"", ""REDIM"", ""CONST"", ""DEF_TYPE"", ""SETSTRINGSIZE"""
+    jsonText &= "]" & Chr(10)
+    jsonText &= "}" & Chr(10)
+
+    Dim f As Integer
+    f = FreeFile
+    Open outPath For Output As #f
+    If Err <> 0 Then
+        errMsg = "MIR: opcode json open failed " & outPath
+        Return 0
+    End If
+    Print #f, jsonText;
+    Close #f
+    errMsg = ""
+    Return 1
+End Function

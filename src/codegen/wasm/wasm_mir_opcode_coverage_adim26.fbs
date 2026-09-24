@@ -1,0 +1,195 @@
+#ifndef UXB_WASM_MIR_OPCODE_COVERAGE_ADIM26_FBS
+#define UXB_WASM_MIR_OPCODE_COVERAGE_ADIM26_FBS
+
+#include once "../../semantic/mir_model.fbs"
+#include once "../../backend/common/backend_emit_policy.fbs"
+#include once "wasm_instr_emit.fbs"
+#include once "uxb_wasm_surface_contract.fbs"
+
+' ADIM26: MIR -> WAT/WASM coverage gate.
+' Direct WAT üretilemeyen güvenli opcode'lar host import route'a düşer.
+' Native-only opcode'lar wasm hedefinde fail-close olur.
+
+Private Function UXBAdim26WasmNormalizePath(ByRef pathText As String) As String
+    Dim rawText As String
+    rawText = Trim(pathText)
+
+    Dim outText As String
+    outText = ""
+
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim ch As String
+        ch = Mid(rawText, i, 1)
+        If ch = "/" Then
+            outText &= "\"
+        Else
+            outText &= ch
+        End If
+    Next i
+
+    Return outText
+End Function
+
+Private Function UXBAdim26WasmEnsureParentDir(ByRef filePath As String) As Integer
+    Dim norm As String
+    norm = UXBAdim26WasmNormalizePath(filePath)
+    Dim cutAt As Integer
+    cutAt = 0
+
+    Dim i As Integer
+    For i = Len(norm) To 1 Step -1
+        If Mid(norm, i, 1) = "\" Then
+            cutAt = i
+            Exit For
+        End If
+    Next i
+
+    If cutAt <= 0 Then Return 1
+
+    Dim parentDir As String
+    parentDir = Left(norm, cutAt - 1)
+    If Trim(parentDir) = "" Then Return 1
+    If Dir(parentDir, 16) <> "" Then Return 1
+
+    Dim currentPath As String
+    currentPath = ""
+    For i = 1 To Len(parentDir)
+        Dim ch As String
+        ch = Mid(parentDir, i, 1)
+        currentPath &= ch
+        If ch = "\" Then
+            Dim partialPath As String
+            partialPath = Left(currentPath, Len(currentPath) - 1)
+            If Len(partialPath) > 0 And Right(partialPath, 1) <> ":" Then
+                If Dir(partialPath, 16) = "" Then MkDir partialPath
+            End If
+        End If
+    Next i
+
+    If Right(parentDir, 1) <> ":" Then
+        If Dir(parentDir, 16) = "" Then MkDir parentDir
+    End If
+
+    Return 1
+End Function
+
+Private Function UXBAdim26WasmCsvEscape(ByVal rawText As String) As String
+    Dim outText As String
+    Dim i As Integer
+    Dim ch As String
+    outText = ""
+    For i = 1 To Len(rawText)
+        ch = Mid(rawText, i, 1)
+        If ch = Chr(34) Then
+            outText &= Chr(34) & Chr(34)
+        Else
+            outText &= ch
+        End If
+    Next i
+    Return Chr(34) & outText & Chr(34)
+End Function
+
+Private Function UXBAdim26WasmWriteText(ByRef filePath As String, ByRef textValue As String, ByRef errText As String) As Integer
+    errText = ""
+    If Trim(filePath) = "" Then Return 1
+    If UXBAdim26WasmEnsureParentDir(filePath) = 0 Then
+        errText = "ADIM26 cannot create parent dir: " & filePath
+        Return 0
+    End If
+    Dim ff As Integer
+    ff = FreeFile
+    Open filePath For Output As #ff
+    If Err <> 0 Then
+        errText = "ADIM26 cannot write wasm coverage file: " & filePath
+        Return 0
+    End If
+    Print #ff, textValue;
+    Close #ff
+    Return 1
+End Function
+
+Function UXBWasmOpcodeEmitClassAdim26(ByVal opcodeText As String) As String
+    Dim op As String
+    Dim d As String
+    op = UXBWasmCanonicalOpcode(opcodeText)
+
+    Select Case op
+    Case "WASM_BLOCKED"
+        Return "NATIVE_ONLY_DIAGNOSTIC"
+    Case "NOP", "DECL", "LOAD_CONST", "LOAD_VAR", "STORE_VAR", "ADD", "SUB", "MUL", "DIV", "MOD", "UIDIV", "UMOD", "EQ", "NE", "LT", "LE", "GT", "GE", "ULT", "ULE", "UGT", "UGE", "AND", "OR", "XOR", "SHL", "SHR", "NEG", "NOT", "JMP", "JZ", "JNZ", "RET"
+        Return "DIRECT_WAT"
+    Case "HOST_IMPORT"
+        Return "HOST_IMPORT_WAT"
+    End Select
+
+    If UXBWasmOpcodeIsDirect(op) <> 0 Then Return "DIRECT_WAT"
+
+    d = UXBBackendTargetDecisionForOpcode(opcodeText, UXB_TARGET_WASM)
+    If d = UXB_EMIT_NATIVE_ONLY Or d = UXB_EMIT_BLOCKED Or d = UXB_EMIT_WASM_UNSUPPORTED Then Return "NATIVE_ONLY_DIAGNOSTIC"
+    If d = UXB_EMIT_WASM_IMPORT Or d = UXB_EMIT_RUNTIME_CALL Then Return "HOST_IMPORT_WAT"
+    If d = UXB_EMIT_IMPLEMENTED Then Return "DIRECT_OR_HOST_WAT"
+    If d = UXB_EMIT_COMPILE_TIME_ONLY Then Return "METADATA_ONLY"
+
+    Return "HOST_IMPORT_WAT"
+End Function
+
+Private Function UXBAdim26WasmSetHas(ByRef setText As String, ByRef keyText As String) As Integer
+    If InStr(setText, "|" & UCase(Trim(keyText)) & "|") > 0 Then Return 1
+    Return 0
+End Function
+
+Private Sub UXBAdim26WasmSetAdd(ByRef setText As String, ByRef keyText As String)
+    Dim k As String
+    k = UCase(Trim(keyText))
+    If k = "" Then Exit Sub
+    If UXBAdim26WasmSetHas(setText, k) = 0 Then setText &= "|" & k & "|"
+End Sub
+
+Function UXBWasmMirOpcodeCoverageGateAdim26(ByRef m As MIRModule, ByRef csvOutPath As String, ByRef errText As String) As Integer
+    Dim opSet As String
+    Dim csvText As String
+    Dim fi As Integer
+    Dim bi As Integer
+    Dim ii As Integer
+    Dim op As String
+    Dim emitClass As String
+    Dim failCount As Integer
+    Dim writeErr As String
+
+    errText = ""
+    opSet = ""
+    For fi = 0 To m.functionCount - 1
+        For bi = 0 To m.functions(fi).blockCount - 1
+            For ii = 0 To m.functions(fi).blocks(bi).instructionCount - 1
+                UXBAdim26WasmSetAdd opSet, m.functions(fi).blocks(bi).instructions(ii).opcode
+            Next ii
+        Next bi
+    Next fi
+
+    csvText = "opcode,canonical,emit_class,target_status,status,diagnostic,action" & Chr(10)
+    Do While opSet <> ""
+        Dim p As Integer
+        p = InStr(opSet, "|")
+        If p <= 0 Then Exit Do
+        op = Mid(opSet, 2, p - 2)
+        opSet = Mid(opSet, p + 1)
+        If Trim(op) = "" Then Continue Do
+        emitClass = UXBWasmOpcodeEmitClassAdim26(op)
+        If emitClass = "NATIVE_ONLY_DIAGNOSTIC" Then
+            csvText &= UXBAdim26WasmCsvEscape(op) & "," & UXBAdim26WasmCsvEscape(UXBWasmCanonicalOpcode(op)) & "," & UXBAdim26WasmCsvEscape(emitClass) & "," & UXBAdim26WasmCsvEscape(UXBWasmSurfaceTargetStatus(op)) & "," & UXBAdim26WasmCsvEscape("FAIL_FOR_WASM_TARGET") & "," & UXBAdim26WasmCsvEscape("UXB_WASM_OPCODE_UNSUPPORTED") & "," & UXBAdim26WasmCsvEscape("Native-only opcode cannot be emitted to WAT/WASM") & Chr(10)
+            failCount += 1
+        Else
+            csvText &= UXBAdim26WasmCsvEscape(op) & "," & UXBAdim26WasmCsvEscape(UXBWasmCanonicalOpcode(op)) & "," & UXBAdim26WasmCsvEscape(emitClass) & "," & UXBAdim26WasmCsvEscape(UXBWasmSurfaceTargetStatus(op)) & "," & UXBAdim26WasmCsvEscape("OK") & "," & UXBAdim26WasmCsvEscape("") & "," & UXBAdim26WasmCsvEscape("Direct WAT or host import route exists") & Chr(10)
+        End If
+    Loop
+
+    If UXBAdim26WasmWriteText(csvOutPath, csvText, writeErr) = 0 Then errText = writeErr: Return 0
+    If failCount > 0 Then
+        errText = "ADIM26 WASM coverage failed: native-only opcode count=" & LTrim(Str(failCount))
+        Return 0
+    End If
+    Return 1
+End Function
+
+#endif

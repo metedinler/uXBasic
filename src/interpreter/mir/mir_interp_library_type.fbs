@@ -1,0 +1,175 @@
+#ifndef UXB_MIR_INTERP_LIBRARY_TYPE_FBS
+#define UXB_MIR_INTERP_LIBRARY_TYPE_FBS
+
+#include once "../../mir/mir_instruction.fbs"
+#include once "../../semantic/library_type_contract.fbs"
+#include once "../common/interp_context.fbs"
+#include once "mir_interp_state.fbs"
+
+Private Function UXBMIRLibTypeSplitRational(ByRef valueIn As UXBInterpValue, ByRef numOut As LongInt, ByRef denOut As LongInt) As Integer
+    numOut = 0
+    denOut = 1
+    If UCase(Trim(valueIn.typeName)) = "RATIONAL" Then
+        Dim payload As String
+        payload = Trim(valueIn.stringValue)
+        Dim slashPos As Integer
+        slashPos = InStr(payload, "/")
+        If slashPos > 0 Then
+            numOut = ValLng(Trim(Left(payload, slashPos - 1)))
+            denOut = ValLng(Trim(Mid(payload, slashPos + 1)))
+            If denOut = 0 Then Return 0
+            Return 1
+        End If
+        If payload <> "" Then
+            numOut = ValLng(payload)
+            denOut = 1
+        End If
+        Return 1
+    End If
+    If valueIn.kind = UXB_VAL_STRING Or valueIn.kind = UXB_VAL_WSTRING Or valueIn.kind = UXB_VAL_VARIANT Or valueIn.kind = UXB_VAL_ANY Then
+        numOut = ValLng(Trim(valueIn.stringValue))
+        denOut = 1
+        Return 1
+    End If
+    numOut = valueIn.intValue
+    denOut = 1
+    Return 1
+End Function
+
+Private Function UXBMIRLibTypeRationalCompare(ByVal an As LongInt, ByVal ad As LongInt, ByVal bn As LongInt, ByVal bd As LongInt) As LongInt
+    Dim leftScaled As LongInt
+    Dim rightScaled As LongInt
+    leftScaled = an * bd
+    rightScaled = bn * ad
+    If leftScaled < rightScaled Then Return -1
+    If leftScaled > rightScaled Then Return 1
+    Return 0
+End Function
+
+Private Function UXBMIRInterpExecRationalProvider(ByRef ins As UXBMIRInstructionRecord, ByRef st As UXBMIRInterpState, ByVal memberName As String) As UXBInterpValue
+    If ins.operandCount < 3 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "RATIONAL." & memberName & " expects two operands")
+
+    Dim leftValue As UXBInterpValue
+    Dim rightValue As UXBInterpValue
+    leftValue = UXBMIRInterpGetOperand(st, ins.operands(1))
+    rightValue = UXBMIRInterpGetOperand(st, ins.operands(2))
+
+    Dim an As LongInt, ad As LongInt, bn As LongInt, bd As LongInt
+    If UXBMIRLibTypeSplitRational(leftValue, an, ad) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "RATIONAL." & memberName & " left operand is invalid")
+    If UXBMIRLibTypeSplitRational(rightValue, bn, bd) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "RATIONAL." & memberName & " right operand is invalid")
+
+    Dim resultValue As UXBInterpValue
+    Dim cmp As LongInt
+    Select Case UCase(Trim(memberName))
+    Case "ADD"
+        resultValue = UXBInterpValueRational((an * bd) + (bn * ad), ad * bd)
+    Case "SUB"
+        resultValue = UXBInterpValueRational((an * bd) - (bn * ad), ad * bd)
+    Case "MUL"
+        resultValue = UXBInterpValueRational(an * bn, ad * bd)
+    Case "DIV"
+        If bn = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_DIV_ZERO, "RATIONAL.DIV divide by zero")
+        resultValue = UXBInterpValueRational(an * bd, ad * bn)
+    Case "EQ"
+        cmp = UXBMIRLibTypeRationalCompare(an, ad, bn, bd)
+        resultValue = UXBInterpValueBool(IIf(cmp = 0, 1, 0))
+    Case "NE"
+        cmp = UXBMIRLibTypeRationalCompare(an, ad, bn, bd)
+        resultValue = UXBInterpValueBool(IIf(cmp <> 0, 1, 0))
+    Case "LT"
+        cmp = UXBMIRLibTypeRationalCompare(an, ad, bn, bd)
+        resultValue = UXBInterpValueBool(IIf(cmp < 0, 1, 0))
+    Case "LE"
+        cmp = UXBMIRLibTypeRationalCompare(an, ad, bn, bd)
+        resultValue = UXBInterpValueBool(IIf(cmp <= 0, 1, 0))
+    Case "GT"
+        cmp = UXBMIRLibTypeRationalCompare(an, ad, bn, bd)
+        resultValue = UXBInterpValueBool(IIf(cmp > 0, 1, 0))
+    Case "GE"
+        cmp = UXBMIRLibTypeRationalCompare(an, ad, bn, bd)
+        resultValue = UXBInterpValueBool(IIf(cmp >= 0, 1, 0))
+    Case Else
+        Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "library type provider missing: RATIONAL." & memberName)
+    End Select
+
+    If UXBInterpIsError(resultValue) = 0 And Trim(ins.resultName) <> "" Then UXBMIRInterpSetVar st, ins.resultName, resultValue
+    Return resultValue
+End Function
+
+Private Function UXBMIRInterpExecOwnedTextProvider(ByRef ins As UXBMIRInstructionRecord, ByRef st As UXBMIRInterpState, ByVal typeName As String, ByVal memberName As String) As UXBInterpValue
+    If ins.operandCount <> 2 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, typeName & "." & memberName & " expects one operand")
+    Dim sourceValue As UXBInterpValue = UXBMIRInterpGetOperand(st, ins.operands(1))
+    Dim result As UXBInterpValue = UXBInterpValueExternal(typeName, 0, "")
+    If memberName <> "CONSTRUCT" And UCase(sourceValue.typeName) <> UCase(typeName) Then
+        Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "library type operand mismatch: " & typeName & "." & memberName)
+    End If
+    Select Case memberName
+    Case "CONSTRUCT"
+        If sourceValue.kind <> UXB_VAL_STRING Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, typeName & ".CONSTRUCT expects STRING")
+        result.libraryPayload = UXBLibraryTextCreate(sourceValue.stringValue)
+    Case "COPY"
+        result = UXBInterpLibraryValueCopy(sourceValue)
+    Case "CLONE"
+        result.libraryPayload = UXBLibraryPayloadClone(sourceValue.libraryPayload)
+        If sourceValue.libraryPayload.node <> 0 And result.libraryPayload.node = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "library type CLONE failed: " & typeName)
+    Case "RETAIN"
+        result = sourceValue
+    Case "DROP"
+        Dim sourceIdx As Integer = UXBMIRInterpFindVar(st, ins.operands(1))
+        If sourceIdx < 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, "library type DROP requires a variable")
+        st.vars(sourceIdx)->value.libraryPayload.Clear()
+        st.vars(sourceIdx)->value.stringValue = ""
+        result = UXBInterpValueVoid()
+    Case "NORMALIZE"
+        If sourceValue.libraryPayload.node <> 0 Then
+            Dim textPtr As UXBLibraryTextPayload Ptr = CPtr(UXBLibraryTextPayload Ptr, sourceValue.libraryPayload.node->dataPtr)
+            textPtr->textValue = UCase(textPtr->textValue)
+        End If
+        result = sourceValue
+    Case "TOSTRING"
+        result = UXBInterpValueString(UXBInterpValueToString(sourceValue))
+    Case Else
+        Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "library type provider missing: " & typeName & "." & memberName)
+    End Select
+    If UXBInterpIsError(result) = 0 And Trim(ins.resultName) <> "" Then
+        If memberName = "COPY" Then
+            UXBMIRInterpAssignVar st, ins.resultName, result
+        Else
+            UXBMIRInterpSetVar st, ins.resultName, result
+        End If
+    End If
+    Return result
+End Function
+
+Function UXBMIRInterpExecLibraryTypeCall(ByRef ins As UXBMIRInstructionRecord, ByRef ctx As UXBInterpContext, ByRef st As UXBMIRInterpState, ByRef handledOut As Integer) As UXBInterpValue
+    handledOut = 0
+    If ins.operandCount < 1 Then Return UXBInterpValueVoid()
+
+    Dim contractIdx As Integer
+    Dim typeName As String
+    Dim memberName As String
+    Dim resultType As String
+    If UXBLibraryTypeFindCallOwner(ins.operands(0), contractIdx, typeName, memberName) = 0 Then Return UXBInterpValueVoid()
+
+    handledOut = 1
+    If UXBLibraryTypeResolveCallName(ins.operands(0), contractIdx, typeName, memberName, resultType) = 0 Then
+        Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "library type member not declared: " & UCase(Trim(typeName)) & "." & UCase(Trim(memberName)))
+    End If
+
+    Dim providerName As String
+    providerName = ""
+    If contractIdx >= 0 And contractIdx < gUXBLibraryTypeCount Then providerName = UCase(Trim(gUXBLibraryTypes(contractIdx).mirProvider))
+
+    Select Case providerName
+    Case "OWNED_TEXT_REFERENCE"
+        Return UXBMIRInterpExecOwnedTextProvider(ins, st, typeName, memberName)
+    Case "RATIONAL_REFERENCE"
+        Return UXBMIRInterpExecRationalProvider(ins, st, memberName)
+    Case Else
+        Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "library type provider missing: " & UCase(Trim(typeName)) & "." & UCase(Trim(memberName)) & " via " & providerName)
+    End Select
+
+    Return UXBInterpValueVoid()
+End Function
+
+#endif

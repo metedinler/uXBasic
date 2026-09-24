@@ -1,0 +1,214 @@
+#ifndef UXBASIC_LEXER_TOKEN_JSON_FBS
+#define UXBASIC_LEXER_TOKEN_JSON_FBS
+
+#include once "../../common/string_builder.fbs"
+
+Private Function LexerJsonEscape(ByRef rawText As String) As String
+    Dim outText As String = ""
+    Dim i As Integer
+    For i = 1 To Len(rawText)
+        Dim c As Integer = Asc(Mid(rawText, i, 1))
+        Select Case c
+        Case 34
+            outText &= "\\" & Chr(34)
+        Case 92
+            outText &= "\\\\"
+        Case 13
+            outText &= "\\r"
+        Case 10
+            outText &= "\\n"
+        Case 9
+            outText &= "\\t"
+        Case Else
+            If c < 32 Then
+                outText &= " "
+            Else
+                outText &= Chr(c)
+            End If
+        End Select
+    Next i
+    Return outText
+End Function
+
+Private Function LexerJsonPair(ByRef keyText As String, ByRef valueText As String) As String
+    Return Chr(34) & keyText & Chr(34) & ":" & Chr(34) & LexerJsonEscape(valueText) & Chr(34)
+End Function
+
+Function LexerTokensToJson(ByRef tokens As TokenList) As String
+    ' linear-time accumulation (string_builder.fbs): `j &= piece` per token made this O(n^2)
+    Dim jb As UXBStrBuf
+    UXBStrBufInit jb, 4096 + tokens.count * 320
+    UXBStrBufAdd jb, "[" & Chr(10)
+    Dim i As Integer
+    For i = 0 To tokens.count - 1
+        If i > 0 Then UXBStrBufAdd jb, "," & Chr(10)
+        UXBStrBufAdd jb, "  {" & _
+             LexerJsonPair("kind", tokens.items(i).kind) & "," & _
+             Chr(34) & "tokKind" & Chr(34) & ":" & LTrim(Str(tokens.items(i).tokKind)) & "," & _
+             Chr(34) & "tokenKind" & Chr(34) & ":" & LTrim(Str(tokens.items(i).tokKind)) & "," & _
+             LexerJsonPair("rawLexeme", tokens.items(i).rawLexeme) & "," & _
+             LexerJsonPair("canonicalLexeme", tokens.items(i).canonicalLexeme) & "," & _
+             LexerJsonPair("sourceFile", tokens.items(i).sourceFile) & "," & _
+             Chr(34) & "lineNo" & Chr(34) & ":" & LTrim(Str(tokens.items(i).lineNo)) & "," & _
+             Chr(34) & "line" & Chr(34) & ":" & LTrim(Str(tokens.items(i).lineNo)) & "," & _
+             Chr(34) & "colNo" & Chr(34) & ":" & LTrim(Str(tokens.items(i).colNo)) & "," & _
+             Chr(34) & "column" & Chr(34) & ":" & LTrim(Str(tokens.items(i).colNo)) & "," & _
+             Chr(34) & "offset" & Chr(34) & ":" & LTrim(Str(tokens.items(i).offset)) & "," & _
+             Chr(34) & "length" & Chr(34) & ":" & LTrim(Str(tokens.items(i).length)) & "," & _
+             LexerJsonPair("numericBase", tokens.items(i).numericBase) & "," & _
+             LexerJsonPair("numericSuffix", tokens.items(i).numericSuffix) & _
+             "}"
+    Next i
+    UXBStrBufAdd jb, Chr(10) & "]"
+    Return UXBStrBufText(jb)
+End Function
+
+Function LexerDiagnosticsToJson(ByRef diagnostics As LexerDiagnosticList) As String
+    Dim j As String = "[" & Chr(10)
+    Dim i As Integer
+    For i = 0 To diagnostics.count - 1
+        If i > 0 Then j &= "," & Chr(10)
+        j &= "  {" & _
+             LexerJsonPair("code", diagnostics.items(i).code) & "," & _
+             LexerJsonPair("message", diagnostics.items(i).message) & "," & _
+             LexerJsonPair("sourceFile", diagnostics.items(i).sourceFile) & "," & _
+             Chr(34) & "lineNo" & Chr(34) & ":" & LTrim(Str(diagnostics.items(i).lineNo)) & "," & _
+             Chr(34) & "colNo" & Chr(34) & ":" & LTrim(Str(diagnostics.items(i).colNo)) & _
+             "}"
+    Next i
+    j &= Chr(10) & "]"
+    Return j
+End Function
+
+Private Function LexerNormalizeOutputPath(ByRef rawPath As String) As String
+    Dim outPath As String
+    outPath = ""
+    Dim i As Integer
+    For i = 1 To Len(rawPath)
+        Dim ch As String
+        ch = Mid(rawPath, i, 1)
+        If ch = "/" Then
+            outPath &= "\"
+        Else
+            outPath &= ch
+        End If
+    Next i
+    Return outPath
+End Function
+
+Private Function LexerDirNameOfPath(ByRef rawPath As String) As String
+    Dim norm As String
+    norm = LexerNormalizeOutputPath(rawPath)
+    Dim i As Integer
+    For i = Len(norm) To 1 Step -1
+        Dim ch As String
+        ch = Mid(norm, i, 1)
+        If ch = "\" Then Return Left(norm, i - 1)
+    Next i
+    Return ""
+End Function
+
+Private Sub LexerSafeCloseFile(ByVal fileNo As Integer)
+    On Error GoTo _lexer_safe_close_err
+    Close #fileNo
+    On Error GoTo 0
+    Exit Sub
+
+_lexer_safe_close_err:
+    On Error GoTo 0
+End Sub
+
+Private Function LexerEnsureDirPath(ByRef dirText As String) As Integer
+    Dim norm As String
+    norm = LexerNormalizeOutputPath(dirText)
+    norm = Trim(norm)
+    If norm = "" Or norm = "." Then Return 1
+
+    Do While Len(norm) > 0 And Right(norm, 1) = "\"
+        norm = Left(norm, Len(norm) - 1)
+    Loop
+    If norm = "" Then Return 1
+    If Dir(norm, 16) <> "" Then Return 1
+
+    On Error GoTo _lexer_mkdir_err
+    Dim cur As String
+    cur = ""
+    Dim i As Integer
+    For i = 1 To Len(norm)
+        Dim ch As String
+        ch = Mid(norm, i, 1)
+        cur &= ch
+        If ch = "\" Then
+            Dim partial As String
+            partial = Left(cur, Len(cur) - 1)
+            If Len(partial) > 0 And Right(partial, 1) <> ":" Then
+                If Dir(partial, 16) = "" Then MkDir partial
+            End If
+        End If
+    Next i
+
+    If Len(norm) > 0 And Right(norm, 1) <> ":" Then
+        If Dir(norm, 16) = "" Then MkDir norm
+    End If
+    On Error GoTo 0
+    Return 1
+
+_lexer_mkdir_err:
+    On Error GoTo 0
+    If Dir(norm, 16) <> "" Then Return 1
+    Return 0
+End Function
+
+Function LexerWriteTextFile(ByRef filePath As String, ByRef textValue As String) As Integer
+    Dim outPath As String
+    outPath = LexerNormalizeOutputPath(filePath)
+    If Trim(outPath) = "" Then Return 0
+
+    Dim parentDir As String
+    parentDir = LexerDirNameOfPath(outPath)
+    If LexerEnsureDirPath(parentDir) = 0 Then Return 0
+
+    Dim f As Integer
+    Dim opened As Integer
+    f = FreeFile
+    opened = 0
+
+    On Error GoTo _lexer_write_open_err
+    Open outPath For Output As #f
+    opened = 1
+
+    On Error GoTo _lexer_write_print_err
+    Print #f, textValue;
+
+    On Error GoTo _lexer_write_close_err
+    Close #f
+    opened = 0
+    On Error GoTo 0
+    Return 1
+
+_lexer_write_open_err:
+    On Error GoTo 0
+    If opened <> 0 Then LexerSafeCloseFile f
+    Return 0
+
+_lexer_write_print_err:
+    On Error GoTo 0
+    If opened <> 0 Then LexerSafeCloseFile f
+    Return 0
+
+_lexer_write_close_err:
+    On Error GoTo 0
+    Return 0
+End Function
+
+Function LexerWriteTokensJson(ByRef tokens As TokenList, ByRef outPath As String) As Integer
+    Dim j As String = LexerTokensToJson(tokens)
+    Return LexerWriteTextFile(outPath, j)
+End Function
+
+Function LexerWriteDiagnosticsJson(ByRef diagnostics As LexerDiagnosticList, ByRef outPath As String) As Integer
+    Dim j As String = LexerDiagnosticsToJson(diagnostics)
+    Return LexerWriteTextFile(outPath, j)
+End Function
+
+#endif

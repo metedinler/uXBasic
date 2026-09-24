@@ -1,0 +1,228 @@
+#ifndef UXB_AST_INTERP_CONTROL_FBS
+#define UXB_AST_INTERP_CONTROL_FBS
+
+#include once "../../parser/ast.fbs"
+#include once "../common/interp_context.fbs"
+#include once "ast_interp_helpers.fbs"
+
+Declare Function UXBAstInterpExecControl(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+
+Private Function UXBAstInterpFindDirectLabel(ByRef ast As ASTPool, ByVal containerIdx As Integer, ByVal labelText As String) As Integer
+    Dim target As String = UCase(Trim(labelText))
+    Dim ch As Integer = ast.nodes(containerIdx).firstChild
+    Do While ch <> AST_NULL
+        If UCase(Trim(ast.nodes(ch).kind)) = ASTK_LABEL_STMT Then
+            If UCase(Trim(ast.nodes(ch).value)) = target Then Return ch
+        End If
+        ch = ast.nodes(ch).nextSibling
+    Loop
+    Return AST_NULL
+End Function
+
+Private Function UXBAstInterpIsControlBoundary(ByRef ast As ASTPool, ByVal containerIdx As Integer) As Integer
+    Dim k As String = UCase(Trim(ast.nodes(containerIdx).kind))
+    Select Case k
+    Case ASTK_PROGRAM, ASTK_FUNCTION_STMT, ASTK_SUB_STMT, ASTK_CLASS_METHOD_DECL, ASTK_EVENT_STMT, ASTK_PIPE_STMT, ASTK_THREAD_STMT, ASTK_PARALEL_STMT
+        Return 1
+    Case ASTK_BLOCK
+        Dim parentIdx As Integer = ast.nodes(containerIdx).parent
+        If parentIdx <> AST_NULL Then
+            Dim parentKind As String = UCase(Trim(ast.nodes(parentIdx).kind))
+            If parentKind = ASTK_FUNCTION_STMT Or parentKind = ASTK_SUB_STMT Or parentKind = ASTK_CLASS_METHOD_DECL Or parentKind = ASTK_EVENT_STMT Or parentKind = ASTK_PIPE_STMT Or parentKind = ASTK_THREAD_STMT Or parentKind = ASTK_PARALEL_STMT Then Return 1
+        End If
+    End Select
+    Return 0
+End Function
+
+Function UXBAstInterpExecSequenceChildren(ByRef ast As ASTPool, ByVal containerIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    Dim pc As Integer = ast.nodes(containerIdx).firstChild
+    Dim gosubReturns(Any) As Integer
+    Dim gosubDepth As Integer = 0
+    Dim routineContainer As Integer
+    Dim containerKind As String = UCase(Trim(ast.nodes(containerIdx).kind))
+    routineContainer = IIf(containerKind = ASTK_FUNCTION_STMT Or containerKind = ASTK_SUB_STMT Or containerKind = ASTK_CLASS_METHOD_DECL Or containerKind = ASTK_EVENT_STMT Or containerKind = ASTK_PIPE_STMT Or containerKind = ASTK_THREAD_STMT Or containerKind = ASTK_PARALEL_STMT, 1, 0)
+
+    Do While pc <> AST_NULL
+        Dim currentIdx As Integer = pc
+        Dim nextIdx As Integer = ast.nodes(currentIdx).nextSibling
+        Dim currentKind As String = UCase(Trim(ast.nodes(currentIdx).kind))
+
+        If routineContainer <> 0 And (currentKind = ASTK_PARAM_DECL Or currentKind = ASTK_RETURN_TYPE Or currentKind = "SLOT_HEADER_ARGS") Then
+            pc = nextIdx
+            Continue Do
+        End If
+
+        Dim r As UXBInterpValue = UXBAstInterpExecStmt(ast, currentIdx, ctx)
+        If UXBInterpIsError(r) <> 0 Then Return r
+
+        Dim signalText As String = UCase(Trim(ctx.result.statusText))
+        If signalText = "GOTO" Or signalText = "GOSUB" Then
+            Dim labelIdx As Integer = UXBAstInterpFindDirectLabel(ast, containerIdx, ctx.lastError)
+            If labelIdx = AST_NULL Then
+                If UXBAstInterpIsControlBoundary(ast, containerIdx) <> 0 Then
+                    Return UXBInterpValueError(UXB_INTERP_ERR_SYMBOL_NOT_FOUND, "AST interpreter label not found: " & ctx.lastError)
+                End If
+                Return r
+            End If
+
+            If signalText = "GOSUB" Then
+                If gosubDepth >= 4096 Then Return UXBInterpValueError(UXB_INTERP_ERR_LIMIT, "AST interpreter GOSUB stack limit exceeded")
+                If gosubDepth = 0 Then
+                    ReDim gosubReturns(0)
+                Else
+                    ReDim Preserve gosubReturns(gosubDepth)
+                End If
+                gosubReturns(gosubDepth) = nextIdx
+                gosubDepth += 1
+            End If
+
+            ctx.lastError = ""
+            ctx.result.statusText = "PASS"
+            pc = labelIdx
+            Continue Do
+        End If
+
+        If signalText = "RETURN" And gosubDepth > 0 Then
+            gosubDepth -= 1
+            pc = gosubReturns(gosubDepth)
+            If gosubDepth = 0 Then Erase gosubReturns
+            ctx.result.statusText = "PASS"
+            Continue Do
+        End If
+
+        If signalText = "RETURN" Or signalText = "END" Or signalText = "BREAK" Or signalText = "CONTINUE" Then Return r
+        pc = nextIdx
+    Loop
+
+    If gosubDepth <> 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "AST interpreter GOSUB reached end of scope without RETURN")
+    Return UXBInterpValueVoid()
+End Function
+
+Private Function UXBAstInterpExecBlockChildren(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    Return UXBAstInterpExecSequenceChildren(ast, nodeIdx, ctx)
+End Function
+
+Private Function UXBAstInterpExecIf(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    Dim condIdx As Integer = ASTFirstChildByRole(ast, nodeIdx, "CONDITION")
+    If condIdx = AST_NULL Then condIdx = ast.nodes(nodeIdx).firstChild
+    Dim cv As UXBInterpValue = UXBAstInterpEvalExpr(ast, condIdx, ctx)
+    If UXBInterpIsError(cv) <> 0 Then Return cv
+    If UXBInterpTruth(cv) <> 0 Then
+        Dim bodyIdx As Integer = ASTFirstChildByRole(ast, nodeIdx, "THEN")
+        If bodyIdx = AST_NULL Then bodyIdx = ASTFirstChildByRole(ast, nodeIdx, "BODY")
+        If bodyIdx <> AST_NULL Then Return UXBAstInterpExecStmt(ast, bodyIdx, ctx)
+        Return UXBInterpValueVoid()
+    End If
+    Dim elseifIdx As Integer = ASTFirstChildByKind(ast, nodeIdx, ASTK_ELSEIF_PART)
+    Do While elseifIdx <> AST_NULL
+        Dim er As UXBInterpValue = UXBAstInterpExecControl(ast, elseifIdx, ctx)
+        If ctx.result.statusText <> "" Or UXBInterpTruth(er) <> 0 Or UXBInterpIsError(er) <> 0 Then Return er
+        elseifIdx = ast.nodes(elseifIdx).nextSibling
+    Loop
+    Dim elseIdx As Integer = ASTFirstChildByKind(ast, nodeIdx, ASTK_ELSE_PART)
+    If elseIdx <> AST_NULL Then Return UXBAstInterpExecStmt(ast, elseIdx, ctx)
+    Return UXBInterpValueVoid()
+End Function
+
+Function UXBAstInterpExecControl(ByRef ast As ASTPool, ByVal nodeIdx As Integer, ByRef ctx As UXBInterpContext) As UXBInterpValue
+    If nodeIdx < 0 Or nodeIdx >= ast.count Then Return UXBInterpValueVoid()
+    Dim n As ASTNode = ast.nodes(nodeIdx)
+    Select Case UCase(Trim(n.kind))
+    Case ASTK_IF_STMT
+        Return UXBAstInterpExecIf(ast, nodeIdx, ctx)
+    Case ASTK_ELSEIF_PART
+        Dim condIdx As Integer = ASTFirstChildByRole(ast, nodeIdx, "CONDITION")
+        If condIdx = AST_NULL Then condIdx = n.firstChild
+        Dim cv As UXBInterpValue = UXBAstInterpEvalExpr(ast, condIdx, ctx)
+        If UXBInterpIsError(cv) <> 0 Then Return cv
+        If UXBInterpTruth(cv) <> 0 Then Return UXBAstInterpExecBlockChildren(ast, nodeIdx, ctx)
+        Return UXBInterpValueBool(0)
+    Case ASTK_ELSE_PART, ASTK_CASE_BLOCK, ASTK_CASE_ELSE, ASTK_TRY_BODY, ASTK_CATCH_PART, ASTK_FINALLY_PART
+        Return UXBAstInterpExecBlockChildren(ast, nodeIdx, ctx)
+    Case ASTK_FOR_STMT, ASTK_FOR_EACH_STMT, ASTK_DO_EACH_STMT
+        Dim guard As Integer = 0
+        Do
+            Dim rr As UXBInterpValue = UXBAstInterpExecBlockChildren(ast, nodeIdx, ctx)
+            If UXBInterpIsError(rr) <> 0 Then Return rr
+            If ctx.result.statusText = "BREAK" Then ctx.result.statusText = "PASS": Return UXBInterpValueVoid()
+            If ctx.result.statusText = "RETURN" Or ctx.result.statusText = "END" Then Return rr
+            guard += 1
+            If guard >= 1 Then Exit Do
+        Loop
+        Return UXBInterpValueVoid()
+    Case ASTK_DO_STMT
+        If UCase(Trim(n.op)) = "WHILE_WEND" Then
+            Dim whileGuard As Integer = 0
+            Do
+                Dim condNode As Integer = n.firstChild
+                If condNode = AST_NULL Then Exit Do
+                Dim cv As UXBInterpValue = UXBAstInterpEvalExpr(ast, condNode, ctx)
+                If UXBInterpIsError(cv) <> 0 Then Return cv
+                If UXBInterpTruth(cv) = 0 Then Exit Do
+
+                Dim bodyNode As Integer = ast.nodes(condNode).nextSibling
+                Do While bodyNode <> AST_NULL
+                    Dim bodyRet As UXBInterpValue = UXBAstInterpExecStmt(ast, bodyNode, ctx)
+                    If UXBInterpIsError(bodyRet) <> 0 Then Return bodyRet
+                    If ctx.result.statusText = "BREAK" Then ctx.result.statusText = "PASS": Exit Do
+                    If ctx.result.statusText = "RETURN" Or ctx.result.statusText = "END" Then Return bodyRet
+                    bodyNode = ast.nodes(bodyNode).nextSibling
+                Loop
+
+                ' S-110: no fixed iteration cap; the run budget (--max-steps) is the only limit
+                whileGuard += 1
+                If ctx.stepLimit > 0 And whileGuard > ctx.stepLimit Then Return UXBInterpValueError(UXB_INTERP_ERR_LIMIT, "while guard exceeded (--max-steps " & LTrim(Str(ctx.stepLimit)) & ")")
+            Loop
+            Return UXBInterpValueVoid()
+        End If
+
+        Dim doGuard As Integer = 0
+        Do
+            Dim dr As UXBInterpValue = UXBAstInterpExecBlockChildren(ast, nodeIdx, ctx)
+            If UXBInterpIsError(dr) <> 0 Then Return dr
+            If ctx.result.statusText = "BREAK" Then ctx.result.statusText = "PASS": Return UXBInterpValueVoid()
+            If ctx.result.statusText = "RETURN" Or ctx.result.statusText = "END" Then Return dr
+            doGuard += 1
+            If doGuard >= 1 Then Exit Do
+        Loop
+        Return UXBInterpValueVoid()
+    Case ASTK_SELECT_STMT
+        Return UXBAstInterpExecBlockChildren(ast, nodeIdx, ctx)
+    Case ASTK_EXIT_STMT
+        ctx.result.statusText = "BREAK"
+        Return UXBInterpValueVoid()
+    Case ASTK_LABEL_STMT
+        Return UXBInterpValueVoid()
+    Case ASTK_GOTO_STMT
+        ctx.lastError = Trim(n.value)
+        ctx.result.statusText = "GOTO"
+        Return UXBInterpValueVoid()
+    Case ASTK_GOSUB_STMT
+        ctx.lastError = Trim(n.value)
+        ctx.result.statusText = "GOSUB"
+        Return UXBInterpValueVoid()
+    Case ASTK_TRY_STMT
+        Dim tr As UXBInterpValue = UXBAstInterpExecBlockChildren(ast, nodeIdx, ctx)
+        If UXBInterpIsError(tr) <> 0 Then
+            Dim catchIdx As Integer = ASTFirstChildByKind(ast, nodeIdx, ASTK_CATCH_PART)
+            If catchIdx <> AST_NULL Then Return UXBAstInterpExecStmt(ast, catchIdx, ctx)
+        End If
+        Dim finIdx As Integer = ASTFirstChildByKind(ast, nodeIdx, ASTK_FINALLY_PART)
+        If finIdx <> AST_NULL Then Return UXBAstInterpExecStmt(ast, finIdx, ctx)
+        Return tr
+    Case ASTK_THROW_STMT
+        Dim msg As String = "throw"
+        If n.firstChild <> AST_NULL Then msg = UXBInterpValueToString(UXBAstInterpEvalExpr(ast, n.firstChild, ctx))
+        Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, msg)
+    Case ASTK_ASSERT_STMT
+        If n.firstChild <> AST_NULL Then
+            Dim av As UXBInterpValue = UXBAstInterpEvalExpr(ast, n.firstChild, ctx)
+            If UXBInterpIsError(av) <> 0 Then Return av
+            If UXBInterpTruth(av) = 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "assert failed")
+        End If
+        Return UXBInterpValueVoid()
+    End Select
+    Return UXBAstInterpExecBlockChildren(ast, nodeIdx, ctx)
+End Function
+
+#endif

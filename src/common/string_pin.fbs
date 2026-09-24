@@ -1,0 +1,52 @@
+#ifndef UXB_STRING_PIN_FBS
+#define UXB_STRING_PIN_FBS
+
+' S-076: real string-data pointers (SADD) for the two INTERPRETERS.
+'
+' SADD(s) is the address of the string's NUL-terminated character data, an ordinary
+' NATIVE address (PEEKB(SADD(s)) is the first character, PEEKB(SADD(s) + LEN(s)) is 0).
+' Native x64 and the legacy backend need nothing here: a STRING value already IS such a
+' pointer there and strings are immutable blocks, so SADD is the identity. The
+' interpreters hold strings as host String objects that move whenever a variable is
+' reassigned, so SADD hands out a PINNED copy instead: the text is copied once into
+' this table, the copy never moves or is freed, and the returned address stays valid
+' for the whole run. This matches native behaviour exactly -- after `s = "other"` an
+' earlier SADD(s) still points at the OLD text there too -- and equal texts share one
+' pinned copy, so calling SADD in a loop does not grow the table.
+Const UXB_STRPIN_MAX As Integer = 8192
+
+Dim Shared gUxbStrPins(0 To UXB_STRPIN_MAX - 1) As String
+Dim Shared gUxbStrPinCount As Integer
+' The empty string has no character buffer of its own; SADD("") points at this NUL.
+Dim Shared gUxbStrPinEmptyByte As UByte
+
+' 1 = addrOut is the pinned address; 0 = errText says why (table full).
+Private Function UXBStrPinAddress(ByRef textIn As String, ByRef addrOut As ULongInt, ByRef errText As String) As Integer
+    errText = ""
+    addrOut = 0
+    If Len(textIn) = 0 Then
+        addrOut = CULngInt(@gUxbStrPinEmptyByte)
+        Return 1
+    End If
+
+    Dim i As Integer
+    For i = 0 To gUxbStrPinCount - 1
+        If Len(gUxbStrPins(i)) = Len(textIn) Then
+            If gUxbStrPins(i) = textIn Then
+                addrOut = CULngInt(StrPtr(gUxbStrPins(i)))
+                Return 1
+            End If
+        End If
+    Next i
+
+    If gUxbStrPinCount >= UXB_STRPIN_MAX Then
+        errText = "SADD: more than " & LTrim(Str(UXB_STRPIN_MAX)) & " distinct strings were pinned in one run"
+        Return 0
+    End If
+    gUxbStrPins(gUxbStrPinCount) = textIn
+    addrOut = CULngInt(StrPtr(gUxbStrPins(gUxbStrPinCount)))
+    gUxbStrPinCount += 1
+    Return 1
+End Function
+
+#endif
