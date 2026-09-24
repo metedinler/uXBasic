@@ -1,0 +1,2 @@
+INCLUDE "lib2.bas"
+PRINT 2
