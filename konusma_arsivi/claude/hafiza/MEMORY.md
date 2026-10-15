@@ -1,13 +1,13 @@
+# Memory Index
+
 - [Her kusur SORUN_TAKIP'a (2026-10-11)](feedback_her_kusur_sorun_takibe.md) — bulunan her kusur/sınır ayrı S-kaydı; sinirlar.txt → sorun_takibe_isle.py; testi gevşetmek çözüm değil; tasarımda olup kodda olmayan her şey kılavuzda ◇ HEDEF.
 - [Anlatım iddiaları da sınanır (2026-10-12)](feedback_anlatim_iddialari_da_sinanir.md) — kılavuzda örnek dışı cümle/tablo iddiaları dört motorda sınanır (parantezsiz SUB çağrısı, CONST, UNION örnekleri); iddia_denetle.py yöntemi.
 - [Kılavuz V2 üretimi 2026-10-08→14](project_uxb_kilavuz_v2_20261008.md) — uret.py + tuzaklar, referans 20261014_0253 (hat ardisik5.ps1 bitti), DERSLER: kapanışları değer düzeyinde sına; kitap örnekleri + külliyat yetmez, TAM MODEL PAKETLERİ de koş (GOSUB/GOTO bayat anlatımı böyle bulundu), açılan kayıtlar S-513…S-542, AST gerilemeleri S-535/539/540, ek_k_yaz3.py + K5 dosyaları, kalan işler.
 - [Tek dosya + köprü + eğitim 2026-10-07](project_uxb_tekdosya_koprusu_egitim_20261007.md) — uxb\tekdosyaklsoru, paketleyici31 (-F), env yolu, kopru_* zinciri, CPU LoRA koşusu, host.cmd düzeltmesi.
-# Memory Index
-
 - [Kod analizi + RAG zinciri 2026-10-06](project_uxb_kod_analiz_ve_rag_20261006.md) — uxb_kod_analiz/ek_amac/günlük zincir, legacy modül kök nedenleri, latest_summary tuzağı, OpenClaw tetik uyarısı.
 - [Groq/token/emir araçları: gerçek durum](project_groq_token_bridge_20260930.md) — 09-30 oturumunun "çalışıyor" iddiaları; 10-06'da neyin doğrulandığı (Groq evet, token_manager yeniden yazıldı, emir_* denenmedi).
 
-- [Git repo + MinGit](project_no_git_manual_zip_backups.md) — MinGit at %LOCALAPPDATA%\Programs\MinGit\cmd; origin metedinler/uXBasic, main 1 commit önde (07550bb, gönderilmemiş, gerçek e-postayla); placeholder identity in config; `git add -A` YASAK (15 427 yeni dosya); gönderme Mete onayı ister (2026-10-14 ölçüldü).
+- [Git repo + MinGit](project_no_git_manual_zip_backups.md) — MinGit at %LOCALAPPDATA%\Programs\MinGit\cmd; origin metedinler/uXBasic; yerel main 07550bb (gerçek e-postalı, olduğu gibi push etme); placeholder identity in config; `git add -A` YASAK (15 427 yeni dosya); yayın dalı yayin/20261015 gönderildi (2026-10-15, geçici indeks).
 - [uXBasic type naming rules](feedback_uxb_type_naming_rules.md) — no LONG/INTEGER/DOUBLE, no $#%! suffixes; conversion is I8(x)/U8(x)/F32(x).
 - [Dil Tanımı (tek kanonik belge) 2026-09-28](project_uxb_dil_tanimi_20260928.md) — YONERGE, alanlar/, birleştirici, ornek_dogrula, dis_danis; team = workflow + Codex CLI + Kimi/Gemini API; quota facts.
 - [Codex + a second Claude are concurrent collaborators](project_codex_concurrent_collaborator.md) — this session is "Claude 1"; check mtimes, avoid game/ without asking.
@@ -39,4 +39,5 @@
 - [uxsdl3 finished 2026-09-23](project_uxsdl3_complete_20260923.md) — SDL3 wrapper complete (319 exports, 8 headless tests x 4 engines, guide in docs/); layout, generator, out-of-scope list; raylib 3D/Shaders still open.
 - [Eski AST-x64 bulguları 2026-10-14](project_uxb_eski_astx64_bulgulari_20261014.md) — S-524…S-542 işlendi (eski AST-x64 kusurları, AST gerilemeleri, GOSUB); S-157-L kapsamı: 32 yuvalık metin halkası (20 örneğin nedeni bilinir); yama yöntemi; ham dosya ai_koordinasyon\CLAUDE_ESKI_ASTX64_BULGULAR_20261014.md.
 - [Eski AST-x64 DONDURULMAZ (Mete 2026-10-14)](feedback_eski_astx64_dondurulmaz_20261014.md) — tüm motorlar gibi aynı sonucu verecek; açık ret ara durum; kusurlar (S-524…S-538, S-157-L, S-086, S-091) açık kalır; Codex uygular, ben altı yolda doğrularım.
-- [Dosya envanteri + temizlik + GitHub planı 2026-10-14](project_uxb_temizlik_github_plani_20261014.md) — reports 40 GB'ın 36,5 GB'ı DLL kopyası (34,72 GB SHA-256 doğrulandı, SİLİNMEDİ); kök neden S-117/G-ARAC-7; Mete'nin 8 kararı bekleniyor; belge ai_koordinasyon\DOSYA_ENVANTERI_VE_TEMIZLIK_ONERISI_20261014.md.
+- [Temizlik UYGULANDI 2026-10-15](project_uxb_temizlik_github_plani_20261014.md) — reports DLL kopyaları + zip'li eski paketler silindi (≈35,5 GB, C: 3→38 GB; zip/rar'a dokunulmadı); kök neden S-117/G-ARAC-7 çözülmedi, yer yeniden dolar; 1 614 yeni DLL 2 gün sonra; günlük ai_koordinasyon\TEMIZLIK_GUNLUGU_20261015.md.
+- [GitHub yayını 2026-10-15](project_uxb_github_yayin_20261015.md) — metedinler/uXBasic (herkese açık) `yayin/20261015` dalı: kaynak+testler+araçlar+TÜM belgeler+tasarım+konuşma/hafıza arşivi (gizli anahtarlar silindi, Mete'ye yenileme önerildi); GitHub itibar koruması ilk göndermeyi reddetti (AQ. anahtarı); yerel main'i olduğu gibi push etme; geçici indeks yöntemi.
