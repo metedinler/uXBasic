@@ -18,8 +18,10 @@ $ErrorActionPreference = "Continue"
 $root = (Get-Location).Path
 
 $suites = @(
+  @{ Name = "compiler_consolidation"; Script = "tests\compiler_consolidation\run_consolidation_tests.ps1"; Konu = "matris, dosya/metin, SELECT, DIM, DECLARE, PRINT, float/property ve Win64 ABI" },
   @{ Name = "numeric_model";   Script = "tests\numeric_model\run_numeric_model_tests.ps1";      Konu = "U64/I64/dar tamsayi/onaltilik literal" },
   @{ Name = "library_type_contract"; Script = "tests\library_type_contract\run_library_type_tests.ps1"; Konu = "LIBTYPE lifecycle, RATIONAL deger aktarimi ve provider tanilari (MIR)" },
+  @{ Name = "libtype_target_gate"; Script = "tests\diagnostics\run_s499_libtype_target_gate_tests.ps1"; Konu = "S-499: kullanilan birinci sinif library type icin hedef provider kapisi" },
   @{ Name = "abi_model";       Script = "tests\abi_model\run_abi_model_tests.ps1";              Konu = "SIZEOF, F80 ABI, TYPE alanlari, VARPTR(a(i))" },
   @{ Name = "memoryref_model"; Script = "tests\memoryref_model\run_memoryref_model_tests.ps1";  Konu = "MemoryRef bolge/omur denetimi" },
   @{ Name = "memory_model";    Script = "tests\memory_model\run_memory_model_tests.ps1";        Konu = "AUTO/NATIVE/VIRTUAL, VARPTR, isaretci aritmetigi" },
@@ -44,8 +46,30 @@ $suites = @(
   @{ Name = "float_text";      Script = "tests\float_text\run_float_text_tests.ps1";              Konu = "ondalik sayi metni: F64 16 / F32 7 hane, ilave sifir yok, ayni kural tum motorlarda (S-142b)" },
   @{ Name = "wasm_model";      Script = "tests\wasm_model\run_wasm_model_tests.ps1";              Konu = "WASM/WAT: global degisken/dizi, golgeleme (node ile gercek calistirma)" },
   @{ Name = "cli_flags";       Script = "tests\cli_flags\run_cli_flag_tests.ps1";               Konu = "CLI fiil/bayrak: help, version, --max-steps" }
+  @{ Name = "diagnostics";     Script = "tests\diagnostics\run_parenless_call_tests.ps1";       Konu = "S-440: parantezsiz cagri reddi ve tum hedeflerde ortak tanı kodu" },
+  @{ Name = "const_write";     Script = "tests\diagnostics\run_const_write_tests.ps1";          Konu = "S-441: CONST yazma ve BYREF sabit gecisi ortak tanisi" }
+  @{ Name = "union_overlay";   Script = "tests\diagnostics\run_union_overlay_tests.ps1";        Konu = "S-442: UNION ortak MIR alan ortusu AST/MIR/x64/JS/WAT" }
+  @{ Name = "magic_bitwise";   Script = "tests\diagnostics\run_s443_magic_tests.ps1";           Konu = "S-443: MAGIC AND/OR/XOR primitive ve object-return AST/MIR/x64/JS" }
+  @{ Name = "js_exceptions";   Script = "tests\diagnostics\run_s444_js_exception_tests.ps1";    Konu = "S-444: JS uncaught THROW/ASSERT async hata siniri" },
+  @{ Name = "dll_type_list";   Script = "tests\diagnostics\run_s445_dll_type_list_tests.ps1";  Konu = "S-445: CALL(DLL) bilinmeyen arguman tip listesinin tum hedeflerde ortak reddi" },
+  @{ Name = "f32_parity";      Script = "tests\diagnostics\run_s446_f32_tests.ps1";             Konu = "S-446: F32 saklama, aritmetik ve metin cikti paritysi" },
+  @{ Name = "s480_ast_regressions"; Script = "tests\diagnostics\run_s480_ast_regression_tests.ps1"; Konu = "S-480: AST cok boyutlu dizi, sinir denetimi ve I32 donusum geri uyumlulugu" }
+  @{ Name = "s502_f32_array_direct"; Script = "tests\diagnostics\run_s502_f32_array_direct_tests.ps1"; Konu = "S-502: F32 dizi elemaninin dogrudan okuma, STR ve F64 donusumu" }
+  @{ Name = "s503_f32_storage"; Script = "tests\diagnostics\run_s503_f32_storage_tests.ps1"; Konu = "S-503: F32 DIM baslangici, atama ve dizi saklama paritysi" }
+  @{ Name = "s505_unary_comparison"; Script = "tests\diagnostics\run_s505_unary_comparison_tests.ps1"; Konu = "S-505: karsilastirma sonucuna tekli eksi, MIR-x64 kanonik I64 ve WAT float kapisi" }
+  @{ Name = "s506_float_to_integer"; Script = "tests\diagnostics\run_s506_float_to_integer_tests.ps1"; Konu = "S-506: AST ondalik-tamsayi donusumu sifira dogru kesme paritysi" }
+  @{ Name = "s508_fix_type"; Script = "tests\diagnostics\run_s508_fix_type_tests.ps1"; Konu = "S-508: FIX sonucu statik I32 turu ve tum hedeflerde kullanilabilirligi" }
+  @{ Name = "s510_mir_f32_rounding"; Script = "tests\diagnostics\run_s510_mir_f32_rounding_tests.ps1"; Konu = "S-510: MIR F32 saklama ve donusumde gercek tek duyarlik yuvarlamasi" }
+@{ Name = "s459_mixed_numeric_string"; Script = "tests\diagnostics\run_s459_mixed_numeric_string_tests.ps1"; Konu = "S-459/S-460: sayisal ve STRING operandlar icin ortak acik tip tanisi" }
+  @{ Name = "s464_interpreter_compare"; Script = "tests\diagnostics\run_s464_interpreter_compare_tests.ps1"; Konu = "S-464: AST/MIR BOTH karsilastirmasi ve sessiz ayrisma kapisi" }
+  @{ Name = "s500_libtype_diagnostics"; Script = "tests\diagnostics\run_s500_libtype_diagnostic_consistency_tests.ps1"; Konu = "S-500: birinci sinif kutuphane tipi provider tanilarinda ortak alan sozlesmesi" }
+  @{ Name = "s219_rotate_width"; Script = "tests\diagnostics\run_s219_rotate_width_tests.ps1"; Konu = "S-219: ROL/ROR sol operand genisligi ve signedness paritysi" }
 )
-if ($Only.Count -gt 0) { $suites = $suites | Where-Object { $Only -contains $_.Name } }
+if ($Only.Count -gt 0) {
+  $unknownSuites = @($Only | Where-Object { $_ -notin $suites.Name })
+  if ($unknownSuites.Count -gt 0) { throw ('Unknown test suite: ' + ($unknownSuites -join ', ')) }
+  $suites = $suites | Where-Object { $Only -contains $_.Name }
+}
 
 $results = @()
 $started = Get-Date
@@ -87,6 +111,19 @@ foreach ($s in $suites) {
     if ($fails) { Write-Host $fails -ForegroundColor Red }
   }
   $results += [pscustomobject]$row
+  # Compact, inspectable progress without rereading the full console transcript.
+  $progressPath = [IO.Path]::GetFullPath($ReportPath + '.progress.json')
+  $progressParent = Split-Path $progressPath -Parent
+  New-Item -ItemType Directory -Force $progressParent | Out-Null
+  [ordered]@{
+    schema = 'uxb.model_suite_progress.v1'
+    compiler = $UxbLabel
+    started = $started.ToString('o')
+    updated = (Get-Date).ToString('o')
+    completed_packages = $results.Count
+    requested_packages = $suites.Count
+    packages = $results
+  } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $progressPath -Encoding UTF8
   # her paketten sonra o pakete ait gecici klasorler silinir (tepe disk kullanimi bir paketle sinirli kalir)
   if ($scratch -and (Test-Path "$scratch\runs")) { try { [IO.Directory]::Delete("$scratch\runs", $true) } catch {} }
 }
@@ -111,3 +148,4 @@ $md += ""; $md += "Genel: **$gecen / $toplam** kontrol geçti."
 [IO.File]::WriteAllText((Join-Path $root $ReportPath), ($md -join "`r`n") + "`r`n", (New-Object Text.UTF8Encoding($false)))
 if ($bad.Count -gt 0) { exit 1 }
 "Tum paketler temiz."
+exit 0
