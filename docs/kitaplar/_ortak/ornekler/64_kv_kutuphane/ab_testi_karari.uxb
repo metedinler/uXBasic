@@ -1,0 +1,148 @@
+' KONU: Üst düzey: uxstats2 ile web sayfası A/B testi karar raporu (t testi, oran z testi, F testi, ANOVA, Tukey)
+' KOMUTLAR: INCLUDE UXSTATS2_WelchTStat UXSTATS2_WelchTP UXSTATS2_FVarianceP UXSTATS2_TwoPropZStat UXSTATS2_TwoPropZP UXSTATS2_AnovaOneWayF UXSTATS2_AnovaOneWayP UXSTATS2_PosthocTukeyQ
+' ACIKLAMA: Eski ve yeni sayfa tasarımı karşılaştırılır. Sayfa yüklenme süresi iki bağımsız örneklem olarak Welch t testiyle, iki varyansın eşitliği F testiyle sınanır. Dönüşüm oranları (alışveriş yapan / ziyaretçi) iki oran z testiyle karşılaştırılır. Üç cihaz türünün süre ortalamaları tek yönlü ANOVA ile, çiftler ise Tukey q değeriyle (kritik değer 3.77: k=3, serbestlik 12, alfa 0.05) incelenir. Bütün değerler saf Python'da yazılmış bağımsız bir hesapla (eksik beta ve gama işlevleriyle) yaklaşık 12 basamağa kadar doğrulanmıştır. Kütüphane geçersiz girdide NaN döndürür, tutarsız girdide (başarı sayısı deneme sayısından büyük gibi) anlamsız değer üretebilir ve PosthocScheffeF standart Scheffé F'inin k-1'e bölünmemiş halini verir (G-KUT-15); gerçek verilerde önce örnek sayılarını denetleyin.
+'= gecikme ort (ms): eski 217.2500, yeni 188.1250
+'= welch t = 5.0235, p = 0.0004 -> anlamli: EVET
+'= varyans esitligi F p = 0.1793 -> esit varyans: EVET
+'= donusum: eski %12.0000, yeni %17.1429
+'= iki oran z = -2.0827, p = 0.0373 -> anlamli: EVET
+'= cihaz ANOVA: F = 22.0614, p = 0.0001 -> anlamli: EVET
+'= tukey q: masaustu-tablet 9.3662, masaustu-telefon 4.0587, tablet-telefon 5.3075
+'= tukey anlamli cift sayisi: 3 / 3
+'= karar: yeni tasarim yayinlansin
+INCLUDE "include/modules/uxstats2.uxmh"
+
+' F64 değeri 4 ondalıklı metne çevirir (negatif sayıları da işler)
+FUNCTION F4(v AS F64) AS STRING
+    DIM isaret AS STRING = ""
+    DIM x AS F64 = v
+    IF x < 0 THEN
+        isaret = "-"
+        x = -x
+    END IF
+    DIM t AS I64 = INT(x * 10000 + 0.5)
+    DIM kesir AS STRING = STR(t MOD 10000)
+    DO WHILE LEN(kesir) < 4
+        kesir = "0" + kesir
+    LOOP
+    RETURN isaret + STR(t \ 10000) + "." + kesir
+END FUNCTION
+
+' p değeri alfa (0.05) altındaysa fark istatistiksel olarak anlamlıdır
+FUNCTION Anlamli(p AS F64) AS STRING
+    DIM s AS STRING = "HAYIR"
+    IF p < 0.05 THEN s = "EVET"
+    RETURN s
+END FUNCTION
+
+MAIN
+    DIM eski(7) AS F64
+    DIM yeni(7) AS F64
+    DIM sure(14) AS F64
+    DIM a AS U64 = UXSTATS2_VecCreate(8)
+    DIM b AS U64 = UXSTATS2_VecCreate(8)
+    DIM v AS U64 = UXSTATS2_VecCreate(15)
+    DIM g AS U64 = UXSTATS2_VecCreate(15)
+    DIM rc AS I32
+    DIM i AS I32
+    DIM toplamA AS F64 = 0
+    DIM toplamB AS F64 = 0
+    DIM t AS F64
+    DIM pLat AS F64
+    DIM pVar AS F64
+    DIM z AS F64
+    DIM pDon AS F64
+    DIM f AS F64
+    DIM pAnova AS F64
+    DIM q12 AS F64
+    DIM q13 AS F64
+    DIM q23 AS F64
+    DIM anlamliCift AS I32 = 0
+    DIM yayin AS I32 = 0
+    DIM donA AS F64
+    DIM donB AS F64
+    DIM s1 AS STRING
+    DIM s2 AS STRING
+
+    eski(0) = 212: eski(1) = 198: eski(2) = 225: eski(3) = 240: eski(4) = 205: eski(5) = 219: eski(6) = 231: eski(7) = 208
+    yeni(0) = 188: yeni(1) = 195: yeni(2) = 176: yeni(3) = 201: yeni(4) = 184: yeni(5) = 192: yeni(6) = 179: yeni(7) = 190
+    FOR i = 0 TO 7
+        rc = UXSTATS2_VecPush(a, eski(i))
+        rc = UXSTATS2_VecPush(b, yeni(i))
+        toplamA += eski(i)
+        toplamB += yeni(i)
+    NEXT
+    s1 = F4(toplamA / 8)
+    s2 = F4(toplamB / 8)
+    PRINT "gecikme ort (ms): eski "; s1; ", yeni "; s2
+
+    t = UXSTATS2_WelchTStat(a, b)
+    pLat = UXSTATS2_WelchTP(a, b)
+    s1 = F4(t)
+    s2 = F4(pLat)
+    PRINT "welch t = "; s1; ", p = "; s2; " -> anlamli: "; Anlamli(pLat)
+
+    pVar = UXSTATS2_FVarianceP(a, b)
+    s1 = F4(pVar)
+    ' varyans eşitliği sınamasında anlamlı olmamak (p >= 0.05) eşit varyans varsayımını korur
+    IF pVar >= 0.05 THEN
+        PRINT "varyans esitligi F p = "; s1; " -> esit varyans: EVET"
+    ELSE
+        PRINT "varyans esitligi F p = "; s1; " -> esit varyans: HAYIR"
+    END IF
+
+    donA = 100.0 * 48 / 400
+    donB = 100.0 * 72 / 420
+    s1 = F4(donA)
+    s2 = F4(donB)
+    PRINT "donusum: eski %"; s1; ", yeni %"; s2
+    z = UXSTATS2_TwoPropZStat(48, 400, 72, 420)
+    pDon = UXSTATS2_TwoPropZP(48, 400, 72, 420)
+    s1 = F4(z)
+    s2 = F4(pDon)
+    PRINT "iki oran z = "; s1; ", p = "; s2; " -> anlamli: "; Anlamli(pDon)
+
+    ' üç cihaz türü (1 masaüstü, 2 tablet, 3 telefon), her birinde 5 ölçüm
+    sure(0) = 12.1: sure(1) = 11.8: sure(2) = 13.0: sure(3) = 12.5: sure(4) = 12.2
+    sure(5) = 14.2: sure(6) = 13.8: sure(7) = 14.9: sure(8) = 14.1: sure(9) = 13.6
+    sure(10) = 12.9: sure(11) = 13.3: sure(12) = 12.7: sure(13) = 13.5: sure(14) = 13.1
+    FOR i = 0 TO 14
+        rc = UXSTATS2_VecPush(v, sure(i))
+        rc = UXSTATS2_VecPush(g, 1 + i \ 5)
+    NEXT
+    f = UXSTATS2_AnovaOneWayF(v, g)
+    pAnova = UXSTATS2_AnovaOneWayP(v, g)
+    s1 = F4(f)
+    s2 = F4(pAnova)
+    PRINT "cihaz ANOVA: F = "; s1; ", p = "; s2; " -> anlamli: "; Anlamli(pAnova)
+
+    q12 = UXSTATS2_PosthocTukeyQ(v, g, 1, 2)
+    q13 = UXSTATS2_PosthocTukeyQ(v, g, 1, 3)
+    q23 = UXSTATS2_PosthocTukeyQ(v, g, 2, 3)
+    IF q12 > 3.77 THEN anlamliCift += 1
+    IF q13 > 3.77 THEN anlamliCift += 1
+    IF q23 > 3.77 THEN anlamliCift += 1
+    s1 = F4(q12)
+    s2 = F4(q13)
+    PRINT "tukey q: masaustu-tablet "; s1; ", masaustu-telefon "; s2; ", tablet-telefon "; F4(q23)
+    PRINT "tukey anlamli cift sayisi: "; anlamliCift; " / 3"
+
+    ' karar: hem süre hem dönüşüm yeni tasarım lehine anlamlıysa yayınla
+    IF pLat < 0.05 THEN
+        IF pDon < 0.05 THEN
+            IF toplamB < toplamA THEN
+                IF donB > donA THEN yayin = 1
+            END IF
+        END IF
+    END IF
+    IF yayin = 1 THEN
+        PRINT "karar: yeni tasarim yayinlansin"
+    ELSE
+        PRINT "karar: eski tasarim korunsun"
+    END IF
+
+    rc = UXSTATS2_VecFree(g)
+    rc = UXSTATS2_VecFree(v)
+    rc = UXSTATS2_VecFree(b)
+    rc = UXSTATS2_VecFree(a)
+END MAIN

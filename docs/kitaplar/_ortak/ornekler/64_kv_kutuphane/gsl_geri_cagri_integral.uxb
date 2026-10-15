@@ -1,0 +1,122 @@
+' KONU: Üst düzey: CODEPTR ile uXBasic işlevini C kütüphanesine geri çağrı olarak vermek (uxgsl integral ve kök bulma)
+' KOMUTLAR: INCLUDE CODEPTR VARPTR PEEKD uxgsl.IntegrateQag uxgsl.IntegrationWorkspaceCreate uxgsl.RootBisectionCreate uxgsl.RootBisectionSet uxgsl.RootBisectionIterate uxgsl.RootBisectionRoot
+' ACIKLAMA: GSL'in sayısal integral (IntegrateQag) ve kök bulma (RootBisection) işlevleri, hesaplanacak fonksiyonu bir "geri çağrı" olarak ister: C imzası double f(double x, void *kullanici_verisi). CODEPTR(Fonksiyon), bir uXBasic FUNCTION'ının gerçek makine kodu adresini verir; kullanici_verisi ise isteğe bağlı bir göstericidir (burada VARPTR ile bir I32 değişkeninin adresi, geri çağrıda PEEKD ile okunur). Bu yüzden integralini aldığınız fonksiyonlar uXBasic ile yazılır, hesabı C kodu yapar. CODEPTR'ın verebileceği gerçek kod adresi yalnız yerel x64 çıktısında vardır; AST ve MIR yorumlayıcıları "requires native x64" hatasıyla açıkça reddeder (G-DIS-8). Geri çağrının uXBasic imzası C imzasının ilk parametrelerini izler: ikinci parametre (PTR) yazılmazsa yok sayılır. Bütün sonuçlar analitik değerlerle karşılaştırılmıştır (pi, karekök 2, 64/6 ...). Bu yüzden örnek yalnız x64 için beklentili işaretlidir.
+' MOTORLAR: x64
+'= x^2 integrali [0,1]: 0.333333333333
+'= sin integrali [0,pi]: 2.000000000000
+'= pi (4/(1+x^2) integrali [0,1]): 3.141592653590
+'= normal dagilim kapsami [-6,6]: 0.999999998027
+'= x^3 integrali [0,2] (kullanici verisi n=3): 4.000000000000
+'= x^5 integrali [0,2] (kullanici verisi n=5): 10.666666666667
+'= kok x^2-2: 1.414213562373
+'= kok cos(x)-x: 0.739085133215
+'= isaret degisimi olmayan aralik reddedildi: EVET
+INCLUDE "include/modules/uxgsl.uxmh"
+
+' F64 değeri 12 ondalıklı metne çevirir (yalnız sıfır ve pozitif sayılar için)
+FUNCTION F12(v AS F64) AS STRING
+    DIM t AS I64 = INT(v * 1000000000000.0 + 0.5)
+    DIM kesir AS STRING = STR(t MOD 1000000000000)
+    DO WHILE LEN(kesir) < 12
+        kesir = "0" + kesir
+    LOOP
+    RETURN STR(t \ 1000000000000) + "." + kesir
+END FUNCTION
+
+' ---- geri çağrılar: C'nin gördüğü imza double f(double x, void *kullanici_verisi) ----
+FUNCTION Kare(x AS F64) AS F64
+    RETURN x * x
+END FUNCTION
+
+FUNCTION SinusF(x AS F64) AS F64
+    RETURN SIN(x)
+END FUNCTION
+
+FUNCTION ArcTanF(x AS F64) AS F64
+    RETURN 4.0 / (1.0 + x * x)
+END FUNCTION
+
+FUNCTION NormalYogunluk(x AS F64) AS F64
+    RETURN EXP(-x * x / 2.0) / SQR(2.0 * 3.141592653589793)
+END FUNCTION
+
+' x üssü n: n, kullanici_verisi göstericisinin gösterdiği I32'den okunur
+FUNCTION UsFonk(x AS F64, p AS PTR) AS F64
+    DIM n AS I32 = PEEKD(p)
+    DIM sonuc AS F64 = 1.0
+    DIM i AS I32
+    FOR i = 1 TO n
+        sonuc = sonuc * x
+    NEXT
+    RETURN sonuc
+END FUNCTION
+
+FUNCTION KarekokIki(x AS F64) AS F64
+    RETURN x * x - 2.0
+END FUNCTION
+
+FUNCTION Dottie(x AS F64) AS F64
+    RETURN COS(x) - x
+END FUNCTION
+
+' ---- ortak yardımcılar ----
+FUNCTION Integral(geriCagri AS PTR, veri AS PTR, alt AS F64, ust AS F64) AS F64
+    DIM calisma AS U64 = uxgsl.IntegrationWorkspaceCreate(1000)
+    DIM sonuc AS F64 = uxgsl.IntegrateQag(geriCagri, veri, alt, ust, 0.000000000001, 0.000000000001, 1000, 6, calisma)
+    uxgsl.IntegrationWorkspaceFree(calisma)
+    RETURN sonuc
+END FUNCTION
+
+' İkiye bölme yöntemiyle kök bulur; aralıkta işaret değişimi yoksa -1000000000.0 verir
+FUNCTION Kok(geriCagri AS PTR, alt AS F64, ust AS F64) AS F64
+    DIM cozucu AS U64 = uxgsl.RootBisectionCreate()
+    DIM rc AS I32 = uxgsl.RootBisectionSet(cozucu, geriCagri, 0, alt, ust)
+    DIM i AS I32
+    DIM kok AS F64 = -1000000000.0
+    IF rc = 1 THEN
+        FOR i = 1 TO 60
+            rc = uxgsl.RootBisectionIterate(cozucu)
+        NEXT
+        kok = uxgsl.RootBisectionRoot(cozucu)
+    END IF
+    uxgsl.RootBisectionFree(cozucu)
+    RETURN kok
+END FUNCTION
+
+MAIN
+    DIM v AS F64
+    DIM s AS STRING
+    DIM n AS I32 = 3
+
+    v = Integral(CODEPTR(Kare), 0, 0.0, 1.0)
+    s = F12(v)
+    PRINT "x^2 integrali [0,1]: "; s
+    v = Integral(CODEPTR(SinusF), 0, 0.0, 3.141592653589793)
+    s = F12(v)
+    PRINT "sin integrali [0,pi]: "; s
+    v = Integral(CODEPTR(ArcTanF), 0, 0.0, 1.0)
+    s = F12(v)
+    PRINT "pi (4/(1+x^2) integrali [0,1]): "; s
+    v = Integral(CODEPTR(NormalYogunluk), 0, -6.0, 6.0)
+    s = F12(v)
+    PRINT "normal dagilim kapsami [-6,6]: "; s
+
+    v = Integral(CODEPTR(UsFonk), VARPTR(n), 0.0, 2.0)
+    s = F12(v)
+    PRINT "x^3 integrali [0,2] (kullanici verisi n=3): "; s
+    n = 5
+    v = Integral(CODEPTR(UsFonk), VARPTR(n), 0.0, 2.0)
+    s = F12(v)
+    PRINT "x^5 integrali [0,2] (kullanici verisi n=5): "; s
+
+    v = Kok(CODEPTR(KarekokIki), 1.0, 2.0)
+    s = F12(v)
+    PRINT "kok x^2-2: "; s
+    v = Kok(CODEPTR(Dottie), 0.0, 1.0)
+    s = F12(v)
+    PRINT "kok cos(x)-x: "; s
+
+    ' x^2-2 [2,3] aralığında işaret değiştirmez: Set çağrısı reddeder
+    v = Kok(CODEPTR(KarekokIki), 2.0, 3.0)
+    IF v < -999999999.0 THEN PRINT "isaret degisimi olmayan aralik reddedildi: EVET"
+END MAIN

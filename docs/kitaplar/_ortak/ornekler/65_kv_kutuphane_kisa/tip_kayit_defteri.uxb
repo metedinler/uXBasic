@@ -1,0 +1,124 @@
+' KONU: uxclz ile çalışma anında tür hiyerarşisi, arayüz ve nesne ömrü yönetimi (uxjson ile kayıt defterini okumak)
+' KOMUTLAR: INCLUDE uxclz.TypeRegister uxclz.TypeAddInterface uxclz.TypeIsA uxclz.RegistryMetadataJson uxclz.ObjectWrap uxclz.ObjectRetain uxclz.ObjectRelease uxclz.LastError uxjson.Parse
+' ACIKLAMA: uxclz, uXBasic'in CLASS sisteminden bağımsız, C++ ile yazılmış ikinci bir nesne altyapısıdır: türler çalışma anında adla kaydedilir (TypeRegister), tabanları ve arayüzleri vardır, kayıt defteri JSON olarak okunabilir. Burada beş tür kaydedilir (soyut bir kök, iki alt sınıf, iki arayüz), kayıt defteri uxjson ile ayrıştırılıp hiyerarşi yazdırılır; üç geçersiz kayıt denemesi kütüphanenin okunabilir hata iletileriyle reddedilir; son olarak bir nesnenin başvuru sayımı gösterilir: Retain'den sonra iki, fazladan üçüncü Release ise bayat tutamaç olarak reddedilir (kütüphane bu hatayı çökmeden yakalar; Bölüm 20.3 ile karşılaştırın). Dikkat: nesne yükü (payload) bir göstericidir; yorumlayıcılarda opak jetona çevrilir, bu yüzden değeri yazdırılmaz.
+'= kayitli tur sayisi: 5
+'= Hayvan (soyut kok)
+'= Kedi <- Hayvan, arayuzler: Sesli
+'= Kopek <- Hayvan, arayuzler: Sesli Yuruyen
+'= Sesli (arayuz)
+'= Yuruyen (arayuz)
+'= Kedi bir Hayvan mi: EVET, Hayvan bir Kedi mi: HAYIR, Kopek bir Kedi mi: HAYIR
+'= hata: taban tur yok -> base type does not exist
+'= hata: bos ad -> type name is empty
+'= hata: sinif arayuz diye eklenemez -> target id is not registered as an interface
+'= nesne omru: release 1 tamam, release 2 tamam, release 3 reddedildi (release on invalid/stale handle)
+INCLUDE "include/modules/uxclz.uxmh"
+INCLUDE "include/modules/uxjson.uxmh"
+
+MAIN
+    DIM rc AS I32
+    DIM hayvan AS U32
+    DIM kedi AS U32
+    DIM kopek AS U32
+    DIM sesli AS U32
+    DIM yuruyen AS U32
+    DIM kotu AS U32
+    DIM json AS STRING
+    DIM belge AS U64
+    DIM kok AS U64
+    DIM turler AS U64
+    DIM tur AS U64
+    DIM arayuzler AS U64
+    DIM adet AS U64
+    DIM i AS U64
+    DIM j AS U64
+    DIM ad AS STRING
+    DIM taban AS I64
+    DIM bayrak AS I64
+    DIM satir AS STRING
+    DIM hata AS STRING
+    DIM arayuzNo AS I64
+    DIM a AS I32
+    DIM b AS I32
+    DIM c AS I32
+    DIM nesne AS U64
+    DIM r1 AS I32
+    DIM r2 AS I32
+    DIM r3 AS I32
+
+    rc = uxclz.ResetRegistry()
+    hayvan = uxclz.TypeRegister("Hayvan", 0, uxclz.TYPE_CLASS + uxclz.TYPE_ABSTRACT)
+    kedi = uxclz.TypeRegister("Kedi", hayvan, uxclz.TYPE_CLASS)
+    kopek = uxclz.TypeRegister("Kopek", hayvan, uxclz.TYPE_CLASS)
+    sesli = uxclz.TypeRegister("Sesli", 0, uxclz.TYPE_INTERFACE)
+    yuruyen = uxclz.TypeRegister("Yuruyen", 0, uxclz.TYPE_INTERFACE)
+    rc = uxclz.TypeAddInterface(kedi, sesli)
+    rc = uxclz.TypeAddInterface(kopek, sesli)
+    rc = uxclz.TypeAddInterface(kopek, yuruyen)
+
+    ' kayıt defterini JSON olarak al ve uxjson ile gez
+    json = uxclz.RegistryMetadataJson()
+    belge = uxjson.Parse(json)
+    ASSERT belge <> 0, "kayit defteri JSON degil"
+    kok = uxjson.Root(belge)
+    turler = uxjson.ObjectGet(kok, "types")
+    adet = uxjson.ArraySize(turler)
+    PRINT "kayitli tur sayisi: "; adet
+    FOR i = 0 TO adet - 1
+        tur = uxjson.ArrayGet(turler, i)
+        ad = uxjson.GetString(uxjson.ObjectGet(tur, "name"))
+        taban = uxjson.GetI64(uxjson.ObjectGet(tur, "base"))
+        bayrak = uxjson.GetI64(uxjson.ObjectGet(tur, "flags"))
+        arayuzler = uxjson.ObjectGet(tur, "interfaces")
+        satir = ad
+        IF (bayrak & 2) <> 0 THEN
+            satir = satir + " (arayuz)"
+        ELSEIF taban = 0 THEN
+            IF (bayrak & 128) <> 0 THEN
+                satir = satir + " (soyut kok)"
+            ELSE
+                satir = satir + " (kok)"
+            END IF
+        ELSE
+            satir = satir + " <- " + uxclz.TypeName(taban)
+            IF uxjson.ArraySize(arayuzler) > 0 THEN
+                satir = satir + ", arayuzler:"
+                FOR j = 0 TO uxjson.ArraySize(arayuzler) - 1
+                    arayuzNo = uxjson.GetI64(uxjson.ArrayGet(arayuzler, j))
+                    satir = satir + " " + uxclz.TypeName(arayuzNo)
+                NEXT
+            END IF
+        END IF
+        PRINT satir
+    NEXT
+    uxjson.Free(belge)
+
+    a = uxclz.TypeIsA(kedi, hayvan)
+    b = uxclz.TypeIsA(hayvan, kedi)
+    c = uxclz.TypeIsA(kopek, kedi)
+    PRINT "Kedi bir Hayvan mi: "; IFF(a = 1, "EVET", "HAYIR"); ", Hayvan bir Kedi mi: "; IFF(b = 1, "EVET", "HAYIR"); ", Kopek bir Kedi mi: "; IFF(c = 1, "EVET", "HAYIR")
+
+    ' geçersiz kayıtlar: sıfır döner, neden LastError'dadır
+    kotu = uxclz.TypeRegister("Yetim", 99999, uxclz.TYPE_CLASS)
+    hata = uxclz.LastError()
+    IF kotu = 0 THEN PRINT "hata: taban tur yok -> "; hata
+    kotu = uxclz.TypeRegister("", 0, uxclz.TYPE_CLASS)
+    hata = uxclz.LastError()
+    IF kotu = 0 THEN PRINT "hata: bos ad -> "; hata
+    rc = uxclz.TypeAddInterface(kedi, hayvan)
+    hata = uxclz.LastError()
+    IF rc = 0 THEN PRINT "hata: sinif arayuz diye eklenemez -> "; hata
+
+    ' nesne ömrü: başvuru sayımı
+    nesne = uxclz.ObjectWrap(kedi, 12345, 0)
+    rc = uxclz.ObjectRetain(nesne)
+    r1 = uxclz.ObjectRelease(nesne)
+    r2 = uxclz.ObjectRelease(nesne)
+    r3 = uxclz.ObjectRelease(nesne)
+    hata = uxclz.LastError()
+    IF r1 = 1 THEN
+        IF r2 = 1 THEN
+            IF r3 = 0 THEN PRINT "nesne omru: release 1 tamam, release 2 tamam, release 3 reddedildi ("; hata; ")"
+        END IF
+    END IF
+END MAIN

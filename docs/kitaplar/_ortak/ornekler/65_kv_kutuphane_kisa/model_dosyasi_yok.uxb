@@ -1,0 +1,49 @@
+' KONU: Model dosyası isteyen kütüphaneler (uxonnx, uxllama) dosya yokken nasıl davranır
+' KOMUTLAR: INCLUDE uxonnx.Init uxonnx.SessionCreate uxonnx.LastError uxllama.Create uxllama.SetModelPath uxllama.ModelExists uxllama.Prompt
+' ACIKLAMA: ONNX ve llama kütüphaneleri çalışmak için bir model dosyası ister; bu depoda model dosyası bulunmadığı için olumlu yol (çıkarım yapmak) burada sınanamaz. Ama olumsuz yol sınanabilir ve önemlidir: model yoksa kütüphane çökmez, sıfır tutamaç döndürür ve nedenini okunabilir bir iletiyle bildirir (uxonnx: LastError; uxllama: ModelExists = 0 ve Prompt = 0). Gerçek model eklediğinizde bu denetimler üretim kodunuzun ilk satırları olmalıdır. uxllama dış bir komut satırı programı (llama) çalıştırır; program da yoksa Prompt yine kapalı hatayla (0) döner. Bu örnek ONNX Runtime kütüphanesini bin klasöründe arar (Init'e verilen yol çalışma klasörüne göredir). Yalnız MIR ve x64'te beklenir: uxllama sarmalayıcısında Prompt ve PromptFile işlevlerinin parametre adları (prompt, promptFile) işlev adlarıyla aynıdır ve AST yerel adı değil işlevi görür, "CALL(DLL) STRPTR requires string argument" hatası verir (G-KUT-21).
+' CALISMA: kok
+' MOTORLAR: MIR x64
+'= onnx init: 1
+'= olmayan model: oturum 0, nedeni belirtildi: EVET
+'= llama: model yolu atandi, model var mi: 0
+'= llama: istem gonderme reddedildi (Prompt = 0), hata iletisi var: EVET
+INCLUDE "include/modules/uxmathcore.uxmh"
+INCLUDE "include/modules/uxonnx.uxmh"
+INCLUDE "include/modules/uxllama.uxmh"
+
+MAIN
+    DIM rc AS I32
+    DIM oturum AS U64
+    DIM hata AS STRING
+    DIM llama AS U64
+    DIM tampon AS U64
+    DIM tp AS U64
+    DIM var AS I32
+    DIM uzunluk AS I32
+
+    rc = uxonnx.Init("bin")
+    PRINT "onnx init: "; rc
+    oturum = uxonnx.SessionCreate("olmayan_model.onnx", 1)
+    hata = uxonnx.LastError(oturum)
+    IF oturum = 0 THEN
+        IF INSTR(hata, "File doesn't exist") > 0 THEN PRINT "olmayan model: oturum 0, nedeni belirtildi: EVET"
+    END IF
+
+    llama = uxllama.Create()
+    ASSERT llama <> 0, "llama nesnesi olusmadi"
+    rc = uxllama.SetModelPath(llama, "olmayan_model.gguf")
+    rc = uxllama.SetCliPath(llama, "olmayan_llama_cli.exe")
+    var = uxllama.ModelExists(llama)
+    PRINT "llama: model yolu atandi, model var mi: "; var
+
+    ' çıktı tamponu: 4096 baytlık ham bellek (uxmathcore U8 tamponu)
+    tampon = UXMC_BufferCreate(UXMC_TYPE_U8(), 4096)
+    tp = UXMC_BufferDataPtr(tampon)
+    rc = uxllama.Prompt(llama, "merhaba", tp, 4096)
+    uzunluk = uxllama.LastError(llama, tp, 4096)
+    IF rc = 0 THEN
+        IF uzunluk > 0 THEN PRINT "llama: istem gonderme reddedildi (Prompt = 0), hata iletisi var: EVET"
+    END IF
+    rc = UXMC_BufferFree(tampon)
+    uxllama.Free(llama)
+END MAIN

@@ -1,0 +1,151 @@
+' KONU: Üst düzey: uxgsl (GNU Bilimsel Kütüphane) ile mühendislik hesap defteri (normal dağılım, kombinasyon, Bessel, karmaşık sayı, matris)
+' KOMUTLAR: INCLUDE uxgsl.Erf uxgsl.LnGamma uxgsl.BesselJ0 uxgsl.RngCreate uxgsl.RngGaussian uxgsl.VectorMean uxgsl.ComplexMultiply uxgsl.ComplexAdd uxgsl.MatrixMultiply uxgsl.LastError
+' ACIKLAMA: GSL, bilimsel hesabın standart kütüphanesidir; uXBasic'te SIN ve EXP dışında özel fonksiyon yoktur. Bu örnekte: hata işlevi Erf ile normal dağılım olasılıkları (çan eğrisi), LnGamma ile büyük kombinasyon sayıları (taşmadan), Bessel J0 ile dairesel davul zarının ilk iki titreşim kipinin oranı, karmaşık sayı tutamaçlarıyla ikinci derece denklemin karmaşık kökünün doğrulanması, tohumlu bir Gauss rastgele örneğinin vektör istatistiği ve matris çarpımı hesaplanır. uxgsl hatayı düzenli bildirir: başarısız çağrı 0 ya da NaN döndürür, nedeni LastStatus ve LastError ile okunur (burada uyumsuz boyutlu matris çarpımında). Her değer bağımsız bir Python hesabıyla doğrulanmıştır. Geri çağrılı integral ve kök bulma için gsl_geri_cagri_integral örneğine bakın.
+'= P(-1.96 < Z < 1.96) = 0.9500
+'= P(IQ > 130) = 0.02275
+'= C(52, 5) = 2598960
+'= C(40, 20) = 137846528820
+'= J0 ilk sifirinda |J0| < 1e-12: EVET
+'= davul zari 2. kip / 1. kip frekans orani: 2.2954
+'= z = -1 + 2i, z*z + 2z + 5 = 0 + 0i
+'= A x B = [19 22; 43 50]
+'= uyumsuz carpim reddedildi: matrix shape mismatch
+'= gauss ornek: ortalama ve std makul: EVET
+INCLUDE "include/modules/uxgsl.uxmh"
+
+' F64 değeri n ondalıklı metne çevirir (yalnız sıfır ve pozitif sayılar için)
+FUNCTION Fn(v AS F64, n AS I32) AS STRING
+    DIM kat AS I64 = 1
+    DIM i AS I32
+    FOR i = 1 TO n
+        kat = kat * 10
+    NEXT
+    DIM t AS I64 = INT(v * kat + 0.5)
+    DIM kesir AS STRING = STR(t MOD kat)
+    DO WHILE LEN(kesir) < n
+        kesir = "0" + kesir
+    LOOP
+    RETURN STR(t \ kat) + "." + kesir
+END FUNCTION
+
+' n'in k'lı kombinasyonu: Gamma'nın logaritmasıyla (taşma olmaz), en yakın tamsayıya yuvarlanır
+FUNCTION Kombinasyon(n AS I32, k AS I32) AS I64
+    DIM a AS F64 = uxgsl.LnGamma(n + 1.0)
+    DIM b AS F64 = uxgsl.LnGamma(k + 1.0)
+    DIM c AS F64 = uxgsl.LnGamma(n - k + 1.0)
+    RETURN INT(EXP(a - b - c) + 0.5)
+END FUNCTION
+
+MAIN
+    DIM e AS F64
+    DIM p AS F64
+    DIM s1 AS STRING
+    DIM k1 AS I64
+    DIM k2 AS I64
+    DIM j0 AS F64
+    DIM z1 AS F64
+    DIM z2 AS F64
+    DIM rc AS I32
+    DIM hata AS STRING
+    DIM i AS I32
+
+    ' 1) çan eğrisi: P(-a < Z < a) = erf(a / karekök 2)
+    e = uxgsl.Erf(1.96 / SQR(2.0))
+    s1 = Fn(e, 4)
+    PRINT "P(-1.96 < Z < 1.96) = "; s1
+    ' IQ ortalama 100, std 15: P(IQ > 130) = P(Z > 2) = 0.5 * erfc(2 / karekök 2) = 0.5 * (1 - erf(...))
+    e = uxgsl.Erf(2.0 / SQR(2.0))
+    p = 0.5 * (1.0 - e)
+    s1 = Fn(p, 5)
+    PRINT "P(IQ > 130) = "; s1
+
+    ' 2) kombinasyon sayıları
+    k1 = Kombinasyon(52, 5)
+    k2 = Kombinasyon(40, 20)
+    PRINT "C(52, 5) = "; k1
+    PRINT "C(40, 20) = "; k2
+
+    ' 3) Bessel: J0'ın ilk iki sıfırı, dairesel davul zarının ilk iki titreşim kipinin frekanslarını belirler
+    j0 = uxgsl.BesselJ0(2.404825557695773)
+    IF ABS(j0) < 0.000000000001 THEN
+        PRINT "J0 ilk sifirinda |J0| < 1e-12: EVET"
+    ELSE
+        PRINT "J0 ilk sifirinda |J0| < 1e-12: HAYIR"
+    END IF
+    j0 = uxgsl.BesselJ0(5.520078110286311)
+    ASSERT ABS(j0) < 0.000000000001, "ikinci sifir dogrulanamadi"
+    s1 = Fn(5.520078110286311 / 2.404825557695773, 4)
+    PRINT "davul zari 2. kip / 1. kip frekans orani: "; s1
+
+    ' 4) karmaşık sayı: z = -1 + 2i, z*z + 2z + 5 sıfır mı?
+    DIM z AS U64 = uxgsl.ComplexCreate(-1.0, 2.0)
+    DIM iki AS U64 = uxgsl.ComplexCreate(2.0, 0.0)
+    DIM bes AS U64 = uxgsl.ComplexCreate(5.0, 0.0)
+    DIM kare AS U64 = uxgsl.ComplexCreate(0.0, 0.0)
+    DIM ikiZ AS U64 = uxgsl.ComplexCreate(0.0, 0.0)
+    DIM toplam1 AS U64 = uxgsl.ComplexCreate(0.0, 0.0)
+    DIM toplam2 AS U64 = uxgsl.ComplexCreate(0.0, 0.0)
+    rc = uxgsl.ComplexMultiply(z, z, kare)
+    rc = uxgsl.ComplexMultiply(iki, z, ikiZ)
+    rc = uxgsl.ComplexAdd(kare, ikiZ, toplam1)
+    rc = uxgsl.ComplexAdd(toplam1, bes, toplam2)
+    z1 = uxgsl.ComplexReal(toplam2)
+    z2 = uxgsl.ComplexImaginary(toplam2)
+    PRINT "z = -1 + 2i, z*z + 2z + 5 = "; z1; " + "; z2; "i"
+    uxgsl.ComplexFree(toplam2)
+    uxgsl.ComplexFree(toplam1)
+    uxgsl.ComplexFree(ikiZ)
+    uxgsl.ComplexFree(kare)
+    uxgsl.ComplexFree(bes)
+    uxgsl.ComplexFree(iki)
+    uxgsl.ComplexFree(z)
+
+    ' 5) matris çarpımı
+    DIM a AS U64 = uxgsl.MatrixCreate(2, 2)
+    DIM b AS U64 = uxgsl.MatrixCreate(2, 2)
+    DIM c AS U64 = uxgsl.MatrixCreate(2, 2)
+    DIM m23 AS U64 = uxgsl.MatrixCreate(2, 3)
+    DIM c00 AS F64
+    DIM c01 AS F64
+    DIM c10 AS F64
+    DIM c11 AS F64
+    rc = uxgsl.MatrixSet(a, 0, 0, 1): rc = uxgsl.MatrixSet(a, 0, 1, 2)
+    rc = uxgsl.MatrixSet(a, 1, 0, 3): rc = uxgsl.MatrixSet(a, 1, 1, 4)
+    rc = uxgsl.MatrixSet(b, 0, 0, 5): rc = uxgsl.MatrixSet(b, 0, 1, 6)
+    rc = uxgsl.MatrixSet(b, 1, 0, 7): rc = uxgsl.MatrixSet(b, 1, 1, 8)
+    rc = uxgsl.MatrixMultiply(a, b, c)
+    ASSERT rc = 1, "matris carpimi basarisiz"
+    c00 = uxgsl.MatrixGet(c, 0, 0)
+    c01 = uxgsl.MatrixGet(c, 0, 1)
+    c10 = uxgsl.MatrixGet(c, 1, 0)
+    c11 = uxgsl.MatrixGet(c, 1, 1)
+    PRINT "A x B = ["; c00; " "; c01; "; "; c10; " "; c11; "]"
+    ' 2x3 ile 2x2 çarpılamaz: çağrı 0 döner, neden LastError'da
+    rc = uxgsl.MatrixMultiply(m23, a, c)
+    hata = uxgsl.LastError()
+    IF rc = 0 THEN PRINT "uyumsuz carpim reddedildi: "; hata
+    uxgsl.MatrixFree(m23)
+    uxgsl.MatrixFree(c)
+    uxgsl.MatrixFree(b)
+    uxgsl.MatrixFree(a)
+
+    ' 6) tohumlu Gauss örneği: 100 değer, ortalama ~0, standart sapma ~1 (AST'de her DLL çağrısı yavaş olduğundan sayı küçük tutuldu)
+    DIM rng AS U64 = uxgsl.RngCreate(2026)
+    DIM v AS U64 = uxgsl.VectorCreate(100)
+    DIM ort AS F64
+    DIM sd AS F64
+    DIM x AS F64
+    FOR i = 0 TO 99
+        x = uxgsl.RngGaussian(rng, 1.0)
+        rc = uxgsl.VectorSet(v, i, x)
+    NEXT
+    ort = uxgsl.VectorMean(v)
+    sd = uxgsl.VectorStandardDeviation(v)
+    IF ABS(ort) < 0.3 THEN
+        IF sd > 0.8 THEN
+            IF sd < 1.2 THEN PRINT "gauss ornek: ortalama ve std makul: EVET"
+        END IF
+    END IF
+    uxgsl.VectorFree(v)
+    uxgsl.RngFree(rng)
+END MAIN

@@ -1,0 +1,104 @@
+' KONU: Üst düzey: uxtensor ve uxnn ile XOR problemini öğrenen küçük sinir ağı
+' KOMUTLAR: INCLUDE uxtensor.Create2D uxtensor.Set2D uxtensor.DataPtr uxnn.DenseLayerCreate uxnn.NetworkAddLayer uxnn.NetworkMSEPtr uxnn.NetworkTrainMSESGDPtr uxnn.NetworkForwardTensor IFF
+' ACIKLAMA: XOR (özel veya) tek bir doğru çizgisiyle ayrılamaz; ağın öğrenmesi için gizli katman gerekir. Veri uxtensor ile F64 tensörlerde tutulur, tensörün ham bellek işaretçisi (DataPtr) uxnn eğitim işlevine verilir. Ağ 2 girdili, 4 nöronlu tanh gizli katmanı ve 1 çıktılı sigmoid katmanı olan iki katmanlı bir ağdır; 3000 tur SGD ile eğitilir. Dikkat: NetworkAddLayer ile eklenen katmanların sahibi ağdır; yalnız NetworkFree çağrılır. Katmanı ayrıca LayerFree ile bırakırsanız çifte serbest bırakma yığını bozar ve program 0xC0000374 koduyla çöker (G-KUT-9).
+'= katman: 2, girdi: 2, cikti: 1
+'= hata en az 100 kat dustu: EVET
+'= 0 0 -> 0.01 -> sinif 0
+'= 0 1 -> 0.99 -> sinif 1
+'= 1 0 -> 0.99 -> sinif 1
+'= 1 1 -> 0.01 -> sinif 0
+'= dogru sinif: 4 / 4
+INCLUDE "include/modules/uxtensor.uxmh"
+INCLUDE "include/modules/uxnn.uxmh"
+
+' F64 değeri 2 ondalıklı metne çevirir
+FUNCTION F2(v AS F64) AS STRING
+    DIM t AS I64 = INT(v * 100 + 0.5)
+    DIM kesir AS STRING = STR(t MOD 100)
+    IF LEN(kesir) < 2 THEN kesir = "0" + kesir
+    RETURN STR(t \ 100) + "." + kesir
+END FUNCTION
+
+' XOR doğruluk tablosunu (girdi x, beklenen y) tensörlere yazar
+SUB VeriKur(x AS U64, y AS U64)
+    uxtensor.Set2D(x, 0, 0, 0.0): uxtensor.Set2D(x, 0, 1, 0.0): uxtensor.Set2D(y, 0, 0, 0.0)
+    uxtensor.Set2D(x, 1, 0, 0.0): uxtensor.Set2D(x, 1, 1, 1.0): uxtensor.Set2D(y, 1, 0, 1.0)
+    uxtensor.Set2D(x, 2, 0, 1.0): uxtensor.Set2D(x, 2, 1, 0.0): uxtensor.Set2D(y, 2, 0, 1.0)
+    uxtensor.Set2D(x, 3, 0, 1.0): uxtensor.Set2D(x, 3, 1, 1.0): uxtensor.Set2D(y, 3, 0, 0.0)
+END SUB
+
+' 2 -> 4 (tanh) -> 1 (sigmoid) ağını kurar ve tutamacını verir
+FUNCTION AgKur() AS U64
+    DIM ag AS U64
+    DIM gizli AS U64
+    DIM cikis AS U64
+    DIM rc AS I32
+    uxnn.Seed(7)
+    ag = uxnn.NetworkCreate()
+    gizli = uxnn.DenseLayerCreate(2, 4, uxnn.ACT_TANH)
+    cikis = uxnn.DenseLayerCreate(4, 1, uxnn.ACT_SIGMOID)
+    uxnn.LayerInit(gizli, uxnn.INIT_XAVIER, 0.0)
+    uxnn.LayerInit(cikis, uxnn.INIT_XAVIER, 0.0)
+    rc = uxnn.NetworkAddLayer(ag, gizli)
+    rc = uxnn.NetworkAddLayer(ag, cikis)
+    RETURN ag
+END FUNCTION
+
+MAIN
+    DIM x AS U64 = uxtensor.Create2D(4, 2)
+    DIM y AS U64 = uxtensor.Create2D(4, 1)
+    DIM girdi AS U64 = uxtensor.Create1D(2)
+    DIM cikti AS U64 = uxtensor.Create1D(1)
+    DIM ag AS U64
+    DIM xp AS U64
+    DIM yp AS U64
+    DIM katman AS I32
+    DIM girdiBoyu AS I32
+    DIM ciktiBoyu AS I32
+    DIM once AS F64
+    DIM sonra AS F64
+    DIM i AS I32
+    DIM a AS F64
+    DIM b AS F64
+    DIM p AS F64
+    DIM sinif AS I32
+    DIM beklenen AS I32
+    DIM dogru AS I32 = 0
+
+    VeriKur(x, y)
+    ag = AgKur()
+    katman = uxnn.NetworkLayerCount(ag)
+    girdiBoyu = uxnn.NetworkInputDim(ag)
+    ciktiBoyu = uxnn.NetworkOutputDim(ag)
+    PRINT "katman: "; katman; ", girdi: "; girdiBoyu; ", cikti: "; ciktiBoyu
+
+    xp = uxtensor.DataPtr(x)
+    yp = uxtensor.DataPtr(y)
+    once = uxnn.NetworkMSEPtr(ag, xp, yp, 4, 2, 1)
+    sonra = uxnn.NetworkTrainMSESGDPtr(ag, xp, yp, 4, 2, 1, 3000, 0.5)
+    IF once > sonra * 100 THEN
+        PRINT "hata en az 100 kat dustu: EVET"
+    ELSE
+        PRINT "hata en az 100 kat dustu: HAYIR"
+    END IF
+
+    FOR i = 0 TO 3
+        a = uxtensor.Get2D(x, i, 0)
+        b = uxtensor.Get2D(x, i, 1)
+        uxtensor.SetFlat(girdi, 0, a)
+        uxtensor.SetFlat(girdi, 1, b)
+        uxnn.NetworkForwardTensor(ag, girdi, cikti)
+        p = uxtensor.GetFlat(cikti, 0)
+        sinif = IFF(p >= 0.5, 1, 0)
+        beklenen = CINT(uxtensor.Get2D(y, i, 0))
+        IF sinif = beklenen THEN dogru += 1
+        PRINT CINT(a); " "; CINT(b); " -> "; F2(p); " -> sinif "; sinif
+    NEXT
+    PRINT "dogru sinif: "; dogru; " / 4"
+
+    uxnn.NetworkFree(ag)
+    uxtensor.Free(cikti)
+    uxtensor.Free(girdi)
+    uxtensor.Free(y)
+    uxtensor.Free(x)
+END MAIN

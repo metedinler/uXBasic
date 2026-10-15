@@ -1,0 +1,129 @@
+' KONU: Üst düzey: uxaimath ile sınıflandırıcı çıktı katmanı (softmax, çapraz entropi, doğruluk, SGD adımı)
+' KOMUTLAR: INCLUDE uxtensor.Create2D uxtensor.DataPtr uxaimath.SoftmaxPtr uxaimath.ArgMax uxaimath.CategoricalCrossEntropy uxaimath.Sigmoid uxaimath.GELU uxaimath.SGDUpdate uxaimath.ClipNorm
+' ACIKLAMA: Bir sinir ağının son katmanı her örnek için sınıf başına ham puan (logit) üretir. Softmax puanları olasılığa çevirir, çapraz entropi yanlış sınıfa verilen güveni cezalandırır, doğruluk doğru tahminlerin oranıdır. Bu örnekte 3 örnek x 4 sınıf logit tablosu bir uxtensor tensörüdür; uxaimath işlevleri ham işaretçilerle çalıştığı için her satır SliceAxis0 ile kendi tensörüne ayrılır ve DataPtr ile işaretçisi alınır. (Satır işaretçisini DataPtr + satır * 32 bayt diye hesaplamak yalnız x64'te çalışır; AST ve MIR bu işaretçileri opak "jeton" olarak tuttuklarından "stale or invalid pointer handle token" hatasıyla reddeder: G-DIS-9.) Üçüncü örnekte puanlar birbirine çok yakındır ve ağ yanılır: kayıp yüksek, doğruluk 2/3 çıkar. Sonda tek bir SGD adımı (parametre - öğrenme oranı * eğim) ve eğim kırpma (ClipNorm) gösterilir. GELU, kesin erf biçimi değil, tanh yaklaşığıdır (x = 1 için 0.8412; kesin değer 0.8413). uxaimath, uxtensor'u INCLUDE etmeden derlenmez ("unknown symbol: uxtensor"), uxtensor önce yazılmalıdır (G-KUT-14). Değerler numpy ile 15 basamağa kadar doğrulanmıştır.
+'= aktivasyonlar (x: sigmoid relu gelu swish)
+'= -2: 0.1192 0.0000 -0.0454 -0.2384
+'= -1: 0.2689 0.0000 -0.1588 -0.2689
+'= 0: 0.5000 0.0000 0.0000 0.0000
+'= 1: 0.7311 1.0000 0.8412 0.7311
+'= 2: 0.8808 2.0000 1.9546 1.7616
+'= ornek 0: tahmin 0, gercek 0, olasiliklar 0.6381 0.2347 0.0954 0.0318, kayip 0.4493
+'= ornek 1: tahmin 1, gercek 1, olasiliklar 0.1005 0.7427 0.0823 0.0745, kayip 0.2974
+'= ornek 2: tahmin 0, gercek 3, olasiliklar 0.2887 0.2612 0.2363 0.2138, kayip 1.5425
+'= ortalama kayip: 0.7631
+'= dogruluk: 0.6667 (2 / 3)
+'= sgd adimi: 0.9500 -1.9000 0.4750
+'= klip sonrasi norm: 0.5000
+INCLUDE "include/modules/uxtensor.uxmh"
+INCLUDE "include/modules/uxaimath.uxmh"
+
+' F64 değeri 4 ondalıklı metne çevirir (negatif sayıları da işler)
+FUNCTION F4(v AS F64) AS STRING
+    DIM isaret AS STRING = ""
+    DIM x AS F64 = v
+    IF x < 0 THEN
+        isaret = "-"
+        x = -x
+    END IF
+    DIM t AS I64 = INT(x * 10000 + 0.5)
+    DIM kesir AS STRING = STR(t MOD 10000)
+    DO WHILE LEN(kesir) < 4
+        kesir = "0" + kesir
+    LOOP
+    IF t = 0 THEN isaret = ""
+    RETURN isaret + STR(t \ 10000) + "." + kesir
+END FUNCTION
+
+MAIN
+    DIM satirlar AS I32 = 3
+    DIM sinif AS I32 = 4
+    DIM gercek(2) AS I32
+    DIM logit AS U64 = uxtensor.Create2D(3, 4)
+    DIM satirL AS U64
+    DIM satirO AS U64
+    DIM r AS I32
+    DIM c AS I32
+    DIM x AS F64
+    DIM a AS F64
+    DIM b AS F64
+    DIM g AS F64
+    DIM w AS F64
+    DIM sl AS STRING
+    DIM kayipToplam AS F64 = 0
+    DIM dogru AS I32 = 0
+    DIM tahmin AS I64
+    DIM kayip AS F64
+    DIM p AS F64
+    DIM satir AS STRING
+    DIM kayipMetni AS STRING
+    DIM girdiP AS U64
+    DIM cikiP AS U64
+    DIM parametre AS U64 = uxtensor.Create1D(3)
+    DIM egim AS U64 = uxtensor.Create1D(3)
+    DIM norm AS F64
+    DIM p1 AS F64
+    DIM p2 AS F64
+    DIM p3 AS F64
+
+    ' 1) etkinleştirme (aktivasyon) işlevleri tablosu
+    PRINT "aktivasyonlar (x: sigmoid relu gelu swish)"
+    FOR x = -2 TO 2
+        a = uxaimath.Sigmoid(x)
+        b = uxaimath.ReLU(x)
+        g = uxaimath.GELU(x)
+        w = uxaimath.Swish(x)
+        PRINT CINT(x); ": "; F4(a); " "; F4(b); " "; F4(g); " "; F4(w)
+    NEXT
+
+    ' 2) 3 örnek x 4 sınıf logit tablosu ve gerçek sınıflar
+    uxtensor.Set2D(logit, 0, 0, 2.0): uxtensor.Set2D(logit, 0, 1, 1.0): uxtensor.Set2D(logit, 0, 2, 0.1): uxtensor.Set2D(logit, 0, 3, -1.0)
+    uxtensor.Set2D(logit, 1, 0, 0.5): uxtensor.Set2D(logit, 1, 1, 2.5): uxtensor.Set2D(logit, 1, 2, 0.3): uxtensor.Set2D(logit, 1, 3, 0.2)
+    uxtensor.Set2D(logit, 2, 0, 1.2): uxtensor.Set2D(logit, 2, 1, 1.1): uxtensor.Set2D(logit, 2, 2, 1.0): uxtensor.Set2D(logit, 2, 3, 0.9)
+    gercek(0) = 0: gercek(1) = 1: gercek(2) = 3
+
+    FOR r = 0 TO satirlar - 1
+        ' her satır kendi (kopya) tensörüne ayrılır: işaretçiye sayı eklemek (taban + ofset) yalnız x64'te çalışır (G-DIS-9)
+        satirL = uxtensor.SliceAxis0(logit, r, 1)
+        satirO = uxtensor.Create1D(sinif)
+        girdiP = uxtensor.DataPtr(satirL)
+        cikiP = uxtensor.DataPtr(satirO)
+        uxaimath.SoftmaxPtr(girdiP, cikiP, sinif)
+        tahmin = uxaimath.ArgMax(cikiP, sinif)
+        ' gerçek sınıfa verilen olasılığın -ln'si çapraz entropidir (tek-sıcak etiket)
+        p = uxtensor.GetFlat(satirO, gercek(r))
+        kayip = -LOG(p)
+        kayipToplam += kayip
+        IF tahmin = gercek(r) THEN dogru += 1
+        satir = ""
+        FOR c = 0 TO sinif - 1
+            p = uxtensor.GetFlat(satirO, c)
+            IF c > 0 THEN satir = satir + " "
+            satir = satir + F4(p)
+        NEXT
+        uxtensor.Free(satirO)
+        uxtensor.Free(satirL)
+        kayipMetni = F4(kayip)
+        PRINT "ornek "; r; ": tahmin "; tahmin; ", gercek "; gercek(r); ", olasiliklar "; satir; ", kayip "; kayipMetni
+    NEXT
+    sl = F4(kayipToplam / satirlar)
+    PRINT "ortalama kayip: "; sl
+    sl = F4(dogru / satirlar)
+    PRINT "dogruluk: "; sl; " ("; dogru; " / "; satirlar; ")"
+
+    ' 3) tek SGD adımı: parametre = parametre - öğrenme oranı * eğim, sonra eğim normuna göre kırpma
+    uxtensor.SetFlat(parametre, 0, 1.0): uxtensor.SetFlat(parametre, 1, -2.0): uxtensor.SetFlat(parametre, 2, 0.5)
+    uxtensor.SetFlat(egim, 0, 0.1): uxtensor.SetFlat(egim, 1, -0.2): uxtensor.SetFlat(egim, 2, 0.05)
+    uxaimath.SGDUpdate(uxtensor.DataPtr(parametre), uxtensor.DataPtr(egim), 3, 0.5)
+    p1 = uxtensor.GetFlat(parametre, 0)
+    p2 = uxtensor.GetFlat(parametre, 1)
+    p3 = uxtensor.GetFlat(parametre, 2)
+    PRINT "sgd adimi: "; F4(p1); " "; F4(p2); " "; F4(p3)
+    ' norm 0.5'ten büyükse vektör, yönü korunarak 0.5 uzunluğuna kırpılır
+    uxaimath.ClipNorm(uxtensor.DataPtr(parametre), 3, 0.5)
+    norm = uxtensor.Norm2(parametre)
+    PRINT "klip sonrasi norm: "; F4(norm)
+
+    uxtensor.Free(egim)
+    uxtensor.Free(parametre)
+    uxtensor.Free(logit)
+END MAIN

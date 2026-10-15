@@ -1,0 +1,121 @@
+' KONU: Üst düzey: CSV dosyasından ikili sınıflandırma modeli eğitmek (uxfs + uxsystem + uxnn3)
+' KOMUTLAR: INCLUDE uxsystem.TempDirectory uxfs.WriteAllText uxfs.DeleteFile uxnn3.LoadCSV uxnn3.Standardize uxnn3.SplitTrain uxnn3.SplitTest uxnn3.ModelCreate uxnn3.AddDense uxnn3.TrainDataset uxnn3.EvalBinaryAccuracy uxnn3.Save uxnn3.Load
+' ACIKLAMA: Tam bir makine öğrenmesi hattı: program önce -1..1 aralığında 21x21 noktalık bir ızgarayı, "noktanın merkeze uzaklığı 0.707'den küçükse etiket 1" kuralıyla etiketleyip geçici klasöre CSV olarak yazar (uxsystem + uxfs), uxnn3 dosyayı veri kümesi olarak yükler, her sütunu ortalaması 0 ve standart sapması 1 olacak biçimde ölçekler (Standardize), %80 eğitim / %20 sınama olarak böler, 2 girdili, 12 nöronlu tanh gizli katmanlı ve 1 çıktılı sigmoid katmanlı bir ağı momentumlu SGD ile 400 tur eğitir, sınama kümesinde doğruluğu ölçer, modeli dosyaya kaydedip geri yükler ve aynı doğruluğu bulur. Dikkat: burada ölçekleme bölmeden önce yapılmıştır, bu sınama kümesinin istatistiğinin eğitime sızması demektir; gerçek projede ölçekleyici yalnız eğitim kümesine uydurulur (uxdataset.ScalerFitStandard). Eğitimin sayıları DLL'in hesabıdır, bağımsız olarak yeniden hesaplanamaz; örnek, veri hattının yapısını (satır sayıları, bölme, kaydet/yükle tutarlılığı) ve eğitimle doğruluğun yükseldiğini denetler. Eğitim sonrası sınama doğruluğu ızgara sınırındaki 4 noktayı yanlış bilir. Tekrarlanabilirlik uyarısı: Init ve TrainDataset'e tohum verilse bile uxnn3, aynı işlem içinde ikinci kez eğitilen aynı yapılandırmada farklı sonuç verir (gizli genel rastgele durum, G-KUT-17); aşağıdaki sayılar programın yeni bir işlemde ilk eğitimi içindir.
+'= veri: 441 nokta, iceride 149, disarida 292
+'= egitim kumesi: 353 satir, sinama kumesi: 88 satir
+'= egitim oncesi sinama dogrulugu: %46.59
+'= egitim sonrasi: egitim %99.72, sinama %95.45
+'= egitim dogrulugu artti: EVET
+'= kaydet/yukle tutarli: EVET
+INCLUDE "include/modules/uxsystem.uxmh"
+INCLUDE "include/modules/uxfs.uxmh"
+INCLUDE "include/modules/uxnn3.uxmh"
+
+' 0..1 oranını yüzde olarak 2 ondalıklı metne çevirir
+FUNCTION Yuzde(oran AS F64) AS STRING
+    DIM t AS I64 = INT(oran * 10000 + 0.5)
+    DIM kesir AS STRING = STR(t MOD 100)
+    IF LEN(kesir) < 2 THEN kesir = "0" + kesir
+    RETURN STR(t \ 100) + "." + kesir
+END FUNCTION
+
+MAIN
+    DIM klasor AS STRING
+    DIM csvYolu AS STRING
+    DIM modelYolu AS STRING
+    DIM csv AS STRING = "x,y,etiket" + CHR(10)
+    DIM i AS I32
+    DIM j AS I32
+    DIM etiket AS I32
+    DIM iceride AS I32 = 0
+    DIM rc AS I32
+    DIM satir AS I32
+    DIM egitimSatir AS I32
+    DIM sinamaSatir AS I32
+    DIM ds AS U64
+    DIM egitim AS U64
+    DIM sinama AS U64
+    DIM model AS U64
+    DIM yuklenen AS U64
+    DIM once AS F64
+    DIM sonraSinama AS F64
+    DIM sonraEgitim AS F64
+    DIM yuklenenDogruluk AS F64
+    DIM kayip AS F64
+    DIM s1 AS STRING
+    DIM s2 AS STRING
+
+    klasor = uxsystem.TempDirectory()
+    csvYolu = klasor + "uxb_kilavuz_daire.csv"
+    modelYolu = klasor + "uxb_kilavuz_daire_model.bin"
+
+    ' 1) veriyi üret ve CSV olarak yaz (tam sayılardan türetilen onda birler: her motorda aynı metin)
+    FOR i = -10 TO 10
+        FOR j = -10 TO 10
+            etiket = 0
+            IF i * i + j * j < 50 THEN
+                etiket = 1
+                iceride += 1
+            END IF
+            csv = csv + STR(i / 10.0) + "," + STR(j / 10.0) + "," + STR(etiket) + CHR(10)
+        NEXT
+    NEXT
+    rc = uxfs.WriteAllText(csvYolu, csv)
+    ASSERT rc = 1, "CSV yazilamadi"
+
+    ' 2) yükle, ölçekle, böl
+    ds = uxnn3.LoadCSV(csvYolu, 2, 1, 1)
+    ASSERT ds <> 0, "CSV yuklenemedi"
+    satir = uxnn3.Rows(ds)
+    PRINT "veri: "; satir; " nokta, iceride "; iceride; ", disarida "; satir - iceride
+    rc = uxnn3.Standardize(ds)
+    egitim = uxnn3.SplitTrain(ds, 0.8, 42)
+    sinama = uxnn3.SplitTest(ds, 0.8, 42)
+    egitimSatir = uxnn3.Rows(egitim)
+    sinamaSatir = uxnn3.Rows(sinama)
+    PRINT "egitim kumesi: "; egitimSatir; " satir, sinama kumesi: "; sinamaSatir; " satir"
+
+    ' 3) modeli kur: 2 -> 12 (tanh) -> 1 (sigmoid)
+    model = uxnn3.ModelCreate(2)
+    rc = uxnn3.AddDense(model, 12, uxnn3.ACT_TANH)
+    rc = uxnn3.AddDense(model, 1, uxnn3.ACT_SIGMOID)
+    rc = uxnn3.Init(model, 7, 1.0)
+    rc = uxnn3.SetOptimizer(model, uxnn3.OPT_MOMENTUM, 0.02, 0.9)
+
+    ' 4) eğitimden önce ve sonra ölç
+    once = uxnn3.EvalBinaryAccuracy(model, sinama, 0.5)
+    s1 = Yuzde(once)
+    PRINT "egitim oncesi sinama dogrulugu: %"; s1
+    kayip = uxnn3.TrainDataset(model, egitim, 400, 16, 1, 1)
+    sonraSinama = uxnn3.EvalBinaryAccuracy(model, sinama, 0.5)
+    sonraEgitim = uxnn3.EvalBinaryAccuracy(model, egitim, 0.5)
+    s1 = Yuzde(sonraEgitim)
+    s2 = Yuzde(sonraSinama)
+    PRINT "egitim sonrasi: egitim %"; s1; ", sinama %"; s2
+    IF sonraSinama > once THEN
+        PRINT "egitim dogrulugu artti: EVET"
+    ELSE
+        PRINT "egitim dogrulugu artti: HAYIR"
+    END IF
+
+    ' 5) kaydet, yükle, aynı doğruluğu bul
+    rc = uxnn3.Save(model, modelYolu)
+    ASSERT rc = 1, "model kaydedilemedi"
+    yuklenen = uxnn3.Load(modelYolu)
+    ASSERT yuklenen <> 0, "model yuklenemedi"
+    yuklenenDogruluk = uxnn3.EvalBinaryAccuracy(yuklenen, sinama, 0.5)
+    IF yuklenenDogruluk = sonraSinama THEN
+        PRINT "kaydet/yukle tutarli: EVET"
+    ELSE
+        PRINT "kaydet/yukle tutarli: HAYIR"
+    END IF
+
+    ' 6) temizlik
+    uxnn3.ModelFree(yuklenen)
+    uxnn3.ModelFree(model)
+    uxnn3.DatasetFree(sinama)
+    uxnn3.DatasetFree(egitim)
+    uxnn3.DatasetFree(ds)
+    rc = uxfs.DeleteFile(modelYolu)
+    rc = uxfs.DeleteFile(csvYolu)
+END MAIN

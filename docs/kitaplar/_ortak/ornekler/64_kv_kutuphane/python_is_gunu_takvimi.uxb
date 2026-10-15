@@ -1,0 +1,78 @@
+' KONU: Üst düzey: uxpython ile Python modülünü çağırmak (iş günü takvimi) ve sonucu uxjson ile okumak
+' KOMUTLAR: INCLUDE PythonOpen PythonCallModule PythonString PythonInt PythonJson PythonError PythonRelease PythonClose uxjson.Parse uxjson.ObjectGet
+' ACIKLAMA: uXBasic'te takvim işlevi yoktur (haftanın günü, hafta sonu, ayın gün sayısı). Bu iş Python standart kütüphanesindeki datetime ve calendar modüllerine bırakılır: küçük bir Python modülü (py_yardimci/takvim_yardimcisi.py) yazılır, uxpython onu modulePath ile bulur ve uXBasic işlevleri çağırır gibi çağırır. Bağımsız değişkenler ve anahtar sözcüklü bağımsız değişkenler JSON metni olarak verilir; dönüş değeri PythonString, PythonInt ya da PythonJson ile alınır. Python hatası çağrıyı 0 tutamacıyla geri çevirir ve sınıf adıyla birlikte PythonError'dan okunur. uxpython kendi Python'unu getirmez: makinedeki bir Python'u yükler (PythonRuntimeVersion ile sorulur), bu yüzden örnek yalnız sürümden bağımsız standart kütüphane çağrılarına dayanır. PythonInt, int64'e sığmayan büyük sayılarda sessizce -1 verir (G-KUT-13); büyük sayıyı PythonString ile alın. Dosya yolları çalışma klasörüne göre çözülür, bu yüzden program proje kökünden çalıştırılır.
+' CALISMA: kok
+'= 15 is gunu sonra: 2026-10-30
+'= 10 is gunu once: 2026-09-24
+'= ekim 2026 is gunu sayisi: 21
+'= subat 2028: 29 gun, ilk gun haftanin 1. gunu (0 = pazartesi)
+'= gecersiz tarih reddedildi: ValueError
+'= 25 faktoriyel: 15511210043330985984000000
+INCLUDE "include/modules/uxpython.uxmh"
+INCLUDE "include/modules/uxjson.uxmh"
+
+' Python işlevini çağırır; hata varsa 0 tutamacı döner
+FUNCTION Cagir(oturum AS U64, islev AS STRING, argumanlar AS STRING) AS U64
+    RETURN PythonCallModule(oturum, "takvim_yardimcisi", islev, argumanlar, "{}")
+END FUNCTION
+
+MAIN
+    DIM s AS U64
+    DIM r AS U64
+    DIM ok AS I32
+    DIM metin AS STRING
+    DIM adet AS I64
+    DIM belge AS U64
+    DIM kok AS U64
+    DIM gun AS I64
+    DIM ilk AS I64
+    DIM tatiller AS STRING = "[""2026-10-29""]"
+
+    s = PythonOpen("", "", "docs/kitaplar/_ortak/ornekler/64_kv_kutuphane/py_yardimci", 0)
+    ASSERT s <> 0, "Python oturumu acilamadi"
+    ASSERT PythonReady(s) = 1, "Python hazir degil"
+
+    ' 8 Ekim 2026 perşembeden 15 iş günü sonrası; 29 Ekim resmî tatil olduğu için atlanır
+    r = Cagir(s, "is_gunu_ekle", "[""2026-10-08"", 15, " + tatiller + "]")
+    metin = PythonString(s, r)
+    PRINT "15 is gunu sonra: "; metin
+    ok = PythonRelease(s, r)
+
+    ' eksi sayı geriye gider
+    r = Cagir(s, "is_gunu_ekle", "[""2026-10-08"", -10, []]")
+    metin = PythonString(s, r)
+    PRINT "10 is gunu once: "; metin
+    ok = PythonRelease(s, r)
+
+    r = Cagir(s, "is_gunu_say", "[""2026-10-01"", ""2026-10-31"", " + tatiller + "]")
+    adet = PythonInt(s, r)
+    PRINT "ekim 2026 is gunu sayisi: "; adet
+    ok = PythonRelease(s, r)
+
+    ' sözlük döndüren işlev: PythonJson metin verir, uxjson ile alanlar okunur
+    r = Cagir(s, "ay_ozeti", "[2028, 2]")
+    metin = PythonJson(s, r)
+    belge = uxjson.Parse(metin)
+    ASSERT belge <> 0, "sonuc JSON degil"
+    kok = uxjson.Root(belge)
+    gun = uxjson.GetI64(uxjson.ObjectGet(kok, "gun"))
+    ilk = uxjson.GetI64(uxjson.ObjectGet(kok, "ilk_haftaici"))
+    PRINT "subat 2028: "; gun; " gun, ilk gun haftanin "; ilk; ". gunu (0 = pazartesi)"
+    uxjson.Free(belge)
+    ok = PythonRelease(s, r)
+
+    ' Python hatası: geçersiz tarih ValueError ile reddedilir
+    r = Cagir(s, "is_gunu_ekle", "[""2026-13-45"", 1, []]")
+    metin = PythonError(s)
+    IF r = 0 THEN
+        IF INSTR(metin, "ValueError") > 0 THEN PRINT "gecersiz tarih reddedildi: ValueError"
+    END IF
+
+    ' standart kütüphane işlevi doğrudan: büyük sayı metin olarak alınır
+    r = PythonCallModule(s, "math", "factorial", "[25]", "{}")
+    metin = PythonString(s, r)
+    PRINT "25 faktoriyel: "; metin
+    ok = PythonRelease(s, r)
+
+    ok = PythonClose(s)
+END MAIN

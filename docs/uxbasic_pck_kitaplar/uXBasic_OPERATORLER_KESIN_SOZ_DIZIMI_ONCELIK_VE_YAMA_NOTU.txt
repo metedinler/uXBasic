@@ -1,0 +1,307 @@
+uXBasic Operatör Gerçekliği, Öncelik Tablosu ve Kesin Yama Notu
+==================================================================
+
+Kaynak kabulü
+-------------
+Bu not src(30.05_5).zip içindeki son kaynak ağacı esas alınarak yazılmıştır. İnceleme özellikle şu dosyalar üzerinden yapılmıştır:
+
+- src/parser/lexer/lexer_readers.fbs
+- src/parser/parser/parser_expr.fbs
+- src/parser/parser/parser_adim08_operator_contract.fbs
+- src/semantic/mir.fbs
+- src/semantic/mir_lower_stmt.fbs
+- src/semantic/mir_lower_stmt_core_split.fbs
+- src/semantic/mir_model.fbs
+- src/mir/mir_registry.fbs
+- src/surface/uxb_surface_layer_bridge.fbs
+- src/backend/common/backend_emit_policy.fbs
+
+Kısa hüküm
+----------
+Operatör yüzeyinde üç kesin hata / tutarsızlık vardır:
+
+1. `==` parser ve semantic tarafında var gibi kabul edilmiş, fakat lexer `==` operatörünü tek token olarak üretmiyor. Bu yüzden `a == b` kaynakta güvenilir değildir. Düzeltme: lexer iki karakterli OP listesine `==` eklenmelidir.
+
+2. `parser_adim08_operator_contract.fbs` içinde `\` ve `\=` yazımları kullanılmış. FreeBASIC stringlerinde ters eğik çizgi kaçış karakteri değildir; bu nedenle `"\\"` iki karakterli metindir ve gerçek `\` operatörünü temsil etmez. Düzeltme: sözleşme dosyasında gerçek kaynak operatörü için `"\"` ve `"\="` kullanılmalıdır.
+
+3. `^` ve `^=` bazı katmanlarda üs alma, bazı katmanlarda XOR gibi yorumlanıyor. Parser `^` operatörünü bit düzeyi XOR katmanında okuyor; semantic tarafında da `^` -> XOR görülüyor. Buna karşılık `mir_registry`, `surface_layer_bridge`, `backend_emit_policy` gibi yerlerde `^` -> POW ve `^=` -> POW_ASSIGN izleri var. Bu anlam boşluğu giderilmelidir.
+
+Kesin dil kararı
+----------------
+Bu paket şu kararı uygular:
+
+- `**` üs alma operatörüdür.
+- `**=` üs alarak atama operatörüdür.
+- `^` bit özel veya / XOR operatörüdür.
+- `^=` XOR ile atama operatörüdür.
+- `==` eşitlik karşılaştırmasıdır.
+- `=` atama operatörüdür. Karşılaştırmada yeni kodda `==` kullanılmalıdır.
+- `<>` ve `!=` eşit değil karşılaştırmasıdır.
+- `AND`, `OR`, `NOT`, `XOR`, `MOD`, `SHL`, `SHR`, `ROL`, `ROR` kelime operatörleridir.
+- `PIPE` komuttur; ifade içi boru operatörü `|>` sembolüdür.
+
+Neden `=` karşılaştırma değil?
+------------------------------
+uXBasic BASIC kökenli olduğu için `IF a = b THEN` yazımı istenebilir. Fakat mevcut parser mimarisi `=` işaretini assignment seviyesinde ele alıyor. Aynı sembolü hem atama hem eşitlik yapmak mümkündür ama bunun için statement/context ayrımı, lvalue denetimi ve IF/WHILE koşulu içi özel bağlam gerekir. Bu paket hızlı, güvenli ve net çözüm olarak `==` karşılaştırmasını resmi hale getirir. BASIC uyumluluğu istenirse sonraki yamada IF/WHILE koşulu içinde `=` karşılaştırma olarak yorumlanacak ayrı bir compatibility modu eklenebilir.
+
+Kaynak sözdizimi: ifade grameri
+-------------------------------
+Aşağıdaki gramer uXBasic operatörlerinin kanonik kaynak sözdizimidir. Bu gramer parser_expr.fbs içindeki gerçek işlem sırası temel alınarak yazılmıştır.
+
+```text
+expression      := assignment
+assignment      := ternary (assign_op assignment)?
+assign_op       := = | += | -= | *= | /= | \= | %= | &= | |= | ^= | <<= | >>= | **= | =+ | =-
+ternary         := pipe ( ? expression : ternary )?
+pipe            := logical_or ( |> logical_or )*
+logical_or      := logical_and ( (OR | ||) logical_and )*
+logical_and     := bit_or ( (AND | &&) bit_or )*
+bit_or          := bit_xor ( | bit_xor )*
+bit_xor         := bit_and ( (XOR | ^) bit_and )*
+bit_and         := relation ( & relation )*
+relation        := shift ( (== | <> | != | < | <= | > | >=) shift )*
+shift           := additive ( (<< | >> | SHL | SHR | ROL | ROR) additive )*
+additive        := multiplicative ( (+ | -) multiplicative )*
+multiplicative  := power ( (* | / | \ | % | MOD) power )*
+power           := unary ( ** power )?
+unary           := (++ | -- | + | - | @ | ! | ~ | NOT) unary | postfix
+postfix         := primary ( . member | (args) | ++ | -- )*
+primary         := NUMBER | STRING | IDENT | KEYWORD_REF | NEW Type(args) | (expression)
+```
+
+Çocuk / sol-sağ AST düzeni
+--------------------------
+Parser operatörleri AST içinde şu biçimde taşır:
+
+- Binary operatörler: `BINARY`, `left = sol ifade`, `right = sağ ifade`, `op = operatör`.
+- Unary operatörler: `UNARY`, `right = hedef ifade`, `op = operatör`.
+- Ön/son artırma azaltma: `INCDEC_EXPR`, `left = hedef`, `value = PRE veya POST`, `op = ++ veya --`.
+- Üçlü operatör: `TERNARY_EXPR`, `left = koşul`, `firstChild = doğru ifade`, `right = yanlış ifade`, `op = ?:`.
+- Boru operatörü: `BINARY`, `left = boruya verilen veri`, `right = hedef fonksiyon/ifade`, `op = |>`. MIR indirmede hedefin identifier-like olması beklenir.
+- Üye erişimi: `FIELD_EXPR`, `left = nesne/modül`, `value = üye adı`.
+- Çağrı: `CALL_EXPR`, çocuklar argümanlardır.
+
+Tam operatör listesi
+--------------------
+
+1. Aritmetik
+~~~~~~~~~~~~
+| Operatör | Arity | Yön | Öncelik | Sözdizimi | Görev |
+|---|---:|---|---:|---|---|
+| `+` | 2 | sol | 100 | `a + b` | Toplama. Sayısal tiplerde toplar; metin birleştirme kuralı ayrıca string katmanında ele alınabilir. |
+| `-` | 2 | sol | 100 | `a - b` | Çıkarma. |
+| `*` | 2 | sol | 110 | `a * b` | Çarpma. |
+| `/` | 2 | sol | 110 | `a / b` | Bölme. Float tercihinde kesirli sonuç verir. |
+| `\` | 2 | sol | 110 | `a \ b` | Tam sayı bölme / integer division. |
+| `%` | 2 | sol | 110 | `a % b` | Kalan alma. `MOD` ile aynı aile. |
+| `MOD` | 2 | sol | 110 | `a MOD b` | BASIC tarzı kalan alma. |
+| `**` | 2 | sağ | 130 | `a ** b` | Üs alma. Sağ birleşimlidir: `2 ** 3 ** 2`, `2 ** (3 ** 2)` gibi okunur. |
+
+Not: Bu yamada `^` üs alma değildir. Üs alma için `**` kullanılır.
+
+2. Karşılaştırma
+~~~~~~~~~~~~~~~~
+| Operatör | Arity | Yön | Öncelik | Sözdizimi | Görev |
+|---|---:|---|---:|---|---|
+| `==` | 2 | sol | 80 | `a == b` | Eşitlik karşılaştırması. Bu yama ile lexer tarafından tek OP olarak tanınır. |
+| `<>` | 2 | sol | 80 | `a <> b` | Eşit değil. BASIC tarzı yazım. |
+| `!=` | 2 | sol | 80 | `a != b` | Eşit değil. C tarzı yazım; semanticte `<>` ile aynı sonuca gider. |
+| `<` | 2 | sol | 80 | `a < b` | Küçüktür. |
+| `<=` | 2 | sol | 80 | `a <= b` | Küçük veya eşit. |
+| `>` | 2 | sol | 80 | `a > b` | Büyüktür. |
+| `>=` | 2 | sol | 80 | `a >= b` | Büyük veya eşit. |
+
+Not: Chained comparison desteklenmiş gibi yazılabilir ama matematiksel zincir anlamı garanti edilmez. `a < b AND b < c` yazmak daha doğrudur.
+
+3. Mantıksal operatörler
+~~~~~~~~~~~~~~~~~~~~~~~~
+| Operatör | Arity | Yön | Öncelik | Sözdizimi | Görev |
+|---|---:|---|---:|---|---|
+| `NOT` | 1 | sağ | 120 | `NOT koşul` | Mantıksal değil. Parserda unary seviyededir. |
+| `!` | 1 | sağ | 120 | `!koşul` | Mantıksal değil sembolü; AST op `LNOT` olarak işaretlenir. |
+| `AND` | 2 | sol | 40 | `a AND b` | Mantıksal VE. İki taraf doğruysa doğru. |
+| `&&` | 2 | sol | 40 | `a && b` | Mantıksal VE sembolü. |
+| `OR` | 2 | sol | 30 | `a OR b` | Mantıksal VEYA. |
+| `||` | 2 | sol | 30 | `a || b` | Mantıksal VEYA sembolü. |
+| `XOR` | 2 | sol | 60 | `a XOR b` | Özel veya. Sayısal bağlamda bit XOR; boolean bağlamda yalnız biri doğruysa doğru. |
+
+4. Bit işlemleri
+~~~~~~~~~~~~~~~~
+| Operatör | Arity | Yön | Öncelik | Sözdizimi | Görev |
+|---|---:|---|---:|---|---|
+| `~` | 1 | sağ | 120 | `~a` | Bit tersleme. Unary AST op `NOT` olarak işaretlenir. |
+| `&` | 2 | sol | 70 | `a & b` | Bit düzeyi AND. |
+| `^` | 2 | sol | 60 | `a ^ b` | Bit düzeyi XOR. Bu yamada POW değildir. |
+| `|` | 2 | sol | 50 | `a | b` | Bit düzeyi OR. |
+| `SHL` | 2 | sol | 90 | `a SHL n` | Sola bit kaydırma. |
+| `SHR` | 2 | sol | 90 | `a SHR n` | Sağa bit kaydırma. |
+| `<<` | 2 | sol | 90 | `a << n` | Sola bit kaydırma sembolü. |
+| `>>` | 2 | sol | 90 | `a >> n` | Sağa bit kaydırma sembolü. |
+| `ROL` | 2 | sol | 90 | `a ROL n` | Sola döndürme. |
+| `ROR` | 2 | sol | 90 | `a ROR n` | Sağa döndürme. |
+
+5. Atama ve birleşik atama
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+| Operatör | Arity | Yön | Öncelik | Sözdizimi | Görev |
+|---|---:|---|---:|---|---|
+| `=` | 2 | sağ | 10 | `a = b` | Atama. |
+| `+=` | 2 | sağ | 10 | `a += b` | `a = a + b`. |
+| `-=` | 2 | sağ | 10 | `a -= b` | `a = a - b`. |
+| `*=` | 2 | sağ | 10 | `a *= b` | `a = a * b`. |
+| `/=` | 2 | sağ | 10 | `a /= b` | `a = a / b`. |
+| `\=` | 2 | sağ | 10 | `a \= b` | `a = a \ b`. |
+| `%=` | 2 | sağ | 10 | `a %= b` | `a = a % b`. |
+| `&=` | 2 | sağ | 10 | `a &= b` | `a = a & b`. |
+| `|=` | 2 | sağ | 10 | `a |= b` | `a = a | b`. |
+| `^=` | 2 | sağ | 10 | `a ^= b` | `a = a XOR b`. |
+| `<<=` | 2 | sağ | 10 | `a <<= b` | `a = a << b`. |
+| `>>=` | 2 | sağ | 10 | `a >>= b` | `a = a >> b`. |
+| `**=` | 2 | sağ | 10 | `a **= b` | `a = a ** b`. Bu yama ile eklenir. |
+| `=+` | 2 | sağ | 10 | `a =+ b` | Uyumluluk biçimi; `a = +b` anlamına indirilmelidir. |
+| `=-` | 2 | sağ | 10 | `a =- b` | Uyumluluk biçimi; `a = -b` anlamına indirilir. |
+
+6. Artırma / azaltma
+~~~~~~~~~~~~~~~~~~~~
+| Operatör | Arity | Yön | Öncelik | Sözdizimi | Görev |
+|---|---:|---|---:|---|---|
+| `++` prefix | 1 | sağ | 120 | `++a` | Ön artırma; değer olarak yeni sonucu verir. |
+| `--` prefix | 1 | sağ | 120 | `--a` | Ön azaltma; değer olarak yeni sonucu verir. |
+| `++` postfix | 1 | sol | 140 | `a++` | Son artırma; değer olarak eski sonucu verir. |
+| `--` postfix | 1 | sol | 140 | `a--` | Son azaltma; değer olarak eski sonucu verir. |
+
+7. Tekli adres / işaret operatörleri
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+| Operatör | Arity | Yön | Öncelik | Sözdizimi | Görev |
+|---|---:|---|---:|---|---|
+| `+` prefix | 1 | sağ | 120 | `+a` | Pozitif işaret. |
+| `-` prefix | 1 | sağ | 120 | `-a` | Negatif işaret. |
+| `@` prefix | 1 | sağ | 120 | `@a` | Adres/başvuru alma ailesi; VARPTR/SADD/CODEPTR ile aynı düşük seviye düşünceye yakındır. |
+
+8. Üye, çağrı, indeks, ayırıcı ve boru
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+| İşaret | Arity | Yön | Öncelik | Sözdizimi | Görev |
+|---|---:|---|---:|---|---|
+| `.` | 2 | sol | 140 | `nesne.alan`, `modül.fonksiyon()` | Üye/alan/metot erişimi. |
+| `(` `)` | n | sol | 140 | `f(a,b)` veya `(a+b)` | Çağrı veya gruplama. |
+| `[` `]` | 2/n | sol | 140 | `dizi[i]` | Köşeli indeksleme yüzeyi. Mevcut parser desteği ayrıca kontrol edilmelidir. |
+| `,` | ayırıcı | - | - | `a,b,c` | Argüman veya liste ayırıcı. |
+| `:` | ayırıcı | - | - | `komut1: komut2` veya `?:` | Satır içi ayırıcı veya ternary ayırıcı. |
+| `;` | ayırıcı | - | - | `PRINT a; b` | PRINT yerleşimi / ayırma. |
+| `#` | işaret | - | - | `#1` | Dosya kanal numarası. |
+| `|>` | 2 | sol | 25 | `veri |> Fonksiyon` | Boru: sol değeri sağdaki işleme aktarır. |
+| `? :` | 3 | sağ | 20 | `koşul ? doğru : yanlış` | Üçlü koşul ifadesi. |
+
+Öncelik tablosu: büyük sayı daha güçlü bağlanır
+-----------------------------------------------
+| Sıra | Grup | Operatörler | Öncelik | Yön |
+|---:|---|---|---:|---|
+| 1 | Postfix / üye / çağrı | `.`, `()`, `[]`, postfix `++`, postfix `--` | 140 | sol |
+| 2 | Üs | `**` | 130 | sağ |
+| 3 | Prefix unary | prefix `++`, prefix `--`, `+`, `-`, `@`, `!`, `~`, `NOT` | 120 | sağ |
+| 4 | Çarpımsal | `*`, `/`, `\`, `%`, `MOD` | 110 | sol |
+| 5 | Toplamsal | `+`, `-` | 100 | sol |
+| 6 | Kaydırma / döndürme | `<<`, `>>`, `SHL`, `SHR`, `ROL`, `ROR` | 90 | sol |
+| 7 | Karşılaştırma | `==`, `<>`, `!=`, `<`, `<=`, `>`, `>=` | 80 | sol |
+| 8 | Bit AND | `&` | 70 | sol |
+| 9 | Bit XOR | `^`, `XOR` | 60 | sol |
+| 10 | Bit OR | `|` | 50 | sol |
+| 11 | Mantıksal AND | `AND`, `&&` | 40 | sol |
+| 12 | Mantıksal OR | `OR`, `||` | 30 | sol |
+| 13 | Boru | `|>` | 25 | sol |
+| 14 | Üçlü koşul | `? :` | 20 | sağ |
+| 15 | Atama | `=`, `+=`, `-=`, `*=`, `/=`, `\=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `**=`, `=+`, `=-` | 10 | sağ |
+
+Not: Mevcut parserda unary `-` power’dan önce çalışır. Yani `-2 ** 2` mevcut parser mantığıyla `(-2) ** 2` olarak okunur. Matematik derslerindeki `-(2 ** 2)` davranışı istenirse parser sırası ayrıca değiştirilmelidir. Bu paket mevcut parser davranışını belgeler; güçlendirme olarak parantez önerir: `-(2 ** 2)`.
+
+Örnekler
+--------
+```uxbasic
+MAIN
+    DIM a AS I32
+    DIM b AS I32
+    a = 10
+    b = 3
+
+    PRINT a + b
+    PRINT a - b
+    PRINT a * b
+    PRINT a / b
+    PRINT a \ b
+    PRINT a MOD b
+    PRINT a ** b
+
+    IF a == 10 AND b != 0 THEN
+        PRINT "karsilastirma tamam"
+    END IF
+
+    PRINT a & b
+    PRINT a | b
+    PRINT a ^ b
+    PRINT a SHL 2
+    PRINT a SHR 1
+
+    a += 5
+    b **= 2
+    PRINT a
+    PRINT b
+END MAIN
+```
+
+Copilot’a uygulanacak kesin yama özeti
+--------------------------------------
+1. `src/parser/lexer/lexer_readers.fbs`
+   - 3 karakterli OP listesine `**=` ekle.
+   - 2 karakterli OP listesine `==` ekle.
+
+2. `src/parser/parser/parser_expr.fbs`
+   - `IsAssignmentOp` içine `**=` ekle.
+
+3. `src/parser/parser/parser_adim08_operator_contract.fbs`
+   - Dosyayı paketteki sürümle değiştir. Bu sürüm tüm operatörleri, öncelikleri, yönleri, arity bilgilerini ve bilinen operatör kontrolünü kapsar.
+
+4. `src/semantic/mir_model.fbs`
+   - `Const MIR_OP_POW As String = "POW"` ekle.
+   - `Const MIR_OP_POW_ASSIGN As String = "POW_ASSIGN"` ekle.
+
+5. `src/semantic/mir.fbs`
+   - `MIRMapBinaryOpcode` içinde `**` -> `MIR_OP_POW` ekle.
+   - `^` -> `MIR_OP_XOR` olarak kalsın.
+
+6. `src/semantic/mir_lower_stmt.fbs` ve `src/semantic/mir_lower_stmt_core_split.fbs`
+   - birleşik atama Case listesine `**=` ekle.
+   - `Case "**=": compoundOp = MIR_OP_POW` ekle.
+
+7. `src/mir/mir_registry.fbs`
+   - yüzey listesine `**`, `**=` ekle.
+   - `Case "**": Return "MIR_POW"` ekle.
+   - `Case "**=": Return "MIR_POW_ASSIGN"` ekle.
+   - `Case "^": Return "MIR_XOR"` yap.
+   - `Case "^=": Return "MIR_XOR_ASSIGN"` yap.
+
+8. `src/surface/uxb_surface_layer_bridge.fbs`
+   - `^`/`^=` eşlemesini XOR’a çevir.
+   - `**`/`**=` eşlemesini POW’a bağla.
+
+9. `src/backend/common/backend_emit_policy.fbs`
+   - `**`/`POW` -> `POW` yap.
+   - `**=`/`POW_ASSIGN` -> `POW_ASSIGN` yap.
+   - `^`/`XOR` -> `XOR` yap.
+   - `^=` -> `XOR_ASSIGN` yap.
+   - `&` bit AND olarak yorumlanıyorsa `&` -> `AND`, `&=` -> `AND_ASSIGN` yap. String birleştirme ayrı STR_CONCAT hattında kalmalı; aynı sembol iki anlam taşımamalı.
+
+Test önerisi
+------------
+Aşağıdaki testler geçmeden operatör yaması tamam denmemeli:
+
+```text
+operator_001_equal_equal.uxb       -> IF a == b THEN
+operator_002_not_equal.uxb         -> <> ve !=
+operator_003_power.uxb             -> **
+operator_004_power_assign.uxb      -> **=
+operator_005_xor_symbol.uxb        -> ^
+operator_006_xor_assign.uxb        -> ^=
+operator_007_shift_assign.uxb      -> <<= ve >>=
+operator_008_precedence_math.uxb   -> 2 + 3 * 4 ** 2
+operator_009_ternary_pipe.uxb      -> ? : ve |>
+operator_010_unary_power.uxb       -> -2 ** 2 ve -(2 ** 2)
+```

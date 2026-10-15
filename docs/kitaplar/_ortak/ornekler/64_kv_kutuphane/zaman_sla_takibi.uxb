@@ -1,0 +1,120 @@
+' KONU: Orta düzey: uxdatetime ile destek bileti SLA (hizmet süresi) takibi
+' KOMUTLAR: INCLUDE uxdatetime.ParseUtc uxdatetime.AddMilliseconds uxdatetime.DifferenceMilliseconds uxdatetime.FormatUtc uxdatetime.MonotonicTicks uxdatetime.MonotonicFrequency
+' ACIKLAMA: Her biletin açılış zamanı ve SLA süresi (saat) vardır; son tarih = açılış + SLA, kalan süre = son tarih - şimdi. Zamanlar milisaniye cinsinden tamsayıdır, bu yüzden toplama ve çıkarma kayan nokta hatası üretmez. ParseUtc yalnız "YYYY-AA-GGTSS:DD:SSZ" biçimini (ve üç haneli ".mmm" kesrini) güvenle okur; geçersiz metinde -1 döner, bu yüzden ayrıştırmadan önce biçim elle denetlenir. Saat dilimi farkı ("+03:00"), 1-2 haneli kesir ve 1970 öncesi tarihler sessizce yanlış sonuç verir (G-KUT-7, G-KUT-8). "Şimdi" sabit alınmıştır; gerçek saat için UnixMillisecondsUtc kullanılır.
+'= simdi: 2026-10-08T12:00:00Z
+'= T-105 atlandi: gecersiz acilis tarihi
+'= T-102 son 2026-10-08T06:30:00Z  gecikti 5 sa 30 dk
+'= T-101 son 2026-10-08T12:15:00Z  kaldi 0 sa 15 dk
+'= T-103 son 2026-10-09T09:45:00Z  kaldi 21 sa 45 dk
+'= T-104 son 2026-10-09T14:00:00Z  kaldi 26 sa 0 dk
+'= gecikmis: 1, 6 saat icinde dolacak: 1
+'= olculen sure negatif degil: EVET
+INCLUDE "include/modules/uxdatetime.uxmh"
+
+CONST SAAT_MS = 3600000
+
+' "YYYY-AA-GGTSS:DD:SSZ" metnini milisaniyeye çevirir; biçim geçersizse -1 verir
+FUNCTION Ayristir(metin AS STRING) AS I64
+    IF LEN(metin) <> 20 THEN RETURN -1
+    IF MID(metin, 11, 1) <> "T" THEN RETURN -1
+    IF RIGHT(metin, 1) <> "Z" THEN RETURN -1
+    DIM v AS I64 = uxdatetime.ParseUtc(metin)
+    RETURN v
+END FUNCTION
+
+' Milisaniyeyi işaretsiz "SS sa DD dk" metnine çevirir
+FUNCTION SureYaz(ms AS I64) AS STRING
+    DIM m AS I64 = ms
+    IF m < 0 THEN m = -m
+    DIM dk AS I64 = m \ 60000
+    RETURN STR(dk \ 60) + " sa " + STR(dk MOD 60) + " dk"
+END FUNCTION
+
+' "2026-10-08T12:15:00.000Z" -> "2026-10-08T12:15:00Z"
+FUNCTION Kisa(ms AS I64) AS STRING
+    DIM f AS STRING = uxdatetime.FormatUtc(ms)
+    RETURN LEFT(f, 19) + "Z"
+END FUNCTION
+
+MAIN
+    DIM kod(4) AS STRING
+    DIM acilis(4) AS STRING
+    DIM sla(4) AS I32
+    DIM son(4) AS I64
+    DIM kalan(4) AS I64
+    DIM sira(4) AS I32
+    DIM n AS I32 = 0
+    DIM i AS I32
+    DIM j AS I32
+    DIM k AS I32
+    DIM gecici AS I32
+    DIM simdi AS I64
+    DIM t AS I64
+    DIM metin AS STRING = ""
+    DIM sure AS STRING = ""
+    DIM gecikmis AS I32 = 0
+    DIM yakin AS I32 = 0
+    DIM sayac AS I32
+    DIM toplam AS I64 = 0
+    DIM t0 AS I64
+    DIM t1 AS I64
+    DIM frek AS I64
+
+    kod(0) = "T-101": acilis(0) = "2026-10-08T08:15:00Z": sla(0) = 4
+    kod(1) = "T-102": acilis(1) = "2026-10-07T22:30:00Z": sla(1) = 8
+    kod(2) = "T-103": acilis(2) = "2026-10-08T09:45:00Z": sla(2) = 24
+    kod(3) = "T-104": acilis(3) = "2026-10-06T14:00:00Z": sla(3) = 72
+    kod(4) = "T-105": acilis(4) = "08.10.2026 10:00": sla(4) = 4
+
+    simdi = Ayristir("2026-10-08T12:00:00Z")
+    metin = Kisa(simdi)
+    PRINT "simdi: "; metin
+
+    FOR i = 0 TO 4
+        t = Ayristir(acilis(i))
+        IF t = -1 THEN
+            PRINT kod(i); " atlandi: gecersiz acilis tarihi"
+        ELSE
+            son(i) = uxdatetime.AddMilliseconds(t, sla(i) * SAAT_MS)
+            kalan(i) = uxdatetime.DifferenceMilliseconds(son(i), simdi)
+            sira(n) = i
+            n += 1
+        END IF
+    NEXT
+
+    ' kalan süreye göre küçükten büyüğe sırala (en acil önce)
+    FOR j = 0 TO n - 2
+        FOR k = 0 TO n - 2 - j
+            IF kalan(sira(k)) > kalan(sira(k + 1)) THEN
+                gecici = sira(k)
+                sira(k) = sira(k + 1)
+                sira(k + 1) = gecici
+            END IF
+        NEXT
+    NEXT
+
+    FOR k = 0 TO n - 1
+        i = sira(k)
+        metin = Kisa(son(i))
+        sure = SureYaz(kalan(i))
+        IF kalan(i) < 0 THEN
+            PRINT kod(i); " son "; metin; "  gecikti "; sure
+            gecikmis += 1
+        ELSE
+            PRINT kod(i); " son "; metin; "  kaldi "; sure
+            IF kalan(i) <= 6 * SAAT_MS THEN yakin += 1
+        END IF
+    NEXT
+    PRINT "gecikmis: "; gecikmis; ", 6 saat icinde dolacak: "; yakin
+
+    ' yüksek çözünürlüklü sayaçla süre ölçümü: değer makineye bağlıdır, bu yüzden yalnız tutarlılığı denetlenir
+    t0 = uxdatetime.MonotonicTicks()
+    FOR sayac = 1 TO 20000
+        toplam += sayac
+    NEXT
+    t1 = uxdatetime.MonotonicTicks()
+    frek = uxdatetime.MonotonicFrequency()
+    IF frek > 0 THEN
+        IF t1 >= t0 THEN PRINT "olculen sure negatif degil: EVET"
+    END IF
+END MAIN

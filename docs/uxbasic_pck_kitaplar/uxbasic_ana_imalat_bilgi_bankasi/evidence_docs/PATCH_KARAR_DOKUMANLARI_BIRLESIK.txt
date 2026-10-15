@@ -1,0 +1,1018 @@
+
+
+---
+# uxbasic_logic16_all_layers_patch/docs/UXB_LOGIC16_OPERATOR_ALL_LAYERS_KESIN_KARAR.txt
+
+# uXBasic TRUE/FALSE, BASIC eşitliği ve Logic16 operatörleri — tüm katman kesin karar
+
+Bu dosya src.zip içindeki son kaynak ağacı incelenerek yazıldı. Önceki operatör yamaları doğru yöndeydi, fakat tüm katmanlara aynı anda davranış tanımı verilmediği için eksik kaldı. Bu paket önceki operatör paketlerinin üstüne uygulanacak tamamlayıcı pakettir.
+
+## 1. Kaynakta görülen gerçek durum
+
+1. `TRUE` ve `FALSE` ön-işleyici içinde kullanılıyor, fakat normal lexer keyword tablosunda yok. Bu yüzden normal kaynakta `TRUE`/`FALSE` çoğu yerde IDENT gibi düşebilir. MIR ve x64 bazı yerlerde TRUE/FALSE özel durumunu biliyor, fakat bu güvenilir ve tek hatlı değildir.
+2. `OPERATOR` anahtar sözcüğü kaynakta vardır: lexer keyword table, class member parser, AST `CLASS_OPERATOR_DECL`, semantic ve x64 tarafında izleri bulunur. Eksik olan şey sınıf içi `OPERATOR` değil; ifade operatörlerinin tüm katmanlarda aynı sözleşmeyle davranmasıdır.
+3. AST tarafında her operatör için ayrı node kind yoktur. Mevcut tasarım `BINARY`, `UNARY`, `TERNARY_EXPR`, `INCDEC_EXPR`, `CLASS_OPERATOR_DECL` düğümleri ve bunların `op` alanı üzerine kuruludur. Bu kabul edilebilir; fakat AST interpreter, MIR lowering, MIR interpreter ve codegen aynı `op` sözlüğünü paylaşmalıdır.
+4. `==` lexer’da tek OP token olarak yoktu. Bu eklenmelidir.
+5. `=` için BASIC uyumu gerekir: statement başında lvalue ile `a = b` atamadır; expression/condition içinde `a = b` karşılaştırmadır. `==` de açık eşitlik karşılaştırmasıdır.
+6. `^` / `^=` anlamı kaynakta çakışmıştır: bazı katmanlarda POW, bazı katmanlarda XOR gibi geçiyor. Kesin karar: `**` ve `**=` üs alma ailesidir; `^` ve `^=` XOR ailesidir.
+7. `&` x64 capability içinde `STR_CONCAT` olarak eşlenmiş; bu uXBasic operatör sözleşmesiyle çakışır. Kesin karar: `&` bit AND operatörüdür. Metin birleştirme için `+` veya `STR_CONCAT` runtime/builtin kullanılır.
+8. Unary parser `UNARY` düğümünde operandı `right` alanına koyuyor; ASTMakeUnary ve AST interpreter ise `left` bekliyor. Bu katmanlar arası çocuk/operand tutarsızlığıdır. Çözüm: unary düğümünde `left` ve `right` aynı operandı gösterir; sonraki temizlikte role-child modeli eklenir.
+9. Ternary parser `left=condition`, `firstChild=trueExpr`, `right=falseExpr` kuruyor; AST interpreter ise child0/child1/child2 bekliyor. Çözüm: AST interpreter ve tüm tüketiciler bu kanonik üçlü düzeni okuyacak.
+
+## 2. Kesin boolean değeri
+
+uXBasic içinde boolean doğru değeri BASIC uyumlu olarak `-1`, yanlış değeri `0` kabul edilir. Bunun sebebi bit düzeyinde `NOT 0 = -1` ve eski BASIC mantığıyla uyumdur. JS/WASM çıktısında hedef dil gereği `true/false` veya `1/0` kullanılabilir, fakat uXBasic semantiğinde TRUE = -1, FALSE = 0 kabul edilir.
+
+```text
+TRUE  -> boolean literal, MIR LOAD_CONST -1
+FALSE -> boolean literal, MIR LOAD_CONST 0
+```
+
+## 3. Logic16 resmi operatör isimleri
+
+Alt çizgili yazımlar resmi değildir. Eğitim verisinde, kitapta ve testlerde alt çizgisiz kısa biçim kullanılacaktır.
+
+| Sıra | Resmi ad | İşlev | Formül |
+|---:|---|---|---|
+| 1 | FALSE | her zaman yanlış | `A AND NOT A` |
+| 2 | AND | A ve B doğruysa doğru | `A AND B` |
+| 3 | NIMP | A doğru, B yanlışsa doğru | `A AND NOT B` |
+| 4 | IDA | A değerini döndürür | `A` |
+| 5 | NCIMP | B doğru, A yanlışsa doğru | `NOT A AND B` |
+| 6 | IDB | B değerini döndürür | `B` |
+| 7 | XOR | A ve B farklıysa doğru | `A XOR B` |
+| 8 | OR | A veya B doğruysa doğru | `A OR B` |
+| 9 | NOR | OR tersidir | `NOT (A OR B)` |
+| 10 | XNOR | XOR tersidir | `NOT (A XOR B)` |
+| 11 | NOTB | B tersidir | `NOT B` |
+| 12 | CIMP | B ise A | `A OR NOT B` |
+| 13 | NOTA | A tersidir | `NOT A` |
+| 14 | IMP | A ise B | `NOT A OR B` |
+| 15 | NAND | AND tersidir | `NOT (A AND B)` |
+| 16 | TRUE | her zaman doğru | `A OR NOT A` |
+
+## 4. Kabul edilecek eş adlar
+
+Resmi adlar eğitim verisinde tek biçimli olmalı; fakat lexer/parser kullanıcı kolaylığı için bazı yaygın eş adları kabul edebilir.
+
+| Resmi | Kabul edilecek eş adlar |
+|---|---|
+| FALSE | ZERO |
+| TRUE | ONE |
+| XNOR | NXOR, EQV, EQA, IFF |
+| IDA | yalnız IDA |
+| IDB | yalnız IDB |
+| NOTA | yalnız NOTA |
+| NOTB | yalnız NOTB |
+
+`ID_A`, `ID_B`, `NOT_A`, `NOT_B` kitapta ve eğitim verisinde kullanılmayacak. İstenirse ayrı legacy-uyarı modunda kabul edilebilir; bu paketin resmi yüzeyinde yoktur.
+
+## 5. İşlem önceliği ve yön
+
+Yüksek sayı daha sıkı bağlanır. Çocuk/operand modeli aşağıda verilmiştir.
+
+| Öncelik | Aile | Operatörler | Yön |
+|---:|---|---|---|
+| 150 | Postfix/erişim | `.`, `()`, `[]`, `a++`, `a--` | soldan sağa |
+| 140 | Üs | `**` | sağdan sola |
+| 130 | Prefix unary | `++a`, `--a`, `+a`, `-a`, `@a`, `!a`, `~a`, `NOT a` | sağdan sola |
+| 120 | Çarpımsal | `*`, `/`, `\`, `%`, `MOD` | soldan sağa |
+| 110 | Toplamsal | `+`, `-` | soldan sağa |
+| 100 | Kaydırma/döndürme | `<<`, `>>`, `SHL`, `SHR`, `ROL`, `ROR` | soldan sağa |
+| 90 | Karşılaştırma | `=`, `==`, `<>`, `!=`, `<`, `<=`, `>`, `>=` | soldan sağa; zincir yasaklanabilir |
+| 80 | Bit AND | `&` | soldan sağa |
+| 70 | Bit XOR | `^` | soldan sağa |
+| 60 | Bit OR | `|` | soldan sağa |
+| 50 | Mantık AND ailesi | `AND`, `NAND`, `NIMP`, `NCIMP` | soldan sağa |
+| 45 | Mantık XOR/eşdeğerlik ailesi | `XOR`, `XNOR`, `NXOR`, `EQV`, `EQA`, `IFF` | soldan sağa |
+| 40 | Mantık OR/koşul ailesi | `OR`, `NOR`, `IMP`, `CIMP`, `IDA`, `IDB`, `NOTA`, `NOTB` | soldan sağa |
+| 30 | Boru | `|>` | soldan sağa |
+| 20 | Üçlü | `? :` | sağdan sola |
+| 10 | Atama | `=`, `+=`, `-=`, `*=`, `/=`, `\=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `**=`, `=+`, `=-` | sağdan sola, yalnız statement/lvalue bağlamı |
+
+Not: `=` hem atama hem karşılaştırma olabilir. Ayırım parser statement bağlamında yapılır:
+
+```text
+satır başı lvalue + =      -> ASSIGN_STMT
+IF/WHILE/ifadede a = b     -> BINARY op EQ
+```
+
+## 6. AST çocuk modeli
+
+| AST düğümü | Alanlar | Açıklama |
+|---|---|---|
+| `BOOLEAN` | `value=TRUE/FALSE` | TRUE/FALSE için doğrudan AST literal düğümü oluşturulur. |
+| `BINARY` | `left`, `right`, `op` | Tüm ikili operatörler için tek düğüm. `op` kanonik operatör adıdır. |
+| `UNARY` | `left`, `right`, `op` | Operand hem `left` hem `right` alanına yazılır; eski tüketiciler kırılmaz. |
+| `TERNARY_EXPR` | `left=condition`, `firstChild=trueExpr`, `right=falseExpr`, `op=?:` | AST interpreter, MIR lowering ve exporter bu modeli okuyacak. |
+| `INCDEC_EXPR` | `left=target`, `value=PRE/POST`, `op=++/--` | Ön/son artırma/azaltma. |
+| `CLASS_OPERATOR_DECL` | `op` | Sınıf içi OPERATOR overload bildirimi. |
+
+## 7. Tüm katmanlarda yapılacaklar
+
+### Lexer
+- `TRUE`, `FALSE`, Logic16 operatörleri ve eş adlar keyword olarak eklenecek.
+- `==` ve `**=` OP olarak eklenecek.
+- `ID_A` gibi alt çizgili biçimler resmi keyword yapılmayacak.
+
+### Parser expression
+- `TRUE`/`FALSE` görüldüğünde `BOOLEAN` AST düğümü üretilecek.
+- `=` relation seviyesine eklenecek; `==` de relation seviyesinde `=`/EQ olarak normalize edilecek.
+- Assignment expression içinden `=` çıkarılacak. Assignment statement parser tarafından yakalanacak. `+=`, `-=`, `*=`, `/=`, `\=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `**=`, `=+`, `=-` statement/lvalue bağlamında atama olacak.
+- Logic16 binary keyword operatörleri parse edilecek.
+- Unary node hem left hem right alanına operandı yazacak.
+- Ternary node tüketicilerle uyumlu hale getirilecek.
+
+### AST contract/exporter
+- `BOOLEAN`, `BINARY`, `UNARY`, `TERNARY_EXPR`, `INCDEC_EXPR`, `CLASS_OPERATOR_DECL` zaten var; ama route/coverage tablosuna Logic16 op adları eklenmeli.
+- JSON exporter `op` alanını kaybetmemeli.
+
+### Semantic/type
+- Logic16 operatörlerinin sonucu BOOLEAN kabul edilecek.
+- `AND/OR/XOR` hem integer bitwise hem boolean bağlamında çalışabilir; fakat Logic16 türevleri boolean sonuç üretir.
+- `TRUE/FALSE` sembol araması yapmadan literal kabul edilmeli.
+
+### MIR lowering
+- `TRUE -> LOAD_CONST -1`, `FALSE -> LOAD_CONST 0`.
+- `=` ve `==` -> `EQ`.
+- `**` -> `POW`; `**=` -> `POW_ASSIGN`.
+- `^` -> `XOR`; `^=` -> `XOR_ASSIGN`.
+- Logic16 için ya doğrudan MIR opcode eklenecek (`NAND`, `IMP`, ...) ya da lowering sırasında temel op dizisine indirgenecek. Bu paketin önerisi: önce opcode ekle, sonra backendlerde istenirse temel op dizisine indir.
+
+### MIR model/registry/signature/verifier
+- `MIR_OP_POW`, `MIR_OP_NAND`, `MIR_OP_NOR`, `MIR_OP_XNOR`, `MIR_OP_IMP`, `MIR_OP_CIMP`, `MIR_OP_NIMP`, `MIR_OP_NCIMP`, `MIR_OP_IDA`, `MIR_OP_IDB`, `MIR_OP_NOTA`, `MIR_OP_NOTB` eklenecek.
+- Signature: tüm Logic16 ikili op’lar 2 operand + result ister. `NOTA/NOTB/IDA/IDB` isim olarak iki operandlıdır; kullanılmayan operand yine sözleşmede taşınır.
+
+### AST interpreter
+- TRUE/FALSE doğrudan bool döndürür.
+- `BINARY` için Logic16 truth table uygulanır.
+- `UNARY` operandı `left` yoksa `right`tan alır.
+- `TERNARY_EXPR` için `left/firstChild/right` modeli okunur.
+
+### MIR interpreter/evaluator
+- MIR Logic16 opcode’ları çalıştırılır.
+- Boolean sonuç uXBasic semantiğinde -1/0 olmalıdır.
+- POW desteklenir.
+
+### JS codegen
+- `EQ -> ===`, `NE -> !==`, normal aritmetikler JS işleçlerine gider.
+- Logic16 için JS ifade şablonu kullanılabilir: `NAND(a,b)=!((a)&&(b))`, `IMP(a,b)=(!a)||b`.
+- TRUE/FALSE hedefte `true/false` yazılabilir, fakat uXBasic çıktı gerekirse `-1/0` olarak normalize edilir.
+
+### WAT/WASM codegen
+- Temel op’lar direkt i32 talimatlarıdır.
+- Logic16 op’lar WAT içinde kısa instruction dizisine indirgenir veya host import olarak çağrılır. İlk güvenli sürümde instruction dizisi tercih edilir.
+
+### x64 codegen
+- `&` STR_CONCAT olmaktan çıkar; bit AND olur.
+- `^` POW olmaktan çıkar; XOR olur.
+- POW yalnız `**` / `POW` opcode ile runtime helper’a gider.
+- Logic16 op’lar doğrudan CMP/SETcc/AND/OR/XOR/NOT dizilerine indirilebilir. İlk güvenli sürümde MIR lowering bunları temel op dizisine indirirse x64 ek yükü azalır.
+
+### Surface/backend/coverage/gate
+- Surface registry ve layer bridge Logic16 kelimelerini OPERATOR/EXPRESSION_OPERATOR olarak tanır.
+- ADIM25/26/27 gate Logic16 AST->MIR->backend route’larını bekler.
+- Testlerde placeholder yasaktır.
+
+
+
+---
+# uxbasic_logic16_all_layers_patch/docs/UXB_OPERATOR_LOGIC16_LAYER_MATRIX.txt
+
+# Operatör katman matrisi
+
+| Katman | Dosya/alan | Sorun | Yapılacak işlem |
+|---|---|---|---|
+| Lexer keyword | `src/parser/lexer/lexer_keyword_table.fbs` | TRUE/FALSE ve Logic16 yok | Keyword listesine TRUE/FALSE/NAND/NOR/XNOR/IMP/CIMP/NIMP/NCIMP/IDA/IDB/NOTA/NOTB/ZERO/ONE/NXOR/EQV/EQA/IFF ekle |
+| Lexer op reader | `src/parser/lexer/lexer_readers.fbs` | `==`, `**=` yok | ReadOperatorOrPunct içine `**=`, `==` ekle |
+| Parser op contract | `src/parser/parser/parser_adim08_operator_contract.fbs` | `\` yazımı ve öncelikler tutarsız | Tek kaynak öncelik tablosu ile değiştir |
+| Parser expr primary | `src/parser/parser/parser_expr.fbs` | TRUE/FALSE IDENT/KEYWORD_REF olabilir | TRUE/FALSE -> BOOLEAN node yap |
+| Parser relation | `parser_expr.fbs` | `=` relation değil | `=` ve `==` relation olarak parse edilecek |
+| Parser assignment | `parser_expr.fbs` | `=` expression assignment | `=` expression assignment listesinden çıkarılacak; statement registry atamayı yakalayacak |
+| Parser logic16 | `parser_expr.fbs` | türev mantık yok | ParseLogicAnd/ParseLogicXor/ParseLogicOr seviyelerine ekle |
+| AST | `ast*.fbs` | generic node var, op sözleşmesi eksik | BINARY/UNARY/TERNARY çocuk modeli kesinleştir; exporter op alanını yazsın |
+| Semantic | `semantic_pass_tail.fbs` | yeni op tipleri yok | Logic16 sonucu BOOLEAN, POW numeric olarak işaretlenecek |
+| MIR model | `semantic/mir_model.fbs` | POW/Logic16 const eksik | MIR_OP_POW ve Logic16 constları eklenecek |
+| MIR map | `semantic/mir.fbs` | map eksik/çakışmalı | `**->POW`, `^->XOR`, Logic16 -> opcode |
+| MIR lowering | `semantic/mir_lower_expr.fbs` | TRUE/FALSE ve logic16 eksik | literal/lowering eklenecek |
+| MIR evaluator | `semantic/mir_evaluator*.fbs` | Logic16 yok, POW eksik olabilir | truth table uygulanacak |
+| AST interpreter | `interpreter/ast/ast_interp_expr.fbs` | Logic16 yok; unary/ternary çocuk karışık | Binary truth table + unary/ternary kanonik okuma |
+| MIR interpreter | `interpreter/mir/mir_interp_arith.fbs` | Logic16 yok | MIR op çalıştırma ekle |
+| JS codegen | `codegen/js/js_expr_emit.fbs` | Logic16 yok | JS şablonları ekle |
+| WASM codegen | `codegen/wasm/wasm_instr_emit.fbs` | Logic16 yok | direkt diziler veya host-import kararı |
+| x64 codegen | `codegen/x64/mir_x64_capability.fbs` ve emitter | `&`/`^` hatalı | `&=AND`, `^=XOR`, `**=POW` düzelt |
+| Surface | `surface/uxb_surface_registry.fbs`, bridge | Logic16 görünmez | OPERATOR/EXPRESSION_OPERATOR olarak ekle |
+| Tests | `tests/operator_logic16_all_layers` | test yok | truth table, equality, AST/MIR/JS/WAT/x64 gate testleri ekle |
+
+
+---
+# uxbasic_logic16_true_false_patch/docs/UXB_TRUE_FALSE_LOGIC16_KESIN_KARAR.txt
+
+uXBasic TRUE/FALSE ve 16 Mantıksal Operatör Kesin Söz Dizimi
+=================================================================
+
+Bu belge, operatör yamasına ek kesin karardır. Önceki operatör paketinde `==`, `=`, `**`, `^`, `|>` ve işlem öncelikleri düzeltilmişti. Bu ek karar iki büyük eksikliği kapatır:
+
+1. `TRUE` ve `FALSE` dil anahtar sözcüğü ve boolean literal olmalıdır.
+2. AND, OR, NOT, XOR ailesinden üretilebilen 16 iki girdili doğruluk fonksiyonu dil yüzeyi, kitap, test verisi ve LLM eğitim verisinde açıkça yer almalıdır.
+
+Bu karar uXBasic'in BASIC kökenini korur. Eski BASIC belgelerinde `TRUE`, `FALSE`, `AND`, `OR`, `NOT`, `XOR`, `EQV`, `IMP` gibi mantık işleçleri görülebilir. Yapay zeka eğitiminde bu belgelerden veri alınacağı için bu terimler belirsiz bırakılmamalıdır.
+
+1. TRUE ve FALSE
+-----------------
+
+`TRUE` doğru değerdir. Sayısal karşılığı `1` kabul edilir.
+`FALSE` yanlış değerdir. Sayısal karşılığı `0` kabul edilir.
+
+Sözdizimi:
+
+    DIM aktif AS BOOLEAN
+    aktif = TRUE
+    IF aktif = TRUE THEN PRINT "aktif"
+    IF aktif THEN PRINT "aktif"
+    IF NOT aktif THEN PRINT "kapali"
+
+Lexer kararı:
+
+    TRUE  -> KEYWORD TRUE
+    FALSE -> KEYWORD FALSE
+
+Parser kararı:
+
+    TRUE  -> AST BOOLEAN value="TRUE"  op="1"
+    FALSE -> AST BOOLEAN value="FALSE" op="0"
+
+MIR kararı:
+
+    TRUE  -> MIR_CONST_BOOL 1 veya MIR_CONST_I32 1
+    FALSE -> MIR_CONST_BOOL 0 veya MIR_CONST_I32 0
+
+2. Eşitlik kararı
+-----------------
+
+BASIC uyumu için:
+
+    a = b          statement başında atama
+    IF a = b THEN  koşul/ifade içinde eşitlik karşılaştırması
+    IF a == b THEN açık eşitlik karşılaştırması
+
+Bu karar değişmez. `=` hem atama hem karşılaştırma olabilir; ayrım bağlamdan yapılır.
+
+3. 16 iki girdili doğruluk fonksiyonu
+-------------------------------------
+
+A ve B iki boolean girdi olsun. Girdi sırası tabloda şu şekildedir:
+
+    00, 01, 10, 11
+
+| No | Ad | Diğer adlar | Sonuç dizisi | Formül | Görev |
+|---:|---|---|---|---|---|
+| 0 | FALSE | ZERO | 0000 | A AND NOT A | Her zaman yanlış döndürür. |
+| 1 | AND |  | 0001 | A AND B | İkisi de doğruysa doğru. |
+| 2 | NIMP | A_ONLY, A_AND_NOT_B | 0010 | A AND NOT B | A doğru, B yanlışsa doğru. |
+| 3 | ID_A | A | 0011 | A | Sadece A'nın değerini döndürür. |
+| 4 | NCIMP | B_ONLY, NOT_A_AND_B | 0100 | NOT A AND B | B doğru, A yanlışsa doğru. |
+| 5 | ID_B | B | 0101 | B | Sadece B'nin değerini döndürür. |
+| 6 | XOR | NEQ | 0110 | A XOR B | Farklıysa doğru. |
+| 7 | OR |  | 0111 | A OR B | En az biri doğruysa doğru. |
+| 8 | NOR |  | 1000 | NOT (A OR B) | İkisi de yanlışsa doğru. |
+| 9 | XNOR | NXOR, EQV, EQA, IFF | 1001 | NOT (A XOR B) | Aynıysa doğru. |
+| 10 | NOT_B |  | 1010 | NOT B | B'nin tersini döndürür. |
+| 11 | CIMP | B_IMP_A | 1011 | A OR NOT B | B ise A. |
+| 12 | NOT_A |  | 1100 | NOT A | A'nın tersini döndürür. |
+| 13 | IMP | A_IMP_B | 1101 | NOT A OR B | A ise B. |
+| 14 | NAND |  | 1110 | NOT (A AND B) | İkisi de doğruysa yanlış. |
+| 15 | TRUE | ONE | 1111 | A OR NOT A | Her zaman doğru döndürür. |
+
+4. Kullanım biçimi
+------------------
+
+Temel kullanımlar:
+
+    IF A AND B THEN PRINT "ikisi de dogru"
+    IF A OR B THEN PRINT "en az biri dogru"
+    IF A XOR B THEN PRINT "farkli"
+    IF A NAND B THEN PRINT "ikisi birden dogru degil"
+    IF A NOR B THEN PRINT "ikisi de yanlis"
+    IF A XNOR B THEN PRINT "ayni"
+    IF A IMP B THEN PRINT "A ise B"
+    IF A EQV B THEN PRINT "denk"
+
+Kimlik ve sınır operatörleri eğitim, mantık tablosu ve dijital devre anlatımı için korunur:
+
+    sonuc = A ID_A B     ' sonuc A olur
+    sonuc = A ID_B B     ' sonuc B olur
+    sonuc = A NOT_A B    ' sonuc NOT A olur
+    sonuc = A NOT_B B    ' sonuc NOT B olur
+    sonuc = A TRUE B     ' sonuc TRUE olur
+    sonuc = A FALSE B    ' sonuc FALSE olur
+
+Not: `TRUE` ve `FALSE` tek başına boolean literal olarak da kullanılır. Parser bağlamı şudur:
+
+    TRUE          -> literal
+    A TRUE B      -> iki girdili her zaman doğru operatörü
+    FALSE         -> literal
+    A FALSE B     -> iki girdili her zaman yanlış operatörü
+
+5. İşlem önceliği
+-----------------
+
+Bu ek kararla önerilen kesin öncelik tablosu şöyledir:
+
+| Öncelik | Grup | Operatörler | Bağlanma |
+|---:|---|---|---|
+| 1 | Postfix/çağrı/üye | `.`, `()`, `[]`, `a++`, `a--` | soldan sağa |
+| 2 | Üs | `**` | sağdan sola |
+| 3 | Prefix unary | `++a`, `--a`, `+a`, `-a`, `@a`, `!a`, `~a`, `NOT a` | sağdan sola |
+| 4 | Çarpımsal | `*`, `/`, `\`, `%`, `MOD` | soldan sağa |
+| 5 | Toplamsal | `+`, `-` | soldan sağa |
+| 6 | Kaydırma/döndürme | `<<`, `>>`, `SHL`, `SHR`, `ROL`, `ROR` | soldan sağa |
+| 7 | Karşılaştırma | `=`, `==`, `<>`, `!=`, `<`, `<=`, `>`, `>=` | soldan sağa |
+| 8 | Bit AND | `&` | soldan sağa |
+| 9 | Bit XOR | `^` | soldan sağa |
+| 10 | Bit OR | `|` | soldan sağa |
+| 11 | Mantık AND ailesi | `AND`, `NAND`, `NIMP`, `NCIMP` | soldan sağa |
+| 12 | Mantık XOR/eşdeğerlik ailesi | `XOR`, `XNOR`, `NXOR`, `EQV`, `EQA`, `IFF` | soldan sağa |
+| 13 | Mantık OR/koşul ailesi | `OR`, `NOR`, `IMP`, `CIMP` | soldan sağa |
+| 14 | Kimlik/sınır ailesi | `ID_A`, `ID_B`, `NOT_A`, `NOT_B`, `TRUE`, `ONE`, `FALSE`, `ZERO` | soldan sağa |
+| 15 | Boru | `|>` | soldan sağa |
+| 16 | Üçlü koşul | `? :` | sağdan sola |
+| 17 | Atama | `=`, `+=`, `-=`, `*=`, `/=`, `\=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `**=`, `=+`, `=-` | sağdan sola |
+
+6. Boolean ve bitwise ayrımı
+----------------------------
+
+uXBasic'te iki ayrı düşünce vardır:
+
+- Boolean mantık: `TRUE`, `FALSE`, `AND`, `OR`, `NOT`, `XOR`, `NAND`, `IMP`, `EQV`.
+- Bit işlemleri: `&`, `|`, `^`, `~`, `<<`, `>>`, `SHL`, `SHR`, `ROL`, `ROR`.
+
+`AND`, `OR`, `XOR` BASIC kökeni nedeniyle integer üzerinde bit düzeyi davranabilir; fakat `BOOLEAN` tipli ifadede mantıksal davranış beklenir. Kitapta ve LLM eğitim verisinde şu kural yazılmalıdır:
+
+    BOOLEAN ile kullanılırsa mantık işlemi.
+    Tam sayı ile kullanılırsa bit işlemi.
+    Belirsizlik varsa bit işlemi için sembollü &, |, ^ kullan.
+    Mantık işlemi için TRUE/FALSE ve açık karşılaştırma kullan.
+
+7. Katmanlarda yapılacak zorunlu değişiklikler
+----------------------------------------------
+
+A. lexer_keyword_table.fbs
+
+- TRUE ve FALSE keyword olmalı.
+- 16 doğruluk fonksiyonu keyword olmalı.
+- Alias adları da keyword olmalı: ZERO, ONE, NXOR, EQV, EQA, IFF.
+
+B. parser_expr.fbs
+
+- TRUE/FALSE literal olarak AST BOOLEAN üretmeli.
+- Expression parser 16 mantık operatörünü tanımalı.
+- `=` expression içinde karşılaştırma olarak çalışmalı.
+- `a = b` statement bağlamında atama kalmalı.
+
+C. MIR
+
+- TRUE/FALSE sabitleri MIR sabitine inmeli.
+- 16 mantık işleci MIR opcode ya da canonical runtime op olarak haritalanmalı.
+- En azından şu canonical op adları olmalı:
+
+    MIR_BOOL_FALSE
+    MIR_BOOL_TRUE
+    MIR_AND
+    MIR_OR
+    MIR_XOR
+    MIR_NOT
+    MIR_NAND
+    MIR_NOR
+    MIR_XNOR
+    MIR_IMP
+    MIR_CIMP
+    MIR_NIMP
+    MIR_NCIMP
+    MIR_ID_A
+    MIR_ID_B
+    MIR_NOT_A
+    MIR_NOT_B
+
+D. Backend ve JS/WASM
+
+İlk sağlam çözüm: yeni mantık op'larını runtime/helper çağrısına indir.
+İkinci aşama: JS/WAT doğrudan ifade üreticisi ekle.
+
+8. Test zorunluluğu
+-------------------
+
+Aşağıdaki testler PASS olmadan yama tamam sayılmaz:
+
+    TRUE literal parse edilir.
+    FALSE literal parse edilir.
+    IF TRUE THEN çalışır.
+    IF FALSE THEN ELSE dalı çalışır.
+    IF A = B THEN eşitlik karşılaştırmasıdır.
+    IF A == B THEN eşitlik karşılaştırmasıdır.
+    16 doğruluk fonksiyonu 00,01,10,11 kombinasyonunda beklenen tabloyu üretir.
+    tokens.json içinde TRUE/FALSE KEYWORD olarak görünür.
+    AST içinde BOOLEAN node oluşur.
+    MIR içinde boolean sabit ve boolean op görünür.
+
+9. Kitap ve LLM eğitim notu
+---------------------------
+
+Kitaplara şu bölüm eklenmelidir:
+
+    TRUE/FALSE sabitleri
+    16 doğruluk fonksiyonu
+    doğruluk tablosu
+    işlem önceliği
+    boolean/bitwise ayrımı
+    BASIC uyumu: IF a = b THEN
+    modern açık eşitlik: IF a == b THEN
+
+LLM eğitim verisinde her mantık operatörü için şu örnek aileleri üretilmelidir:
+
+    operator_logic16_001_truth_table.uxb
+    operator_logic16_002_if_equal_basic.uxb
+    operator_logic16_003_digital_gate.uxb
+    operator_logic16_004_sensor_decision.uxb
+    operator_logic16_005_qbasic_translation.uxb
+
+
+---
+# uxbasic_operator_basic_equal_patch/docs/UXB_OPERATOR_ESITLIK_BASIC_UYUMLULUK_KESIN_KARAR.txt
+
+# uXBasic Operatör Kesin Söz Dizimi, Öncelik, Yön ve BASIC Eşitlik Uyumluluğu
+
+Bu belge, src(30.05_5) kaynak ağacındaki lexer/parser operatör gerçekliği üzerine hazırlanmış kesin düzeltme notudur.
+Amaç, uXBasic'te hem BASIC kökenli `IF a = b THEN` yazımını korumak hem de modern `a == b` karşılaştırmasını resmi hale getirmektir.
+
+Bu belge kitap, test ve yapay zeka eğitim verisi için kaynak kabul edilmelidir. Operatör konusunda boş anlam, belirsiz eşleme ve katman çakışması bırakılmamalıdır.
+
+-------------------------------------------------------------------------------
+1. Kesin dil kararı
+-------------------------------------------------------------------------------
+
+1. `=` iki bağlamlıdır:
+   - Statement bağlamında, sol taraf atanabilir değer ise atamadır.
+     Örnek: `a = 10`, `tank.ph = 7.2`, `veri(3) = 42`
+   - Expression/koşul bağlamında karşılaştırmadır.
+     Örnek: `IF a = b THEN`, `DO WHILE durum = 1`, `ASSERT sonuc = 0`
+
+2. `==` her zaman açık eşitlik karşılaştırmasıdır.
+   Örnek: `IF a == b THEN`
+
+3. `<>` ve `!=` eşit değil karşılaştırmasıdır.
+
+4. `**` üs alma operatörüdür.
+   Örnek: `alan = r ** 2`
+
+5. `**=` üs alarak atama operatörüdür.
+   Örnek: `x **= 3` eşdeğeri: `x = x ** 3`
+
+6. `^` üs alma değildir; XOR ailesinde özel veya/bit XOR operatörüdür.
+   Eğitim verisinde eski BASIC dokümanlarından gelen `^` üs alma örnekleri uXBasic'e çevrilirken `**` yapılmalıdır.
+
+7. `^=` XOR ile atamadır.
+   Örnek: `bayrak ^= maske`
+
+8. `&` bit düzeyinde AND operatörüdür. Metin birleştirme için ana öneri `+` veya string kütüphane fonksiyonudur. `&` backend tarafında STR_CONCAT'a düşürülmemelidir.
+
+9. `|` bit düzeyinde OR operatörüdür.
+
+10. `|>` boru/pipeline operatörüdür; `PIPE` komutu ile karıştırılmamalıdır.
+
+11. `OPERATOR` bir hesap operatörü değildir; sınıf içinde operatör davranışı tanımlayan anahtar sözcüktür.
+
+-------------------------------------------------------------------------------
+2. Neden `=` karşılaştırma da olmalıdır?
+-------------------------------------------------------------------------------
+
+uXBasic BASIC kökenlidir. QBasic, QuickBASIC, FreeBASIC, QB64, PureBasic ve eski BASIC belgelerinde `IF a = b THEN` çok yaygındır. Yapay zeka eğitiminde bu belgelerden veri alınacağı için `=` işaretini koşul içinde karşılaştırma olarak kabul etmemek ileride büyük çeviri ve eğitim kirliliği doğurur.
+
+Bu yüzden doğru çözüm şudur:
+
+- Parser statement başında atanabilir sol taraf + assignment operator görürse ASSIGN_STMT üretir.
+- Parser expression/condition içinde `=` veya `==` görürse BINARY/EQ karşılaştırması üretir.
+- Semantic/MIR katmanı `=` ve `==` karşılaştırmasını aynı EQ opcode'una indirir.
+- Statement assignment ayrı AST düğümü olarak kalır.
+
+Bu tasarım hem BASIC uyumludur hem de modern `==` yazımını destekler.
+
+-------------------------------------------------------------------------------
+3. Lexer gerçek operatör yüzeyi
+-------------------------------------------------------------------------------
+
+3 karakterli sembollü operatörler:
+
+    <<=   >>=   **=
+
+2 karakterli sembollü operatörler:
+
+    ==    ++    --    +=    -=    *=    /=    \=    %=    &=    |=    ^=    =+    =-
+    **    <<    >>    <=    >=    <>    !=    &&    ||    |>
+
+1 karakterli sembollü operatör ve işaretler:
+
+    +     -     *     /     \     %     =     <     >     @     #
+    (     )     [     ]     ,     :     ;     .     |     &     !     ~     ?
+
+Kelime operatörleri:
+
+    AND   OR    NOT   XOR   MOD   SHL   SHR   ROL   ROR
+
+Özel anahtar sözcük:
+
+    OPERATOR
+
+-------------------------------------------------------------------------------
+4. Operatörlerin amaçları
+-------------------------------------------------------------------------------
+
+Aritmetik:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `+` | `a + b` | Sayısal toplama; metinlerde önerilen birleştirme yolu olabilir. |
+| `-` | `a - b` | Çıkarma. |
+| `*` | `a * b` | Çarpma. |
+| `/` | `a / b` | Bölme. Sayı tipi float ise ondalıklı sonuç beklenir. |
+| `\` | `a \ b` | Tam sayı bölme. |
+| `%` | `a % b` | Kalan alma. |
+| `MOD` | `a MOD b` | BASIC kelime biçimli kalan alma. |
+| `**` | `a ** b` | Üs alma. Sağdan bağlanır. |
+
+Karşılaştırma:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `=` | `IF a = b THEN` | Expression/condition içinde eşitlik karşılaştırması; statement başında assignment olabilir. |
+| `==` | `IF a == b THEN` | Açık eşitlik karşılaştırması. |
+| `<>` | `a <> b` | Eşit değil. BASIC biçimi. |
+| `!=` | `a != b` | Eşit değil. C/JS biçimi. |
+| `<` | `a < b` | Küçük. |
+| `<=` | `a <= b` | Küçük veya eşit. |
+| `>` | `a > b` | Büyük. |
+| `>=` | `a >= b` | Büyük veya eşit. |
+
+Mantıksal:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `AND` | `a AND b` | Mantıksal VE. BASIC biçimi. |
+| `&&` | `a && b` | Mantıksal VE. C/JS biçimi. |
+| `OR` | `a OR b` | Mantıksal VEYA. BASIC biçimi. |
+| `||` | `a || b` | Mantıksal VEYA. C/JS biçimi. |
+| `NOT` | `NOT a` | Mantıksal değil. BASIC biçimi. |
+| `!` | `!a` | Mantıksal değil. C/JS biçimi. |
+| `XOR` | `a XOR b` | Mantıksal/bit özel veya. |
+
+Bit düzeyi:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `&` | `a & b` | Bit AND. |
+| `|` | `a | b` | Bit OR. |
+| `^` | `a ^ b` | Bit XOR. Üs alma değildir. |
+| `~` | `~a` | Bit NOT / tüm bitleri tersle. |
+| `SHL` | `a SHL n` | Sola kaydırma. |
+| `SHR` | `a SHR n` | Sağa kaydırma. |
+| `<<` | `a << n` | Sola kaydırma sembollü biçim. |
+| `>>` | `a >> n` | Sağa kaydırma sembollü biçim. |
+| `ROL` | `a ROL n` | Sola döndürme. |
+| `ROR` | `a ROR n` | Sağa döndürme. |
+
+Atama:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `=` | `a = b` | Statement bağlamında basit atama. |
+| `+=` | `a += b` | Toplayarak atama. |
+| `-=` | `a -= b` | Çıkararak atama. |
+| `*=` | `a *= b` | Çarparak atama. |
+| `/=` | `a /= b` | Bölerek atama. |
+| `\=` | `a \= b` | Tam sayı bölerek atama. |
+| `%=` | `a %= b` | Kalan alarak atama. |
+| `&=` | `a &= b` | Bit AND ile atama. |
+| `|=` | `a |= b` | Bit OR ile atama. |
+| `^=` | `a ^= b` | Bit XOR ile atama. |
+| `<<=` | `a <<= b` | Sola kaydırarak atama. |
+| `>>=` | `a >>= b` | Sağa kaydırarak atama. |
+| `**=` | `a **= b` | Üs alarak atama. |
+| `=+` | `a =+ b` | Uyumluluk/özel pozitif atama biçimi; yeni kodda `a = +b` daha açık yazılmalıdır. |
+| `=-` | `a =- b` | Uyumluluk/özel negatif atama biçimi; yeni kodda `a = -b` daha açık yazılmalıdır. |
+
+Artırma/azaltma:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `++` | `a++` | Son artırma. |
+| `++` | `++a` | Ön artırma. |
+| `--` | `a--` | Son azaltma. |
+| `--` | `--a` | Ön azaltma. |
+
+Üye/çağrı/indeks/yardımcı:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `.` | `nesne.alan`, `modul.fonksiyon()` | Üye, alan veya modül erişimi. |
+| `()` | `fonksiyon(a,b)`, `(a+b)` | Çağrı ve gruplama. |
+| `[]` | `dizi[i]` | Köşeli indeks yüzeyi. |
+| `,` | `a, b` | Argüman/öğe ayırıcı. |
+| `:` | `komut1: komut2` veya `? :` | Aynı satır ayırıcı veya ternary ayırıcı. |
+| `;` | `PRINT a; b` | PRINT yan yana yazma/ayırıcı. |
+| `#` | `#1` | Dosya kanalı/handle işareti. |
+| `@` | `@a` | Adres/başvuru ailesi. |
+| `? :` | `koşul ? doğru : yanlış` | Üçlü koşul ifadesi. |
+| `|>` | `veri |> fonksiyon` | Boru/pipeline zinciri. |
+
+-------------------------------------------------------------------------------
+5. İşlem önceliği ve yön
+-------------------------------------------------------------------------------
+
+Aşağıdaki tabloda büyük sayı daha yüksek önceliği gösterir.
+
+| Öncelik | Grup | Operatörler | Yön |
+|---:|---|---|---|
+| 150 | Postfix/üye/çağrı/indeks | `.`, `()`, `[]`, `a++`, `a--` | soldan sağa |
+| 140 | Üs alma | `**` | sağdan sola |
+| 130 | Prefix/tekli | `++a`, `--a`, `+a`, `-a`, `@a`, `!a`, `~a`, `NOT a` | sağdan sola |
+| 120 | Çarpımsal | `*`, `/`, `\`, `%`, `MOD` | soldan sağa |
+| 110 | Toplamsal | `+`, `-` | soldan sağa |
+| 100 | Kaydırma/döndürme | `<<`, `>>`, `SHL`, `SHR`, `ROL`, `ROR` | soldan sağa |
+| 90 | Karşılaştırma | `=`, `==`, `<>`, `!=`, `<`, `<=`, `>`, `>=` | soldan sağa |
+| 80 | Bit AND | `&` | soldan sağa |
+| 70 | Bit XOR | `^`, `XOR` | soldan sağa |
+| 60 | Bit OR | `|` | soldan sağa |
+| 50 | Mantıksal AND | `AND`, `&&` | soldan sağa |
+| 40 | Mantıksal OR | `OR`, `||` | soldan sağa |
+| 30 | Boru | `|>` | soldan sağa |
+| 20 | Üçlü koşul | `? :` | sağdan sola |
+| 10 | Atama | `=`, `+=`, `-=`, `*=`, `/=`, `\=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `**=`, `=+`, `=-` | sağdan sola / statement-lvalue |
+
+Önemli bağlam notu:
+
+- Aynı `=` sembolü hem karşılaştırma hem assignment tablosunda görünür. Farkı bağlam belirler.
+- `IF`, `WHILE`, `UNTIL`, `ASSERT`, `PRINT`, fonksiyon argümanı gibi expression bağlamlarında `=` karşılaştırmadır.
+- Satır başında atanabilir sol taraf + `=` varsa assignment statement olur.
+
+Örnekler:
+
+    a = 10                    ' assignment statement
+    IF a = 10 THEN PRINT a    ' equality expression
+    IF a == 10 THEN PRINT a   ' explicit equality expression
+    tank.ph = 7.2             ' field assignment statement
+    IF tank.ph = 7.2 THEN ... ' field equality expression
+
+-------------------------------------------------------------------------------
+6. Çocuk/bağlanma yapısı
+-------------------------------------------------------------------------------
+
+Parser AST çocuk ilişkisi şöyle düşünülmelidir:
+
+- Unary: sağ çocuk taşır.
+  Örnek: `-a` -> UNARY(op="-", right=a)
+
+- Binary: sol ve sağ çocuk taşır.
+  Örnek: `a + b` -> BINARY(op="+", left=a, right=b)
+
+- Ternary: koşul sol, false sağ, true çocuk listesinde ilk çocuk olarak tutulabilir; mevcut AST sözleşmesine göre korunmalıdır.
+  Örnek: `a ? b : c` -> TERNARY_EXPR(op="?:", left=a, child[0]=b, right=c)
+
+- Assignment statement: sol atanabilir düğüm, sağ ifade düğümü taşır.
+  Örnek: `a = b` -> ASSIGN_STMT(op="=", left=IDENT(a), right=IDENT(b))
+
+- Comparison expression: binary düğüm taşır.
+  Örnek: `a = b` koşul içinde -> BINARY(op="=", left=IDENT(a), right=IDENT(b))
+
+-------------------------------------------------------------------------------
+7. Düzeltilmesi gereken katmanlar
+-------------------------------------------------------------------------------
+
+1. Lexer:
+   - `==` tek OP token olmalıdır.
+   - `**=` tek OP token olmalıdır.
+
+2. Parser expression:
+   - `=` relation/compare seviyesinde kabul edilmelidir.
+   - `==` relation/compare seviyesinde kabul edilmelidir.
+   - `=` expression-level assignment listesinden çıkarılmalıdır.
+   - `**=` assignment operator listesine eklenmelidir.
+
+3. Parser statement:
+   - Satır başı atanabilir sol taraf + `=` assignment statement olarak kalmalıdır.
+   - Satır başı field/index assignment dönüşümü korunmalıdır.
+   - `**=` extended assignment listesine eklenmelidir.
+
+4. Operator contract:
+   - `\` ve `\=` tek backslash biçimiyle yazılmalıdır; `\\` yazımı sözleşme içinde hatalıdır.
+   - `=` comparison ve assignment bağlam notuyla tanımlanmalıdır.
+   - `==` resmi comparison olmalıdır.
+   - `**`, `**=`, `^`, `^=` anlamları kesin ayrılmalıdır.
+
+5. Semantic/MIR:
+   - `=` ve `==` -> EQ
+   - `<>` ve `!=` -> NE
+   - `**` -> POW
+   - `^` ve `XOR` -> XOR
+   - `**=` -> POW_ASSIGN
+   - `^=` -> XOR_ASSIGN
+
+6. MIR registry/backend policy:
+   - `^` artık POW'a gitmemelidir.
+   - `^=` artık POW_ASSIGN'a gitmemelidir.
+   - `&` STR_CONCAT olarak eşlenmemelidir; bit AND olmalıdır.
+
+7. Test:
+   - `IF a = b THEN` geçmelidir.
+   - `IF a == b THEN` geçmelidir.
+   - `a = b` statement assignment kalmalıdır.
+   - `a ** b` POW olmalıdır.
+   - `a ^ b` XOR olmalıdır.
+   - `a **= b` POW_ASSIGN olmalıdır.
+   - `a ^= b` XOR_ASSIGN olmalıdır.
+
+-------------------------------------------------------------------------------
+8. Copilot uygulama özeti
+-------------------------------------------------------------------------------
+
+Bu paket içindeki README_COPILOT_OPERATOR_BASIC_EQUAL.txt dosyasını uygula.
+Önce lexer ve parser yamalarını işle. Sonra semantic/MIR registry düzeltmelerini işle. En son testleri ekle ve token/AST/MIR çıktılarında eşleşmeleri doğrula.
+
+
+
+---
+# uxbasic_logic16_all_layers_patch/README_COPILOT_LOGIC16_ALL_LAYERS.txt
+
+# Copilot uygulama talimatı — uXBasic Logic16 tüm katman yaması
+
+Bu paket, önceki operatör yamalarının üstüne uygulanır. Önce şu dosyayı oku:
+
+`docs/UXB_LOGIC16_OPERATOR_ALL_LAYERS_KESIN_KARAR.txt`
+
+Uygulama sırası:
+
+1. Lexer keyword tablosuna TRUE/FALSE ve Logic16 keywordlerini ekle.
+2. Lexer operator reader içine `==` ve `**=` ekle.
+3. Parser operator contract dosyasını yeni öncelik tablosuyla değiştir.
+4. parser_expr.fbs içinde:
+   - TRUE/FALSE -> BOOLEAN AST node.
+   - `=` relation/equality olarak parse edilecek.
+   - expression assignment listesinden `=` çıkarılacak.
+   - `**`, `**=`, `^`, `^=` kararları uygulanacak.
+   - Logic16 op seviyeleri eklenecek.
+   - UNARY node left ve right aynı operandı gösterecek.
+   - TERNARY tüketiciler left/firstChild/right modeline göre düzeltilecek.
+5. AST interpreter, MIR lowering, MIR evaluator, MIR interpreter, JS/WASM/x64 codegen ve surface bridge dosyalarına snippets içindeki kararları uygula.
+6. `ID_A`, `ID_B`, `NOT_A`, `NOT_B` resmi yazım değildir; kitap/test/eğitim verisi için `IDA`, `IDB`, `NOTA`, `NOTB` kullan.
+7. Testleri ekle ve çalıştır. Placeholder üretme. Test runner çıktı uydurmasın.
+
+Beklenen ana sonuçlar:
+
+- `TRUE` ve `FALSE` normal kaynakta literal çalışır.
+- `IF a = b THEN` PASS.
+- `IF a == b THEN` PASS.
+- `a = b` satır başında atama olarak kalır.
+- `A NAND B`, `A IMP B`, `A XNOR B`, `A IDA B`, `A NOTB B` parse/MIR/interpreter/codegen hattında tanınır.
+- `^` XOR, `**` POW olur.
+- `&` bit AND olur; STR_CONCAT değildir.
+
+
+---
+# uxbasic_logic16_all_layers_patch/docs/UXB_LOGIC16_OPERATOR_ALL_LAYERS_KESIN_KARAR.txt
+
+# uXBasic TRUE/FALSE, BASIC eşitliği ve Logic16 operatörleri — tüm katman kesin karar
+
+Bu dosya src.zip içindeki son kaynak ağacı incelenerek yazıldı. Önceki operatör yamaları doğru yöndeydi, fakat tüm katmanlara aynı anda davranış tanımı verilmediği için eksik kaldı. Bu paket önceki operatör paketlerinin üstüne uygulanacak tamamlayıcı pakettir.
+
+## 1. Kaynakta görülen gerçek durum
+
+1. `TRUE` ve `FALSE` ön-işleyici içinde kullanılıyor, fakat normal lexer keyword tablosunda yok. Bu yüzden normal kaynakta `TRUE`/`FALSE` çoğu yerde IDENT gibi düşebilir. MIR ve x64 bazı yerlerde TRUE/FALSE özel durumunu biliyor, fakat bu güvenilir ve tek hatlı değildir.
+2. `OPERATOR` anahtar sözcüğü kaynakta vardır: lexer keyword table, class member parser, AST `CLASS_OPERATOR_DECL`, semantic ve x64 tarafında izleri bulunur. Eksik olan şey sınıf içi `OPERATOR` değil; ifade operatörlerinin tüm katmanlarda aynı sözleşmeyle davranmasıdır.
+3. AST tarafında her operatör için ayrı node kind yoktur. Mevcut tasarım `BINARY`, `UNARY`, `TERNARY_EXPR`, `INCDEC_EXPR`, `CLASS_OPERATOR_DECL` düğümleri ve bunların `op` alanı üzerine kuruludur. Bu kabul edilebilir; fakat AST interpreter, MIR lowering, MIR interpreter ve codegen aynı `op` sözlüğünü paylaşmalıdır.
+4. `==` lexer’da tek OP token olarak yoktu. Bu eklenmelidir.
+5. `=` için BASIC uyumu gerekir: statement başında lvalue ile `a = b` atamadır; expression/condition içinde `a = b` karşılaştırmadır. `==` de açık eşitlik karşılaştırmasıdır.
+6. `^` / `^=` anlamı kaynakta çakışmıştır: bazı katmanlarda POW, bazı katmanlarda XOR gibi geçiyor. Kesin karar: `**` ve `**=` üs alma ailesidir; `^` ve `^=` XOR ailesidir.
+7. `&` x64 capability içinde `STR_CONCAT` olarak eşlenmiş; bu uXBasic operatör sözleşmesiyle çakışır. Kesin karar: `&` bit AND operatörüdür. Metin birleştirme için `+` veya `STR_CONCAT` runtime/builtin kullanılır.
+8. Unary parser `UNARY` düğümünde operandı `right` alanına koyuyor; ASTMakeUnary ve AST interpreter ise `left` bekliyor. Bu katmanlar arası çocuk/operand tutarsızlığıdır. Çözüm: unary düğümünde `left` ve `right` aynı operandı gösterir; sonraki temizlikte role-child modeli eklenir.
+9. Ternary parser `left=condition`, `firstChild=trueExpr`, `right=falseExpr` kuruyor; AST interpreter ise child0/child1/child2 bekliyor. Çözüm: AST interpreter ve tüm tüketiciler bu kanonik üçlü düzeni okuyacak.
+
+## 2. Kesin boolean değeri
+
+uXBasic içinde boolean doğru değeri BASIC uyumlu olarak `-1`, yanlış değeri `0` kabul edilir. Bunun sebebi bit düzeyinde `NOT 0 = -1` ve eski BASIC mantığıyla uyumdur. JS/WASM çıktısında hedef dil gereği `true/false` veya `1/0` kullanılabilir, fakat uXBasic semantiğinde TRUE = -1, FALSE = 0 kabul edilir.
+
+```text
+TRUE  -> boolean literal, MIR LOAD_CONST -1
+FALSE -> boolean literal, MIR LOAD_CONST 0
+```
+
+## 3. Logic16 resmi operatör isimleri
+
+Alt çizgili yazımlar resmi değildir. Eğitim verisinde, kitapta ve testlerde alt çizgisiz kısa biçim kullanılacaktır.
+
+| Sıra | Resmi ad | İşlev | Formül |
+|---:|---|---|---|
+| 1 | FALSE | her zaman yanlış | `A AND NOT A` |
+| 2 | AND | A ve B doğruysa doğru | `A AND B` |
+| 3 | NIMP | A doğru, B yanlışsa doğru | `A AND NOT B` |
+| 4 | IDA | A değerini döndürür | `A` |
+| 5 | NCIMP | B doğru, A yanlışsa doğru | `NOT A AND B` |
+| 6 | IDB | B değerini döndürür | `B` |
+| 7 | XOR | A ve B farklıysa doğru | `A XOR B` |
+| 8 | OR | A veya B doğruysa doğru | `A OR B` |
+| 9 | NOR | OR tersidir | `NOT (A OR B)` |
+| 10 | XNOR | XOR tersidir | `NOT (A XOR B)` |
+| 11 | NOTB | B tersidir | `NOT B` |
+| 12 | CIMP | B ise A | `A OR NOT B` |
+| 13 | NOTA | A tersidir | `NOT A` |
+| 14 | IMP | A ise B | `NOT A OR B` |
+| 15 | NAND | AND tersidir | `NOT (A AND B)` |
+| 16 | TRUE | her zaman doğru | `A OR NOT A` |
+
+## 4. Kabul edilecek eş adlar
+
+Resmi adlar eğitim verisinde tek biçimli olmalı; fakat lexer/parser kullanıcı kolaylığı için bazı yaygın eş adları kabul edebilir.
+
+| Resmi | Kabul edilecek eş adlar |
+|---|---|
+| FALSE | ZERO |
+| TRUE | ONE |
+| XNOR | NXOR, EQV, EQA, IFF |
+| IDA | yalnız IDA |
+| IDB | yalnız IDB |
+| NOTA | yalnız NOTA |
+| NOTB | yalnız NOTB |
+
+`ID_A`, `ID_B`, `NOT_A`, `NOT_B` kitapta ve eğitim verisinde kullanılmayacak. İstenirse ayrı legacy-uyarı modunda kabul edilebilir; bu paketin resmi yüzeyinde yoktur.
+
+## 5. İşlem önceliği ve yön
+
+Yüksek sayı daha sıkı bağlanır. Çocuk/operand modeli aşağıda verilmiştir.
+
+| Öncelik | Aile | Operatörler | Yön |
+|---:|---|---|---|
+| 150 | Postfix/erişim | `.`, `()`, `[]`, `a++`, `a--` | soldan sağa |
+| 140 | Üs | `**` | sağdan sola |
+| 130 | Prefix unary | `++a`, `--a`, `+a`, `-a`, `@a`, `!a`, `~a`, `NOT a` | sağdan sola |
+| 120 | Çarpımsal | `*`, `/`, `\`, `%`, `MOD` | soldan sağa |
+| 110 | Toplamsal | `+`, `-` | soldan sağa |
+| 100 | Kaydırma/döndürme | `<<`, `>>`, `SHL`, `SHR`, `ROL`, `ROR` | soldan sağa |
+| 90 | Karşılaştırma | `=`, `==`, `<>`, `!=`, `<`, `<=`, `>`, `>=` | soldan sağa; zincir yasaklanabilir |
+| 80 | Bit AND | `&` | soldan sağa |
+| 70 | Bit XOR | `^` | soldan sağa |
+| 60 | Bit OR | `|` | soldan sağa |
+| 50 | Mantık AND ailesi | `AND`, `NAND`, `NIMP`, `NCIMP` | soldan sağa |
+| 45 | Mantık XOR/eşdeğerlik ailesi | `XOR`, `XNOR`, `NXOR`, `EQV`, `EQA`, `IFF` | soldan sağa |
+| 40 | Mantık OR/koşul ailesi | `OR`, `NOR`, `IMP`, `CIMP`, `IDA`, `IDB`, `NOTA`, `NOTB` | soldan sağa |
+| 30 | Boru | `|>` | soldan sağa |
+| 20 | Üçlü | `? :` | sağdan sola |
+| 10 | Atama | `=`, `+=`, `-=`, `*=`, `/=`, `\=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `**=`, `=+`, `=-` | sağdan sola, yalnız statement/lvalue bağlamı |
+
+Not: `=` hem atama hem karşılaştırma olabilir. Ayırım parser statement bağlamında yapılır:
+
+```text
+satır başı lvalue + =      -> ASSIGN_STMT
+IF/WHILE/ifadede a = b     -> BINARY op EQ
+```
+
+## 6. AST çocuk modeli
+
+| AST düğümü | Alanlar | Açıklama |
+|---|---|---|
+| `BOOLEAN` | `value=TRUE/FALSE` | TRUE/FALSE için doğrudan AST literal düğümü oluşturulur. |
+| `BINARY` | `left`, `right`, `op` | Tüm ikili operatörler için tek düğüm. `op` kanonik operatör adıdır. |
+| `UNARY` | `left`, `right`, `op` | Operand hem `left` hem `right` alanına yazılır; eski tüketiciler kırılmaz. |
+| `TERNARY_EXPR` | `left=condition`, `firstChild=trueExpr`, `right=falseExpr`, `op=?:` | AST interpreter, MIR lowering ve exporter bu modeli okuyacak. |
+| `INCDEC_EXPR` | `left=target`, `value=PRE/POST`, `op=++/--` | Ön/son artırma/azaltma. |
+| `CLASS_OPERATOR_DECL` | `op` | Sınıf içi OPERATOR overload bildirimi. |
+
+## 7. Tüm katmanlarda yapılacaklar
+
+### Lexer
+- `TRUE`, `FALSE`, Logic16 operatörleri ve eş adlar keyword olarak eklenecek.
+- `==` ve `**=` OP olarak eklenecek.
+- `ID_A` gibi alt çizgili biçimler resmi keyword yapılmayacak.
+
+### Parser expression
+- `TRUE`/`FALSE` görüldüğünde `BOOLEAN` AST düğümü üretilecek.
+- `=` relation seviyesine eklenecek; `==` de relation seviyesinde `=`/EQ olarak normalize edilecek.
+- Assignment expression içinden `=` çıkarılacak. Assignment statement parser tarafından yakalanacak. `+=`, `-=`, `*=`, `/=`, `\=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `**=`, `=+`, `=-` statement/lvalue bağlamında atama olacak.
+- Logic16 binary keyword operatörleri parse edilecek.
+- Unary node hem left hem right alanına operandı yazacak.
+- Ternary node tüketicilerle uyumlu hale getirilecek.
+
+### AST contract/exporter
+- `BOOLEAN`, `BINARY`, `UNARY`, `TERNARY_EXPR`, `INCDEC_EXPR`, `CLASS_OPERATOR_DECL` zaten var; ama route/coverage tablosuna Logic16 op adları eklenmeli.
+- JSON exporter `op` alanını kaybetmemeli.
+
+### Semantic/type
+- Logic16 operatörlerinin sonucu BOOLEAN kabul edilecek.
+- `AND/OR/XOR` hem integer bitwise hem boolean bağlamında çalışabilir; fakat Logic16 türevleri boolean sonuç üretir.
+- `TRUE/FALSE` sembol araması yapmadan literal kabul edilmeli.
+
+### MIR lowering
+- `TRUE -> LOAD_CONST -1`, `FALSE -> LOAD_CONST 0`.
+- `=` ve `==` -> `EQ`.
+- `**` -> `POW`; `**=` -> `POW_ASSIGN`.
+- `^` -> `XOR`; `^=` -> `XOR_ASSIGN`.
+- Logic16 için ya doğrudan MIR opcode eklenecek (`NAND`, `IMP`, ...) ya da lowering sırasında temel op dizisine indirgenecek. Bu paketin önerisi: önce opcode ekle, sonra backendlerde istenirse temel op dizisine indir.
+
+### MIR model/registry/signature/verifier
+- `MIR_OP_POW`, `MIR_OP_NAND`, `MIR_OP_NOR`, `MIR_OP_XNOR`, `MIR_OP_IMP`, `MIR_OP_CIMP`, `MIR_OP_NIMP`, `MIR_OP_NCIMP`, `MIR_OP_IDA`, `MIR_OP_IDB`, `MIR_OP_NOTA`, `MIR_OP_NOTB` eklenecek.
+- Signature: tüm Logic16 ikili op’lar 2 operand + result ister. `NOTA/NOTB/IDA/IDB` isim olarak iki operandlıdır; kullanılmayan operand yine sözleşmede taşınır.
+
+### AST interpreter
+- TRUE/FALSE doğrudan bool döndürür.
+- `BINARY` için Logic16 truth table uygulanır.
+- `UNARY` operandı `left` yoksa `right`tan alır.
+- `TERNARY_EXPR` için `left/firstChild/right` modeli okunur.
+
+### MIR interpreter/evaluator
+- MIR Logic16 opcode’ları çalıştırılır.
+- Boolean sonuç uXBasic semantiğinde -1/0 olmalıdır.
+- POW desteklenir.
+
+### JS codegen
+- `EQ -> ===`, `NE -> !==`, normal aritmetikler JS işleçlerine gider.
+- Logic16 için JS ifade şablonu kullanılabilir: `NAND(a,b)=!((a)&&(b))`, `IMP(a,b)=(!a)||b`.
+- TRUE/FALSE hedefte `true/false` yazılabilir, fakat uXBasic çıktı gerekirse `-1/0` olarak normalize edilir.
+
+### WAT/WASM codegen
+- Temel op’lar direkt i32 talimatlarıdır.
+- Logic16 op’lar WAT içinde kısa instruction dizisine indirgenir veya host import olarak çağrılır. İlk güvenli sürümde instruction dizisi tercih edilir.
+
+### x64 codegen
+- `&` STR_CONCAT olmaktan çıkar; bit AND olur.
+- `^` POW olmaktan çıkar; XOR olur.
+- POW yalnız `**` / `POW` opcode ile runtime helper’a gider.
+- Logic16 op’lar doğrudan CMP/SETcc/AND/OR/XOR/NOT dizilerine indirilebilir. İlk güvenli sürümde MIR lowering bunları temel op dizisine indirirse x64 ek yükü azalır.
+
+### Surface/backend/coverage/gate
+- Surface registry ve layer bridge Logic16 kelimelerini OPERATOR/EXPRESSION_OPERATOR olarak tanır.
+- ADIM25/26/27 gate Logic16 AST->MIR->backend route’larını bekler.
+- Testlerde placeholder yasaktır.
+
+
+
+---
+# uxbasic_logic16_all_layers_patch/docs/UXB_OPERATOR_LOGIC16_LAYER_MATRIX.txt
+
+# Operatör katman matrisi
+
+| Katman | Dosya/alan | Sorun | Yapılacak işlem |
+|---|---|---|---|
+| Lexer keyword | `src/parser/lexer/lexer_keyword_table.fbs` | TRUE/FALSE ve Logic16 yok | Keyword listesine TRUE/FALSE/NAND/NOR/XNOR/IMP/CIMP/NIMP/NCIMP/IDA/IDB/NOTA/NOTB/ZERO/ONE/NXOR/EQV/EQA/IFF ekle |
+| Lexer op reader | `src/parser/lexer/lexer_readers.fbs` | `==`, `**=` yok | ReadOperatorOrPunct içine `**=`, `==` ekle |
+| Parser op contract | `src/parser/parser/parser_adim08_operator_contract.fbs` | `\` yazımı ve öncelikler tutarsız | Tek kaynak öncelik tablosu ile değiştir |
+| Parser expr primary | `src/parser/parser/parser_expr.fbs` | TRUE/FALSE IDENT/KEYWORD_REF olabilir | TRUE/FALSE -> BOOLEAN node yap |
+| Parser relation | `parser_expr.fbs` | `=` relation değil | `=` ve `==` relation olarak parse edilecek |
+| Parser assignment | `parser_expr.fbs` | `=` expression assignment | `=` expression assignment listesinden çıkarılacak; statement registry atamayı yakalayacak |
+| Parser logic16 | `parser_expr.fbs` | türev mantık yok | ParseLogicAnd/ParseLogicXor/ParseLogicOr seviyelerine ekle |
+| AST | `ast*.fbs` | generic node var, op sözleşmesi eksik | BINARY/UNARY/TERNARY çocuk modeli kesinleştir; exporter op alanını yazsın |
+| Semantic | `semantic_pass_tail.fbs` | yeni op tipleri yok | Logic16 sonucu BOOLEAN, POW numeric olarak işaretlenecek |
+| MIR model | `semantic/mir_model.fbs` | POW/Logic16 const eksik | MIR_OP_POW ve Logic16 constları eklenecek |
+| MIR map | `semantic/mir.fbs` | map eksik/çakışmalı | `**->POW`, `^->XOR`, Logic16 -> opcode |
+| MIR lowering | `semantic/mir_lower_expr.fbs` | TRUE/FALSE ve logic16 eksik | literal/lowering eklenecek |
+| MIR evaluator | `semantic/mir_evaluator*.fbs` | Logic16 yok, POW eksik olabilir | truth table uygulanacak |
+| AST interpreter | `interpreter/ast/ast_interp_expr.fbs` | Logic16 yok; unary/ternary çocuk karışık | Binary truth table + unary/ternary kanonik okuma |
+| MIR interpreter | `interpreter/mir/mir_interp_arith.fbs` | Logic16 yok | MIR op çalıştırma ekle |
+| JS codegen | `codegen/js/js_expr_emit.fbs` | Logic16 yok | JS şablonları ekle |
+| WASM codegen | `codegen/wasm/wasm_instr_emit.fbs` | Logic16 yok | direkt diziler veya host-import kararı |
+| x64 codegen | `codegen/x64/mir_x64_capability.fbs` ve emitter | `&`/`^` hatalı | `&=AND`, `^=XOR`, `**=POW` düzelt |
+| Surface | `surface/uxb_surface_registry.fbs`, bridge | Logic16 görünmez | OPERATOR/EXPRESSION_OPERATOR olarak ekle |
+| Tests | `tests/operator_logic16_all_layers` | test yok | truth table, equality, AST/MIR/JS/WAT/x64 gate testleri ekle |
+
+
+---
+# uxbasic_logic16_all_layers_patch/README_COPILOT_LOGIC16_ALL_LAYERS.txt
+
+# Copilot uygulama talimatı — uXBasic Logic16 tüm katman yaması
+
+Bu paket, önceki operatör yamalarının üstüne uygulanır. Önce şu dosyayı oku:
+
+`docs/UXB_LOGIC16_OPERATOR_ALL_LAYERS_KESIN_KARAR.txt`
+
+Uygulama sırası:
+
+1. Lexer keyword tablosuna TRUE/FALSE ve Logic16 keywordlerini ekle.
+2. Lexer operator reader içine `==` ve `**=` ekle.
+3. Parser operator contract dosyasını yeni öncelik tablosuyla değiştir.
+4. parser_expr.fbs içinde:
+   - TRUE/FALSE -> BOOLEAN AST node.
+   - `=` relation/equality olarak parse edilecek.
+   - expression assignment listesinden `=` çıkarılacak.
+   - `**`, `**=`, `^`, `^=` kararları uygulanacak.
+   - Logic16 op seviyeleri eklenecek.
+   - UNARY node left ve right aynı operandı gösterecek.
+   - TERNARY tüketiciler left/firstChild/right modeline göre düzeltilecek.
+5. AST interpreter, MIR lowering, MIR evaluator, MIR interpreter, JS/WASM/x64 codegen ve surface bridge dosyalarına snippets içindeki kararları uygula.
+6. `ID_A`, `ID_B`, `NOT_A`, `NOT_B` resmi yazım değildir; kitap/test/eğitim verisi için `IDA`, `IDB`, `NOTA`, `NOTB` kullan.
+7. Testleri ekle ve çalıştır. Placeholder üretme. Test runner çıktı uydurmasın.
+
+Beklenen ana sonuçlar:
+
+- `TRUE` ve `FALSE` normal kaynakta literal çalışır.
+- `IF a = b THEN` PASS.
+- `IF a == b THEN` PASS.
+- `a = b` satır başında atama olarak kalır.
+- `A NAND B`, `A IMP B`, `A XNOR B`, `A IDA B`, `A NOTB B` parse/MIR/interpreter/codegen hattında tanınır.
+- `^` XOR, `**` POW olur.
+- `&` bit AND olur; STR_CONCAT değildir.

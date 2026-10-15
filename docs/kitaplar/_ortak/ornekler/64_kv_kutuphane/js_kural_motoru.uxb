@@ -1,0 +1,115 @@
+' KONU: Üst düzey: uxjsruntime ile JavaScript kural motoru (fiyat ve indirim kuralları metin olarak yüklenir)
+' KOMUTLAR: INCLUDE JsRuntimeCreate JsRuntimeTimeLimitMs JsContextCreate JsBootstrapUxb JsEval JsCallAwait JsResultJson JsLastError uxjson.Parse uxjson.GetF64
+' ACIKLAMA: İş kuralları (indirim oranı, KDV) JavaScript olarak yazılır ve çalışma anında yüklenir; uXBasic programı sepeti JSON olarak verir, kural motoru sonucu JSON olarak döndürür, uxjson ile okunur. Kural değiştiğinde program yeniden derlenmez. QuickJS motoru yalıtılmıştır: çalışma süresi sınırı (burada 300 ms) sonsuz döngülü bir kuralı keser, bellek sınırı taşmaları durdurur ve hatalar JsLastError ile okunabilir kodlarla bildirilir. JsBootstrapUxb çağrılmazsa JsResultJson sessizce boş metin döndürür (G-KUT-12); bu yüzden her bağlamdan sonra çağrılır. Dosya yolları çalışma klasörüne göre çözülür, bu yüzden program proje kökünden çalıştırılır.
+' CALISMA: kok
+'= sepet 1: ara 1200, oran 0.15, indirim 180, kdv 204, toplam 1224
+'= sepet 2: ara 445, oran 0, indirim 0, kdv 89, toplam 534
+'= sepet 3: ara 640, oran 0.1, indirim 64, kdv 115.2, toplam 691.2
+'= sepet 4: ara 1500, oran 0.05, indirim 75, kdv 285, toplam 1710
+'= bozuk kural yuklenemedi: UXJS_EVAL_FAILED
+'= olmayan kural: UXJS_FUNCTION_NOT_CALLABLE
+'= sonsuz dongulu kural durduruldu: UXJS_CALL_FAILED
+INCLUDE "include/modules/uxjsruntime.uxmh"
+INCLUDE "include/modules/uxjson.uxmh"
+
+' Kurallar: yalnız burası değişir, uXBasic tarafı aynı kalır
+FUNCTION KuralMetni() AS STRING
+    DIM k AS STRING
+    k = "function indirimOrani(musteri, tutar) {" _
+      + "  if (musteri.sadakat >= 5 && tutar >= 1000) return 0.15;" _
+      + "  if (musteri.sadakat >= 5) return 0.10;" _
+      + "  if (tutar >= 1000) return 0.05;" _
+      + "  return 0;" _
+      + "}" _
+      + "function yuvarla(x) { return Math.round(x * 100) / 100; }" _
+      + "function fiyatHesapla(sepet) {" _
+      + "  var ara = 0;" _
+      + "  for (var i = 0; i < sepet.kalemler.length; i++) {" _
+      + "    ara += sepet.kalemler[i].adet * sepet.kalemler[i].fiyat;" _
+      + "  }" _
+      + "  var oran = indirimOrani(sepet.musteri, ara);" _
+      + "  var indirim = yuvarla(ara * oran);" _
+      + "  var kdv = yuvarla((ara - indirim) * 0.20);" _
+      + "  return { ara: ara, oran: oran, indirim: indirim, kdv: kdv, toplam: yuvarla(ara - indirim + kdv) };" _
+      + "}"
+    RETURN k
+END FUNCTION
+
+' Sepeti JSON bağımsız değişken dizisi olarak kurar: [{"musteri":{...},"kalemler":[...]}]
+FUNCTION SepetJson(sadakat AS I32, adet1 AS I32, fiyat1 AS I32, adet2 AS I32, fiyat2 AS I32) AS STRING
+    RETURN "[{""musteri"":{""sadakat"":" + STR(sadakat) + "},""kalemler"":[" _
+         + "{""adet"":" + STR(adet1) + ",""fiyat"":" + STR(fiyat1) + "}," _
+         + "{""adet"":" + STR(adet2) + ",""fiyat"":" + STR(fiyat2) + "}]}]"
+END FUNCTION
+
+' Kural motorundan fiyatı ister ve sonucu yazdırır
+SUB SepetHesapla(cx AS I32, sira AS I32, arguman AS STRING)
+    DIM r AS I32
+    DIM ok AS I32
+    DIM metin AS STRING
+    DIM belge AS U64
+    DIM kok AS U64
+    DIM ara AS F64
+    DIM oran AS F64
+    DIM indirim AS F64
+    DIM kdv AS F64
+    DIM toplam AS F64
+    r = JsCallAwait(cx, "fiyatHesapla", arguman, 100)
+    ASSERT r > 0, "kural cagrisi basarisiz"
+    metin = JsResultJson(cx, r)
+    ok = JsResultFree(cx, r)
+    belge = uxjson.Parse(metin)
+    ASSERT belge <> 0, "sonuc JSON degil"
+    kok = uxjson.Root(belge)
+    ara = uxjson.GetF64(uxjson.ObjectGet(kok, "ara"))
+    oran = uxjson.GetF64(uxjson.ObjectGet(kok, "oran"))
+    indirim = uxjson.GetF64(uxjson.ObjectGet(kok, "indirim"))
+    kdv = uxjson.GetF64(uxjson.ObjectGet(kok, "kdv"))
+    toplam = uxjson.GetF64(uxjson.ObjectGet(kok, "toplam"))
+    PRINT "sepet "; sira; ": ara "; ara; ", oran "; oran; ", indirim "; indirim; ", kdv "; kdv; ", toplam "; toplam
+    uxjson.Free(belge)
+END SUB
+
+MAIN
+    DIM rt AS I32
+    DIM cx AS I32
+    DIM r AS I32
+    DIM ok AS I32
+    DIM hata AS STRING
+
+    rt = JsRuntimeCreate()
+    ok = JsRuntimeMemoryLimitMb(rt, 32)
+    ok = JsRuntimeTimeLimitMs(rt, 300)
+    cx = JsContextCreate(rt)
+    ok = JsBootstrapUxb(cx, "runtime/js/common/ux_runtime_core.js", "runtime/js/quickjs/ux_runtime_quickjs.js")
+    ASSERT ok = 1, "JS calisma zamani hazirlanamadi"
+    ok = JsEval(cx, KuralMetni(), "kurallar.js", JsEvalScriptFlag())
+    ASSERT ok = 1, "kurallar yuklenemedi"
+
+    SepetHesapla(cx, 1, SepetJson(7, 2, 450, 1, 300))
+    SepetHesapla(cx, 2, SepetJson(2, 3, 120, 1, 85))
+    SepetHesapla(cx, 3, SepetJson(6, 4, 160, 0, 0))
+    SepetHesapla(cx, 4, SepetJson(0, 3, 500, 0, 0))
+
+    ' 1) sözdizimi hatalı kural: yükleme reddedilir, hata kodu metnin başında gelir
+    ok = JsEval(cx, "function bozuk( { return 1; }", "bozuk.js", JsEvalScriptFlag())
+    hata = JsLastError(cx)
+    IF ok = 0 THEN PRINT "bozuk kural yuklenemedi: "; LEFT(hata, 16)
+    ok = JsClearError(cx)
+
+    ' 2) olmayan kural çağrılırsa
+    r = JsCall(cx, "olmayanKural", "[]")
+    hata = JsLastError(cx)
+    IF r = 0 THEN PRINT "olmayan kural: "; LEFT(hata, 26)
+    ok = JsClearError(cx)
+
+    ' 3) sonsuz döngülü kural çalışma süresi sınırıyla kesilir
+    ok = JsEval(cx, "function sonsuz() { while (true) {} }", "sonsuz.js", JsEvalScriptFlag())
+    r = JsCall(cx, "sonsuz", "[]")
+    hata = JsLastError(cx)
+    IF r = 0 THEN PRINT "sonsuz dongulu kural durduruldu: "; LEFT(hata, 16)
+    ok = JsClearError(cx)
+
+    ok = JsContextFree(cx)
+    ok = JsRuntimeFree(rt)
+END MAIN

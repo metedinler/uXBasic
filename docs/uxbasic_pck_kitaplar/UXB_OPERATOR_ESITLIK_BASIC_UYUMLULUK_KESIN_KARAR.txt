@@ -1,0 +1,297 @@
+# uXBasic Operatör Kesin Söz Dizimi, Öncelik, Yön ve BASIC Eşitlik Uyumluluğu
+
+Bu belge, src(30.05_5) kaynak ağacındaki lexer/parser operatör gerçekliği üzerine hazırlanmış kesin düzeltme notudur.
+Amaç, uXBasic'te hem BASIC kökenli `IF a = b THEN` yazımını korumak hem de modern `a == b` karşılaştırmasını resmi hale getirmektir.
+
+Bu belge kitap, test ve yapay zeka eğitim verisi için kaynak kabul edilmelidir. Operatör konusunda boş anlam, belirsiz eşleme ve katman çakışması bırakılmamalıdır.
+
+-------------------------------------------------------------------------------
+1. Kesin dil kararı
+-------------------------------------------------------------------------------
+
+1. `=` iki bağlamlıdır:
+   - Statement bağlamında, sol taraf atanabilir değer ise atamadır.
+     Örnek: `a = 10`, `tank.ph = 7.2`, `veri(3) = 42`
+   - Expression/koşul bağlamında karşılaştırmadır.
+     Örnek: `IF a = b THEN`, `DO WHILE durum = 1`, `ASSERT sonuc = 0`
+
+2. `==` her zaman açık eşitlik karşılaştırmasıdır.
+   Örnek: `IF a == b THEN`
+
+3. `<>` ve `!=` eşit değil karşılaştırmasıdır.
+
+4. `**` üs alma operatörüdür.
+   Örnek: `alan = r ** 2`
+
+5. `**=` üs alarak atama operatörüdür.
+   Örnek: `x **= 3` eşdeğeri: `x = x ** 3`
+
+6. `^` üs alma değildir; XOR ailesinde özel veya/bit XOR operatörüdür.
+   Eğitim verisinde eski BASIC dokümanlarından gelen `^` üs alma örnekleri uXBasic'e çevrilirken `**` yapılmalıdır.
+
+7. `^=` XOR ile atamadır.
+   Örnek: `bayrak ^= maske`
+
+8. `&` bit düzeyinde AND operatörüdür. Metin birleştirme için ana öneri `+` veya string kütüphane fonksiyonudur. `&` backend tarafında STR_CONCAT'a düşürülmemelidir.
+
+9. `|` bit düzeyinde OR operatörüdür.
+
+10. `|>` boru/pipeline operatörüdür; `PIPE` komutu ile karıştırılmamalıdır.
+
+11. `OPERATOR` bir hesap operatörü değildir; sınıf içinde operatör davranışı tanımlayan anahtar sözcüktür.
+
+-------------------------------------------------------------------------------
+2. Neden `=` karşılaştırma da olmalıdır?
+-------------------------------------------------------------------------------
+
+uXBasic BASIC kökenlidir. QBasic, QuickBASIC, FreeBASIC, QB64, PureBasic ve eski BASIC belgelerinde `IF a = b THEN` çok yaygındır. Yapay zeka eğitiminde bu belgelerden veri alınacağı için `=` işaretini koşul içinde karşılaştırma olarak kabul etmemek ileride büyük çeviri ve eğitim kirliliği doğurur.
+
+Bu yüzden doğru çözüm şudur:
+
+- Parser statement başında atanabilir sol taraf + assignment operator görürse ASSIGN_STMT üretir.
+- Parser expression/condition içinde `=` veya `==` görürse BINARY/EQ karşılaştırması üretir.
+- Semantic/MIR katmanı `=` ve `==` karşılaştırmasını aynı EQ opcode'una indirir.
+- Statement assignment ayrı AST düğümü olarak kalır.
+
+Bu tasarım hem BASIC uyumludur hem de modern `==` yazımını destekler.
+
+-------------------------------------------------------------------------------
+3. Lexer gerçek operatör yüzeyi
+-------------------------------------------------------------------------------
+
+3 karakterli sembollü operatörler:
+
+    <<=   >>=   **=
+
+2 karakterli sembollü operatörler:
+
+    ==    ++    --    +=    -=    *=    /=    \=    %=    &=    |=    ^=    =+    =-
+    **    <<    >>    <=    >=    <>    !=    &&    ||    |>
+
+1 karakterli sembollü operatör ve işaretler:
+
+    +     -     *     /     \     %     =     <     >     @     #
+    (     )     [     ]     ,     :     ;     .     |     &     !     ~     ?
+
+Kelime operatörleri:
+
+    AND   OR    NOT   XOR   MOD   SHL   SHR   ROL   ROR
+
+Özel anahtar sözcük:
+
+    OPERATOR
+
+-------------------------------------------------------------------------------
+4. Operatörlerin amaçları
+-------------------------------------------------------------------------------
+
+Aritmetik:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `+` | `a + b` | Sayısal toplama; metinlerde önerilen birleştirme yolu olabilir. |
+| `-` | `a - b` | Çıkarma. |
+| `*` | `a * b` | Çarpma. |
+| `/` | `a / b` | Bölme. Sayı tipi float ise ondalıklı sonuç beklenir. |
+| `\` | `a \ b` | Tam sayı bölme. |
+| `%` | `a % b` | Kalan alma. |
+| `MOD` | `a MOD b` | BASIC kelime biçimli kalan alma. |
+| `**` | `a ** b` | Üs alma. Sağdan bağlanır. |
+
+Karşılaştırma:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `=` | `IF a = b THEN` | Expression/condition içinde eşitlik karşılaştırması; statement başında assignment olabilir. |
+| `==` | `IF a == b THEN` | Açık eşitlik karşılaştırması. |
+| `<>` | `a <> b` | Eşit değil. BASIC biçimi. |
+| `!=` | `a != b` | Eşit değil. C/JS biçimi. |
+| `<` | `a < b` | Küçük. |
+| `<=` | `a <= b` | Küçük veya eşit. |
+| `>` | `a > b` | Büyük. |
+| `>=` | `a >= b` | Büyük veya eşit. |
+
+Mantıksal:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `AND` | `a AND b` | Mantıksal VE. BASIC biçimi. |
+| `&&` | `a && b` | Mantıksal VE. C/JS biçimi. |
+| `OR` | `a OR b` | Mantıksal VEYA. BASIC biçimi. |
+| `||` | `a || b` | Mantıksal VEYA. C/JS biçimi. |
+| `NOT` | `NOT a` | Mantıksal değil. BASIC biçimi. |
+| `!` | `!a` | Mantıksal değil. C/JS biçimi. |
+| `XOR` | `a XOR b` | Mantıksal/bit özel veya. |
+
+Bit düzeyi:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `&` | `a & b` | Bit AND. |
+| `|` | `a | b` | Bit OR. |
+| `^` | `a ^ b` | Bit XOR. Üs alma değildir. |
+| `~` | `~a` | Bit NOT / tüm bitleri tersle. |
+| `SHL` | `a SHL n` | Sola kaydırma. |
+| `SHR` | `a SHR n` | Sağa kaydırma. |
+| `<<` | `a << n` | Sola kaydırma sembollü biçim. |
+| `>>` | `a >> n` | Sağa kaydırma sembollü biçim. |
+| `ROL` | `a ROL n` | Sola döndürme. |
+| `ROR` | `a ROR n` | Sağa döndürme. |
+
+Atama:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `=` | `a = b` | Statement bağlamında basit atama. |
+| `+=` | `a += b` | Toplayarak atama. |
+| `-=` | `a -= b` | Çıkararak atama. |
+| `*=` | `a *= b` | Çarparak atama. |
+| `/=` | `a /= b` | Bölerek atama. |
+| `\=` | `a \= b` | Tam sayı bölerek atama. |
+| `%=` | `a %= b` | Kalan alarak atama. |
+| `&=` | `a &= b` | Bit AND ile atama. |
+| `|=` | `a |= b` | Bit OR ile atama. |
+| `^=` | `a ^= b` | Bit XOR ile atama. |
+| `<<=` | `a <<= b` | Sola kaydırarak atama. |
+| `>>=` | `a >>= b` | Sağa kaydırarak atama. |
+| `**=` | `a **= b` | Üs alarak atama. |
+| `=+` | `a =+ b` | Uyumluluk/özel pozitif atama biçimi; yeni kodda `a = +b` daha açık yazılmalıdır. |
+| `=-` | `a =- b` | Uyumluluk/özel negatif atama biçimi; yeni kodda `a = -b` daha açık yazılmalıdır. |
+
+Artırma/azaltma:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `++` | `a++` | Son artırma. |
+| `++` | `++a` | Ön artırma. |
+| `--` | `a--` | Son azaltma. |
+| `--` | `--a` | Ön azaltma. |
+
+Üye/çağrı/indeks/yardımcı:
+
+| Operatör | Kullanım | Görev |
+|---|---|---|
+| `.` | `nesne.alan`, `modul.fonksiyon()` | Üye, alan veya modül erişimi. |
+| `()` | `fonksiyon(a,b)`, `(a+b)` | Çağrı ve gruplama. |
+| `[]` | `dizi[i]` | Köşeli indeks yüzeyi. |
+| `,` | `a, b` | Argüman/öğe ayırıcı. |
+| `:` | `komut1: komut2` veya `? :` | Aynı satır ayırıcı veya ternary ayırıcı. |
+| `;` | `PRINT a; b` | PRINT yan yana yazma/ayırıcı. |
+| `#` | `#1` | Dosya kanalı/handle işareti. |
+| `@` | `@a` | Adres/başvuru ailesi. |
+| `? :` | `koşul ? doğru : yanlış` | Üçlü koşul ifadesi. |
+| `|>` | `veri |> fonksiyon` | Boru/pipeline zinciri. |
+
+-------------------------------------------------------------------------------
+5. İşlem önceliği ve yön
+-------------------------------------------------------------------------------
+
+Aşağıdaki tabloda büyük sayı daha yüksek önceliği gösterir.
+
+| Öncelik | Grup | Operatörler | Yön |
+|---:|---|---|---|
+| 150 | Postfix/üye/çağrı/indeks | `.`, `()`, `[]`, `a++`, `a--` | soldan sağa |
+| 140 | Üs alma | `**` | sağdan sola |
+| 130 | Prefix/tekli | `++a`, `--a`, `+a`, `-a`, `@a`, `!a`, `~a`, `NOT a` | sağdan sola |
+| 120 | Çarpımsal | `*`, `/`, `\`, `%`, `MOD` | soldan sağa |
+| 110 | Toplamsal | `+`, `-` | soldan sağa |
+| 100 | Kaydırma/döndürme | `<<`, `>>`, `SHL`, `SHR`, `ROL`, `ROR` | soldan sağa |
+| 90 | Karşılaştırma | `=`, `==`, `<>`, `!=`, `<`, `<=`, `>`, `>=` | soldan sağa |
+| 80 | Bit AND | `&` | soldan sağa |
+| 70 | Bit XOR | `^`, `XOR` | soldan sağa |
+| 60 | Bit OR | `|` | soldan sağa |
+| 50 | Mantıksal AND | `AND`, `&&` | soldan sağa |
+| 40 | Mantıksal OR | `OR`, `||` | soldan sağa |
+| 30 | Boru | `|>` | soldan sağa |
+| 20 | Üçlü koşul | `? :` | sağdan sola |
+| 10 | Atama | `=`, `+=`, `-=`, `*=`, `/=`, `\=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `**=`, `=+`, `=-` | sağdan sola / statement-lvalue |
+
+Önemli bağlam notu:
+
+- Aynı `=` sembolü hem karşılaştırma hem assignment tablosunda görünür. Farkı bağlam belirler.
+- `IF`, `WHILE`, `UNTIL`, `ASSERT`, `PRINT`, fonksiyon argümanı gibi expression bağlamlarında `=` karşılaştırmadır.
+- Satır başında atanabilir sol taraf + `=` varsa assignment statement olur.
+
+Örnekler:
+
+    a = 10                    ' assignment statement
+    IF a = 10 THEN PRINT a    ' equality expression
+    IF a == 10 THEN PRINT a   ' explicit equality expression
+    tank.ph = 7.2             ' field assignment statement
+    IF tank.ph = 7.2 THEN ... ' field equality expression
+
+-------------------------------------------------------------------------------
+6. Çocuk/bağlanma yapısı
+-------------------------------------------------------------------------------
+
+Parser AST çocuk ilişkisi şöyle düşünülmelidir:
+
+- Unary: sağ çocuk taşır.
+  Örnek: `-a` -> UNARY(op="-", right=a)
+
+- Binary: sol ve sağ çocuk taşır.
+  Örnek: `a + b` -> BINARY(op="+", left=a, right=b)
+
+- Ternary: koşul sol, false sağ, true çocuk listesinde ilk çocuk olarak tutulabilir; mevcut AST sözleşmesine göre korunmalıdır.
+  Örnek: `a ? b : c` -> TERNARY_EXPR(op="?:", left=a, child[0]=b, right=c)
+
+- Assignment statement: sol atanabilir düğüm, sağ ifade düğümü taşır.
+  Örnek: `a = b` -> ASSIGN_STMT(op="=", left=IDENT(a), right=IDENT(b))
+
+- Comparison expression: binary düğüm taşır.
+  Örnek: `a = b` koşul içinde -> BINARY(op="=", left=IDENT(a), right=IDENT(b))
+
+-------------------------------------------------------------------------------
+7. Düzeltilmesi gereken katmanlar
+-------------------------------------------------------------------------------
+
+1. Lexer:
+   - `==` tek OP token olmalıdır.
+   - `**=` tek OP token olmalıdır.
+
+2. Parser expression:
+   - `=` relation/compare seviyesinde kabul edilmelidir.
+   - `==` relation/compare seviyesinde kabul edilmelidir.
+   - `=` expression-level assignment listesinden çıkarılmalıdır.
+   - `**=` assignment operator listesine eklenmelidir.
+
+3. Parser statement:
+   - Satır başı atanabilir sol taraf + `=` assignment statement olarak kalmalıdır.
+   - Satır başı field/index assignment dönüşümü korunmalıdır.
+   - `**=` extended assignment listesine eklenmelidir.
+
+4. Operator contract:
+   - `\` ve `\=` tek backslash biçimiyle yazılmalıdır; `\\` yazımı sözleşme içinde hatalıdır.
+   - `=` comparison ve assignment bağlam notuyla tanımlanmalıdır.
+   - `==` resmi comparison olmalıdır.
+   - `**`, `**=`, `^`, `^=` anlamları kesin ayrılmalıdır.
+
+5. Semantic/MIR:
+   - `=` ve `==` -> EQ
+   - `<>` ve `!=` -> NE
+   - `**` -> POW
+   - `^` ve `XOR` -> XOR
+   - `**=` -> POW_ASSIGN
+   - `^=` -> XOR_ASSIGN
+
+6. MIR registry/backend policy:
+   - `^` artık POW'a gitmemelidir.
+   - `^=` artık POW_ASSIGN'a gitmemelidir.
+   - `&` STR_CONCAT olarak eşlenmemelidir; bit AND olmalıdır.
+
+7. Test:
+   - `IF a = b THEN` geçmelidir.
+   - `IF a == b THEN` geçmelidir.
+   - `a = b` statement assignment kalmalıdır.
+   - `a ** b` POW olmalıdır.
+   - `a ^ b` XOR olmalıdır.
+   - `a **= b` POW_ASSIGN olmalıdır.
+   - `a ^= b` XOR_ASSIGN olmalıdır.
+
+-------------------------------------------------------------------------------
+8. Copilot uygulama özeti
+-------------------------------------------------------------------------------
+
+Bu paket içindeki README_COPILOT_OPERATOR_BASIC_EQUAL.txt dosyasını uygula.
+Önce lexer ve parser yamalarını işle. Sonra semantic/MIR registry düzeltmelerini işle. En son testleri ekle ve token/AST/MIR çıktılarında eşleşmeleri doğrula.
+

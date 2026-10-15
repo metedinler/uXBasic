@@ -1,0 +1,114 @@
+' KONU: Orta düzey: uxtensor ile not matrisi çözümlemesi (MatVec, Transpose2D, kosinüs benzerliği)
+' KOMUTLAR: INCLUDE uxtensor.Create2D uxtensor.MatVec uxtensor.Transpose2D uxtensor.SliceAxis0 uxtensor.Dot uxtensor.Norm2 uxtensor.Mean uxtensor.Fill
+' ACIKLAMA: 4 öğrenci x 3 sınavlık not matrisi bir 2 boyutlu tensördür. Ağırlık vektörüyle MatVec çarpımı her öğrencinin ağırlıklı notunu tek çağrıda verir; devrik matris ile 1/4 vektörünün çarpımı sınav ortalamalarını verir. İki öğrencinin not satırı SliceAxis0 ile ayrılıp kosinüs benzerliği (Dot / (Norm2 * Norm2)) ile karşılaştırılır. SliceAxis0 bir kopya üretir: dilime yazmak asıl tensörü değiştirmez. uxtensor hatayı iletiyle bildirmez: hatalı boyutta ya da uyumsuz işlemde tutamaç 0, sınır dışı okumada nan döner (G-KUT-6). Bütün tutamaçlar işi bitince Free ile bırakılır.
+'= agirlikli not: Ali 81.00, Ayse 74.50, Can 90.50, Deniz 62.50
+'= sinav ortalamalari: 67.50 76.25 85.00
+'= genel ortalama: 76.25
+'= en yuksek: Can
+'= en benzer cift: Ayse - Deniz (0.9997)
+INCLUDE "include/modules/uxtensor.uxmh"
+
+' F64 değeri 2 ondalıklı metne çevirir (yalnız sıfır ve pozitif sayılar için)
+FUNCTION F2(v AS F64) AS STRING
+    DIM t AS I64 = INT(v * 100 + 0.5)
+    DIM kesir AS STRING = STR(t MOD 100)
+    IF LEN(kesir) < 2 THEN kesir = "0" + kesir
+    RETURN STR(t \ 100) + "." + kesir
+END FUNCTION
+
+' F64 değeri 4 ondalıklı metne çevirir (yalnız sıfır ve pozitif sayılar için)
+FUNCTION F4(v AS F64) AS STRING
+    DIM t AS I64 = INT(v * 10000 + 0.5)
+    DIM kesir AS STRING = STR(t MOD 10000)
+    DO WHILE LEN(kesir) < 4
+        kesir = "0" + kesir
+    LOOP
+    RETURN STR(t \ 10000) + "." + kesir
+END FUNCTION
+
+' İki not satırının kosinüs benzerliği: 1'e yakınsa satırların "şekli" benzerdir
+FUNCTION Benzerlik(notlar AS U64, i AS I64, j AS I64) AS F64
+    DIM ri AS U64 = uxtensor.SliceAxis0(notlar, i, 1)
+    DIM rj AS U64 = uxtensor.SliceAxis0(notlar, j, 1)
+    DIM nokta AS F64 = uxtensor.Dot(ri, rj)
+    DIM ni AS F64 = uxtensor.Norm2(ri)
+    DIM nj AS F64 = uxtensor.Norm2(rj)
+    uxtensor.Free(rj)
+    uxtensor.Free(ri)
+    RETURN nokta / (ni * nj)
+END FUNCTION
+
+MAIN
+    DIM isim(3) AS STRING
+    DIM veri(11) AS F64
+    DIM i AS I64
+    DIM j AS I64
+    DIM n AS U64 = uxtensor.Create2D(4, 3)
+    DIM w AS U64 = uxtensor.Create1D(3)
+    DIM bir AS U64 = uxtensor.Create1D(4)
+    DIM skor AS U64
+    DIM nt AS U64
+    DIM ort AS U64
+    DIM genel AS F64
+    DIM o1 AS F64
+    DIM o2 AS F64
+    DIM o3 AS F64
+    DIM satir AS STRING
+    DIM enIyi AS I64 = 0
+    DIM b AS F64
+    DIM enB AS F64 = 0.0
+    DIM bi AS I64 = 0
+    DIM bj AS I64 = 0
+
+    isim(0) = "Ali": isim(1) = "Ayse": isim(2) = "Can": isim(3) = "Deniz"
+    veri(0) = 70: veri(1) = 80: veri(2) = 90
+    veri(3) = 60: veri(4) = 75: veri(5) = 85
+    veri(6) = 90: veri(7) = 85: veri(8) = 95
+    veri(9) = 50: veri(10) = 65: veri(11) = 70
+    FOR i = 0 TO 11
+        uxtensor.SetFlat(n, i, veri(i))
+    NEXT
+    uxtensor.SetFlat(w, 0, 0.3): uxtensor.SetFlat(w, 1, 0.3): uxtensor.SetFlat(w, 2, 0.4)
+    uxtensor.Fill(bir, 0.25)
+
+    ' 1) ağırlıklı not = not matrisi x ağırlık vektörü
+    skor = uxtensor.MatVec(n, w)
+    satir = ""
+    FOR i = 0 TO 3
+        IF i > 0 THEN satir = satir + ", "
+        satir = satir + isim(i) + " " + F2(uxtensor.GetFlat(skor, i))
+        IF uxtensor.GetFlat(skor, i) > uxtensor.GetFlat(skor, enIyi) THEN enIyi = i
+    NEXT
+    PRINT "agirlikli not: "; satir
+
+    ' 2) sınav ortalamaları = devrik(not matrisi) x (1/4, 1/4, 1/4, 1/4)
+    nt = uxtensor.Transpose2D(n)
+    ort = uxtensor.MatVec(nt, bir)
+    o1 = uxtensor.GetFlat(ort, 0)
+    o2 = uxtensor.GetFlat(ort, 1)
+    o3 = uxtensor.GetFlat(ort, 2)
+    PRINT "sinav ortalamalari: "; F2(o1); " "; F2(o2); " "; F2(o3)
+    genel = uxtensor.Mean(n)
+    PRINT "genel ortalama: "; F2(genel)
+    PRINT "en yuksek: "; isim(enIyi)
+
+    ' 3) en benzer iki öğrenci
+    FOR i = 0 TO 2
+        FOR j = i + 1 TO 3
+            b = Benzerlik(n, i, j)
+            IF b > enB THEN
+                enB = b
+                bi = i
+                bj = j
+            END IF
+        NEXT
+    NEXT
+    PRINT "en benzer cift: "; isim(bi); " - "; isim(bj); " ("; F4(enB); ")"
+
+    uxtensor.Free(ort)
+    uxtensor.Free(nt)
+    uxtensor.Free(skor)
+    uxtensor.Free(bir)
+    uxtensor.Free(w)
+    uxtensor.Free(n)
+END MAIN

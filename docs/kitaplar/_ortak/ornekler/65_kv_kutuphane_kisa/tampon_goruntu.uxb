@@ -1,0 +1,121 @@
+' KONU: uxmathcore ile tipli bellek tamponları: U8 piksel dizisini F64'e çevirip parlaklık çözümlemesi yapmak
+' KOMUTLAR: INCLUDE UXMC_BufferCreate UXMC_SetByte UXMC_BufferCast UXMC_VecScaleF64 UXMC_VecMinF64 UXMC_VecMaxF64 UXMC_VecL2NormF64 UXMC_VecNormalizeL2F64 UXMC_BufferSlice UXMC_VecAxpyF64
+' ACIKLAMA: Gri tonlamalı bir görüntünün 8 pikseli bayt (U8, 0-255) olarak saklanır. Çözümleme için önce ondalığa çevrilir (BufferCast), 255'e bölünerek 0-1 aralığına ölçeklenir (VecScaleF64), sonra en koyu/en açık piksel, ortalama parlaklık, L2 normu ve birim uzunluğa normalleştirme hesaplanır. Dilim (BufferSlice) bir kopyadır. Tamponlar tutamaçtır ve Free ile bırakılır. Dikkat (G-KUT-16): bir tamponun tipine sığmayan değer yazılırsa sessizce bozulur (I32'ye 3000000000 → -2147483648; U8'e çevirmek mod 256 alır), hata bildirilmez. Değerler numpy ile doğrulanmıştır.
+'= pikseller (U8): 8 adet, bayt boyutu 8
+'= ondalik tampon: 8 adet, bayt boyutu 64
+'= en koyu 0.0000, en acik 1.0000
+'= ortalama parlaklik: 0.4701
+'= L2 norm: 1.6241, birim uzunluga normalleste: 1.0000
+'= %20 parlatilmis ilk 4 piksel: 0.0000 0.3012 0.6024 1.2000
+'= dilim [2..5]: 0.5020 1.0000 0.1255 0.3765
+'= U8 tasma: 300 yazilinca 44, -1 yazilinca 255 okunur
+INCLUDE "include/modules/uxmathcore.uxmh"
+
+' F64 değeri 4 ondalıklı metne çevirir (negatif sayıları da işler)
+FUNCTION F4(v AS F64) AS STRING
+    DIM isaret AS STRING = ""
+    DIM x AS F64 = v
+    IF x < 0 THEN
+        isaret = "-"
+        x = -x
+    END IF
+    DIM t AS I64 = INT(x * 10000 + 0.5)
+    DIM kesir AS STRING = STR(t MOD 10000)
+    DO WHILE LEN(kesir) < 4
+        kesir = "0" + kesir
+    LOOP
+    IF t = 0 THEN isaret = ""
+    RETURN isaret + STR(t \ 10000) + "." + kesir
+END FUNCTION
+
+MAIN
+    DIM piksel(7) AS I32
+    DIM bayt AS U64 = UXMC_BufferCreate(UXMC_TYPE_U8(), 8)
+    DIM ondalik AS U64
+    DIM olcekli AS U64 = UXMC_BufferCreate(UXMC_TYPE_F64(), 8)
+    DIM birim AS U64 = UXMC_BufferCreate(UXMC_TYPE_F64(), 8)
+    DIM parlak AS U64 = UXMC_BufferCreate(UXMC_TYPE_F64(), 8)
+    DIM dilim AS U64
+    DIM tas AS U64 = UXMC_BufferCreate(UXMC_TYPE_U8(), 2)
+    DIM rc AS I32
+    DIM i AS I32
+    DIM toplam AS F64 = 0
+    DIM enKoyu AS F64
+    DIM enAcik AS F64
+    DIM norm AS F64
+    DIM birimNorm AS F64
+    DIM n1 AS I32
+    DIM n2 AS I64
+    DIM t1 AS F64
+    DIM t2 AS F64
+    DIM s1 AS STRING
+    DIM s2 AS STRING
+    DIM s3 AS STRING
+    DIM s4 AS STRING
+
+    piksel(0) = 0: piksel(1) = 64: piksel(2) = 128: piksel(3) = 255
+    piksel(4) = 32: piksel(5) = 96: piksel(6) = 160: piksel(7) = 224
+    FOR i = 0 TO 7
+        rc = UXMC_SetByte(bayt, i, piksel(i))
+    NEXT
+    n1 = UXMC_BufferCount(bayt)
+    n2 = UXMC_BufferByteSize(bayt)
+    PRINT "pikseller (U8): "; n1; " adet, bayt boyutu "; n2
+
+    ondalik = UXMC_BufferCast(bayt, UXMC_TYPE_F64())
+    n1 = UXMC_BufferCount(ondalik)
+    n2 = UXMC_BufferByteSize(ondalik)
+    PRINT "ondalik tampon: "; n1; " adet, bayt boyutu "; n2
+
+    rc = UXMC_VecScaleF64(ondalik, 1.0 / 255.0, olcekli)
+    ASSERT rc = 1, "olcekleme basarisiz"
+    enKoyu = UXMC_VecMinF64(olcekli)
+    enAcik = UXMC_VecMaxF64(olcekli)
+    s1 = F4(enKoyu)
+    s2 = F4(enAcik)
+    PRINT "en koyu "; s1; ", en acik "; s2
+
+    FOR i = 0 TO 7
+        toplam += UXMC_GetF64(olcekli, i)
+    NEXT
+    s1 = F4(toplam / 8)
+    PRINT "ortalama parlaklik: "; s1
+
+    norm = UXMC_VecL2NormF64(olcekli)
+    rc = UXMC_VecNormalizeL2F64(olcekli, birim)
+    birimNorm = UXMC_VecL2NormF64(birim)
+    s1 = F4(norm)
+    s2 = F4(birimNorm)
+    PRINT "L2 norm: "; s1; ", birim uzunluga normalleste: "; s2
+
+    ' %20 parlatma: parlak = 1.2 * olcekli + 0 (VecAxpy: alfa * x + y; y sıfır tamponudur)
+    rc = UXMC_BufferFillZero(parlak)
+    rc = UXMC_VecAxpyF64(1.2, olcekli, parlak, parlak)
+    s1 = F4(UXMC_GetF64(parlak, 0))
+    s2 = F4(UXMC_GetF64(parlak, 1))
+    s3 = F4(UXMC_GetF64(parlak, 2))
+    s4 = F4(UXMC_GetF64(parlak, 3))
+    PRINT "%20 parlatilmis ilk 4 piksel: "; s1; " "; s2; " "; s3; " "; s4
+
+    dilim = UXMC_BufferSlice(olcekli, 2, 4)
+    s1 = F4(UXMC_GetF64(dilim, 0))
+    s2 = F4(UXMC_GetF64(dilim, 1))
+    s3 = F4(UXMC_GetF64(dilim, 2))
+    s4 = F4(UXMC_GetF64(dilim, 3))
+    PRINT "dilim [2..5]: "; s1; " "; s2; " "; s3; " "; s4
+
+    ' tip sınırı: 300 bayta sığmaz, -1 işaretsiz değildir; ikisi de sessizce mod 256 alınır
+    rc = UXMC_SetI64(tas, 0, 300)
+    rc = UXMC_SetI64(tas, 1, -1)
+    t1 = UXMC_GetF64(tas, 0)
+    t2 = UXMC_GetF64(tas, 1)
+    PRINT "U8 tasma: 300 yazilinca "; CINT(t1); ", -1 yazilinca "; CINT(t2); " okunur"
+
+    rc = UXMC_BufferFree(tas)
+    rc = UXMC_BufferFree(dilim)
+    rc = UXMC_BufferFree(parlak)
+    rc = UXMC_BufferFree(birim)
+    rc = UXMC_BufferFree(olcekli)
+    rc = UXMC_BufferFree(ondalik)
+    rc = UXMC_BufferFree(bayt)
+END MAIN

@@ -1,0 +1,158 @@
+' KONU: Üst düzey: bir aşamanın çıktısı sonrakinin girdisidir: JSON → düzenli ifade → sözlük → istatistik → karar
+' KOMUTLAR: INCLUDE uxjson.Parse uxregex.IsMatch uxcollections.DictGetOrDefaultI64 uxcollections.DictKeysAsList uxcollections.ListSortAlpha UXSTATS_Mean UXSTATS_StdDevSamp IFF
+' ACIKLAMA: Altı aşamalı bir hat: (1) uxjson, oturum olaylarını içeren JSON metnini ayrıştırır; (2) uxregex her olaydaki kullanıcı adını "2-8 küçük harf" desenine karşı doğrular ve geçersizleri ayırır; (3) uxcollections sözlüğü kullanıcı başına toplam oturum süresini ve hata sayısını biriktirir; (4) anahtarlar listeye alınıp alfabetik sıralanır, sıralama kullanıcı kodunda süreye göre yapılır; (5) uxstats süre toplamlarının ortalamasını ve örneklem standart sapmasını hesaplar; (6) dil, "ortalama + 1 standart sapmanın üstünde" olanları yoğun kullanıcı olarak işaretler. Her aşamanın çıktısı bir sonrakinin girdisidir: JSON metni → tutamaç → metin → desen sonucu → sayı → sözlük → liste → vektör → karar. Beklenen çıktı aynı hattın saf Python karşılığıyla (json, re, statistics) doğrulanmıştır. Kütüphane sonuçları önce değişkene alınır; AST'de bu örnek, çok sayıda DLL çağrısı yüzünden birkaç on saniye sürer (G-HIZ-2). Diziler MAIN'in basinda bildirilir; ASSERT bulunan bir programda dizi bildirimini bir cagridan sonraya koymak x64'te derlenmez (G-DIL-10, S-203).
+' ZAMAN: 300
+'= gecerli olay: 8, reddedilen kullanici adi: 2 (Bob!, x)
+'= siralama: deniz 600 sn, ayse 300 sn, ali 210 sn, can 120 sn
+'= ortalama 307.5 sn, standart sapma 208.4 sn
+'= yogun kullanici: deniz
+'= hata veren kullanicilar: ali, ayse
+INCLUDE "include/modules/uxjson.uxmh"
+INCLUDE "include/modules/uxregex.uxmh"
+INCLUDE "include/modules/uxcollections.uxmh"
+INCLUDE "include/modules/uxstats.uxmh"
+
+' F64 değeri 1 ondalıklı metne çevirir (yalnız sıfır ve pozitif sayılar için)
+FUNCTION F1(v AS F64) AS STRING
+    DIM t AS I64 = INT(v * 10 + 0.5)
+    RETURN STR(t \ 10) + "." + STR(t MOD 10)
+END FUNCTION
+
+MAIN
+    ' Diziler yordamin basinda, ilk cagridan once bildirilir (x64'te ASSERT varken sonradan DIM yazmak derlenmez: G-DIL-10)
+    DIM kullanilmis(7) AS I32
+    DIM adlar(7) AS STRING
+    DIM toplam(7) AS I64
+    DIM metin AS STRING
+    metin = "[" _
+          + "{""kullanici"":""ali"",""eylem"":""oturum"",""sure"":120}," _
+          + "{""kullanici"":""ayse"",""eylem"":""oturum"",""sure"":300}," _
+          + "{""kullanici"":""ali"",""eylem"":""oturum"",""sure"":90}," _
+          + "{""kullanici"":""can"",""eylem"":""oturum"",""sure"":45}," _
+          + "{""kullanici"":""Bob!"",""eylem"":""oturum"",""sure"":500}," _
+          + "{""kullanici"":""ayse"",""eylem"":""hata"",""sure"":0}," _
+          + "{""kullanici"":""deniz"",""eylem"":""oturum"",""sure"":600}," _
+          + "{""kullanici"":""can"",""eylem"":""oturum"",""sure"":75}," _
+          + "{""kullanici"":""ali"",""eylem"":""hata"",""sure"":0}," _
+          + "{""kullanici"":""x"",""eylem"":""oturum"",""sure"":10}]"
+
+    DIM belge AS U64
+    DIM dizi AS U64
+    DIM olay AS U64
+    DIM adet AS U64
+    DIM i AS U64
+    DIM kul AS STRING
+    DIM eylem AS STRING
+    DIM sure AS I64
+    DIM re AS U64
+    DIM uygun AS I32
+    DIM gecerli AS I32 = 0
+    DIM reddedilen AS STRING = ""
+    DIM redSayi AS I32 = 0
+    DIM sureler AS U64 = uxcollections.DictNew()
+    DIM hatalar AS U64 = uxcollections.DictNew()
+    DIM onceki AS I64
+
+    ' 1) JSON -> tutamaç, 2) düzenli ifade ile doğrulama, 3) sözlükte biriktirme
+    belge = uxjson.Parse(metin)
+    ASSERT belge <> 0, "JSON ayristirilamadi"
+    dizi = uxjson.Root(belge)
+    adet = uxjson.ArraySize(dizi)
+    re = uxregex.Compile("^[a-z]{2,8}$", 0)
+    ASSERT re <> 0, "desen derlenemedi"
+    FOR i = 0 TO adet - 1
+        olay = uxjson.ArrayGet(dizi, i)
+        kul = uxjson.GetString(uxjson.ObjectGet(olay, "kullanici"))
+        eylem = uxjson.GetString(uxjson.ObjectGet(olay, "eylem"))
+        sure = uxjson.GetI64(uxjson.ObjectGet(olay, "sure"))
+        uygun = uxregex.IsMatch(re, kul)
+        IF uygun <> 1 THEN
+            IF redSayi > 0 THEN reddedilen = reddedilen + ", "
+            reddedilen = reddedilen + kul
+            redSayi += 1
+        ELSE
+            gecerli += 1
+            IF eylem = "oturum" THEN
+                onceki = uxcollections.DictGetOrDefaultI64(sureler, kul, 0)
+                uxcollections.DictSetI64(sureler, kul, onceki + sure)
+            ELSEIF eylem = "hata" THEN
+                onceki = uxcollections.DictGetOrDefaultI64(hatalar, kul, 0)
+                uxcollections.DictSetI64(hatalar, kul, onceki + 1)
+            END IF
+        END IF
+    NEXT
+    uxregex.Free(re)
+    uxjson.Free(belge)
+    PRINT "gecerli olay: "; gecerli; ", reddedilen kullanici adi: "; redSayi; " ("; reddedilen; ")"
+
+    ' 4) anahtarlar listeye, liste alfabetik, sonra süreye göre azalan seçim
+    DIM anahtarlar AS U64 = uxcollections.DictKeysAsList(sureler)
+    uxcollections.ListSortAlpha(anahtarlar)
+    DIM n AS I64 = uxcollections.ListCount(anahtarlar)
+    DIM j AS I64
+    DIM k AS I64
+    DIM en AS I64
+    DIM sira AS STRING = ""
+    FOR j = 0 TO n - 1
+        adlar(j) = uxcollections.ListGetStr(anahtarlar, j)
+        toplam(j) = uxcollections.DictGetI64(sureler, adlar(j))
+        kullanilmis(j) = 0
+    NEXT
+    FOR k = 0 TO n - 1
+        en = -1
+        FOR j = 0 TO n - 1
+            IF kullanilmis(j) = 0 THEN
+                IF en = -1 THEN
+                    en = j
+                ELSEIF toplam(j) > toplam(en) THEN
+                    en = j
+                END IF
+            END IF
+        NEXT
+        kullanilmis(en) = 1
+        IF k > 0 THEN sira = sira + ", "
+        sira = sira + adlar(en) + " " + STR(toplam(en)) + " sn"
+    NEXT
+    PRINT "siralama: "; sira
+
+    ' 5) istatistik: toplamlar bir vektöre konur
+    DIM vek AS U64 = UXSTATS_VecCreate(8)
+    DIM rc AS I32
+    DIM ort AS F64
+    DIM sd AS F64
+    DIM s1 AS STRING
+    DIM s2 AS STRING
+    FOR j = 0 TO n - 1
+        rc = UXSTATS_VecPush(vek, toplam(j))
+    NEXT
+    ort = UXSTATS_Mean(vek)
+    sd = UXSTATS_StdDevSamp(vek)
+    s1 = F1(ort)
+    s2 = F1(sd)
+    PRINT "ortalama "; s1; " sn, standart sapma "; s2; " sn"
+
+    ' 6) karar: ortalama + 1 standart sapmanın üstündekiler yoğun kullanıcıdır
+    DIM yogun AS STRING = ""
+    FOR j = 0 TO n - 1
+        IF toplam(j) > ort + sd THEN
+            IF LEN(yogun) > 0 THEN yogun = yogun + ", "
+            yogun = yogun + adlar(j)
+        END IF
+    NEXT
+    PRINT "yogun kullanici: "; IFF(LEN(yogun) > 0, yogun, "yok")
+
+    DIM hatali AS STRING = ""
+    DIM hataAnahtar AS U64 = uxcollections.DictKeysAsList(hatalar)
+    uxcollections.ListSortAlpha(hataAnahtar)
+    FOR j = 0 TO uxcollections.ListCount(hataAnahtar) - 1
+        IF j > 0 THEN hatali = hatali + ", "
+        hatali = hatali + uxcollections.ListGetStr(hataAnahtar, j)
+    NEXT
+    PRINT "hata veren kullanicilar: "; hatali
+
+    rc = UXSTATS_VecFree(vek)
+    uxcollections.ListFree(hataAnahtar)
+    uxcollections.ListFree(anahtarlar)
+    uxcollections.DictFree(hatalar)
+    uxcollections.DictFree(sureler)
+END MAIN
