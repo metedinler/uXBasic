@@ -1,0 +1,7 @@
+ENUM Level AS I32
+    LOW = 10
+    HIGH = 20
+END ENUM
+DIM l AS I32
+l = Level.HIGH
+PRINT l
