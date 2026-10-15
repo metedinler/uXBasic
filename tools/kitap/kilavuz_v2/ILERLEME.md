@@ -63,6 +63,6 @@ reddeder (ara durum; yol 2026-10-11 kararıyla korunur); ayrıca anılır. Örne
 | 20 | 20_kutuphaneler | include/modules + libsx | yazıldı · 289 satır · 28 doğrulanmış örnek · 24 Ek G kaydı · 2 ◇ HEDEF |
 | 21 | 21_hedefler | x64/JS/WAT/WASM | yazıldı · 340 satır · 49 Ek G kaydı · 3 ◇ HEDEF |
 | 22 | 22_ic_ice | bileşilebilirlik | yazıldı · 187 satır · 7 doğrulanmış örnek · 40 Ek G kaydı · 2 ◇ HEDEF |
-| 23 | 23_kararlar | programlama kararları | yazıldı · 94 satır · 20 Ek G kaydı · 4 ◇ HEDEF |
+| 23 | 23_kararlar | programlama kararları | yazıldı · 96 satır · 21 Ek G kaydı · 4 ◇ HEDEF |
 | 24 | 24_programlar | büyük örnek programlar | yazıldı · 78 satır · 2 doğrulanmış örnek · 10 Ek G kaydı |
-| 90 | 90_ekler | dizinler, sınırlar, sözlük | yazıldı · 453 satır · 98 Ek G kaydı · 1 ◇ HEDEF |
+| 90 | 90_ekler | dizinler, sınırlar, sözlük | yazıldı · 454 satır · 98 Ek G kaydı · 1 ◇ HEDEF |

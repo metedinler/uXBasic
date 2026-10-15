@@ -163,6 +163,7 @@ kayıtlar önerilen düzeltme sırasıyla numaralanmıştır (`ai_koordinasyon/K
 | Derleme betiği ve DLL denemesi | Gerçek ağaca dokunmadan: yalıtılmış kopya kökte `build_64.ps1`; `native\uxb_runtime\build_runtime_dll.ps1 -OutputDirectory <geçici> -SkipPublish` (2.3, 2.4) |
 | Sorun takip dizini | `ai_koordinasyon/SORUN_TAKIP.md`, `ai_koordinasyon/KILAVUZ_V2_SORUN_DIZINI.md` |
 | Kataloğu SORUN_TAKIP'a işleme | `python tools/kitap/kilavuz_v2/sorun_takibe_isle.py` |
+| Belgelerin GitHub'daki yeri | `https://github.com/metedinler/uXBasic`, dal `yayin/20261015` (2026-10-15'ten beri): bu kılavuz `docs/tasarim/`, sorun kaydı ve karar defteri `ai_koordinasyon/`, belirtimler `spec/`, üretici araçlar `tools/kitap/`, konuşma ve hafıza kayıtları `konusma_arsivi/` altındadır. Hepsi yalnız okumak içindir, lisans vermez; konuşma kayıtlarında gizli anahtarlar silinmiştir (`konusma_arsivi/OKU_BENI.md`) |
 
 ### Tasarım belgeleri ve kılavuzdaki karşılıkları
 

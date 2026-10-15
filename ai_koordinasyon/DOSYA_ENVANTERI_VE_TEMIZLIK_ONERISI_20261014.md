@@ -336,3 +336,66 @@ Eski AST-x64 kusurları (S-524 … S-538, S-157-L, S-086, S-091) bu kuyruğun i�
 - Git durumu: `git_tara.py` (izlenen, değişen, izlenmeyen; gizli anahtar deseni taraması).
 - Belgelerdeki atıflar: `ai_koordinasyon` ve `docs\tasarim` içinde `reports\…_runs` ve `compiler_consolidation\<zaman>` adına yalnız iki eski belge atıf yapıyor.
 - Hiçbir ölçüm dosya değiştirmedi.
+
+---
+
+## 11. Uygulama sonucu (2026-10-15)
+
+Yazım saati: 2026-10-15 14:50. Yukarıdaki bölümler 14 Ekim'deki öneriyi olduğu gibi korur; bu bölüm Mete'nin kararlarını ve yapılanı yazar. Temizliğin ayrıntısı `TEMIZLIK_GUNLUGU_20261015.md`'dedir.
+
+### 11.1 Bölüm 8'deki sekiz sorunun cevabı
+
+| # | Soru | Mete'nin cevabı (2026-10-15) | Ne yapıldı |
+|---|---|---|---|
+| 1 | Kademe 1 (DLL kopyaları) | "hepsi önerdiğin gibi" | **Yapıldı:** 21 663 dosya, 33,01 GB |
+| 2 | Kademe 2 (`.obj`, `.exe`, `reports.zip`) | "gerekirse" önerisi kabul; zip silinmez | **Yapılmadı** (C: 38 GB boş; yer gerekirse `.obj`/`.exe` için aynı yöntem) |
+| 3 | Kademe 3 satırları | "temizle" olanlar kalkar, "sor" olanlar kalır, zip silinmez | **Yapıldı:** `release_packages` içindeki iki çıkarılmış klasör, `dist\_stage`, `dist\_verify` (2,52 GB; zip'te boyut + CRC32 ile bulunanlar). `inventory_downloads` ve `release_assets` **kaldı** |
+| 4 | Kökteki 4,1 GB zip ve 2,8 GB rar | kalsın | Dokunulmadı |
+| 5 | Tasarım belgeleri GitHub'da yayınlansın mı | **Karar değişti:** "tasarım ve tüm dokümantasyon gitsin" | **Yayınlandı** (`docs/tasarim`, `ai_koordinasyon`, `spec`; yalnız okumak için, lisans vermez) |
+| 6 | Git kimliği | noreply önerisi kabul | Tüm yayın commit'leri `metedinler <62749570+metedinler@users.noreply.github.com>` |
+| 7 | Gönderme yolu | yeni dal önerisi kabul | `yayin/20261015` (main'e doğrudan itilmedi) |
+| 8 | DLL paketleri GitHub Release olsun mu | "önce üçüncü taraf lisans kontrolü" önerisi kabul | **Yapılmadı:** lisans kontrolü bekliyor; hiçbir DLL gönderilmedi |
+
+Ek istek: Claude, Codex ve ChatGPT konuşma ve hafıza dosyaları da gitsin (dosya başına 100 MB sınırı). **Yapıldı** (`konusma_arsivi/`).
+
+### 11.2 Gönderilen dal
+
+| Konu | Değer |
+|---|---|
+| Depo | `https://github.com/metedinler/uXBasic` (herkese açık) |
+| Dal | `yayin/20261015` |
+| Uç | `79391cd8c2cb262682cbc40affb2426f9aeacc2a` (bu bölümü içeren sonraki belge commit'i dışında) |
+| Taban | `origin/main` = `fd42dee`; dal 10 commit önde, 0 geride |
+| Birleştirme bağlantısı | `https://github.com/metedinler/uXBasic/pull/new/yayin/20261015` |
+| Boyut | `main`'e göre 4 095 dosya (1 561 765 satır eklendi, 1 960 silindi); GitHub'a göre depo 65,8 MB; en büyük dosya 88,8 MB (sınır 100 MB; GitHub 50 MB üstü iki dosya için uyarı verdi) |
+| Yasak uzantı | `.exe`, `.dll`, `.obj`, `.zip`, `.rar`, `.7z`, `.pdb`, `.lbug` vb.: 0 dosya |
+
+| Harf | Commit | İçerik | Dosya |
+|---|---|---|---:|
+| A | `d3105ad` | `07550bb`'nin içeriği, noreply kimliğiyle yeniden damgalandı (özgün tarih 2026-09-28; yayınlanmamış gerçek e-postalı commit böylece yayına girmedi) | 412 |
+| B | `a712953` | Kaynak ve yerel çalışma zamanı: çalışma ağacındaki değişiklikler (`src`, `native`, `runtime`, `compiler`, `libsx` …) | 128 |
+| C | `01d3094` | Mevcut test paketlerindeki değişiklikler | 9 |
+| D | `03e7226` | Yeni test paketleri | 1 164 |
+| E | `2ed5400` | Araçlar: kitap üreticisi ve yoklamalar, bakım, kütüphane araçları (üçüncü taraf FreeBASIC, wabt, uxotcc hariç) | 301 |
+| F | `54030db` | Yayın politikası: `.gitignore`, `DESIGN-RIGHTS-RESERVED.md` | 2 |
+| G | `a1f69fa` | `docs` altındaki tüm belgeler (tasarım notları, kitaplar, ölçüm kanıtları) | 1 909 |
+| H | `fa80100` | `ai_koordinasyon` (sorun takip, karar defteri, durum) ve `spec` | 42 |
+| I | `96c0aab` | Kök dizindeki belge dosyaları (`docs/kok_notlari/`) ve beceri/ajan tanımları (`.claude`) | 91 |
+| J | `79391cd` | `konusma_arsivi/`: Claude konuşmaları ve ham kayıtları (82), Codex hafıza notları (7), ChatGPT sayfası (1), `OKU_BENI.md` | 91 |
+
+**Gönderilmeyenler:** `tekdosyaklsoru`, `xtestx`, `tool_py`, `game`, `.gitnexus` (indeks 99,9 MB), `tools\FreeBASIC-1.10.1-win64`, `tools\wabt`, `tools\uxotcc_final_release`, kök patch artıkları, Codex oturum günlükleri (≈ 651 MB, tüm projeleri kapsar), `auth.json`, `config.toml`, canlı oturum kayıtları ve her türlü DLL/zip/rar/exe.
+
+### 11.3 Gizli anahtar olayı
+
+- İlk gönderme **GitHub itibar koruması (GH013) tarafından reddedildi:** Claude konuşma kaydında (`konusma_arsivi/claude/konusmalar/ham/…jsonl`) bir Google hizmet anahtarı (`AQ.` ile başlayan yeni biçim) bulunuyordu. Benim tarayıcım bu biçimi tanımıyordu. Hiçbir şey yayınlanmadı.
+- Çözüm: tarayıcı desenleri genişletildi (Google `AQ.`, ortam değişkeni atamaları `…_KEY=`/`…_TOKEN=`, URL'deki `?key=`, bağlantı dizesindeki parola, `Basic` ve Bearer yetkisi, hizmet belirteçleri); örtüşen eşleşmeler tekilleştirildi; sınama birimi (bulunması ve bulunmaması gereken örneklerle) 0 hata verdi; arşiv **özgünlerden baştan** üretildi (8 dosyada 58 gizli değer `[GIZLI-SILINDI:<tür>]` yapıldı, 102 kişisel e-posta yeri `[e-posta]` yapıldı); dalın eklenen ve değişen 4 094 dosyasının **4 079 metin dosyası** (ikili dosya yok sayıldı) ile `origin/main`'in tüm metin dosyaları yeniden tarandı: dalda 0 gizli değer; `origin/main`'de tek eşleşme yanlış alarmdır (`tests/run_class_ctor_dtor_exec_ast.bas` içindeki "Basic CONSTRUCTOR/DESTRUCTOR parsing" yorumu). Sonra gönderme başarılı oldu.
+- **E-posta adresleri (2026-10-15 14:50 taraması):** yazarın kişisel Gmail adresi dalda 30 belgede geçiyor ve **iletişim bilgisi olarak zaten yayındaydı** (`src/cli/cli_help.fbs`, `compiler/wrappers/uxb_main_wrapper.c`, `Programcinin Cep Kitabi.md`); yeni yerler `docs/uxbasic kitap` ve `docs/uxbasic_pck_kitaplar` altındaki eski kitap kopyalarıdır. Konuşma arşivlerinde bu adres maskelenmiştir. Üçüncü kişi adresi tek yerde var: konuşma kaydına yapıştırılmış `tree-sitter-freebasic` (MIT lisanslı) paketinin kendi başlık yorumundaki yazar satırı.
+- Değerler: Gemini ortam değişkeni, Groq (`gsk_…`), `sk-…`, `sk-ant-…` ve Bearer belirteçleri. **Yerel orijinal konuşma kayıtları değişmedi**; gerçek görünümlü anahtarlar orada duruyor. Anahtarlar yayınlanmadı, ama konuşmalarda göründükleri için **yenilenmeleri önerilir**.
+- Ders: yayın öncesi tarama, bilinen anahtar biçimlerinin kapsadığı kadarını yakalar; GitHub'ın itibar koruması ikinci güvenlik ağıdır. Bu depo herkese açık olduğundan yayınlanan şey geri alınamaz sayılmalıdır (önbelleğe ve dizine girebilir).
+
+### 11.4 Yerel depo durumu ve sonraki adım
+
+- Codex'in `HEAD`'i (`main` = `07550bb`), gerçek indeksi ve 137 değişikliği olan çalışma ağacı **değiştirilmedi**; dal, geçici bir indeks ve doğrudan nesne yazımıyla kuruldu (`git add -A` çalıştırılmadı). Yerel `.gitignore` de değişmedi; yeni dışlama kuralları dal `main`'e birleştirilince gelir.
+- Yerel `main`, gerçek e-posta taşıyan `07550bb`'yi içerir. **Olduğu gibi `git push` edilmemelidir.** Yayın yolu `yayin/20261015` dalıdır.
+- Mete'nin yapacağı: GitHub'da dalı gözden geçirip `main`'e birleştirmek (bağlantı yukarıda). Birleştirmeden sonra yerel çalışma ağacına almak için önce Codex'in yerel değişikliklerinin commit'lenmesi gerekir (aynı dosyalar iki yerde değişmiş olur); bu, Codex ile birlikte verilecek ayrı bir karardır.
+- Gönderilen içeriği değiştirmek için yeni commit eklenir (dalın geçmişi yeniden yazılmaz). Bu belgenin ve kitabın bu bölümle ilgili güncellemeleri aynı dala küçük bir belge commit'iyle eklenir.

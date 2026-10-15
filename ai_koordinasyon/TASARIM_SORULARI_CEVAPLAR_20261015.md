@@ -1,6 +1,6 @@
 # Mete'nin 2026-10-15 tasarım soruları: cevaplar ve kayıtlar
 
-Hazırlayan: Claude · Ölçüm referansı: `bin\uxb_kilavuz_20261014_0253.exe`, altı yol (AST, MIR, MIR-x64, eski AST-x64, JS, WAT/WASM) · Yöntem: önce tasarım belgeleri ve kitap, sonra her özellik için **kitapta doğrulanmış bir kontrol programı + özelliği deneyen program** (`tools\kitap\kilavuz_v2\yoklama\vaka_kos.py`, 69 + 51 vaka). Hiçbir derleyici kaynağı değiştirilmedi.
+Hazırlayan: Claude · Ölçüm referansı: `bin\uxb_kilavuz_20261014_0253.exe`, altı yol (AST, MIR, MIR-x64, eski AST-x64, JS, WAT/WASM) · Yöntem: önce tasarım belgeleri ve kitap, sonra her özellik için **kitapta doğrulanmış bir kontrol programı + özelliği deneyen program** (`tools\kitap\kilavuz_v2\yoklama\vaka_kos.py`, 117 vaka, sekiz parti: 69 + 14 + 6 + 1 + 9 + 8 + 2 + 8; vaka dosyaları `tools\kitap\kilavuz_v2\yoklama\iddia_sorular_20261015\`, ham sonuçlar `docs\kitaplar\_ortak\soru_partisi_20261015\`; her partinin koşusu altı motorda ayrı ayrı yapıldı). Hiçbir derleyici kaynağı değiştirilmedi.
 
 Her bulgu kuralınca ayrı bir `SORUN_TAKIP.md` kaydı oldu (**S-544 … S-564**, 21 yeni kayıt; 7 eski kayda güncelleme notu). Kitap yeniden üretildi (Kılavuz V2: 16 320 satır, 197/197 örnek).
 

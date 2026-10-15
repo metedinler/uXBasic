@@ -3073,3 +3073,18 @@ solver, B5 gercek native/JS/WASM provider parity'si ve TASK OF T hala aciktir.
 
 ## 2026-10-14 Mete kararı — eski AST-x64 dondurulmaz
 Eski AST-x64 (`bld --build-x64 --x64-mode AST`) dondurulmayacak; tüm motorlar gibi aynı dil davranışını verecek şekilde çalışacak ("açık ret" kalıcı çözüm değil, ara durumdur). Önceki bekleyen soru: S-157-L. Uygulama sahibi: Codex (kaynak), doğrulama: Claude (değer düzeyinde, altı yolda). Ayrıntı: `ai_koordinasyon/DURUM.md` 2026-10-14 17:04.
+
+## 2026-10-15 Mete kararları — temizlik, yayın ve tasarım istekleri
+Kaynak: Mete'nin sohbet mesajı (2026-10-15). Uygulama ve kanıt: `ai_koordinasyon/DURUM.md` 2026-10-15 14:46, `TEMIZLIK_GUNLUGU_20261015.md`, `DOSYA_ENVANTERI_VE_TEMIZLIK_ONERISI_20261014.md` bölüm 11, `TASARIM_SORULARI_CEVAPLAR_20261015.md`.
+
+**Verilen kararlar.**
+1. 14 Ekim envanterindeki öneriler aynen uygulanır; **zip dosyaları silinmez**, "sor" satırları kalır, "temizle" kararı olanlar kaldırılır. Uygulandı (≈ 35,5 GB).
+2. Kaynak, kütüphaneler, **tasarım belgeleri ve tüm dokümantasyon** GitHub'a gönderilir. Bu, 14 Ekim önerisindeki "tasarım belgeleri özel kalsın" maddesini ve `.gitignore`'daki `/ai_koordinasyon/`, `/docs/tasarim/`, `/spec/` dışlamalarını geçersiz kılar. Uygulandı: `yayin/20261015` dalı.
+3. Claude, Codex ve ChatGPT konuşma/hafıza dosyaları da gönderilir; dosya başına GitHub sınırı 100 MB. Uygulandı (`konusma_arsivi/`; gizli anahtarlar yayın kopyalarında silindi).
+4. **OOP çok güçlü olacak**: uXBasic nesne yönelimli paradigmayla doğdu; çoklu kalıtım, çoklu miras ve karışım (`MIXIN`) dahil zengin bir nesne sistemi hedeflenir. 15 Eylül önerisindeki "çoklu durum kalıtımı yoktur" maddesi geçersizdir. Seçenek A/B/C kararı bekliyor (S-555).
+5. `SUB` ve `FUNCTION` önden `DECLARE` ile bildirilmelidir (S-544; sıkı kural mı, uyarı mı: bekliyor).
+6. İstenen yeni özellikler ◇ HEDEF ve ayrı kayıt olarak girdi: dosya kanalı için değişken/`TYPE` tutamacı (S-548, S-549), Python tarzı `{}`/`[]`/`()` veri sabitleri ve `LIST`/`DICT`/`SET`/`TUPLE`/`DATAFRAME` (S-551, S-552), `DATA`/`READ`/`RESTORE` (S-550), `NONE`/`NODE`/`NAN` tipleri (S-553, S-554, S-564).
+
+**Bekleyen kararlar (Mete).** S-544 (öneri: sıkı kural), S-555 (öneri: seçenek C), S-554/S-564 (öneri: `NONE`/`NODE` eklenmesin, `NULL`/`NOTHING` çalışsın), S-549 ve S-551 tasarım onayı, eski `DATA`/`READ`/`RESTORE` kaynağının yeri, konuşma kayıtlarında görünen hizmet anahtarlarının yenilenmesi, `yayin/20261015` dalının `main`'e birleştirilmesi, DLL paketlerinin GitHub Release olarak yüklenmesi (önce üçüncü taraf lisans kontrolü).
+
+**Görev sahipleri.** Kaynak düzeltmeleri: Codex. Altı yolda değer düzeyinde doğrulama ve kitabın yeniden üretimi: Claude. Yerel `main` (07550bb) gerçek e-postalı bir commit taşır ve olduğu gibi gönderilmemelidir; yayın `yayin/20261015` dalındadır.
