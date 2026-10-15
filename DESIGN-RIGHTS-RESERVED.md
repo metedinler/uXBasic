@@ -8,6 +8,9 @@ All rights are reserved. This repository publication does not grant permission
 to copy, republish, commercialize, patent, register, or create a substantially
 similar derivative language or architecture from the design materials.
 
-The design documents intentionally are not included in this public source
-publication. Source-code permissions in `LICENSE.md` do not transfer design
+As of 2026-10-15 the design documents (`docs/tasarim/`, `ai_koordinasyon/`,
+`spec/`) and the project's conversation and memory records
+(`konusma_arsivi/`) are also published in this repository, at the author's
+decision, **for reading and reference only**. Publishing a document does not
+license it: source-code permissions in `LICENSE.md` do not transfer design
 rights. A separate written agreement is required for any design license.
