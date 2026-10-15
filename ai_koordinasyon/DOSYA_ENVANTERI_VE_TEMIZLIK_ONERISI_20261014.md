@@ -364,10 +364,10 @@ Ek istek: Claude, Codex ve ChatGPT konuşma ve hafıza dosyaları da gitsin (dos
 |---|---|
 | Depo | `https://github.com/metedinler/uXBasic` (herkese açık) |
 | Dal | `yayin/20261015` |
-| Uç | `79391cd8c2cb262682cbc40affb2426f9aeacc2a` (bu bölümü içeren sonraki belge commit'i dışında) |
-| Taban | `origin/main` = `fd42dee`; dal 10 commit önde, 0 geride |
+| Uç | İlk gönderimde `79391cd8c2cb262682cbc40affb2426f9aeacc2a` (aşağıdaki A–J). Bu oturumun tam kaydı ve belge güncellemeleri sonradan eklendi (bölüm 11.5): **15:42 itibarıyla `9f4e215fdd68b32572aaff0e05cf0e9e673387e8`**. Bu belgeyi güncelleyen son küçük belge commit'i bunun üstündedir; güncel uç için `git ls-remote origin yayin/20261015` |
+| Taban | `origin/main` = `fd42dee`; dal 18 commit önde, 0 geride (15:42 itibarıyla) |
 | Birleştirme bağlantısı | `https://github.com/metedinler/uXBasic/pull/new/yayin/20261015` |
-| Boyut | `main`'e göre 4 095 dosya (1 561 765 satır eklendi, 1 960 silindi); GitHub'a göre depo 65,8 MB; en büyük dosya 88,8 MB (sınır 100 MB; GitHub 50 MB üstü iki dosya için uyarı verdi) |
+| Boyut | `main`'e göre 4 118 dosya (1 672 451 satır eklendi, 1 960 silindi); GitHub'a göre depo 116,5 MB (ilk gönderimde 65,8 MB; konuşma kaydının tamamı eklenince büyüdü); en büyük dosya 88,8 MB (sınır 100 MB; GitHub 50 MB üstü iki dosya için uyarı verdi) |
 | Yasak uzantı | `.exe`, `.dll`, `.obj`, `.zip`, `.rar`, `.7z`, `.pdb`, `.lbug` vb.: 0 dosya |
 
 | Harf | Commit | İçerik | Dosya |
@@ -388,7 +388,7 @@ Ek istek: Claude, Codex ve ChatGPT konuşma ve hafıza dosyaları da gitsin (dos
 ### 11.3 Gizli anahtar olayı
 
 - İlk gönderme **GitHub itibar koruması (GH013) tarafından reddedildi:** Claude konuşma kaydında (`konusma_arsivi/claude/konusmalar/ham/…jsonl`) bir Google hizmet anahtarı (`AQ.` ile başlayan yeni biçim) bulunuyordu. Benim tarayıcım bu biçimi tanımıyordu. Hiçbir şey yayınlanmadı.
-- Çözüm: tarayıcı desenleri genişletildi (Google `AQ.`, ortam değişkeni atamaları `…_KEY=`/`…_TOKEN=`, URL'deki `?key=`, bağlantı dizesindeki parola, `Basic` ve Bearer yetkisi, hizmet belirteçleri); örtüşen eşleşmeler tekilleştirildi; sınama birimi (bulunması ve bulunmaması gereken örneklerle) 0 hata verdi; arşiv **özgünlerden baştan** üretildi (8 dosyada 58 gizli değer `[GIZLI-SILINDI:<tür>]` yapıldı, 102 kişisel e-posta yeri `[e-posta]` yapıldı); dalın eklenen ve değişen 4 094 dosyasının **4 079 metin dosyası** (ikili dosya yok sayıldı) ile `origin/main`'in tüm metin dosyaları yeniden tarandı: dalda 0 gizli değer; `origin/main`'de tek eşleşme yanlış alarmdır (`tests/run_class_ctor_dtor_exec_ast.bas` içindeki "Basic CONSTRUCTOR/DESTRUCTOR parsing" yorumu). Sonra gönderme başarılı oldu.
+- Çözüm: tarayıcı desenleri genişletildi (Google `AQ.`, ortam değişkeni atamaları `…_KEY=`/`…_TOKEN=`, URL'deki `?key=`, bağlantı dizesindeki parola, `Basic` ve Bearer yetkisi, hizmet belirteçleri); örtüşen eşleşmeler tekilleştirildi; sınama birimi (bulunması ve bulunmaması gereken örneklerle) 0 hata verdi; arşiv **özgünlerden baştan** üretildi (ilk gönderimde 8 dosyada 58 gizli değer `[GIZLI-SILINDI:<tür>]` yapıldı, 102 kişisel e-posta yeri `[e-posta]` yapıldı; bu oturumun tam kaydı eklenince toplam **107 yer, 9 dosya** ve **162 e-posta yeri, 18 dosya** oldu); ilk gönderimde dalın eklenen ve değişen 4 094 dosyasının 4 079 metin dosyası, **son uçta ise 4 117 dosyanın 4 102 metin dosyası** (ikili dosya yok sayıldı) yeniden tarandı: 0 gizli değer, hassas dosya adı yok, 100 MB ve üstü dosya yok. `origin/main`'in tüm metin dosyalarındaki tek eşleşme yanlış alarmdır (`tests/run_class_ctor_dtor_exec_ast.bas` içindeki "Basic CONSTRUCTOR/DESTRUCTOR parsing" yorumu). Sonra gönderme başarılı oldu. (Tarayıcının `Basic <değer>` kuralı bu yanlış alarmdan sonra rakam ya da `=` ister hâle getirildi; arşivdeki altı `basic_yetki` yer değiştirmesi bu kuraldan önce yapıldığı için bir kısmı gereksiz silme olabilir, güvenli yöndedir.)
 - **E-posta adresleri (2026-10-15 14:50 taraması):** yazarın kişisel Gmail adresi dalda 30 belgede geçiyor ve **iletişim bilgisi olarak zaten yayındaydı** (`src/cli/cli_help.fbs`, `compiler/wrappers/uxb_main_wrapper.c`, `Programcinin Cep Kitabi.md`); yeni yerler `docs/uxbasic kitap` ve `docs/uxbasic_pck_kitaplar` altındaki eski kitap kopyalarıdır. Konuşma arşivlerinde bu adres maskelenmiştir. Üçüncü kişi adresi tek yerde var: konuşma kaydına yapıştırılmış `tree-sitter-freebasic` (MIT lisanslı) paketinin kendi başlık yorumundaki yazar satırı.
 - Değerler: Gemini ortam değişkeni, Groq (`gsk_…`), `sk-…`, `sk-ant-…` ve Bearer belirteçleri. **Yerel orijinal konuşma kayıtları değişmedi**; gerçek görünümlü anahtarlar orada duruyor. Anahtarlar yayınlanmadı, ama konuşmalarda göründükleri için **yenilenmeleri önerilir**.
 - Ders: yayın öncesi tarama, bilinen anahtar biçimlerinin kapsadığı kadarını yakalar; GitHub'ın itibar koruması ikinci güvenlik ağıdır. Bu depo herkese açık olduğundan yayınlanan şey geri alınamaz sayılmalıdır (önbelleğe ve dizine girebilir).
@@ -399,3 +399,20 @@ Ek istek: Claude, Codex ve ChatGPT konuşma ve hafıza dosyaları da gitsin (dos
 - Yerel `main`, gerçek e-posta taşıyan `07550bb`'yi içerir. **Olduğu gibi `git push` edilmemelidir.** Yayın yolu `yayin/20261015` dalıdır.
 - Mete'nin yapacağı: GitHub'da dalı gözden geçirip `main`'e birleştirmek (bağlantı yukarıda). Birleştirmeden sonra yerel çalışma ağacına almak için önce Codex'in yerel değişikliklerinin commit'lenmesi gerekir (aynı dosyalar iki yerde değişmiş olur); bu, Codex ile birlikte verilecek ayrı bir karardır.
 - Gönderilen içeriği değiştirmek için yeni commit eklenir (dalın geçmişi yeniden yazılmaz). Bu belgenin ve kitabın bu bölümle ilgili güncellemeleri aynı dala küçük bir belge commit'iyle eklenir.
+
+### 11.5 İlk gönderimden sonra eklenenler ve gönderim kesintileri (2026-10-15, 15:15–15:42)
+
+İlk gönderimden sonra iki eksik görüldü: (a) bu oturumun (`b85b832d`) konuşma kaydı arşivde yalnız 2026-10-07 00:08'deki ilk 50 MB ile duruyordu, canlı kayıt 127 MB'tı (arşiv betiği oturumu o günden beri yenilememişti; diğer on iki oturum eksiksizdi); (b) bu oturumda yazılan belgeler henüz dalda değildi. Mete'nin "100 MB sınırına göre" isteği gereği kayıt dondurulup temizlendi ve parçalandı, belgeler eklendi:
+
+| Commit | Saat | İçerik |
+|---|---|---|
+| `2655eb8` (L1) | 15:15 | Belge/araç güncellemesi, 26 dosya: durum ve karar defteri, envanter, tasarım soruları cevabı, yeniden üretilen kitap, `tools/kitap` şablonları ve **117 soru vakası ile ham sonuçları** (`tools/kitap/kilavuz_v2/yoklama/iddia_sorular_20261015/`, `docs/kitaplar/_ortak/soru_partisi_20261015/`) |
+| `17e3d42` (K) | 15:29 | Okunur döküm `20261015_b85b832d.md` (8 603 mesaj), eski döküm `ham/20261007_b85b832d.onceki.md`, hafıza notlarının yenilenmesi |
+| `59bcaf9` (P1) | 15:29 | `b85b832d-….part01.jsonl` (44 MiB). Commit iletisi "part 1 of 3" yazar; parçalar sonradan 6'ya çıktı (geçmiş yeniden yazılmadığı için ileti düzeltilmedi) |
+| `b3b4ce5` … `9f4e215` | 15:42 | `part02` … `part06` (her biri ≤ 16 MiB, birer commit); sonuncusu `OKU_BENI.md`'yi günceller ve eski tek parça 50 MB'lık anlık kopyayı kaldırır |
+
+Parçaların art arda eklenmesi, canlı kaydın dondurulduğu andaki (2026-10-15 14:57 yerel, 11:57:58 UTC) 127 388 666 baytlık temizlenmiş kaydı verir (SHA-256 `30c9c58153828d3a…`, parçalamadan önce ve sonra aynı). Eski 50 MB'lık anlık kopya, dondurulan kaydın öneki olarak doğrulandı.
+
+**Gönderim kesintileri (kök neden: zayıf yukarı yön bağlantısı).** İlk tek parçalı ek (28 MB sıkıştırılmış paket) iki kez `HTTP 408` / `curl 55 Connection was reset` ile düştü, bir an `github.com` adı çözülemedi; bağdaştırıcı Wi-Fi, bağlantı hızı 29 Mbit/sn; 46 MB'lık ilk parça ≈ 64 sn'de gitti, aynı boyutlu ikinci parça iki denemede de koptu (89 ve 166 sn sonra). Hiçbir yarım veri uzağa işlenmedi (uzak uç her seferinde değişmeden kaldı). Çözüm: arşiv ≤ 16 MiB'lık parçalara ve birer commit'e bölündü, commit'ler tek tek gönderildi (her biri 7–25 sn). Yerel nesne veri tabanında gönderilmeyen, hiçbir ref'in göstermediği birkaç ara commit (örn. `ae03644`, `5365bdb`) kalır; zararsızdır.
+
+**Ders:** büyük dosyalı gönderiler yukarı yön bağlantısına göre küçük paketlere (≈ 3 MB sıkıştırılmış) bölünmeli; `GIT_TERMINAL_PROMPT=0`, `git push --dry-run` ve gönderiden sonra `git ls-remote` ile uç doğrulanmalı.
