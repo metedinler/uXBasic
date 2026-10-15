@@ -1,5 +1,13 @@
 #ifndef UXB_WASM_EMITTER_FBS
 #define UXB_WASM_EMITTER_FBS
+#include once "../web_control_flow.fbs"
+Dim Shared gUxbWasmHasGosub As Integer
+Dim Shared gUxbWasmUnionRoots As String
+Dim Shared gUxbWasmUnionRootCount As Integer
+
+Private Const UXB_WASM_UNION_BASE As ULongInt = 1114112ULL
+Private Const UXB_WASM_UNION_CELL_BYTES As Integer = 256
+Private Const UXB_WASM_UNION_CELL_LIMIT As Integer = 768
 
 Private Const UXB_WASM_FB_DIRECTORY_ATTR As Integer = 16
 
@@ -118,6 +126,141 @@ Private Function UXBWasmSourceComment(ByRef ins As MIRIRInstruction) As String
     Return outText & Chr(10)
 End Function
 
+Private Function UXBWasmUnionIsUnsigned(ByRef typeText As String) As Integer
+    Select Case UCase(Trim(typeText))
+    Case "U8", "UBYTE", "BOOLEAN", "BOOL", "U16", "USHORT", "U32", "UINTEGER", "UINT", "ULONG"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function UXBWasmUnionIsInteger(ByRef typeText As String) As Integer
+    Select Case UCase(Trim(typeText))
+    Case "I8", "BYTE", "SBYTE", "I16", "SHORT", "I32", "INTEGER", "INT", "LONG", "U8", "UBYTE", "BOOLEAN", "BOOL", "U16", "USHORT", "U32", "UINTEGER", "UINT", "ULONG"
+        Return 1
+    End Select
+    Return 0
+End Function
+
+Private Function UXBWasmUnionRootIndex(ByRef rootRaw As String) As Integer
+    Dim safeRoot As String
+    Dim i As Integer
+    Dim startPos As Integer
+    Dim itemIndex As Integer
+    Dim itemText As String
+    safeRoot = UXBWasmSafeName(rootRaw)
+    If safeRoot = "" Then Return -1
+    startPos = 2
+    itemIndex = 0
+    For i = 2 To Len(gUxbWasmUnionRoots)
+        If Mid(gUxbWasmUnionRoots, i, 1) = "|" Then
+            itemText = Mid(gUxbWasmUnionRoots, startPos, i - startPos)
+            If itemText = safeRoot Then Return itemIndex
+            itemIndex += 1
+            startPos = i + 1
+        End If
+    Next i
+    Return -1
+End Function
+
+Private Function UXBWasmUnionRootAt(ByVal wantedIndex As Integer) As String
+    Dim i As Integer
+    Dim startPos As Integer
+    Dim itemIndex As Integer
+    Dim itemText As String
+    If wantedIndex < 0 Then Return ""
+    startPos = 2
+    itemIndex = 0
+    For i = 2 To Len(gUxbWasmUnionRoots)
+        If Mid(gUxbWasmUnionRoots, i, 1) = "|" Then
+            itemText = Mid(gUxbWasmUnionRoots, startPos, i - startPos)
+            If itemIndex = wantedIndex Then Return itemText
+            itemIndex += 1
+            startPos = i + 1
+        End If
+    Next i
+    Return ""
+End Function
+
+Private Sub UXBWasmCollectUnionRoot(ByRef rootRaw As String)
+    Dim safeRoot As String
+    safeRoot = UXBWasmSafeName(rootRaw)
+    If safeRoot = "" Then Exit Sub
+    If InStr(gUxbWasmUnionRoots, "|" & safeRoot & "|") > 0 Then Exit Sub
+    gUxbWasmUnionRoots &= safeRoot & "|"
+    gUxbWasmUnionRootCount += 1
+End Sub
+
+Private Sub UXBWasmCollectUnionRoots(ByRef module As MIRModule)
+    Dim fi As Integer
+    Dim bi As Integer
+    Dim ii As Integer
+    Dim ins As MIRIRInstruction
+    gUxbWasmUnionRoots = "|"
+    gUxbWasmUnionRootCount = 0
+    For fi = 0 To module.functionCount - 1
+        For bi = 0 To module.functions(fi).blockCount - 1
+            For ii = 0 To module.functions(fi).blocks(bi).instructionCount - 1
+                ins = module.functions(fi).blocks(bi).instructions(ii)
+                Select Case UXBWasmCanonicalOpcode(ins.opcode)
+                Case "UNION_FIELD_LOAD", "UNION_FIELD_STORE"
+                    If ins.operandCount >= 1 Then UXBWasmCollectUnionRoot ins.operands(0)
+                End Select
+            Next ii
+        Next bi
+    Next fi
+End Sub
+
+Private Function UXBWasmUnionAddress(ByRef rootRaw As String, ByRef errText As String) As String
+    Dim rootIndex As Integer
+    rootIndex = UXBWasmUnionRootIndex(rootRaw)
+    If rootIndex < 0 Then
+        errText = "WASM UNION root was not registered: " & Trim(rootRaw)
+        Return ""
+    End If
+    Return "      global.get $__U_" & UXBWasmSafeName(rootRaw) & Chr(10)
+End Function
+
+Private Function UXBWasmEmitUnionFieldLoad(ByRef ins As MIRIRInstruction, ByRef errText As String) As String
+    Dim outText As String
+    Dim unionWidth As Integer
+    Dim typeText As String
+    If ins.operandCount <> 5 Or Trim(ins.result) = "" Then errText = "WASM UNION_FIELD_LOAD requires root,field,offset,width,type and result": Return ""
+    unionWidth = Val(Trim(ins.operands(3)))
+    typeText = Trim(ins.operands(4))
+    If unionWidth <> 1 And unionWidth <> 2 And unionWidth <> 4 Then errText = "WASM UNION_FIELD_LOAD supports only 1, 2 or 4 byte integer fields": Return ""
+    If UXBWasmUnionIsInteger(typeText) = 0 Then errText = "WASM UNION_FIELD_LOAD supports only integer fields in the i32 union storage lane": Return ""
+    outText = UXBWasmUnionAddress(ins.operands(0), errText)
+    If errText <> "" Then Return ""
+    If unionWidth = 1 Then
+        If UXBWasmUnionIsUnsigned(typeText) <> 0 Then outText &= "      i32.load8_u offset=" & Trim(ins.operands(2)) & Chr(10) Else outText &= "      i32.load8_s offset=" & Trim(ins.operands(2)) & Chr(10)
+    ElseIf unionWidth = 2 Then
+        If UXBWasmUnionIsUnsigned(typeText) <> 0 Then outText &= "      i32.load16_u offset=" & Trim(ins.operands(2)) & Chr(10) Else outText &= "      i32.load16_s offset=" & Trim(ins.operands(2)) & Chr(10)
+    Else
+        outText &= "      i32.load offset=" & Trim(ins.operands(2)) & Chr(10)
+    End If
+    outText &= UXBWasmEmitVarSet(ins.result)
+    Return outText
+End Function
+
+Private Function UXBWasmEmitUnionFieldStore(ByRef ins As MIRIRInstruction, ByRef errText As String) As String
+    Dim outText As String
+    Dim unionWidth As Integer
+    Dim typeText As String
+    If ins.operandCount <> 6 Then errText = "WASM UNION_FIELD_STORE requires root,field,value,offset,width,type": Return ""
+    unionWidth = Val(Trim(ins.operands(4)))
+    typeText = Trim(ins.operands(5))
+    If unionWidth <> 1 And unionWidth <> 2 And unionWidth <> 4 Then errText = "WASM UNION_FIELD_STORE supports only 1, 2 or 4 byte integer fields": Return ""
+    If UXBWasmUnionIsInteger(typeText) = 0 Then errText = "WASM UNION_FIELD_STORE supports only integer fields in the i32 union storage lane": Return ""
+    outText = UXBWasmUnionAddress(ins.operands(0), errText)
+    If errText <> "" Then Return ""
+    outText &= UXBWasmEmitValue(ins.operands(2))
+    If unionWidth = 1 Then outText &= "      i32.store8 offset=" & Trim(ins.operands(3)) & Chr(10)
+    If unionWidth = 2 Then outText &= "      i32.store16 offset=" & Trim(ins.operands(3)) & Chr(10)
+    If unionWidth = 4 Then outText &= "      i32.store offset=" & Trim(ins.operands(3)) & Chr(10)
+    Return outText
+End Function
+
 Private Function UXBWasmEmitOneInstruction(ByRef module As MIRModule, ByRef ins As MIRIRInstruction, ByVal nextBlockId As Integer, ByRef errText As String) As String
     Dim op As String
     Dim outText As String
@@ -178,6 +321,31 @@ Private Function UXBWasmEmitOneInstruction(ByRef module As MIRModule, ByRef ins 
             outText &= UXBWasmEmitValue(ins.operands(0))
             outText &= UXBWasmEmitVarSet(ins.result)
         End If
+        Return outText
+
+    Case "CAST"
+        If ins.operandCount <> 1 Or Trim(ins.result) = "" Then errText = "WASM CAST requires one operand and a result": Return ""
+        Dim castType As String = UCase(Trim(ins.resultType))
+        If Left(castType, 5) = "TYPE_" Then castType = Mid(castType, 6)
+        outText &= UXBWasmEmitValue(ins.operands(0))
+        Select Case castType
+        Case "I8", "BYTE", "SBYTE"
+            outText &= "      i32.const 24" & Chr(10) & "      i32.shl" & Chr(10) & "      i32.const 24" & Chr(10) & "      i32.shr_s" & Chr(10)
+        Case "U8", "UBYTE"
+            outText &= "      i32.const 255" & Chr(10) & "      i32.and" & Chr(10)
+        Case "I16", "SHORT"
+            outText &= "      i32.const 16" & Chr(10) & "      i32.shl" & Chr(10) & "      i32.const 16" & Chr(10) & "      i32.shr_s" & Chr(10)
+        Case "U16", "USHORT"
+            outText &= "      i32.const 65535" & Chr(10) & "      i32.and" & Chr(10)
+        Case "I32", "INTEGER", "LONG", "U32", "UINTEGER", "ULONG"
+            ' All supported operands occupy an i32 cell already.
+        Case "BOOL", "BOOLEAN"
+            outText &= "      i32.const 0" & Chr(10) & "      i32.ne" & Chr(10) & "      i32.const -1" & Chr(10) & "      i32.mul" & Chr(10)
+        Case Else
+            errText = "WASM CAST target type is not supported by the i32 model: " & ins.resultType
+            Return ""
+        End Select
+        outText &= UXBWasmEmitVarSet(ins.result)
         Return outText
 
     Case "STORE_VAR"
@@ -287,6 +455,12 @@ Private Function UXBWasmEmitOneInstruction(ByRef module As MIRModule, ByRef ins 
         Return outText
 
     Case "RET"
+        If ins.bareReturn <> 0 And gUxbWasmHasGosub <> 0 Then
+            outText &= "      (if (i32.gt_u (global.get $__gosub_sp) (local.get $__gosub_base)) (then" & Chr(10)
+            outText &= "        (global.set $__gosub_sp (i32.sub (global.get $__gosub_sp) (i32.const 4)))" & Chr(10)
+            outText &= "        (local.set $__pc (i32.load (global.get $__gosub_sp)))" & Chr(10)
+            outText &= "        br $dispatch))" & Chr(10)
+        End If
         If ins.operandCount >= 1 Then
             If UCase(Trim(ins.operands(0))) = "__RESULT__" Then
                 outText &= "      i32.const 0" & Chr(10)
@@ -327,6 +501,12 @@ Private Function UXBWasmEmitOneInstruction(ByRef module As MIRModule, ByRef ins 
             Return ""
         End If
         Return UXBWasmEmitHostCall16(92, ins, 3, ins.result, ins.operands(0), LTrim(Str(UXBWasmFieldKey(ins.operands(1)))))
+
+    Case "UNION_FIELD_LOAD"
+        Return UXBWasmEmitUnionFieldLoad(ins, errText)
+
+    Case "UNION_FIELD_STORE"
+        Return UXBWasmEmitUnionFieldStore(ins, errText)
 
     Case "LOAD_INDEXED"
         If ins.operandCount < 2 Or Trim(ins.result) = "" Then errText = "WASM LOAD_INDEXED requires array, index and result": Return ""
@@ -542,10 +722,13 @@ Private Function UXBWasmEmitOneInstruction(ByRef module As MIRModule, ByRef ins 
         Return ""
 
     Case "GOSUB"
-        ' S-123: there is no return-address stack in the generated dispatcher; the label used
-        ' to be treated as a variable (`undefined local variable`). Fail closed with a clear text.
-        errText = "WASM backend does not support GOSUB/RETURN (no return-address stack in the WAT dispatcher): " & ins.opcode
-        Return ""
+        If ins.operandCount <> 2 Then errText = "WASM GOSUB requires a resolved label and continuation": Return ""
+        outText &= "      (if (i32.ge_u (global.get $__gosub_sp) (global.get $__gosub_limit)) (then unreachable))" & Chr(10)
+        outText &= "      (i32.store (global.get $__gosub_sp) (i32.const " & ins.operands(1) & "))" & Chr(10)
+        outText &= "      (global.set $__gosub_sp (i32.add (global.get $__gosub_sp) (i32.const 4)))" & Chr(10)
+        outText &= "      (local.set $__pc (i32.const " & ins.operands(0) & "))" & Chr(10)
+        outText &= "      br $dispatch" & Chr(10)
+        Return outText
 
     Case Else
         If op = "FADD" Or op = "FSUB" Or op = "FMUL" Or op = "FDIV" Or op = "POW" Or op = "ROL" Or op = "ROR" Or op = "OPEN" Or op = "CLOSE" Or op = "GET" Or op = "PUT" Or op = "SEEK" Or op = "EOF" Or op = "LOF" Or op = "MEMCOPY" Or op = "MEMFILL" Or op = "PEEK" Or op = "POKE" Or op = "ARRAY_NEW" Or op = "ARRAY_LOAD" Or op = "ARRAY_STORE" Or op = "OBJECT_NEW" Or op = "FIELD_LOAD" Or op = "FIELD_STORE" Then
@@ -574,7 +757,7 @@ Private Sub UXBWasmCollectInstructionNames(ByRef ins As MIRIRInstruction, ByRef 
                 localDecls &= "    (local $" & safeName & " i32)" & Chr(10)
             End If
         End If
-    Case "STORE_VAR"
+    Case "STORE_VAR", "UNION_FIELD_LOAD", "UNION_FIELD_STORE"
         If ins.operandCount >= 1 Then
             safeName = UXBWasmSafeName(ins.operands(0))
             If UXBWasmNameIsModuleGlobal(safeName) = 0 And UXBWasmNameSetHas(knownNames, safeName) = 0 Then
@@ -585,7 +768,9 @@ Private Sub UXBWasmCollectInstructionNames(ByRef ins As MIRIRInstruction, ByRef 
     End Select
 End Sub
 
-Private Function UXBWasmEmitFunction(ByRef module As MIRModule, ByRef fn As MIRFunction, ByRef errText As String) As String
+Private Function UXBWasmEmitFunction(ByRef module As MIRModule, ByRef originalFn As MIRFunction, ByRef errText As String) As String
+    Dim fn As MIRFunction
+    If UXBWebPrepareControlFlow(originalFn, fn, errText) = 0 Then Return ""
     Dim outText As String
     Dim b As Integer
     Dim j As Integer
@@ -629,6 +814,7 @@ Private Function UXBWasmEmitFunction(ByRef module As MIRModule, ByRef fn As MIRF
     outText &= " (result i32)" & Chr(10)
     outText &= "    (local $__pc i32)" & Chr(10)
     outText &= "    (local $__result i32)" & Chr(10)
+    If gUxbWasmHasGosub <> 0 Then outText &= "    (local $__gosub_base i32)" & Chr(10)
 
     For p = 0 To fn.localVarCount - 1
         safeName = UXBWasmSafeName(fn.localVars(p))
@@ -646,6 +832,7 @@ Private Function UXBWasmEmitFunction(ByRef module As MIRModule, ByRef fn As MIRF
     Next b
 
     outText &= localDecls
+    If gUxbWasmHasGosub <> 0 Then outText &= "    (local.set $__gosub_base (global.get $__gosub_sp))" & Chr(10)
 
     If fn.blockCount > 0 Then
         outText &= "    i32.const " & Str(fn.entryBlock) & Chr(10)
@@ -686,6 +873,7 @@ Private Function UXBWasmEmitFunction(ByRef module As MIRModule, ByRef fn As MIRF
     outText &= "      end" & Chr(10)
     outText &= "    end" & Chr(10)
     outText &= "    local.get $__result" & Chr(10)
+    If gUxbWasmHasGosub <> 0 Then outText &= "    (global.set $__gosub_sp (local.get $__gosub_base))" & Chr(10)
     outText &= "  )" & Chr(10)
     Return outText
 End Function
@@ -783,9 +971,36 @@ Public Function UXBWasmEmitWatFromMIR(ByRef module As MIRModule, ByRef watPath A
         Next stringBlock
     Next stringFn
 
+    UXBWasmCollectUnionRoots module
+    If gUxbWasmUnionRootCount > UXB_WASM_UNION_CELL_LIMIT Then
+        errText = "WASM UNION storage requires more than " & Trim(Str(UXB_WASM_UNION_CELL_LIMIT)) & " roots; increase the reserved linear-memory lane"
+        Return 0
+    End If
+
     outText = "(module" & Chr(10)
     outText &= UXBWasmEmitHostImports()
     outText &= UXBWatDefaultMemory()
+    gUxbWasmHasGosub = 0
+    Dim gsFn As Integer, gsBlock As Integer, gsIns As Integer
+    For gsFn = 0 To module.functionCount - 1
+        For gsBlock = 0 To module.functions(gsFn).blockCount - 1
+            For gsIns = 0 To module.functions(gsFn).blocks(gsBlock).instructionCount - 1
+                If UCase(Trim(module.functions(gsFn).blocks(gsBlock).instructions(gsIns).opcode)) = "GOSUB" Then gUxbWasmHasGosub = 1
+            Next gsIns
+        Next gsBlock
+    Next gsFn
+    If gUxbWasmHasGosub <> 0 Then
+        ' One reusable page beyond VIRTUAL and sequence scratch memory.
+        ' Each activation saves its base; RETURN cannot pop its caller's GOSUB.
+        outText &= "  (global $__gosub_sp (mut i32) (i32.const 0))" & Chr(10)
+        outText &= "  (global $__gosub_limit (mut i32) (i32.const 0))" & Chr(10)
+        outText &= "  (func $__gosub_init (local $page i32)" & Chr(10)
+        outText &= "    (local.set $page (memory.grow (i32.const 1)))" & Chr(10)
+        outText &= "    (if (i32.eq (local.get $page) (i32.const -1)) (then unreachable))" & Chr(10)
+        outText &= "    (global.set $__gosub_sp (i32.shl (local.get $page) (i32.const 16)))" & Chr(10)
+        outText &= "    (global.set $__gosub_limit (i32.add (global.get $__gosub_sp) (i32.const 65536))))" & Chr(10)
+        outText &= "  (start $__gosub_init)" & Chr(10)
+    End If
 
     ' module-level variables (S-120): one mutable WASM global each (array variables hold the host handle)
     gUxbWasmGlobalNames = "|"
@@ -798,6 +1013,18 @@ Public Function UXBWasmEmitWatFromMIR(ByRef module As MIRModule, ByRef watPath A
             outText &= "  (global $__G_" & globalSafe & " (mut i32) (i32.const 0))" & Chr(10)
         End If
     Next i
+
+    ' UNION fields use real linear-memory overlays rather than the scalar
+    ' variable cell. Each root gets an immutable pointer into the reserved
+    ' storage lane, so byte/word writes preserve neighboring bytes naturally.
+    Dim unionRootIndex As Integer
+    Dim unionRootStart As Integer
+    Dim unionRootSafe As String
+    For unionRootIndex = 0 To gUxbWasmUnionRootCount - 1
+        unionRootSafe = UXBWasmUnionRootAt(unionRootIndex)
+        unionRootStart = CInt(UXB_WASM_UNION_BASE + (CLngInt(unionRootIndex) * UXB_WASM_UNION_CELL_BYTES))
+        outText &= "  (global $__U_" & unionRootSafe & " i32 (i32.const " & Trim(Str(unionRootStart)) & "))" & Chr(10)
+    Next unionRootIndex
 
     For i = 0 To module.functionCount - 1
         fnText = UXBWasmEmitFunction(module, module.functions(i), errText)

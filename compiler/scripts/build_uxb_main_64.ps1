@@ -92,8 +92,7 @@ try {
     Move-Item -Force $x64temp $x64 -ErrorAction Stop
     Write-Host "UYARI: bin\uxb.exe baska bir surec tarafindan kullaniliyordu; eski surum yan tarafa alindi: $aside"
 }
-# old aside copies (older than 6 hours and no longer in use) are removed
-Get-ChildItem $bin -Filter 'uxb.exe.replaced_*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddHours(-6) } | ForEach-Object { try { [IO.File]::Delete($_.FullName) } catch {} }
+# Preserve previous compiler images. Workspace cleanup requires explicit user approval.
 Copy-Item -Force $x64 (Join-Path $bin 'uxb_x64.exe') -ErrorAction SilentlyContinue
 Copy-Item -Force $x64 (Join-Path $uxb 'uxb.exe') -ErrorAction SilentlyContinue
 if (!$SkipX86) {

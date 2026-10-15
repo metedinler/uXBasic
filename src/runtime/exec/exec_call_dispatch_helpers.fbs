@@ -484,13 +484,13 @@ Private Function ExecResolveMethodRoutineIndex(ByRef ps As ParseState, ByRef es 
         End If
 
         Dim receiverType As String
-        If es.vars(receiverIdx).runtimeClassType <> "" Then
-            receiverType = UCase(Trim(es.vars(receiverIdx).runtimeClassType))
+        If ExecVarAt(es, receiverIdx).runtimeClassType <> "" Then
+            receiverType = UCase(Trim(ExecVarAt(es, receiverIdx).runtimeClassType))
         Else
-            receiverType = UCase(Trim(es.vars(receiverIdx).declType))
+            receiverType = UCase(Trim(ExecVarAt(es, receiverIdx).declType))
         End If
         prependReceiverOut = 1
-        receiverAddrOut = CInt(es.vars(receiverIdx).addr)
+        receiverAddrOut = CInt(ExecVarAt(es, receiverIdx).addr)
         ' Try to resolve runtime class from object header vtable handle (if present)
         If receiverAddrOut <> 0 Then
             Dim hval As UInteger
@@ -550,7 +550,7 @@ Private Function ExecResolveMethodRoutineIndex(ByRef ps As ParseState, ByRef es 
         ' requireVirtualChain=1 and refused ("non-virtual base dispatch blocked A.F") every
         ' inherited non-virtual method: plain inheritance did not work in the AST interpreter.
         Dim staticBindType As String
-        staticBindType = UCase(Trim(es.vars(receiverIdx).declType))
+        staticBindType = UCase(Trim(ExecVarAt(es, receiverIdx).declType))
         If staticBindType = "" Or ExecFindClassDeclNode(ps, staticBindType) = -1 Then staticBindType = receiverType
         routineName = staticBindType & "_" & methodUpper
         If ExecResolveMethodRoutineInHierarchy(ps, es, staticBindType, methodUpper, routineIdxOut, declaringClass, methodDecl, 0, errText) = 0 Then
@@ -595,14 +595,16 @@ Private Function ExecInferReceiverClassType(ByRef ps As ParseState, ByRef routin
     routineName = UCase(Trim(routineNameRaw))
     If routineName = "" Then Return ""
 
-    Dim sepPos As Integer
-    sepPos = InStr(routineName, "_")
-    If sepPos <= 1 Then Return ""
-
-    Dim className As String
-    className = Left(routineName, sepPos - 1)
-    If ExecFindClassDeclNode(ps, className) = -1 Then Return ""
-    Return className
+    ' Class names may contain underscores (including TYPE_Box). Splitting at
+    ' the first underscore loses their owner and leaves THIS untyped.
+    Dim bestOwner As String
+    For i As Integer = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "CLASS_STMT" Then Continue For
+        Dim className As String = UCase(Trim(ps.ast.nodes(i).value))
+        If Len(className) <= Len(bestOwner) Then Continue For
+        If Left(routineName, Len(className) + 1) = className & "_" Then bestOwner = className
+    Next i
+    Return bestOwner
 End Function
 
 Private Function ExecRoutineNameIsLocal(ByRef ps As ParseState, ByVal routineNodeIdx As Integer, ByRef nameText As String, paramNames() As String, ByVal paramCount As Integer) As Integer
@@ -654,7 +656,7 @@ Private Sub ExecRestoreRoutineVars(ByRef ps As ParseState, ByRef es As ExecState
         If ExecRoutineNameIsLocal(ps, routineNodeIdx, snapshotVars(i).nameText, paramNames(), paramCount) = 0 Then
             Dim currentIdx As Integer = ExecFindVar(es, snapshotVars(i).nameText)
             If currentIdx >= 0 Then
-                callerWrites(i) = es.vars(currentIdx)
+                callerWrites(i) = ExecVarAt(es, currentIdx)
                 writeFlags(i) = 1
             End If
         End If
@@ -669,8 +671,8 @@ Private Sub ExecRestoreRoutineVars(ByRef ps As ParseState, ByRef es As ExecState
         For i = 0 To aliasCount - 1
             Dim aliasSlot As Integer = aliasSlotPlus1(i) - 1
             If aliasSlot >= 0 And aliasSlot < snapshotCount And aliasSlot < es.count Then
-                If es.vars(aliasSlot).pinned <> 0 Then ExecVarPinLoad es, aliasSlot
-                aliasFinalValues(i) = es.vars(aliasSlot).value
+                If ExecVarAt(es, aliasSlot).pinned <> 0 Then ExecVarPinLoad es, aliasSlot
+                aliasFinalValues(i) = ExecVarAt(es, aliasSlot).value
                 aliasHasValue(i) = 1
             End If
         Next i
@@ -681,8 +683,8 @@ Private Sub ExecRestoreRoutineVars(ByRef ps As ParseState, ByRef es As ExecState
         If writeFlags(i) <> 0 Then
             Dim restoredIdx As Integer = ExecFindVar(es, snapshotVars(i).nameText)
             If restoredIdx >= 0 Then
-                es.vars(restoredIdx).value = callerWrites(i).value
-                If es.vars(restoredIdx).pinned <> 0 Then ExecVarPinStore es, restoredIdx
+                ExecVarAt(es, restoredIdx).value = callerWrites(i).value
+                If ExecVarAt(es, restoredIdx).pinned <> 0 Then ExecVarPinStore es, restoredIdx
             End If
         End If
     Next i
@@ -690,8 +692,8 @@ Private Sub ExecRestoreRoutineVars(ByRef ps As ParseState, ByRef es As ExecState
     For i = 0 To aliasCount - 1
         If aliasHasValue(i) <> 0 Then
             Dim restoredSlot As Integer = aliasSlotPlus1(i) - 1
-            es.vars(restoredSlot).value = aliasFinalValues(i)
-            If es.vars(restoredSlot).pinned <> 0 Then ExecVarPinStore es, restoredSlot
+            ExecVarAt(es, restoredSlot).value = aliasFinalValues(i)
+            If ExecVarAt(es, restoredSlot).pinned <> 0 Then ExecVarPinStore es, restoredSlot
         End If
     Next i
 End Sub
@@ -832,7 +834,7 @@ Private Function ExecInvokeRoutineByIndexOffset(ByRef ps As ParseState, ByRef es
             If Not (Len(byRefParamType) > 2 AndAlso Right(byRefParamType, 2) = "[]") Then
                 Dim byRefSlot As Integer = ExecFindVar(es, ps.ast.nodes(argNode).value)
                 If byRefSlot < 0 Then byRefSlot = ExecEnsureVar(es, ps.ast.nodes(argNode).value)
-                If byRefSlot >= 0 AndAlso es.vars(byRefSlot).isArray = 0 Then
+                If byRefSlot >= 0 AndAlso ExecVarAt(es, byRefSlot).isArray = 0 Then
                     aliasSlotPlus1(writePos) = byRefSlot + 1
                     ExecValueInit argValues(writePos)
                     writePos += 1
@@ -851,7 +853,7 @@ Private Function ExecInvokeRoutineByIndexOffset(ByRef ps As ParseState, ByRef es
                 End If
                 Dim callerArrayIdx As Integer
                 callerArrayIdx = ExecFindVar(es, ps.ast.nodes(argNode).value)
-                If callerArrayIdx < 0 Or callerArrayIdx >= es.count Or es.vars(callerArrayIdx).isArray = 0 Then
+                If callerArrayIdx < 0 Or callerArrayIdx >= es.count Or ExecVarAt(es, callerArrayIdx).isArray = 0 Then
                     errText = "exec: array parameter " & UCase(Trim(paramNames(writePos))) & " requires an array variable argument"
                     Return 0
                 End If
@@ -901,8 +903,8 @@ Private Function ExecInvokeRoutineByIndexOffset(ByRef ps As ParseState, ByRef es
                 es.runtime.callContextDepth -= 1
                 Return 0
             End If
-            es.vars(aliasNameSlot).declType = es.vars(aliasSlotPlus1(ai) - 1).declType
-            es.vars(aliasNameSlot).refIdxPlus1 = aliasSlotPlus1(ai)
+            ExecVarAt(es, aliasNameSlot).declType = ExecVarAt(es, aliasSlotPlus1(ai) - 1).declType
+            ExecVarAt(es, aliasNameSlot).refIdxPlus1 = aliasSlotPlus1(ai)
             Continue For
         End If
         If ExecFindVar(es, paramNames(ai)) < es.runtime.callFrameBase(es.runtime.callContextDepth) Then
@@ -918,24 +920,24 @@ Private Function ExecInvokeRoutineByIndexOffset(ByRef ps As ParseState, ByRef es
             If boundVarIdx <> -1 Then
                 Dim arrayElementType As String
                 arrayElementType = Left(UCase(Trim(paramTypes(ai))), Len(UCase(Trim(paramTypes(ai)))) - 2)
-                es.vars(boundVarIdx).value = es.vars(arrayArgVarIdx(ai)).value
-                es.vars(boundVarIdx).declType = arrayElementType
-                es.vars(boundVarIdx).runtimeClassType = es.vars(arrayArgVarIdx(ai)).runtimeClassType
-                es.vars(boundVarIdx).isArray = 1
-                es.vars(boundVarIdx).arrayId = es.vars(arrayArgVarIdx(ai)).arrayId
-                es.vars(boundVarIdx).arrayDims = es.vars(arrayArgVarIdx(ai)).arrayDims
-                es.vars(boundVarIdx).arrayLower = es.vars(arrayArgVarIdx(ai)).arrayLower
-                es.vars(boundVarIdx).arrayUpper = es.vars(arrayArgVarIdx(ai)).arrayUpper
-                es.vars(boundVarIdx).arrayBytes = es.vars(arrayArgVarIdx(ai)).arrayBytes
+                ExecVarAt(es, boundVarIdx).value = ExecVarAt(es, arrayArgVarIdx(ai)).value
+                ExecVarAt(es, boundVarIdx).declType = arrayElementType
+                ExecVarAt(es, boundVarIdx).runtimeClassType = ExecVarAt(es, arrayArgVarIdx(ai)).runtimeClassType
+                ExecVarAt(es, boundVarIdx).isArray = 1
+                ExecVarAt(es, boundVarIdx).arrayId = ExecVarAt(es, arrayArgVarIdx(ai)).arrayId
+                ExecVarAt(es, boundVarIdx).arrayDims = ExecVarAt(es, arrayArgVarIdx(ai)).arrayDims
+                ExecVarAt(es, boundVarIdx).arrayLower = ExecVarAt(es, arrayArgVarIdx(ai)).arrayLower
+                ExecVarAt(es, boundVarIdx).arrayUpper = ExecVarAt(es, arrayArgVarIdx(ai)).arrayUpper
+                ExecVarAt(es, boundVarIdx).arrayBytes = ExecVarAt(es, arrayArgVarIdx(ai)).arrayBytes
                 ' S-103: the elements of a TYPE array live in memory at the array variable's
                 ' own address (ExecResolveFieldAccess: addr + index * elemSize). The parameter
                 ' is an ALIAS of the caller's array, so it must share that address; without it
                 ' arr(0).X read/wrote the parameter's private slot (always 0, caller unchanged).
-                es.vars(boundVarIdx).addr = es.vars(arrayArgVarIdx(ai)).addr
+                ExecVarAt(es, boundVarIdx).addr = ExecVarAt(es, arrayArgVarIdx(ai)).addr
             End If
         Else
             ExecSetVarValue es, paramNames(ai), boundValues(ai)
-            If boundVarIdx <> -1 Then es.vars(boundVarIdx).declType = paramTypes(ai)
+            If boundVarIdx <> -1 Then ExecVarAt(es, boundVarIdx).declType = paramTypes(ai)
         End If
     Next ai
 
@@ -945,7 +947,7 @@ Private Function ExecInvokeRoutineByIndexOffset(ByRef ps As ParseState, ByRef es
         Dim compatibilityInput As ExecValue
         ExecValueInit compatibilityInput
         If paramCount > 0 AndAlso aliasSlotPlus1(0) > 0 Then
-            compatibilityInput = es.vars(aliasSlotPlus1(0) - 1).value
+            compatibilityInput = ExecVarAt(es, aliasSlotPlus1(0) - 1).value
         ElseIf paramCount > 0 Then
             compatibilityInput = boundValues(0)
         ElseIf legacyTaskPayload <> 0 Then
@@ -969,22 +971,22 @@ Private Function ExecInvokeRoutineByIndexOffset(ByRef ps As ParseState, ByRef es
             Dim thisIdx As Integer
             thisIdx = ExecFindVar(es, "THIS")
             If thisIdx <> -1 Then
-                es.vars(thisIdx).declType = receiverClassType
-                es.vars(thisIdx).runtimeClassType = receiverClassType
+                ExecVarAt(es, thisIdx).declType = receiverClassType
+                ExecVarAt(es, thisIdx).runtimeClassType = receiverClassType
             End If
 
             Dim meIdx As Integer
             meIdx = ExecFindVar(es, "ME")
             If meIdx <> -1 Then
-                es.vars(meIdx).declType = receiverClassType
-                es.vars(meIdx).runtimeClassType = receiverClassType
+                ExecVarAt(es, meIdx).declType = receiverClassType
+                ExecVarAt(es, meIdx).runtimeClassType = receiverClassType
             End If
 
             Dim superIdx As Integer
             superIdx = ExecFindVar(es, "SUPER")
             If superIdx <> -1 Then
-                es.vars(superIdx).declType = receiverClassType
-                es.vars(superIdx).runtimeClassType = receiverClassType
+                ExecVarAt(es, superIdx).declType = receiverClassType
+                ExecVarAt(es, superIdx).runtimeClassType = receiverClassType
             End If
         End If
     End If
@@ -1080,6 +1082,15 @@ Private Function ExecInvokeRoutineByIndexOffset(ByRef ps As ParseState, ByRef es
         Dim declaredReturnType As String
         declaredReturnType = UCase(Trim(ps.ast.nodes(routineNodeIdx).typeName))
         If declaredReturnType = "FUNCTION" Or declaredReturnType = "PIPE" Then declaredReturnType = ""
+        ' Parser routine tags are not result types; AS T lives in RETURN_TYPE.
+        Dim returnTypeChild As Integer = ps.ast.nodes(routineNodeIdx).firstChild
+        Do While returnTypeChild <> -1
+            If UCase(Trim(ps.ast.nodes(returnTypeChild).kind)) = "RETURN_TYPE" Then
+                declaredReturnType = UCase(Trim(ps.ast.nodes(returnTypeChild).value))
+                Exit Do
+            End If
+            returnTypeChild = ps.ast.nodes(returnTypeChild).nextSibling
+        Loop
         If declaredReturnType <> "" Then
             Dim convertedReturn As ExecValue
             If ExecApplyDeclaredType(routineResultEx, declaredReturnType, convertedReturn, errText) = 0 Then
@@ -1093,6 +1104,7 @@ Private Function ExecInvokeRoutineByIndexOffset(ByRef ps As ParseState, ByRef es
                 Return 0
             End If
             routineResultEx = convertedReturn
+            If callNodeIdx >= 0 And callNodeIdx < ps.ast.count Then ps.ast.nodes(callNodeIdx).typeName = declaredReturnType
         End If
 
         valueOut = ExecValueToInteger(routineResultEx)
@@ -1134,6 +1146,7 @@ Private Function ExecInvokeRoutineByPreparedArgs(ByRef ps As ParseState, ByRef e
     End If
 
     Dim paramNames(Any) As String
+    Dim paramTypes(Any) As String
     Dim paramCount As Integer
     ' This calling convention (pre-evaluated argument handles, no original call-site
     ' AST) carries no caller-variable identity, so there is no BYREF alias to bind
@@ -1149,11 +1162,24 @@ Private Function ExecInvokeRoutineByPreparedArgs(ByRef ps As ParseState, ByRef e
 
         If paramCount = 0 Then
             ReDim paramNames(0)
+            ReDim paramTypes(0)
         Else
             ReDim Preserve paramNames(paramCount)
+            ReDim Preserve paramTypes(paramCount)
         End If
 
         paramNames(paramCount) = ps.ast.nodes(bodyStart).value
+        paramTypes(paramCount) = UCase(Trim(ps.ast.nodes(bodyStart).typeName))
+        If paramTypes(paramCount) = "" Then
+            Dim paramTypeNode As Integer = ps.ast.nodes(bodyStart).firstChild
+            Do While paramTypeNode <> -1
+                If UCase(Trim(ps.ast.nodes(paramTypeNode).kind)) = "TYPE_REF" Then
+                    paramTypes(paramCount) = UCase(Trim(ps.ast.nodes(paramTypeNode).value))
+                    Exit Do
+                End If
+                paramTypeNode = ps.ast.nodes(paramTypeNode).nextSibling
+            Loop
+        End If
         paramCount += 1
         bodyStart = ps.ast.nodes(bodyStart).nextSibling
     Loop
@@ -1219,6 +1245,8 @@ Private Function ExecInvokeRoutineByPreparedArgs(ByRef ps As ParseState, ByRef e
                 Return 0
             End If
         End If
+        Dim preparedParamSlot As Integer = ExecFindVar(es, paramNames(ai))
+        If preparedParamSlot <> -1 Then ExecVarAt(es, preparedParamSlot).declType = paramTypes(ai)
         ExecSetVarValue es, paramNames(ai), argValues(ai)
     Next ai
 
@@ -1249,15 +1277,15 @@ Private Function ExecInvokeRoutineByPreparedArgs(ByRef ps As ParseState, ByRef e
             Dim thisIdx As Integer
             thisIdx = ExecFindVar(es, "THIS")
             If thisIdx <> -1 Then
-                es.vars(thisIdx).declType = receiverClassType
-                es.vars(thisIdx).runtimeClassType = receiverClassType
+                ExecVarAt(es, thisIdx).declType = receiverClassType
+                ExecVarAt(es, thisIdx).runtimeClassType = receiverClassType
             End If
 
             Dim meIdx As Integer
             meIdx = ExecFindVar(es, "ME")
             If meIdx <> -1 Then
-                es.vars(meIdx).declType = receiverClassType
-                es.vars(meIdx).runtimeClassType = receiverClassType
+                ExecVarAt(es, meIdx).declType = receiverClassType
+                ExecVarAt(es, meIdx).runtimeClassType = receiverClassType
             End If
         End If
     End If
@@ -1430,13 +1458,13 @@ Private Function ExecResolveReceiverExpr(ByRef ps As ParseState, ByRef es As Exe
             Return 0
         End If
 
-        If es.vars(receiverIdx).runtimeClassType <> "" Then
-            receiverTypeOut = UCase(Trim(es.vars(receiverIdx).runtimeClassType))
+        If ExecVarAt(es, receiverIdx).runtimeClassType <> "" Then
+            receiverTypeOut = UCase(Trim(ExecVarAt(es, receiverIdx).runtimeClassType))
         Else
-            receiverTypeOut = UCase(Trim(es.vars(receiverIdx).declType))
+            receiverTypeOut = UCase(Trim(ExecVarAt(es, receiverIdx).declType))
         End If
 
-        receiverAddrOut = ExecValueToInteger(es.vars(receiverIdx).value)
+        receiverAddrOut = ExecValueToInteger(ExecVarAt(es, receiverIdx).value)
         ' S-108: a class variable's value IS the object address; 0 = NULL reference (the old fallback
         ' to the variable's own slot address served the removed "DIM allocates a default object" model)
         If receiverAddrOut = 0 Then
@@ -1644,17 +1672,17 @@ Private Function ExecTryEvalMagicCall(ByRef ps As ParseState, ByRef es As ExecSt
     If receiverIdx = -1 Then Return -1
 
     Dim receiverType As String
-    If es.vars(receiverIdx).runtimeClassType <> "" Then
-        receiverType = UCase(Trim(es.vars(receiverIdx).runtimeClassType))
+    If ExecVarAt(es, receiverIdx).runtimeClassType <> "" Then
+        receiverType = UCase(Trim(ExecVarAt(es, receiverIdx).runtimeClassType))
     Else
-        receiverType = UCase(Trim(es.vars(receiverIdx).declType))
+        receiverType = UCase(Trim(ExecVarAt(es, receiverIdx).declType))
     End If
 
     ' A FUNCTION invocation can have a same-named numeric result variable in
     ' the current frame. Never reinterpret that scalar variable's storage as an
     ' object header. Callable-object dispatch is eligible only for a declared
     ' class/interface/OBJECT value or an explicit runtime class binding.
-    If Trim(es.vars(receiverIdx).runtimeClassType) = "" Then
+    If Trim(ExecVarAt(es, receiverIdx).runtimeClassType) = "" Then
         If receiverType <> "OBJECT" Then
             If ExecFindClassDeclNode(ps, receiverType) = -1 And ExecFindInterfaceDeclNode(ps, receiverType) = -1 Then
                 Return -1
@@ -1663,8 +1691,8 @@ Private Function ExecTryEvalMagicCall(ByRef ps As ParseState, ByRef es As ExecSt
     End If
 
     Dim receiverAddr As Integer
-    receiverAddr = ExecValueToInteger(es.vars(receiverIdx).value)
-    If receiverAddr = 0 Then receiverAddr = CInt(es.vars(receiverIdx).addr)
+    receiverAddr = ExecValueToInteger(ExecVarAt(es, receiverIdx).value)
+    If receiverAddr = 0 Then receiverAddr = CInt(ExecVarAt(es, receiverIdx).addr)
     If receiverAddr = 0 Then
         If receiverType = "OBJECT" Or ExecFindClassDeclNode(ps, receiverType) <> -1 Or ExecFindInterfaceDeclNode(ps, receiverType) <> -1 Then
             errText = "exec: MAGIC_CALL receiver is null " & receiverName

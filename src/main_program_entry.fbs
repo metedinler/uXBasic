@@ -141,6 +141,7 @@ If IsTurkishMessageRequested() <> 0 Then messageLang = "tr"
 errorLogOutPath = ""
 GetArgValue("--error-log-out", errorLogOutPath)
 If Trim(errorLogOutPath) = "" Then GetArgValue("-elo", errorLogOutPath)
+Dim explicitErrorLogPath As Integer = IIf(Trim(errorLogOutPath) <> "", 1, 0)
 errorLanguageFilePath = ""
 GetArgValue("--error-language-file", errorLanguageFilePath)
 If Trim(errorLanguageFilePath) = "" Then GetArgValue("-elf", errorLanguageFilePath)
@@ -508,8 +509,18 @@ End If
 
 UxbConsoleConfigure consoleMode, programOutputOutPath, programOutputJsonOutPath, finalScreenJsonOutPath
 
+Dim terminalDiagnosticFormat As String = "text"
+GetArgValue("--diag-format", terminalDiagnosticFormat)
+UXBErrorSetTerminalFormat45 terminalDiagnosticFormat
+If LCase(terminalDiagnosticFormat) = "json" Then quietMode = 1: errorToTerminal = 0
+UXBErrorSystemConfigure45 errorLogOutPath, messageLang, errorLanguageFilePath, errorToTerminal, explicitErrorLogPath
 UxbConfigure logOutPath, debugLogOutPath, quietMode, debugMode, traceMode, debugTokenDumpMode, ""
-UXBErrorSystemConfigure45 errorLogOutPath, messageLang, errorLanguageFilePath, errorToTerminal
+Dim errorLimitText As String = "20"
+GetArgValue("--error-limit", errorLimitText)
+If UXBConfigureErrorLimit(errorLimitText) = 0 Then
+    UxbError "UXB_INVALID_ERROR_LIMIT: --error-limit must be an integer in 1..1000000"
+    End 2
+End If
 UXBMessageBusInit
 UXBMessageBusSetLogPath(messageLogOutPath)
 If UXBMessageLanguageSupported(messageLang) = 0 Then
@@ -528,23 +539,30 @@ UxbTraceInit sessionLiveJsonOutPath, layerTimingJsonOutPath, hookTraceMode, "mai
 UxbTraceMark "SESSION", "START", startupMessage
 
 If HasArg("--emit-surface-matrices") Or gUXBCli.route.verb = "mtx" Then
-    Dim matrixOutDir As String = "build\matrices"
-    GetArgValue("--out-dir", matrixOutDir)
+    ' Use the registered output-root option and preserve its default.
+    Dim matrixOutDir As String = outputContractPaths.buildRoot & "/matrices"
     Dim writeErr As String
-    If UXBAdim26EnsureParentDir(matrixOutDir & "\surface_backend_matrix.json") <> 0 Then
-        UXBAdim26WriteText matrixOutDir & "\surface_backend_matrix.json", UXBGenerateSurfaceBackendMatrixJson(), writeErr
-        UXBAdim26WriteText matrixOutDir & "\builtin_backend_matrix.json", UXBGenerateBuiltinBackendMatrixJson(), writeErr
-        UXBAdim26WriteText matrixOutDir & "\type_backend_matrix.json", UXBGenerateTypeBackendMatrixJson(), writeErr
-        UXBAdim26WriteText matrixOutDir & "\library_target_matrix.json", UXBGenerateLibraryTargetMatrixJson(), writeErr
-        UXBAdim26WriteText matrixOutDir & "\design_semantics_matrix.json", UXBGenerateDesignSemanticsMatrixJson(), writeErr
-    End If
-
     If UXBValidateAllSurfaceBackendMatrices() = 0 Then
         UxbError "surface backend matrix validation basarisiz (MISSING eleman bulundu)"
         End 1
     End If
-
-    UxbInfo "surface backend matrix validation PASS: 5 JSON matris dosyasi uretildi -> " & matrixOutDir
+    Dim matrixNames(0 To 4) As String = {"surface_backend_matrix", "builtin_backend_matrix", "type_backend_matrix", "library_target_matrix", "design_semantics_matrix"}
+    Dim matrixTexts(0 To 4) As String
+    matrixTexts(0) = UXBGenerateSurfaceBackendMatrixJson()
+    matrixTexts(1) = UXBGenerateBuiltinBackendMatrixJson()
+    matrixTexts(2) = UXBGenerateTypeBackendMatrixJson()
+    matrixTexts(3) = UXBGenerateLibraryTargetMatrixJson()
+    matrixTexts(4) = UXBGenerateDesignSemanticsMatrixJson()
+    Dim matrixWritten As Integer = 0
+    For matrixIdx As Integer = 0 To 4
+        Dim matrixPath As String = matrixOutDir & "/" & matrixNames(matrixIdx) & ".json"
+        If UXBAdim26WriteText(matrixPath, matrixTexts(matrixIdx), writeErr) = 0 Then
+            UxbError writeErr
+            End 1
+        End If
+        matrixWritten += 1
+    Next matrixIdx
+    UxbInfo "surface backend matrix validation PASS: " & LTrim(Str(matrixWritten)) & " JSON matris dosyasi uretildi -> " & matrixOutDir
     End 0
 End If
 
@@ -871,6 +889,10 @@ If runSemanticPass <> 0 Then
     If libraryExecutionTarget <> "" Then
         If UXBLibraryTypeValidateExecutionTarget(libraryExecutionTarget, semanticErr) = 0 Then
             UxbError semanticErr
+            UXBOutputContractPushFailureDiagnostic frontendDiagnostics, "library_type", semanticErr, sourcePath
+            If UXBOutputContractWriteDiagnosticList(outputContractPaths, frontendDiagnostics, outputContractErr) = 0 Then
+                UxbError "birlesik library type diagnostics yazilamadi: " & outputContractErr
+            End If
             UXBOutputContractWriteFailureDiagnostics outputContractPaths, "library_type", semanticErr, outputContractErr
             End 1
         End If

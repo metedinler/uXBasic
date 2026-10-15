@@ -452,6 +452,7 @@ Private Function Step3IsFfiCallMetadataNode(ByRef ps As ParseState, ByVal nodeId
 End Function
 
 Private Function Step3AstNodeIsRuntimeExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer) As Integer
+    If UCase(Trim(ps.ast.nodes(nodeIdx).role)) = "DEFTYPE_RANGE_METADATA" Then Return 0
     Dim k As String = Step3NodeKind(ps, nodeIdx)
     If Step3IsFfiCallMetadataNode(ps, nodeIdx) <> 0 Then Return 0
     Dim ownerIdx As Integer
@@ -629,7 +630,7 @@ Private Function Step3EnumParseIntegerLiteral(ByRef rawText As String, ByRef out
     ElseIf Left(t, 2) = "0O" Then
         baseValue = 8
         t = Mid(t, 3)
-    ElseIf Left(t, 2) = "%B" Then
+    ElseIf Left(t, 2) = "%B" Or Left(t, 2) = "&B" Then
         baseValue = 2
         t = Mid(t, 3)
     ElseIf Left(t, 2) = "0B" Then
@@ -638,23 +639,21 @@ Private Function Step3EnumParseIntegerLiteral(ByRef rawText As String, ByRef out
     End If
     If t = "" Then Return 0
 
-    Dim acc As LongInt
-    acc = 0
-    Dim i As Integer
-    For i = 1 To Len(t)
-        Dim d As Integer
-        d = Step3EnumDigitValue(Mid(t, i, 1))
-        If d < 0 Or d >= baseValue Then
-            If Mid(t, i, 1) = "_" Then
-                ' Numeric separators are ignored for enum constant validation.
-            Else
-                Return 0
-            End If
-        Else
-            acc = acc * baseValue + d
-        End If
+    Dim acc As ULongInt = 0
+    Dim limit As ULongInt = IIf(signValue < 0, &h8000000000000000ULL, &hFFFFFFFFFFFFFFFFULL)
+    Dim sawDigit As Integer = 0
+    For i As Integer = 1 To Len(t)
+        Dim ch As String = Mid(t, i, 1)
+        If ch = "_" Then Continue For
+        Dim digit As Integer = Step3EnumDigitValue(ch)
+        If digit < 0 Or digit >= baseValue Then Return 0
+        If acc > (limit - CULngInt(digit)) \ CULngInt(baseValue) Then Return 0
+        acc = acc * CULngInt(baseValue) + CULngInt(digit)
+        sawDigit = 1
     Next i
-    outValue = acc * signValue
+    If sawDigit = 0 Then Return 0
+    If signValue < 0 Then acc = 0ULL - acc
+    outValue = CLngInt(acc)
     Return 1
 End Function
 
@@ -689,6 +688,8 @@ Private Function Step3EnumItemExplicitValue(ByRef ps As ParseState, ByVal itemNo
     Return -1
 End Function
 
+Declare Function Step3IntegerLiteralFits(ByVal literalText As String, ByVal targetType As String) As Integer
+
 Private Function Step3ValidateEnums(ByRef ps As ParseState, ByRef errText As String) As Integer
     Dim enumNode As Integer
     For enumNode = 0 To ps.ast.count - 1
@@ -705,7 +706,17 @@ Private Function Step3ValidateEnums(ByRef ps As ParseState, ByRef errText As Str
                 End If
             End If
 
+            Dim baseType As String = TYPE_I32
+            If baseNode <> -1 Then baseType = UXBStep3TypeCanonical(ps.ast.nodes(baseNode).value)
+            Dim bindingIdx As Integer = UXBStep3ResolveTypeIndex(enumName, errText)
+            If bindingIdx < 0 Then Return 0
+            gTypeBindings(bindingIdx).elemTypeName = UXBStep3TypeLegacyName(baseType)
+            gTypeBindings(bindingIdx).sizeBytes = UXBStep3TypeSizeBytes(baseType)
+            gTypeBindings(bindingIdx).alignBytes = UXBStep3TypeAlignBytes(baseType)
+            gTypeBindings(bindingIdx).isSigned = IIf(baseType = TYPE_I8 Or baseType = TYPE_I16 Or baseType = TYPE_I32 Or baseType = TYPE_I64, 1, 0)
+
             Dim nextValue As LongInt
+            Dim nextValueOverflow As Integer = 0
             nextValue = 0
             Dim itemNode As Integer
             itemNode = ps.ast.nodes(enumNode).firstChild
@@ -736,6 +747,19 @@ Private Function Step3ValidateEnums(ByRef ps As ParseState, ByRef errText As Str
                         End If
                     End If
 
+                    Dim explicitlyNegative As Integer = 0
+                    If valueNode >= 0 Then
+                        explicitlyNegative = IIf(Left(Trim(ps.ast.nodes(valueNode).value), 1) = "-" Or (UCase(ps.ast.nodes(valueNode).kind) = "UNARY" And ps.ast.nodes(valueNode).op = "-"), 1, 0)
+                    ElseIf nextValueOverflow <> 0 Then
+                        Return UXBSemanticFail(SEM_E_TYPE_MISMATCH, "enum: implicit value exceeds base type for " & enumName & "." & itemName, errText)
+                    End If
+                    Dim effectiveText As String = LTrim(Str(effectiveValue))
+                    If baseType = TYPE_U64 Then effectiveText = LTrim(Str(CULngInt(effectiveValue)))
+                    Dim baseUnsigned As Integer = IIf(baseType = TYPE_U8 Or baseType = TYPE_U16 Or baseType = TYPE_U32 Or baseType = TYPE_U64, 1, 0)
+                    If (baseUnsigned <> 0 And explicitlyNegative <> 0 And effectiveValue <> 0) Or (baseUnsigned = 0 And effectiveValue < 0 And valueNode >= 0 And explicitlyNegative = 0) Or Step3IntegerLiteralFits(effectiveText, baseType) = 0 Then
+                        Return UXBSemanticFail(SEM_E_TYPE_MISMATCH, "enum: value out of range for " & baseType & " in " & enumName & "." & itemName, errText)
+                    End If
+
                     compareNode = ps.ast.nodes(enumNode).firstChild
                     Dim compareNextValue As LongInt
                     compareNextValue = 0
@@ -758,9 +782,20 @@ Private Function Step3ValidateEnums(ByRef ps As ParseState, ByRef errText As Str
                         compareNode = ps.ast.nodes(compareNode).nextSibling
                     Loop
 
-                    ps.ast.nodes(itemNode).op = LTrim(Str(effectiveValue))
-                    ps.ast.nodes(itemNode).typeName = TYPE_I32
-                    nextValue = effectiveValue + 1
+                    ps.ast.nodes(itemNode).op = effectiveText
+                    ps.ast.nodes(itemNode).typeName = UCase(enumName)
+                    Dim upperLimit As ULongInt = &h7FFFFFFFFFFFFFFFULL
+                    Select Case baseType
+                    Case TYPE_I8: upperLimit = 127ULL
+                    Case TYPE_U8: upperLimit = 255ULL
+                    Case TYPE_I16: upperLimit = 32767ULL
+                    Case TYPE_U16: upperLimit = 65535ULL
+                    Case TYPE_I32: upperLimit = 2147483647ULL
+                    Case TYPE_U32: upperLimit = &hFFFFFFFFULL
+                    Case TYPE_U64: upperLimit = &hFFFFFFFFFFFFFFFFULL
+                    End Select
+                    nextValueOverflow = IIf(CULngInt(effectiveValue) = upperLimit, 1, 0)
+                    If nextValueOverflow = 0 Then nextValue = effectiveValue + 1
                 End If
                 itemNode = ps.ast.nodes(itemNode).nextSibling
             Loop
@@ -851,7 +886,7 @@ Private Function Step3BindDeclarations(ByRef ps As ParseState, ByRef errText As 
                 If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_CONST, enumScope) <> -1 Then
                     Return UXBSemanticFail(SEM_E_DUPLICATE_SYMBOL, "enum: symbol collision " & ps.ast.nodes(i).value, errText)
                 End If
-                If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_CONST, TYPE_I32, enumScope, i, errText) = -1 Then Return 0
+                If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_CONST, ps.ast.nodes(i).typeName, enumScope, i, errText) = -1 Then Return 0
             End If
         Case "LABEL_STMT"
             If Trim(ps.ast.nodes(i).value) <> "" Then If UXBStep3SymbolFindExact(ps.ast.nodes(i).value, SYM_LABEL, Step3ScopeForNode(ps, i)) = -1 Then If UXBStep3SymbolAdd(ps.ast.nodes(i).value, SYM_LABEL, "LABEL", Step3ScopeForNode(ps, i), i, errText) = -1 Then Return 0
@@ -1242,6 +1277,91 @@ End Function
 ' S-148: DIM initializers are assignments too.  Keep their compatibility
 ' check in the same semantic gate as ordinary assignments so MIR lowering
 ' cannot silently store an expression of a different type.
+Private Function Step3IntegerLiteralText(ByRef ps As ParseState, ByVal exprNode As Integer, ByRef literalText As String) As Integer
+    If exprNode < 0 Or exprNode >= ps.ast.count Then Return 0
+    Dim k As String = Step3NodeKind(ps, exprNode)
+    If k = "NUMBER" Then
+        literalText = Trim(ps.ast.nodes(exprNode).value)
+        Return IIf(UXBNumberLiteralIsFloat(literalText) = 0, 1, 0)
+    End If
+    If k = "UNARY" Or k = "UNARY_EXPR" Then
+        Dim opText As String = Trim(ps.ast.nodes(exprNode).op)
+        If opText = "" Then opText = Trim(ps.ast.nodes(exprNode).value)
+        If opText <> "+" And opText <> "-" Then Return 0
+        Dim child As Integer = ps.ast.nodes(exprNode).left
+        If child = -1 Then child = Step3ChildAt(ps, exprNode, 0)
+        If Step3IntegerLiteralText(ps, child, literalText) = 0 Then Return 0
+        If opText = "-" Then
+            If Left(literalText, 1) = "-" Then
+                literalText = Mid(literalText, 2)
+            Else
+                If Left(literalText, 1) = "+" Then literalText = Mid(literalText, 2)
+                literalText = "-" & literalText
+            End If
+        End If
+        Return 1
+    End If
+    Return 0
+End Function
+
+Private Function Step3IntegerLiteralFits(ByVal literalText As String, ByVal targetType As String) As Integer
+    Dim t As String = UCase(Trim(literalText))
+    Dim negative As Integer = 0
+    If Left(t, 1) = "-" Then negative = 1: t = Mid(t, 2)
+    If Left(t, 1) = "+" Then t = Mid(t, 2)
+    Dim radix As ULongInt = 10
+    Select Case Left(t, 2)
+    Case "&H", "0X": radix = 16: t = Mid(t, 3)
+    Case "&O", "0O": radix = 8: t = Mid(t, 3)
+    Case "&B", "%B", "0B": radix = 2: t = Mid(t, 3)
+    End Select
+    If t = "" Then Return 0
+    Dim magnitude As ULongInt = 0
+    Dim digits As Integer = 0
+    For literalPos As Integer = 1 To Len(t)
+        Dim ch As String = Mid(t, literalPos, 1)
+        If ch = "_" Then Continue For
+        Dim digit As Integer = Step3EnumDigitValue(ch)
+        If digit < 0 Then Return 0
+        If CULngInt(digit) >= radix Then Return 0
+        ' Compare before multiplication, including the exact U64 boundary.
+        If magnitude > (&hFFFFFFFFFFFFFFFFULL - CULngInt(digit)) \ radix Then Return 0
+        magnitude = magnitude * radix + CULngInt(digit)
+        digits += 1
+    Next literalPos
+    If digits = 0 Then Return 0
+    Dim limit As ULongInt
+    Select Case UXBStep3TypeCanonical(targetType)
+    Case TYPE_I8: limit = IIf(negative <> 0, 128ULL, 127ULL)
+    Case TYPE_U8: limit = 255ULL
+    Case TYPE_I16: limit = IIf(negative <> 0, 32768ULL, 32767ULL)
+    Case TYPE_U16: limit = 65535ULL
+    Case TYPE_I32: limit = IIf(negative <> 0, 2147483648ULL, 2147483647ULL)
+    Case TYPE_U32: limit = &hFFFFFFFFULL
+    Case TYPE_I64: limit = IIf(negative <> 0, &h8000000000000000ULL, &h7FFFFFFFFFFFFFFFULL)
+    Case TYPE_U64: limit = &hFFFFFFFFFFFFFFFFULL
+    Case Else: Return 0
+    End Select
+    Dim canonicalType As String = UXBStep3TypeCanonical(targetType)
+    If Left(canonicalType, 6) = "TYPE_U" And negative <> 0 And magnitude <> 0 Then Return 0
+    Return IIf(magnitude <= limit, 1, 0)
+End Function
+
+Private Function Step3CheckAssignmentExpression(ByRef ps As ParseState, ByVal targetType As String, ByVal actualType As String, ByVal exprNode As Integer, ByRef errText As String) As Integer
+    Dim literalText As String
+    Dim fixedIntegerTarget As Integer = 0
+    Select Case UXBStep3TypeCanonical(targetType)
+    Case TYPE_I8, TYPE_U8, TYPE_I16, TYPE_U16, TYPE_I32, TYPE_U32, TYPE_I64, TYPE_U64
+        fixedIntegerTarget = 1
+    End Select
+    If fixedIntegerTarget <> 0 AndAlso Step3IntegerLiteralText(ps, exprNode, literalText) <> 0 Then
+        If Step3IntegerLiteralFits(literalText, targetType) <> 0 Then errText = "": Return 1
+        errText = "type: integer literal out of range for " & UXBStep3TypeCanonical(targetType) & ": " & literalText
+        Return 0
+    End If
+    Return UXBStep3CheckAssignment(targetType, actualType, errText)
+End Function
+
 Private Function Step3ValidateDimInitializers(ByRef ps As ParseState, ByRef errText As String) As Integer
     Dim i As Integer
     For i = 0 To ps.ast.count - 1
@@ -1276,10 +1396,10 @@ Private Function Step3ValidateDimInitializers(ByRef ps As ParseState, ByRef errT
                     Return 0
                 End If
             Else
-                If UXBStep3CheckAssignment(declaredType, actualType, errText) = 0 Then Return 0
+                If Step3CheckAssignmentExpression(ps, declaredType, actualType, initExpr, errText) = 0 Then Return 0
             End If
         Else
-            If UXBStep3CheckAssignment(declaredType, actualType, errText) = 0 Then Return 0
+            If Step3CheckAssignmentExpression(ps, declaredType, actualType, initExpr, errText) = 0 Then Return 0
         End If
     Next i
     Return 1
@@ -1296,6 +1416,28 @@ Private Function Step3ValidateAssignments(ByRef ps As ParseState, ByRef errText 
             If lhs <> -1 And rhs <> -1 Then
                 Dim lhsKind As String
                 lhsKind = Step3NodeKind(ps, lhs)
+                If lhsKind = "IDENT" Or lhsKind = "IDENTIFIER" Or lhsKind = "KEYWORD_REF" Then
+                    Dim constLhsName As String
+                    constLhsName = Trim(ps.ast.nodes(lhs).value)
+                    Dim constLhsResult As UXBSymbolResolveResult
+                    ' Resolve the nearest symbol across all kinds first.  A
+                    ' local DIM/parameter shadows an outer CONST; looking up
+                    ' SYM_CONST alone would incorrectly skip that shadow.
+                    If constLhsName <> "" And UXBSymbolResolveAnyKindLexical(Step3ScopeForNode(ps, lhs), constLhsName, constLhsResult) <> 0 AndAlso UCase(Trim(constLhsResult.kind)) = SYM_CONST Then
+                        errText = "UXB_CONST_ASSIGNMENT: cannot assign to CONST " & constLhsName
+                        Return 0
+                    End If
+                ElseIf lhsKind = "CALL_EXPR" Then
+                    ' Indexed assignment is normally a mutable array write;
+                    ' still reject it when the base name resolves to CONST.
+                    Dim constCallName As String
+                    constCallName = UCase(Trim(ps.ast.nodes(lhs).value))
+                    Dim constCallResult As UXBSymbolResolveResult
+                    If constCallName <> "" And UXBSymbolResolveAnyKindLexical(Step3ScopeForNode(ps, lhs), constCallName, constCallResult) <> 0 AndAlso UCase(Trim(constCallResult.kind)) = SYM_CONST Then
+                        errText = "UXB_CONST_ASSIGNMENT: cannot assign to CONST " & constCallName
+                        Return 0
+                    End If
+                End If
                 If lhsKind = "CALL_EXPR" Then
                     Dim callName As String
                     callName = UCase(Trim(ps.ast.nodes(lhs).value))
@@ -1372,7 +1514,7 @@ Private Function Step3ValidateAssignments(ByRef ps As ParseState, ByRef errText 
                         End If
                     End If
                     If classAssignmentHandled = 0 Then
-                        If UXBStep3CheckAssignment(lt, rt, errText) = 0 Then Return 0
+                        If Step3CheckAssignmentExpression(ps, lt, rt, rhs, errText) = 0 Then Return 0
                     End If
                 Else
                     If Step3ValidateCompoundAssignmentTypes(assignOp, lt, rt, errText) = 0 Then Return 0
@@ -1412,9 +1554,31 @@ Private Function Step3ValidateCallsAndReturns(ByRef ps As ParseState, ByRef errT
             End If
         ElseIf k = "RETURN_STMT" Then
             Dim child As Integer = Step3ChildAt(ps, i, 0)
+            If child = -1 Then child = ps.ast.nodes(i).left
             If child <> -1 Then
                 Dim rt As String
                 If UXBStep3InferExprType(ps, child, rt, errText) = 0 Then Return 0
+                Dim owner As Integer = UXBTaskEnclosingRoutine(ps, i)
+                If owner <> -1 Then
+                    Dim wanted As String
+                    Dim retTypeNode As Integer = Step3FindChildByKind(ps, owner, "RETURN_TYPE")
+                    ' Bare RETURN also serves GOSUB. Only value returns with an
+                    ' explicit routine result declaration enter this type gate.
+                    If retTypeNode <> -1 Then
+                        wanted = UXBStep3TypeCanonical(ps.ast.nodes(retTypeNode).value)
+                        If SemHasClassName(ps, UCase(rt)) <> 0 And (SemHasClassName(ps, UCase(wanted)) <> 0 Or SemFindInterfaceNode(ps, UCase(wanted)) <> -1 Or UCase(wanted) = "OBJECT") Then
+                            If SemCanAssignClassType(ps, UCase(wanted), UCase(rt)) = 0 Then errText = "type: RETURN cannot convert " & rt & " to " & wanted: Return 0
+                        Else
+                            If Step3CheckAssignmentExpression(ps, wanted, rt, child, errText) = 0 Then
+                                errText = "return: " & errText & " @" & LTrim(Str(ps.ast.nodes(i).lineNo)) & ":" & LTrim(Str(ps.ast.nodes(i).colNo))
+                                Return 0
+                            End If
+                        End If
+                    ElseIf Step3NodeKind(ps, owner) = "SUB_STMT" Or Step3NodeKind(ps, owner) = "CLASS_CONSTRUCTOR_DECL" Or Step3NodeKind(ps, owner) = "CLASS_DESTRUCTOR_DECL" Then
+                        errText = "return: value returned from void routine"
+                        Return 0
+                    End If
+                End If
             End If
         End If
     Next i

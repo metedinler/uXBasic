@@ -531,11 +531,11 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
             If es.runtime.callContextDepth > 0 And es.runtime.callContextDepth <= 63 Then
                 If existingVarIdx < es.runtime.callFrameBase(es.runtime.callContextDepth) Then canShadowOuter = 1
             End If
-            If canShadowOuter = 0 Then
+            If canShadowOuter = 0 And ExecVarAt(es, existingVarIdx).dimDeclNodePlus1 <> declNode + 1 Then
                 errText = "DIM: duplicate variable " & varName
                 Return 0
             End If
-            If ExecAppendFrameVar(es, varName) = -1 Then
+            If canShadowOuter <> 0 AndAlso ExecAppendFrameVar(es, varName) = -1 Then
                 errText = "DIM: local frame variable capacity exceeded"
                 Return 0
             End If
@@ -625,7 +625,18 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
 
             varValue.valueType = "ARRAY"
             ExecSetVarValue es, varName, varValue
+            If es.variableStorageError <> "" Then
+                errText = es.variableStorageError
+                Return 0
+            End If
             ExecSetVarDeclMeta es, varName, declType, 1, 1, lowerBound, upperBound, totalBytes
+            Dim arrayDeclVarIdx As Integer
+            arrayDeclVarIdx = ExecFindVar(es, varName)
+            If arrayDeclVarIdx < 0 Then
+                errText = "DIM: variable storage allocation failed " & varName
+                Return 0
+            End If
+            ExecVarAt(es, arrayDeclVarIdx).dimDeclNodePlus1 = declNode + 1
             If ExecArrayResizeVar(es, varName, lowerBound, upperBound, 0) = 0 Then
                 errText = "DIM: array storage init failed"
                 Return 0
@@ -641,7 +652,7 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
 
                 Dim arrBase As UInteger
                 arrBase = es.nextVarAddr
-                es.vars(arrVarIdx).addr = arrBase
+                ExecVarAt(es, arrVarIdx).addr = arrBase
 
                 If VMemFillB(arrBase, 0, CUInt(totalBytes)) = 0 Then
                     errText = "DIM: aggregate array allocation out of range"
@@ -705,8 +716,29 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
                 varValue = initValue
             End If
 
+            ' S-503: a scalar DIM initializer crosses the same declared-type
+            ' boundary as a later assignment.  Without this conversion,
+            ' `DIM f AS F32 = 16777217` retained the host integer while
+            ' `f = 16777217` was narrowed at the storage boundary.
+            If initNode <> -1 Then
+                Dim typedInitValue As ExecValue
+                If ExecApplyDeclaredType(varValue, declType, typedInitValue, errText) = 0 Then Return 0
+                varValue = typedInitValue
+            End If
+
             ExecSetVarValue es, varName, varValue
+            If es.variableStorageError <> "" Then
+                errText = es.variableStorageError
+                Return 0
+            End If
             ExecSetVarDeclMeta es, varName, declType, 0, 0, 0, 0, 0
+            Dim scalarDeclVarIdx As Integer
+            scalarDeclVarIdx = ExecFindVar(es, varName)
+            If scalarDeclVarIdx < 0 Then
+                errText = "DIM: variable storage allocation failed " & varName
+                Return 0
+            End If
+            ExecVarAt(es, scalarDeclVarIdx).dimDeclNodePlus1 = declNode + 1
             Dim aggregateSize As Integer
             Dim aggregateErr As String
             Dim hasAggregateLayout As Integer
@@ -724,12 +756,12 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
                     errText = "DIM: aggregate variable allocation failed " & varName
                     Return 0
                 End If
-                If VMemFillB(es.vars(aggVarIdx).addr, 0, CUInt(aggregateSize)) = 0 Then
+                If VMemFillB(ExecVarAt(es, aggVarIdx).addr, 0, CUInt(aggregateSize)) = 0 Then
                     errText = "DIM: aggregate allocation out of range"
                     Return 0
                 End If
                 Dim aggEnd As UInteger
-                aggEnd = es.vars(aggVarIdx).addr + CUInt(aggregateSize)
+                aggEnd = ExecVarAt(es, aggVarIdx).addr + CUInt(aggregateSize)
                 If aggEnd > es.nextVarAddr Then es.nextVarAddr = aggEnd
             ElseIf ExecFindClassDeclNode(ps, declType) <> -1 Then
                 If initNode <> -1 Then
@@ -737,13 +769,13 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
                     Dim initExprNode2 As Integer
                     initExprNode2 = ps.ast.nodes(initNode).left
                     If initExprNode2 <> -1 Then
-                        es.vars(ExecFindVar(es, varName)).runtimeClassType = UCase(Trim(ps.ast.nodes(initExprNode2).value))
+                        ExecVarAt(es, ExecFindVar(es, varName)).runtimeClassType = UCase(Trim(ps.ast.nodes(initExprNode2).value))
                     End If
                 Else
                     ' S-108 (Mete's decision, 2026-09-20): a CLASS variable is a REFERENCE; `DIM a AS Animal`
                     ' makes a NULL reference and the object exists only after `= NEW ...`. (It used to
                     ' allocate and construct a default object here, which `a = NEW Dog()` then leaked.)
-                    es.vars(ExecFindVar(es, varName)).runtimeClassType = ""
+                    ExecVarAt(es, ExecFindVar(es, varName)).runtimeClassType = ""
                     ExecSetVarAddr es, varName, 0
                 End If
             ElseIf ExecFindInterfaceDeclNode(ps, declType) <> -1 Then
@@ -752,10 +784,10 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
                     Dim initExprNodeIface As Integer
                     initExprNodeIface = ps.ast.nodes(initNode).left
                     If initExprNodeIface <> -1 Then
-                        es.vars(ExecFindVar(es, varName)).runtimeClassType = UCase(Trim(ps.ast.nodes(initExprNodeIface).value))
+                        ExecVarAt(es, ExecFindVar(es, varName)).runtimeClassType = UCase(Trim(ps.ast.nodes(initExprNodeIface).value))
                     End If
                 Else
-                    es.vars(ExecFindVar(es, varName)).runtimeClassType = ""
+                    ExecVarAt(es, ExecFindVar(es, varName)).runtimeClassType = ""
                     ExecSetVarAddr es, varName, 0
                 End If
             ElseIf declType = "OBJECT" Then
@@ -764,7 +796,7 @@ Function ExecEvalDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef es 
                     Dim initExprNode3 As Integer
                     initExprNode3 = ps.ast.nodes(initNode).left
                     If initExprNode3 <> -1 Then
-                        es.vars(ExecFindVar(es, varName)).runtimeClassType = UCase(Trim(ps.ast.nodes(initExprNode3).value))
+                        ExecVarAt(es, ExecFindVar(es, varName)).runtimeClassType = UCase(Trim(ps.ast.nodes(initExprNode3).value))
                     End If
                 End If
             End If
@@ -815,7 +847,7 @@ Function ExecEvalREDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef e
             Return 0
         End If
 
-        If es.vars(varIdx).isArray = 0 Or es.vars(varIdx).value.valueType <> "ARRAY" Then
+        If ExecVarAt(es, varIdx).isArray = 0 Or ExecVarAt(es, varIdx).value.valueType <> "ARRAY" Then
             errText = "REDIM: target is not array " & varName
             Return 0
         End If
@@ -835,7 +867,7 @@ Function ExecEvalREDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef e
         End If
 
         Dim declTypeNorm As String
-        declTypeNorm = ExecNormalizeTypeName(es.vars(varIdx).declType)
+        declTypeNorm = ExecNormalizeTypeName(ExecVarAt(es, varIdx).declType)
         If declTypeNorm <> "" And redimType <> declTypeNorm Then
             errText = "REDIM: type mismatch for " & varName
             Return 0
@@ -923,7 +955,7 @@ Function ExecEvalREDIM(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef e
         ExecValueInit newValue
         newValue.valueType = "ARRAY"
 
-        es.vars(varIdx).value = newValue
+        ExecVarAt(es, varIdx).value = newValue
         If ExecArrayResizeVar(es, varName, firstLower, firstUpper, preserveMode) = 0 Then
             errText = "REDIM: array storage resize failed"
             Return 0
@@ -1312,14 +1344,14 @@ Private Function ExecTryResolveBinaryReceiver(ByRef ps As ParseState, ByRef es A
     receiverIdx = ExecFindVar(es, ownerName)
     If receiverIdx = -1 Then Return 0
 
-    If es.vars(receiverIdx).runtimeClassType <> "" Then
-        receiverTypeOut = UCase(Trim(es.vars(receiverIdx).runtimeClassType))
+    If ExecVarAt(es, receiverIdx).runtimeClassType <> "" Then
+        receiverTypeOut = UCase(Trim(ExecVarAt(es, receiverIdx).runtimeClassType))
     Else
-        receiverTypeOut = UCase(Trim(es.vars(receiverIdx).declType))
+        receiverTypeOut = UCase(Trim(ExecVarAt(es, receiverIdx).declType))
     End If
 
     receiverAddrOut = ExecGetVar(es, ownerName)
-    If receiverAddrOut = 0 Then receiverAddrOut = CInt(es.vars(receiverIdx).addr)
+    If receiverAddrOut = 0 Then receiverAddrOut = CInt(ExecVarAt(es, receiverIdx).addr)
     If receiverAddrOut = 0 Then Return 0
 
     If receiverTypeOut = "" Or receiverTypeOut = "OBJECT" Or ExecFindClassDeclNode(ps, receiverTypeOut) = -1 Then
@@ -1531,10 +1563,58 @@ Private Function ExecEvalBinaryInt64(ByRef leftVal As ExecValue, ByRef rightVal 
     Return 1
 End Function
 
-Private Function ExecEvalBinaryValues(ByRef leftVal As ExecValue, ByRef rightVal As ExecValue, ByRef opText As String, ByRef result As ExecValue, ByRef errText As String, ByVal u64Flags As Integer = 0) As Integer
+Private Function ExecEvalRotateByDeclaredType(ByRef leftVal As ExecValue, ByRef rightVal As ExecValue, ByRef declaredTypeRaw As String, ByVal rotateRight As Integer, ByRef result As ExecValue, ByRef errText As String) As Integer
+    If ExecIsIntegerClass(leftVal) = 0 Or ExecIsIntegerClass(rightVal) = 0 Then Return -1
+
+    Dim typeName As String
+    typeName = UCase(Trim(declaredTypeRaw))
+    If Left(typeName, 5) = "TYPE_" Then typeName = Mid(typeName, 6)
+
+    Dim widthBits As Integer
+    widthBits = 0
+    Select Case typeName
+    Case "U8", "UBYTE", "I8", "BYTE", "SBYTE": widthBits = 8
+    Case "U16", "USHORT", "I16", "SHORT": widthBits = 16
+    Case "U32", "UINTEGER", "UINT", "ULONG", "I32", "INTEGER", "INT", "LONG": widthBits = 32
+    Case "U64", "ULONGINT", "I64", "LONGINT", "PTR", "STRPTR", "WSTRPTR": widthBits = 64
+    Case Else: Return -1
+    End Select
+
+    Dim mask As ULongInt
+    mask = &hFFFFFFFFFFFFFFFFULL
+    If widthBits = 8 Then mask = &hFFULL
+    If widthBits = 16 Then mask = &hFFFFULL
+    If widthBits = 32 Then mask = &hFFFFFFFFULL
+
+    Dim sourceBits As ULongInt
+    sourceBits = ExecValueToU64(leftVal) And mask
+    Dim shiftBits As Integer
+    shiftBits = CInt(ExecValueToU64(rightVal) And CULngInt(widthBits - 1))
+    Dim rotatedBits As ULongInt
+    If shiftBits = 0 Then
+        rotatedBits = sourceBits
+    ElseIf rotateRight = 0 Then
+        rotatedBits = ((sourceBits Shl shiftBits) Or (sourceBits Shr (widthBits - shiftBits))) And mask
+    Else
+        rotatedBits = ((sourceBits Shr shiftBits) Or (sourceBits Shl (widthBits - shiftBits))) And mask
+    End If
+
+    Dim rawResult As ExecValue
+    ExecValueSetU64 rawResult, rotatedBits
+    If ExecApplyDeclaredType(rawResult, declaredTypeRaw, result, errText) = 0 Then Return 0
+    Return 1
+End Function
+
+Private Function ExecEvalBinaryValues(ByRef leftVal As ExecValue, ByRef rightVal As ExecValue, ByRef opText As String, ByRef result As ExecValue, ByRef errText As String, ByVal u64Flags As Integer = 0, ByVal declaredTypeRaw As String = "") As Integer
     Dim bigResult As Integer
     bigResult = ExecBigEvalBinaryValues(leftVal, rightVal, opText, result, errText)
     If bigResult >= 0 Then Return bigResult
+
+    Dim rotateResult As Integer
+    If UCase(Trim(opText)) = "ROL" Or UCase(Trim(opText)) = "ROR" Then
+        rotateResult = ExecEvalRotateByDeclaredType(leftVal, rightVal, declaredTypeRaw, IIf(UCase(Trim(opText)) = "ROR", 1, 0), result, errText)
+        If rotateResult >= 0 Then Return rotateResult
+    End If
 
     ' S-077: every operator on two machine integers goes through the one 64-bit
     ' implementation (the per-operator code below is the float/string path).
@@ -2087,7 +2167,7 @@ Function ExecEvalExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer, By
             End If
         End If
 
-        If ExecEvalBinaryValues(leftVal, rightVal, n.op, result, errText, binaryU64Flags) = 0 Then Return 0
+        If ExecEvalBinaryValues(leftVal, rightVal, n.op, result, errText, binaryU64Flags, n.typeName) = 0 Then Return 0
         ' S-088: an expression whose static type is U32 wraps modulo 2^32 (the type pass stamps
         ' n.typeName; comparisons are BOOL and unaffected).
         If UXBStep3TypeIsU32(n.typeName) <> 0 Then
@@ -2106,10 +2186,19 @@ Function ExecEvalExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer, By
             Return 0
         End If
 
-        If ExecValueToInteger(condVal) <> 0 Then
-            Return ExecEvalExpression(ps, thenNode, es, result, errText)
+        Dim selectedNode As Integer = n.right
+        If condVal.valueType = "FLOAT" Then
+            If condVal.floatValue <> 0 Then selectedNode = thenNode
+        ElseIf ExecValueToInteger(condVal) <> 0 Then
+            selectedNode = thenNode
         End If
-        Return ExecEvalExpression(ps, n.right, es, result, errText)
+        If ExecEvalExpression(ps, selectedNode, es, result, errText) = 0 Then Return 0
+        If Trim(n.typeName) <> "" Then
+            Dim conditionalResult As ExecValue
+            If ExecApplyDeclaredType(result, n.typeName, conditionalResult, errText) = 0 Then Return 0
+            result = conditionalResult
+        End If
+        Return 1
 
     Case "CALL_EXPR"
         Dim arrayVarIdx As Integer
@@ -2133,7 +2222,8 @@ Function ExecEvalExpression(ByRef ps As ParseState, ByVal nodeIdx As Integer, By
         End Select
 
         Dim scalarCastName As String
-        scalarCastName = UCase(Trim(bigExprName))
+        scalarCastName = UCase(Trim(UXBStep3StorageType(bigExprName)))
+        If Left(scalarCastName, 5) = "TYPE_" Then scalarCastName = Mid(scalarCastName, 6)
         If scalarCastName = "BOOL" Then scalarCastName = "BOOLEAN"
         Select Case scalarCastName
         Case "BOOLEAN", "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "PTR"
@@ -2423,9 +2513,10 @@ Function ExecDebugGetStringSize() As Integer
 End Function
 
 Private Function ExecIsBuiltinCallName(ByRef callName As String) As Integer
+    If UXBStep3EnumBaseType(callName) <> "" Then Return 1
     Select Case UCase(callName)
     Case "DLL", "API", "CALL", "SIZEOF", "OFFSETOF", "INSTANCEOF", "BOOLEAN", "BOOL", "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "PTR", "LEN", "ABS", "INT", "SGN", "VAL", "ASC", "CINT", "CLNG", "CDBL", "CSNG", "FIX", "SQR", "SIN", "COS", "TAN", "ATN", "EXP", "LOG", "UCASE", "LCASE", "LTRIM", "RTRIM", "TRIM", "LEFT", "RIGHT", "MID", "INSTR", "SPACE", "STRING", "CHR", "STR", "RND", "TIMER", "LOF", "EOF", "INKEY", "GETKEY", "PEEK", "PEEKB", "PEEKW", "PEEKD", "PEEKQ", "VARPTR", "SADD", "LPTR", "CODEPTR", "LBOUND", "UBOUND", _
-         "BIGINIT", "BIGF", "BIGD", "BALL", "BIGI", "BIGINT", "EXTFP", "FP80", "FP128", _
+         "HEX", "OCT", "BIN", "BIGINIT", "BIGF", "BIGD", "BALL", "BIGI", "BIGINT", "EXTFP", "FP80", "FP128", _
          "LIST_NEW", "DICT_NEW", "SET_NEW", "LISTLEN", "LISTGET", "LISTSET", "LISTADD", "LISTREMOVE", "LISTCLEAR", "DICTLEN", "DICTHAS", "DICTGET", "DICTSET", "DICTCLEAR", "SETLEN", "SETHAS", "SETADD", "SETREMOVE", "SETCLEAR"
         Return 1
     End Select
@@ -2446,7 +2537,7 @@ Private Sub ExecSnapshotVars(ByRef es As ExecState, snapshotVars() As ExecVar, B
 
     Dim i As Integer
     For i = 0 To snapshotCount - 1
-        snapshotVars(i) = es.vars(i)
+        snapshotVars(i) = ExecVarAt(es, i)
     Next i
 End Sub
 
@@ -2455,19 +2546,15 @@ Private Sub ExecRestoreVars(ByRef es As ExecState, snapshotVars() As ExecVar, By
     es.nextVarAddr = snapshotNextAddr
 
     If snapshotCount <= 0 Then
-        ' Erase es.vars - fixed array
+        ' Keep allocated pages for later frames in this run.
         Exit Sub
     End If
 
-    ' ReDim es.vars(snapshotCount - 1) - fixed array
-    If snapshotCount > 256 Then
-        ' overflow
-        Exit Sub
-    End If
+    If ExecReserveVarCells(es, snapshotCount) = 0 Then Exit Sub
 
     Dim i As Integer
     For i = 0 To snapshotCount - 1
-        es.vars(i) = snapshotVars(i)
+        ExecVarAt(es, i) = snapshotVars(i)
     Next i
 End Sub
 
@@ -2478,7 +2565,7 @@ Private Function ExecResolveThisMeIdentValue(ByRef es As ExecState, ByRef identT
     Dim varIdx As Integer
     varIdx = ExecFindVar(es, identUpper)
     If varIdx <> -1 Then
-        valueOut = ExecValueToInteger(es.vars(varIdx).value)
+        valueOut = ExecValueToInteger(ExecVarAt(es, varIdx).value)
         Return 1
     End If
 
@@ -2513,7 +2600,7 @@ Private Function ExecResolveThisMeIdentAddr(ByRef es As ExecState, ByRef identTe
     Dim varIdx As Integer
     varIdx = ExecFindVar(es, identUpper)
     If varIdx <> -1 Then
-        addrOut = es.vars(varIdx).addr
+        addrOut = ExecVarAt(es, varIdx).addr
         Return 1
     End If
 
@@ -2771,15 +2858,15 @@ Private Function ExecTryResolveMagicFieldReceiver(ByRef ps As ParseState, ByRef 
     If rootIdx = -1 Then Return 0
 
     Dim candidateType As String
-    If es.vars(rootIdx).runtimeClassType <> "" Then
-        candidateType = UCase(Trim(es.vars(rootIdx).runtimeClassType))
+    If ExecVarAt(es, rootIdx).runtimeClassType <> "" Then
+        candidateType = UCase(Trim(ExecVarAt(es, rootIdx).runtimeClassType))
     Else
-        candidateType = UCase(Trim(es.vars(rootIdx).declType))
+        candidateType = UCase(Trim(ExecVarAt(es, rootIdx).declType))
     End If
 
     Dim candidateAddr As Integer
-    candidateAddr = ExecValueToInteger(es.vars(rootIdx).value)
-    If candidateAddr = 0 Then candidateAddr = CInt(es.vars(rootIdx).addr)
+    candidateAddr = ExecValueToInteger(ExecVarAt(es, rootIdx).value)
+    If candidateAddr = 0 Then candidateAddr = CInt(ExecVarAt(es, rootIdx).addr)
     If candidateAddr = 0 Then Return 0
 
     If candidateType = "" Or candidateType = "OBJECT" Or ExecFindClassDeclNode(ps, candidateType) = -1 Then
@@ -2869,14 +2956,14 @@ Function ExecTryEvalMagicToString(ByRef ps As ParseState, ByRef es As ExecState,
         receiverIdx = ExecFindVar(es, receiverName)
         If receiverIdx = -1 Then Return -1
 
-        If es.vars(receiverIdx).runtimeClassType <> "" Then
-            receiverType = UCase(Trim(es.vars(receiverIdx).runtimeClassType))
+        If ExecVarAt(es, receiverIdx).runtimeClassType <> "" Then
+            receiverType = UCase(Trim(ExecVarAt(es, receiverIdx).runtimeClassType))
         Else
-            receiverType = UCase(Trim(es.vars(receiverIdx).declType))
+            receiverType = UCase(Trim(ExecVarAt(es, receiverIdx).declType))
         End If
 
-        receiverAddr = ExecValueToInteger(es.vars(receiverIdx).value)
-        If receiverAddr = 0 Then receiverAddr = CInt(es.vars(receiverIdx).addr)
+        receiverAddr = ExecValueToInteger(ExecVarAt(es, receiverIdx).value)
+        If receiverAddr = 0 Then receiverAddr = CInt(ExecVarAt(es, receiverIdx).addr)
     ElseIf nk = "FIELD_EXPR" Or nk = "MEMBER_EXPR" Or nk = "CALL_EXPR" Or nk = "NEW_EXPR" Then
         Dim receiverValue As ExecValue
         If ExecEvalExpression(ps, nodeIdx, es, receiverValue, errText) = 0 Then Return 0
@@ -2945,8 +3032,8 @@ Private Sub ExecBindPropertyAccessorContext(ByRef es As ExecState, ByRef rootTyp
     Dim thisIdx As Integer
     thisIdx = ExecFindVar(es, "THIS")
     If thisIdx <> -1 Then
-        es.vars(thisIdx).runtimeClassType = rootType
-        es.vars(thisIdx).addr = rootAddr
+        ExecVarAt(es, thisIdx).runtimeClassType = rootType
+        ExecVarAt(es, thisIdx).addr = rootAddr
     End If
 
     ExecSetVar es, "ME", CInt(rootAddr)
@@ -2954,8 +3041,8 @@ Private Sub ExecBindPropertyAccessorContext(ByRef es As ExecState, ByRef rootTyp
     Dim meIdx As Integer
     meIdx = ExecFindVar(es, "ME")
     If meIdx <> -1 Then
-        es.vars(meIdx).runtimeClassType = rootType
-        es.vars(meIdx).addr = rootAddr
+        ExecVarAt(es, meIdx).runtimeClassType = rootType
+        ExecVarAt(es, meIdx).addr = rootAddr
     End If
 End Sub
 
@@ -3156,8 +3243,8 @@ Private Function ExecResolveFieldAccess(ByRef ps As ParseState, ByRef es As Exec
 
     Dim rootDeclType As String
     Dim rootRuntimeType As String
-    rootDeclType = UCase(Trim(es.vars(rootIdx).declType))
-    rootRuntimeType = UCase(Trim(es.vars(rootIdx).runtimeClassType))
+    rootDeclType = UCase(Trim(ExecVarAt(es, rootIdx).declType))
+    rootRuntimeType = UCase(Trim(ExecVarAt(es, rootIdx).runtimeClassType))
 
     Dim rootType As String
     Dim baseAddr As UInteger
@@ -3202,10 +3289,10 @@ Private Function ExecResolveFieldAccess(ByRef ps As ParseState, ByRef es As Exec
             Return 0
         End If
 
-        baseAddr = es.vars(rootIdx).addr + CUInt(elemIndex * elemSize)
+        baseAddr = ExecVarAt(es, rootIdx).addr + CUInt(elemIndex * elemSize)
     ElseIf rootDeclType = "OBJECT" Or ExecFindClassDeclNode(ps, rootDeclType) <> -1 Then
         rootType = IIf(rootRuntimeType <> "", rootRuntimeType, rootDeclType)
-        baseAddr = CUInt(ExecValueToInteger(es.vars(rootIdx).value))
+        baseAddr = CUInt(ExecValueToInteger(ExecVarAt(es, rootIdx).value))
         If baseAddr = 0 Then
             ' S-108: a class variable that was never assigned is a NULL reference (no default object)
             errText = "exec: field access on a null object reference: " & UCase(Trim(rootName))
@@ -3213,7 +3300,7 @@ Private Function ExecResolveFieldAccess(ByRef ps As ParseState, ByRef es As Exec
         End If
     Else
         rootType = rootDeclType
-        baseAddr = es.vars(rootIdx).addr
+        baseAddr = ExecVarAt(es, rootIdx).addr
     End If
 
     If rootType = "" Then
@@ -3274,12 +3361,13 @@ Private Function ExecTryReadEnumMember(ByRef ps As ParseState, ByRef es As ExecS
             End If
 
             Dim enumValue As LongInt
-            enumValue = CLngInt(Val(valueText))
-            If enumValue < -2147483648LL Or enumValue > 2147483647LL Then
-                errText = "exec: enum value exceeds the AST interpreter I32 range for " & rootName & "." & pathText
-                Return 0
+            enumValue = ValLng(valueText)
+            Dim baseType As String = UXBStep3EnumBaseType(rootName)
+            If baseType = TYPE_U64 Or baseType = TYPE_U32 Then
+                ExecValueSetU64 valueOut, ValULng(valueText)
+            Else
+                ExecValueSetI64 valueOut, enumValue
             End If
-            ExecValueSetInteger valueOut, CInt(enumValue)
             Return 1
         End If
         itemNode = ps.ast.nodes(itemNode).nextSibling
@@ -3607,8 +3695,8 @@ Private Function ExecResolveImplicitThisField(ByRef ps As ParseState, ByRef es A
     If thisIdx = -1 Then Return 1
 
     Dim thisType As String
-    thisType = UCase(Trim(es.vars(thisIdx).runtimeClassType))
-    If thisType = "" Then thisType = UCase(Trim(es.vars(thisIdx).declType))
+    thisType = UCase(Trim(ExecVarAt(es, thisIdx).runtimeClassType))
+    If thisType = "" Then thisType = UCase(Trim(ExecVarAt(es, thisIdx).declType))
     If thisType = "" OrElse ExecFindClassDeclNode(ps, thisType) = -1 Then Return 1
 
     Dim fieldOffset As Integer
@@ -3616,7 +3704,7 @@ Private Function ExecResolveImplicitThisField(ByRef ps As ParseState, ByRef es A
     If TypeLayoutResolvePath(ps, thisType, fieldName, fieldOffset, fieldTypeOut, fieldSizeOut, layoutErr) = 0 Then Return 1
 
     Dim thisAddr As UInteger
-    thisAddr = CUInt(ExecValueToInteger(es.vars(thisIdx).value))
+    thisAddr = CUInt(ExecValueToInteger(ExecVarAt(es, thisIdx).value))
     If thisAddr = 0 Then
         errText = "exec: implicit field receiver is null: " & fieldName
         Return 0
@@ -3866,7 +3954,7 @@ Private Function ExecEvalBuiltinCall(ByRef ps As ParseState, ByRef es As ExecSta
     Case "BOOLEAN", "BOOL", "I8", "U8", "I16", "U16", "I32", "U32", "I64", "U64", "F32", "F64", "PTR", "LEN", "ASC"
         Return ExecEvalBuiltinScalarCategory(ps, es, callName, callNodeIdx, errText)
 
-    Case "UCASE", "LCASE", "LTRIM", "RTRIM", "TRIM", "LEFT", "RIGHT", "MID", "INSTR", "SPACE", "STRING", "CHR", "STR"
+    Case "HEX", "OCT", "BIN", "UCASE", "LCASE", "LTRIM", "RTRIM", "TRIM", "LEFT", "RIGHT", "MID", "INSTR", "SPACE", "STRING", "CHR", "STR"
         Dim textCompat As String
         If ExecEvalNodeAsText(ps, es, callNodeIdx, textCompat, errText) = 0 Then Return 0
         ' Numeric execution path keeps integer return contract; text call side-effects are captured by text evaluator.
@@ -4346,6 +4434,8 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
             Dim u32Involved As Integer
             u32Involved = 0
             If UXBStep3TypeIsU32(n.typeName) <> 0 Then u32Involved = 1
+            Dim rotateInvolved As Integer
+            rotateInvolved = IIf(wideOpNorm = "ROL" Or wideOpNorm = "ROR", 1, 0)
             If n.left >= 0 Then
                 If UXBStep3TypeIsU32(ps.ast.nodes(n.left).typeName) <> 0 Then u32Involved = 1
             End If
@@ -4388,7 +4478,7 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
                     If UXBNumberLiteralIsFloat(ps.ast.nodes(n.right).value) <> 0 Then floatInvolved = 1
                 End If
             End If
-            If u32Involved <> 0 Or stringInvolved <> 0 Or floatInvolved <> 0 Or UXBExprIsWide64(ps, n.left) <> 0 Or UXBExprIsWide64(ps, n.right) <> 0 Then
+            If u32Involved <> 0 Or rotateInvolved <> 0 Or stringInvolved <> 0 Or floatInvolved <> 0 Or UXBExprIsWide64(ps, n.left) <> 0 Or UXBExprIsWide64(ps, n.right) <> 0 Then
                 Dim wideValue As ExecValue
                 If ExecEvalExpression(ps, nodeIdx, es, wideValue, errText) = 0 Then Return 0
                 Return ExecValueToInteger(wideValue)
@@ -4522,21 +4612,9 @@ Private Function ExecEvalNode(ByRef ps As ParseState, ByRef es As ExecState, ByV
         End Select
 
     Case "TERNARY_EXPR"
-        Dim condInt As Integer
-        condInt = ExecEvalNode(ps, es, n.left, errText)
-        If errText <> "" Then Return 0
-
-        Dim thenExpr As Integer
-        thenExpr = ExecChildAt(ps, nodeIdx, 0)
-        If thenExpr = -1 Then
-            errText = "exec: ternary true branch missing"
-            Return 0
-        End If
-
-        If condInt <> 0 Then
-            Return ExecEvalNode(ps, es, thenExpr, errText)
-        End If
-        Return ExecEvalNode(ps, es, n.right, errText)
+        Dim conditionalValue As ExecValue
+        If ExecEvalExpression(ps, nodeIdx, es, conditionalValue, errText) = 0 Then Return 0
+        Return ExecValueToInteger(conditionalValue)
 
     Case "CALL_EXPR"
         Dim arrVarIdx As Integer
@@ -4675,17 +4753,21 @@ End Function
 
 Private Function ExecRunTailStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef st As ASTNode, ByRef errText As String) As Integer
     Select Case UCase(st.kind)
-    Case "EXIT_STMT"
+    Case "EXIT_STMT", "CONTINUE_STMT"
         Dim exitMode As String
         exitMode = UCase(st.op)
         If exitMode = "" Then exitMode = "ANY"
 
-        If exitMode <> "ANY" And exitMode <> "FOR" And exitMode <> "DO" And exitMode <> "IF" Then
+        If exitMode <> "ANY" And exitMode <> "FOR" And exitMode <> "DO" And exitMode <> "WHILE" And exitMode <> "IF" Then
             errText = "exec: unsupported EXIT mode " & st.op
             Return 0
         End If
 
-        es.runtime.exitRequest = exitMode
+        If UCase(st.kind) = "CONTINUE_STMT" Then
+            es.runtime.exitRequest = "CONTINUE:" & exitMode
+        Else
+            es.runtime.exitRequest = exitMode
+        End If
         Return 1
 
     Case "GOTO_STMT"
@@ -4816,7 +4898,7 @@ Private Function ExecRunBlockChildren(ByRef ps As ParseState, ByRef es As ExecSt
     Return 1
 End Function
 
-Private Function ExecRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+Private Function ExecRunStmtCore(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
     If UXBStepBudgetTick(errText) = 0 Then Return 0
     If ExecLockCheckStmtAccess(ps, es, stmtIdx, errText) = 0 Then Return 0
     Dim st As ASTNode
@@ -4884,6 +4966,13 @@ Private Function ExecRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVa
 
     errText = "exec: unsupported statement kind " & st.kind
     Return 0
+End Function
+
+Private Function ExecRunStmt(ByRef ps As ParseState, ByRef es As ExecState, ByVal stmtIdx As Integer, ByRef errText As String) As Integer
+    If es.variableStorageError <> "" Then errText = es.variableStorageError: Return 0
+    Dim result As Integer = ExecRunStmtCore(ps, es, stmtIdx, errText)
+    If es.variableStorageError <> "" Then errText = es.variableStorageError: Return 0
+    Return result
 End Function
 
 Private Function ExecRunProgramScopeDtors(ByRef ps As ParseState, ByRef es As ExecState, ByRef errText As String) As Integer

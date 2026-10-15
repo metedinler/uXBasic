@@ -22,13 +22,13 @@ Private Function ExecResolveMemcopyOperandAddr(ByRef ps As ParseState, ByRef es 
             Dim varIdx As Integer
             varIdx = ExecFindVar(es, identUpper)
             If varIdx <> -1 Then
-                If es.vars(varIdx).isArray <> 0 Then
-                    If ExecDeclTypeIsNativeScalar(es.vars(varIdx).declType) = 0 Then
+                If ExecVarAt(es, varIdx).isArray <> 0 Then
+                    If ExecDeclTypeIsNativeScalar(ExecVarAt(es, varIdx).declType) = 0 Then
                         errText = "exec: MEMCOPY array operand must be a native-scalar-typed array: " & identUpper
                         Return 0
                     End If
                     Dim arrId As Integer
-                    arrId = es.vars(varIdx).arrayId
+                    arrId = ExecVarAt(es, varIdx).arrayId
                     If arrId < 0 Or arrId >= es.arrayCount Then
                         errText = "exec: MEMCOPY array not initialized: " & identUpper
                         Return 0
@@ -92,10 +92,10 @@ Private Function ExecTypeValueLocation(ByRef ps As ParseState, ByRef es As ExecS
     If k = "IDENT" Or k = "IDENTIFIER" Then
         Dim vIdx As Integer = ExecFindVar(es, ps.ast.nodes(nodeIdx).value)
         If vIdx = -1 Then Return 0
-        If es.vars(vIdx).isArray <> 0 Then Return 0
-        candType = UCase(Trim(es.vars(vIdx).declType))
+        If ExecVarAt(es, vIdx).isArray <> 0 Then Return 0
+        candType = UCase(Trim(ExecVarAt(es, vIdx).declType))
         If Left(candType, 5) = "TYPE_" Then candType = Mid(candType, 6)
-        candAddr = es.vars(vIdx).addr
+        candAddr = ExecVarAt(es, vIdx).addr
     ElseIf k = "FIELD_EXPR" Then
         Dim fSize As Integer, rootT As String, rootA As UInteger, pathT As String, resErr As String
         If ExecResolveFieldAccess(ps, es, nodeIdx, candAddr, candType, fSize, rootT, rootA, pathT, resErr) = 0 Then Return 0
@@ -178,7 +178,7 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
     ElseIf ExecTryResolveArrayAccess(ps, es, lhs, arrayVarIdx, arrayElemIdx, errText) <> 0 Then
         If arrayVarIdx < 0 Then Return 0
         isArrayTarget = 1
-        targetName = es.vars(arrayVarIdx).nameText
+        targetName = ExecVarAt(es, arrayVarIdx).nameText
         If ExecGetArrayElement(es, arrayVarIdx, arrayElemIdx, curValue) = 0 Then
             If errText = "" Then errText = "exec: array element read failed"
             Return 0
@@ -203,6 +203,10 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
     ' on a value >= 2^31 collapsed to 2147483648) and used 31-masked 32-bit shifts.
     Dim compoundHandled As Integer
     compoundHandled = 0
+    If opText = "+=" And (curValue.valueType = "STRING" Or rhsValue.valueType = "STRING") Then
+        ExecValueSetString outValue, ExecValueToString(curValue) & ExecValueToString(rhsValue)
+        compoundHandled = 1
+    End If
     If ExecIsIntegerClass(curValue) <> 0 And ExecIsIntegerClass(rhsValue) <> 0 Then
         Dim compoundBaseOp As String
         compoundBaseOp = ""
@@ -315,7 +319,7 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
         shiftAssignType = UCase(Trim(ps.ast.nodes(lhs).typeName))
         Dim shiftAssignVarIdx As Integer
         shiftAssignVarIdx = ExecFindVar(es, targetName)
-        If shiftAssignVarIdx <> -1 Then shiftAssignType = UCase(Trim(es.vars(shiftAssignVarIdx).declType))
+        If shiftAssignVarIdx <> -1 Then shiftAssignType = UCase(Trim(ExecVarAt(es, shiftAssignVarIdx).declType))
         If Left(shiftAssignType, 5) = "TYPE_" Then shiftAssignType = Mid(shiftAssignType, 6)
         Select Case shiftAssignType
         Case "U8", "U16", "U32", "U64", "UBYTE", "USHORT", "UINTEGER", "UINT", "ULONG", "ULONGINT"
@@ -380,7 +384,7 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
     targetIdx = ExecFindVar(es, targetName)
     If targetIdx <> -1 Then
         Dim targetDeclType As String
-        targetDeclType = UCase(Trim(es.vars(targetIdx).declType))
+        targetDeclType = UCase(Trim(ExecVarAt(es, targetIdx).declType))
         Dim isClassLikeTarget As Integer
         isClassLikeTarget = 0
         If targetDeclType = "OBJECT" Then
@@ -391,7 +395,7 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
             isClassLikeTarget = 1
         End If
 
-        If isClassLikeTarget <> 0 And es.vars(targetIdx).isArray = 0 Then
+        If isClassLikeTarget <> 0 And ExecVarAt(es, targetIdx).isArray = 0 Then
             If opText <> "=" Then
                 errText = "exec: class assignment only supports ="
                 Return 0
@@ -404,9 +408,9 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
                     errText = "exec: class assignment type mismatch expected=" & targetDeclType & " actual=" & rhsNewType
                     Return 0
                 End If
-                es.vars(targetIdx).runtimeClassType = rhsNewType
+                ExecVarAt(es, targetIdx).runtimeClassType = rhsNewType
             ElseIf ExecValueToInteger(outValue) = 0 Then
-                es.vars(targetIdx).runtimeClassType = ""
+                ExecVarAt(es, targetIdx).runtimeClassType = ""
             ElseIf ExecFindInterfaceDeclNode(ps, targetDeclType) <> -1 Then
                 Dim inferredAssignType As String
                 inferredAssignType = ""
@@ -415,7 +419,7 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
                         errText = "exec: interface assignment type mismatch expected=" & targetDeclType & " actual=" & inferredAssignType
                         Return 0
                     End If
-                    es.vars(targetIdx).runtimeClassType = inferredAssignType
+                    ExecVarAt(es, targetIdx).runtimeClassType = inferredAssignType
                 Else
                     errText = "exec: interface assignment runtime type unresolved " & targetDeclType
                     Return 0
@@ -433,9 +437,9 @@ Private Function ExecRunAssignStmt(ByRef ps As ParseState, ByRef es As ExecState
                         errText = "exec: class assignment type mismatch expected=" & targetDeclType & " actual=" & inferredClassType
                         Return 0
                     End If
-                    es.vars(targetIdx).runtimeClassType = inferredClassType
+                    ExecVarAt(es, targetIdx).runtimeClassType = inferredClassType
                 Else
-                    es.vars(targetIdx).runtimeClassType = targetDeclType
+                    ExecVarAt(es, targetIdx).runtimeClassType = targetDeclType
                 End If
             End If
 
@@ -1165,9 +1169,9 @@ Private Function ExecRunDeleteStmt(ByRef ps As ParseState, ByRef es As ExecState
     End If
 
     Dim declType As String
-    declType = UCase(Trim(es.vars(varIdx).declType))
+    declType = UCase(Trim(ExecVarAt(es, varIdx).declType))
     Dim runtimeType As String
-    runtimeType = UCase(Trim(es.vars(varIdx).runtimeClassType))
+    runtimeType = UCase(Trim(ExecVarAt(es, varIdx).runtimeClassType))
 
     If declType <> "OBJECT" And ExecFindClassDeclNode(ps, declType) = -1 Then
         errText = "exec: DELETE target must be class or OBJECT"
@@ -1175,8 +1179,8 @@ Private Function ExecRunDeleteStmt(ByRef ps As ParseState, ByRef es As ExecState
     End If
 
     Dim objAddr As UInteger
-    objAddr = es.vars(varIdx).addr
-    If objAddr = 0 Then objAddr = CUInt(ExecValueToInteger(es.vars(varIdx).value))
+    objAddr = ExecVarAt(es, varIdx).addr
+    If objAddr = 0 Then objAddr = CUInt(ExecValueToInteger(ExecVarAt(es, varIdx).value))
 
     If objAddr <> 0 Then
         Dim dtorType As String
@@ -1190,7 +1194,7 @@ Private Function ExecRunDeleteStmt(ByRef ps As ParseState, ByRef es As ExecState
 
     ExecSetVar es, varName, 0
     ExecSetVarAddr es, varName, 0
-    es.vars(varIdx).runtimeClassType = ""
+    ExecVarAt(es, varIdx).runtimeClassType = ""
     Return 1
 End Function
 

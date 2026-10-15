@@ -335,7 +335,7 @@ Private Function MIRX64CallReturnsString(ByRef targetText As String) As Integer
     Select Case UCase(Trim(targetText))
     Case "CHR", "CHR$", "STR", "STR$", "LEFT", "LEFT$", "RIGHT", "RIGHT$", _
          "MID", "MID$", "LCASE", "LCASE$", "UCASE", "UCASE$", "LTRIM", _
-         "LTRIM$", "RTRIM", "RTRIM$", "TRIM", "TRIM$", "SPACE", "SPACE$", _
+         "LTRIM$", "RTRIM", "RTRIM$", "TRIM", "TRIM$", "SPACE", "SPACE$", "STRING", _
          "HEX", "HEX$", "OCT", "OCT$", "BIN", "BIN$", "STR_CONCAT"
         Return 1
     End Select
@@ -393,8 +393,16 @@ Private Sub MIRX64InferLocalTypes(ByRef fn As MIRFunction, ByRef cg As MIRX64Con
                 Case "FADD", "FSUB", "FMUL", "FDIV", "FNEG"
                     ' S-142b: F32 op F32 is a single-precision value (prints with the 7 digit rule); a mix with
                     ' an F64 operand or literal is F64.
-                    inferredType = "F64"
-                    If ins.operandCount >= 1 Then
+                    If UCase(Trim(ins.resultType)) = "F32" Then
+                        ' The canonical MIR result type is authoritative. A
+                        ' mixed F32/I32 expression is still F32 under the
+                        ' language promotion rule; requiring both operands to
+                        ' be F32 here widened the temporary in native x64.
+                        inferredType = "F32"
+                    Else
+                        inferredType = "F64"
+                    End If
+                    If inferredType <> "F32" And ins.operandCount >= 1 Then
                         If MIRX64OperandIsF32(cg, ins.operands(0)) <> 0 Then
                             If op = "FNEG" Then
                                 inferredType = "F32"
@@ -565,8 +573,13 @@ Private Function MIRX64EmitCallInstruction(ByRef ins As MIRIRInstruction, ByRef 
         Return MIRX64EmitRuntimePrintNewline(cg)
 
     Case "PRINT_SEP_COMMA", "PRINT_SEP_SPACE", "PRINT_SEP_SEMICOLON"
-        errText = "TR: MIR_X64_RUNTIME_LOWERING_PENDING: " & callTarget & " ayirici metaverisi eksik | EN: MIR_X64_RUNTIME_LOWERING_PENDING: " & callTarget & " separator metadata is missing"
-        Return MIRX64EmitRuntimeUnsupportedDiagnostic(cg, callTarget, "separator metadata missing")
+        If ins.operandCount <> 1 Then errText = "MIR x64: PRINT separator does not accept operands": Return 0
+        Dim separatorKind As Integer = 0
+        If callTarget = "PRINT_SEP_COMMA" Then separatorKind = 2
+        If callTarget = "PRINT_SEP_SPACE" Then separatorKind = 1
+        MIRX64Emit cg, "    mov rax, " & LTrim(Str(separatorKind))
+        MIRX64EmitRuntimeCall1Reg cg, "__uxb_rt_print_separator", "rax"
+        Return 1
 
     Case "CLS"
         Return MIRX64EmitRuntimeCls(cg)
@@ -1028,6 +1041,11 @@ Private Function MIRX64EmitInstruction(ByRef ins As MIRIRInstruction, ByRef cg A
             errText = "MIR x64 emitter: NEG requires operand and result"
             Return 0
         End If
+        ' The canonical MIR result type is authoritative.  In particular,
+        ' unary arithmetic over BOOLEAN is I64 even though its operand is a
+        ' comparison; do not let an earlier temp inference keep the result in
+        ' a BOOL slot and normalize 1 back to -1 (S-505).
+        If Trim(ins.resultType) <> "" Then MIRX64SetLocalType cg, ins.result, ins.resultType
         If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
         MIRX64Emit cg, "    neg rax"
         Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
@@ -1109,8 +1127,30 @@ Private Function MIRX64EmitInstruction(ByRef ins As MIRIRInstruction, ByRef cg A
             errText = "MIR x64 emitter: " & op & " requires 2 operands and result"
             Return 0
         End If
+        Dim rotateResultOffset As Integer
+        If MIRX64EnsureLocalSlot(cg, ins.result, rotateResultOffset) = 0 Then
+            errText = "MIR x64 emitter: cannot allocate " & op & " result slot"
+            Return 0
+        End If
+        If Trim(ins.resultType) <> "" Then MIRX64SetLocalType cg, ins.result, ins.resultType
         If MIRX64EmitLoadPairToRaxR10(cg, ins.operands(0), ins.operands(1), errText) = 0 Then Return 0
-        If MIRX64EmitSafeShiftRotateI64(cg, op, errText) = 0 Then Return 0
+        If op = "ROL" Or op = "ROR" Then
+            Dim rotateType As String = UCase(Trim(UXBStep3StorageType(ins.resultType)))
+            If Left(rotateType, 5) = "TYPE_" Then rotateType = Mid(rotateType, 6)
+            MIRX64Emit cg, "    mov ecx, r10d"
+            Select Case rotateType
+            Case "U8", "UBYTE", "I8", "BYTE", "SBYTE"
+                If op = "ROL" Then MIRX64Emit cg, "    rol al, cl" Else MIRX64Emit cg, "    ror al, cl"
+            Case "U16", "USHORT", "I16", "SHORT"
+                If op = "ROL" Then MIRX64Emit cg, "    rol ax, cl" Else MIRX64Emit cg, "    ror ax, cl"
+            Case "U32", "UINTEGER", "UINT", "ULONG", "I32", "INTEGER", "INT", "LONG"
+                If op = "ROL" Then MIRX64Emit cg, "    rol eax, cl" Else MIRX64Emit cg, "    ror eax, cl"
+            Case Else
+                If op = "ROL" Then MIRX64Emit cg, "    rol rax, cl" Else MIRX64Emit cg, "    ror rax, cl"
+            End Select
+        Else
+            If MIRX64EmitSafeShiftRotateI64(cg, op, errText) = 0 Then Return 0
+        End If
         Return MIRX64StoreRegToVar(cg, "rax", ins.result, errText)
 
     Case "LABEL"
@@ -1155,6 +1195,22 @@ Private Function MIRX64EmitInstruction(ByRef ins As MIRIRInstruction, ByRef cg A
         End If
         ' Iptal denetimi kosul yuklenmeden ONCE (cagri rax'i ve bayraklari bozar).
         MIRX64EmitTaskCancelPointIfBackEdge cg, targetCond
+
+        If MIRX64OperandIsFloat(cg, ins.operands(0)) <> 0 Then
+            If MIRX64LoadFloatOperandToXmm(cg, ins.operands(0), "xmm0", errText) = 0 Then Return 0
+            MIRX64Emit cg, "    xorpd xmm1, xmm1"
+            MIRX64Emit cg, "    ucomisd xmm0, xmm1"
+            If op = "JZ" Then
+                Dim nonzeroLabel As String = MIRX64NextLabel(cg, "float_condition_nonzero")
+                MIRX64Emit cg, "    jp " & nonzeroLabel
+                MIRX64Emit cg, "    je " & MIRX64BlockLabel(targetCond)
+                MIRX64Emit cg, nonzeroLabel & ":"
+            Else
+                MIRX64Emit cg, "    jp " & MIRX64BlockLabel(targetCond)
+                MIRX64Emit cg, "    jne " & MIRX64BlockLabel(targetCond)
+            End If
+            Return 1
+        End If
 
         If MIRX64LoadOperandToReg(cg, ins.operands(0), "rax", errText) = 0 Then Return 0
 
@@ -1205,6 +1261,12 @@ Private Function MIRX64EmitInstruction(ByRef ins As MIRIRInstruction, ByRef cg A
 
     Case "STORE_FIELD", "FIELD_SET"
         Return MIRX64EmitStoreFieldSynthetic(ins, cg, errText)
+
+    Case "UNION_FIELD_LOAD"
+        Return MIRX64EmitLoadUnionFieldSynthetic(ins, cg, errText)
+
+    Case "UNION_FIELD_STORE"
+        Return MIRX64EmitStoreUnionFieldSynthetic(ins, cg, errText)
 
     Case "METHOD_CALL"
         Return MIRX64EmitMethodCallSynthetic(ins, cg, errText)
@@ -1561,6 +1623,18 @@ End Function
 Private Function MIRX64EmitFunction(ByRef fn As MIRFunction, ByVal fnIdx As Integer, ByRef cg As MIRX64Context, ByRef errText As String) As Integer
     MIRX64BeginFunctionState cg, fn.name, fnIdx
     If MIRX64CollectLocals(fn, cg, errText) = 0 Then Return 0
+    ' Collection/array emitters use nonvolatile registers as scratch. Every
+    ' generated function must preserve them for native callers and callbacks.
+    Dim abiSavedRegs(0 To 5) As String = {"rsi", "rdi", "r12", "r13", "r14", "r15"}
+    Dim abiSavedOffsets(0 To 5) As Integer
+    For abiRegIdx As Integer = 0 To 5
+        Dim abiSlotName As String = MIRX64NextLabel(cg, "ABI_SAVE_" & abiSavedRegs(abiRegIdx))
+        If MIRX64EnsureLocalSlot(cg, abiSlotName, abiSavedOffsets(abiRegIdx)) = 0 Then
+            errText = "MIR x64: cannot reserve callee-saved register slot"
+            Return 0
+        End If
+    Next abiRegIdx
+    cg.stackBytes = MIRX64StackBytesForLocals(cg.localCount)
     MIRX64InferLocalTypes fn, cg
     If MIRX64RegisterParamArrays(cg, fn, errText) = 0 Then Return 0
 
@@ -1569,7 +1643,23 @@ Private Function MIRX64EmitFunction(ByRef fn As MIRFunction, ByVal fnIdx As Inte
     MIRX64Emit cg, "    mov rbp, rsp"
     MIRX64Emit cg, "    push rbx"
     MIRX64EmitRegisterDisciplineComment cg
+    ' Commit each guard page before descending farther into a large frame.
+    ' A single large SUB can jump over Windows' stack guard and fault later.
+    Dim frameRemaining As Integer = cg.stackBytes
+    If frameRemaining > 0 Then MIRX64Emit cg, "    mov r11, rsp"
+    Do While frameRemaining >= 4096
+        MIRX64Emit cg, "    sub r11, 4096"
+        MIRX64Emit cg, "    test byte [r11], 0"
+        frameRemaining -= 4096
+    Loop
+    If frameRemaining > 0 Then
+        MIRX64Emit cg, "    sub r11, " & MIRX64ToStr(frameRemaining)
+        MIRX64Emit cg, "    test byte [r11], 0"
+    End If
     If cg.stackBytes > 0 Then MIRX64Emit cg, "    sub rsp, " & MIRX64ToStr(cg.stackBytes)
+    For abiRegIdx As Integer = 0 To 5
+        MIRX64Emit cg, "    mov qword " & MIRX64RbpRef(abiSavedOffsets(abiRegIdx)) & ", " & abiSavedRegs(abiRegIdx)
+    Next abiRegIdx
 
     Dim excInitOffset As Integer
     If MIRX64FindLocalOffset(cg, "__mir_exc_active", excInitOffset) <> 0 Then
@@ -1694,6 +1784,9 @@ Private Function MIRX64EmitFunction(ByRef fn As MIRFunction, ByVal fnIdx As Inte
             MIRX64Emit cg, ".mir_memory_status_ok_" & LTrim(Str(cg.currentFunctionIndex)) & ":"
         End If
     End If
+    For abiRegIdx As Integer = 0 To 5
+        MIRX64Emit cg, "    mov " & abiSavedRegs(abiRegIdx) & ", qword " & MIRX64RbpRef(abiSavedOffsets(abiRegIdx))
+    Next abiRegIdx
     If cg.stackBytes > 0 Then MIRX64Emit cg, "    add rsp, " & MIRX64ToStr(cg.stackBytes)
     MIRX64Emit cg, "    pop rbx"
     MIRX64Emit cg, "    pop rbp"

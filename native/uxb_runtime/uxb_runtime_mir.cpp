@@ -153,9 +153,11 @@ int64_t host_task_call(const std::string& name, int64_t slot, int64_t input) {
     else if (name == "OFF") rc = uxb_slot_off(static_cast<int>(slot));
     else if (name == "SLOT") rc = uxb_slot_bind(static_cast<int>(slot), static_cast<int>(input), "MIR_SLOT");
     else {
-        uxb::RuntimeState::instance().set_error("MIR host call is not bound: " + name);
-        std::fprintf(stderr, "uXBasic runtime error: MIR host call is not bound: %s\n", name.c_str());
-        return -1;
+        const std::string error = "UXB_RUNTIME_HOST_UNBOUND: MIR host call is not bound: " + name;
+        uxb::RuntimeState::instance().set_error(error);
+        // An absent implementation is not a status-valued language operation.
+        // Use the same controlled exit as emitted bounds/collection failures.
+        return __uxb_rt_runtime_error_exit(error.c_str());
     }
     return rc == UXB_RT_SUCCESS ? static_cast<int64_t>(output) : -1;
 }
@@ -233,11 +235,16 @@ UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_str_temp(const char* value) { retur
 namespace {
 std::mutex console_mutex;
 thread_local std::string console_line;
+thread_local std::size_t console_column = 0;
 }  // namespace
 
 namespace uxb {
 
 void console_write(const std::string& text) {
+    for (char ch : text) {
+        if (ch == '\n' || ch == '\r') console_column = 0;
+        else ++console_column;
+    }
     if (!task_pool_active() && console_line.empty()) {
         std::fputs(text.c_str(), stdout);
         std::fflush(stdout);
@@ -278,6 +285,12 @@ UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_print_cstr(const char* value) {
 UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_print_newline(void) {
     uxb::console_write("\n");
     return 1;
+}
+
+UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_print_separator(int64_t kind) {
+    if (kind == 2) uxb::console_write(std::string(14 - (console_column % 14), ' '));
+    else if (kind == 1) uxb::console_write(" ");
+    return 0;
 }
 
 UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_print_f64(double value) {
@@ -393,6 +406,17 @@ UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_val_i64(const char* value) {
     const long long result = std::strtoll(value, &end, 0);
     return end == value ? 0 : static_cast<int64_t>(result);
 }
+// S-179: the language's VAL() returns a Double (VAL("2.75") = 2.75, S-137's own AST fix already does
+// this), not the truncated integer __uxb_rt_val_i64 gives. Native/legacy called __uxb_rt_val_i64 for
+// VAL while the type registry (correctly) stamps VAL's result F64: the result's raw int64 bits then
+// got read back through XMM0 as if they were already a double's bit pattern -- a silent wrong value
+// (VAL("40") printed as the tiny denormal 40 decodes to, ~1.976e-322).
+UXB_RT_API double UXB_RT_CDECL __uxb_rt_val_f64(const char* value) {
+    if (!value) return 0.0;
+    char* end = nullptr;
+    const double result = std::strtod(value, &end);
+    return end == value ? 0.0 : result;
+}
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_str_i64(int64_t value) { return hold_text(std::to_string(value)); }
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_str_u64(int64_t value) { return hold_text(std::to_string(static_cast<uint64_t>(value))); }
 UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_asc(const char* value) { return value && *value ? static_cast<unsigned char>(*value) : 0; }
@@ -442,6 +466,16 @@ UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_rtrim(const char* value) {
 }
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_trim(const char* value) { return __uxb_rt_ltrim(__uxb_rt_rtrim(value)); }
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_space(int64_t count) { return hold_text(std::string(static_cast<std::size_t>(checked_count(count)), ' ')); }
+UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_string(int64_t count, int64_t code) {
+    if (count < 0) __uxb_rt_runtime_error_exit("STRING count must be >= 0");
+    if (count > 65535) __uxb_rt_runtime_error_exit("STRING count too large");
+    if (code < 0 || code > 255) __uxb_rt_runtime_error_exit("STRING char code range error");
+    return hold_text(std::string(static_cast<std::size_t>(count), static_cast<char>(code)));
+}
+UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_string_text(int64_t count, const char* text) {
+    if (!text || !*text) __uxb_rt_runtime_error_exit("STRING char arg empty");
+    return __uxb_rt_string(count, static_cast<unsigned char>(*text));
+}
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_hex(int64_t value) { std::ostringstream out; out << std::uppercase << std::hex << value; return hold_text(out.str()); }
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_oct(int64_t value) { std::ostringstream out; out << std::oct << value; return hold_text(out.str()); }
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_bin(int64_t value) {
@@ -522,9 +556,9 @@ UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_file_seek(int64_t channel, int64_t posi
 UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_file_eof(int64_t channel) {
     std::lock_guard<std::mutex> lock(file_mutex);
     std::FILE* file = channel_file(channel);
-    if (!file) return 1;
+    if (!file) return -1;
     const int ch = std::fgetc(file);
-    if (ch == EOF) return 1;
+    if (ch == EOF) return -1;
     std::ungetc(ch, file);
     return 0;
 }

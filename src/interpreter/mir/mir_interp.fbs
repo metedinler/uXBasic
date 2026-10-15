@@ -317,32 +317,87 @@ Function UXBMIRInterpExecObjectNewWithCtor(ByRef ins As UXBMIRInstructionRecord,
         If Trim(ins.resultName) <> "" Then UXBMIRInterpSetVar st, ins.resultName, objectValue
         Return objectValue
     End If
-    If ctorIdx >= instructionCount Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR constructor label out of range: " & ctorName)
 
-    Dim ctorLabel As UXBMIRInstructionRecord = instructions(ctorIdx)
-    Dim ctorParamCount As Integer = ctorLabel.operandCount - 1
-    If ctorParamCount < 0 Then ctorParamCount = 0
-    UXBMIRInterpEnterScope st
-    If ctorParamCount > 0 Then
-        Dim receiverName As String = Trim(ctorLabel.operands(1))
-        If receiverName = "" Then receiverName = "THIS"
-        UXBMIRInterpSetVar st, receiverName, objectValue
-        UXBMIRInterpSetVar st, "THIS", objectValue
-        UXBMIRInterpSetVar st, "ME", objectValue
+    ' Canonical MIR carries the OOP class table alongside the instruction list.
+    ' Walk the derived-to-base chain, then invoke constructors base-first.  The
+    ' metadata is deliberately kept outside OBJECT_NEW operands so existing
+    ' backend ABI positions remain unchanged.
+    Dim ctorChain(0 To 64) As Integer
+    Dim chainCount As Integer
+    Dim classIdx As Integer
+    classIdx = -1
+    Dim ci As Integer
+    For ci = 0 To ctx.oopClassCount - 1
+        If UCase(Trim(ctx.oopClassNames(ci))) = objectTypeName Then classIdx = ci: Exit For
+    Next ci
+
+    If classIdx >= 0 Then
+        Dim curIdx As Integer
+        curIdx = classIdx
+        Do While curIdx >= 0
+            If chainCount >= 65 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR constructor inheritance chain too deep: " & objectTypeName)
+            ctorChain(chainCount) = curIdx
+            chainCount += 1
+            Dim baseName As String
+            baseName = UCase(Trim(ctx.oopClassBaseNames(curIdx)))
+            If baseName = "" Then Exit Do
+            curIdx = -1
+            For ci = 0 To ctx.oopClassCount - 1
+                If UCase(Trim(ctx.oopClassNames(ci))) = baseName Then curIdx = ci: Exit For
+            Next ci
+            If curIdx < 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR constructor base class metadata missing: " & baseName)
+        Loop
+    Else
+        ctorChain(0) = -1
+        chainCount = 1
     End If
-    Dim ctorArgIdx As Integer
-    For ctorArgIdx = 1 To ctorParamCount - 1
-        If ctorArgIdx + 1 >= ctorLabel.operandCount Then Exit For
-        Dim argValue As UXBInterpValue = UXBInterpValueVoid()
-        Dim sourceIdx As Integer = ctorArgIdx + 1
-        If ins.operandCount > sourceIdx Then argValue = UXBMIRInterpGetOperand(st, ins.operands(sourceIdx))
-        Dim paramName As String = Trim(ctorLabel.operands(ctorArgIdx + 1))
-        If paramName <> "" Then UXBMIRInterpSetVar st, paramName, argValue
-    Next ctorArgIdx
-    Dim ctorErr As String
-    Dim ctorResult As UXBInterpValue = UXBMIRInterpInvokeLabel(instructions(), instructionCount, ctx, st, ctorName, ctorErr)
-    UXBMIRInterpLeaveScope st
-    If UXBInterpIsError(ctorResult) <> 0 Then Return ctorResult
+
+    For ci = chainCount - 1 To 0 Step -1
+        Dim chainIdx As Integer = ctorChain(ci)
+        Dim currentCtorName As String
+        Dim expectedExplicitCount As Integer
+        If chainIdx >= 0 Then
+            currentCtorName = Trim(ctx.oopClassCtorNames(chainIdx))
+            expectedExplicitCount = ctx.oopClassCtorParamCounts(chainIdx)
+        Else
+            currentCtorName = ctorName
+            expectedExplicitCount = -1
+        End If
+        If currentCtorName = "" Then Continue For
+
+        Dim currentCtorIdx As Integer = UXBMIRInterpFindLabel(st, currentCtorName)
+        If currentCtorIdx < 0 Or currentCtorIdx >= instructionCount Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR constructor label out of range: " & currentCtorName)
+        Dim ctorLabel As UXBMIRInstructionRecord = instructions(currentCtorIdx)
+        Dim ctorParamCount As Integer = ctorLabel.operandCount - 1
+        If ctorParamCount < 0 Then ctorParamCount = 0
+        Dim userArgCount As Integer = ins.operandCount - 2
+        If userArgCount < 0 Then userArgCount = 0
+        If expectedExplicitCount >= 0 And expectedExplicitCount > userArgCount Then
+            Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "MIR constructor requires " & LTrim(Str(expectedExplicitCount)) & " arguments but NEW supplies " & LTrim(Str(userArgCount)) & " for " & currentCtorName)
+        End If
+
+        UXBMIRInterpEnterScope st
+        If ctorParamCount > 0 Then
+            Dim receiverName As String = Trim(ctorLabel.operands(1))
+            If receiverName = "" Then receiverName = "THIS"
+            UXBMIRInterpSetVar st, receiverName, objectValue
+            UXBMIRInterpSetVar st, "THIS", objectValue
+            UXBMIRInterpSetVar st, "ME", objectValue
+        End If
+        Dim ctorArgIdx As Integer
+        For ctorArgIdx = 1 To ctorParamCount - 1
+            If ctorArgIdx + 1 >= ctorLabel.operandCount Then Exit For
+            Dim argValue As UXBInterpValue = UXBInterpValueVoid()
+            Dim sourceIdx As Integer = ctorArgIdx + 1
+            If ins.operandCount > sourceIdx Then argValue = UXBMIRInterpGetOperand(st, ins.operands(sourceIdx))
+            Dim paramName As String = Trim(ctorLabel.operands(ctorArgIdx + 1))
+            If paramName <> "" Then UXBMIRInterpSetVar st, paramName, argValue
+        Next ctorArgIdx
+        Dim ctorErr As String
+        Dim ctorResult As UXBInterpValue = UXBMIRInterpInvokeLabel(instructions(), instructionCount, ctx, st, currentCtorName, ctorErr)
+        UXBMIRInterpLeaveScope st
+        If UXBInterpIsError(ctorResult) <> 0 Then Return ctorResult
+    Next ci
     If Trim(ins.resultName) <> "" Then UXBMIRInterpSetVar st, ins.resultName, objectValue
     Return objectValue
 End Function
@@ -578,13 +633,10 @@ Private Function UXBMIRInterpExecTaskRuntimeCall( _
                     End If
                     If userAliasTargets(userParamIdx) < 0 Then
                         If ins.operandCount > sourceOperandIndex Then userArgValue = UXBMIRInterpGetOperand(st, ins.operands(sourceOperandIndex))
-                        If userParamIsByRef = 0 Then
-                            userArgValue = UXBInterpLibraryValueCopy(userArgValue)
-                            If UXBInterpIsError(userArgValue) <> 0 Then
-                                UXBMIRInterpLeaveScope st
-                                Return userArgValue
-                            End If
-                        End If
+                        ' B3: BYVAL ownership is explicit in canonical MIR. The
+                        ' lowering emits TYPE.COPY for managed values; keeping an
+                        ' implicit runtime copy here would clone twice and make
+                        ' provider lifecycle counts target-dependent.
                         userArgValues(userParamIdx) = userArgValue
                     End If
                 End If
@@ -662,6 +714,20 @@ Private Function UXBMIRInterpExecTaskRuntimeCall( _
         UXBRuntimeArgListInit closeArgs
         UXBRuntimeArgListAdd closeArgs, st.vars(closeMapIdx)->value
         Return UXBRuntimeDispatch(ctx.runtime, RT_FILE_CLOSE, closeArgs)
+
+    Case "EOF", "LOF"
+        handledOut = 1
+        If ins.operandCount <> 2 Then Return UXBInterpValueError(UXB_INTERP_ERR_BAD_ARGUMENT, callName & " expects one channel argument")
+        Dim queryChannelText As String = UXBMIRInterpOperandText(st, ins, 1)
+        Dim queryMapIdx As Integer = UXBMIRInterpFindVar(st, "__UXB_FILE_" & queryChannelText)
+        If queryMapIdx < 0 Then Return UXBInterpValueError(UXB_INTERP_ERR_RUNTIME_SERVICE, "file channel not open: " & queryChannelText)
+        Dim queryArgs As UXBRuntimeArgList
+        UXBRuntimeArgListInit queryArgs
+        UXBRuntimeArgListAdd queryArgs, st.vars(queryMapIdx)->value
+        Dim queryService As String = IIf(callName = "EOF", RT_FILE_EOF, RT_FILE_LOF)
+        Dim queryResult As UXBInterpValue = UXBRuntimeDispatch(ctx.runtime, queryService, queryArgs)
+        If UXBInterpIsError(queryResult) = 0 And Trim(ins.resultName) <> "" Then UXBMIRInterpSetVar st, ins.resultName, queryResult
+        Return queryResult
 
     Case "INPUTF"
         handledOut = 1
@@ -814,6 +880,15 @@ Private Function UXBMIRInterpExecTaskRuntimeCall( _
         ' ends (UXBMIRInterpRunInstructions); rebuilding the events JSON here made
         ' every PRINT cost O(all output so far).
         UXBRuntimeWriteOutput ctx.runtime, printText, RT_PRINT
+        Return UXBInterpValueVoid()
+
+    Case "PRINT_SEP_COMMA", "PRINT_SEP_SPACE", "PRINT_SEP_SEMICOLON"
+        handledOut = 1
+        If ins.operandCount <> 1 Then Return UXBInterpValueError(UXB_INTERP_ERR_MIR_OPCODE, "PRINT separator does not accept operands")
+        Dim separatorText As String = ""
+        If callName = "PRINT_SEP_COMMA" Then separatorText = String(14 - (ctx.runtime.printColumnPos Mod 14), " ")
+        If callName = "PRINT_SEP_SPACE" Then separatorText = " "
+        If separatorText <> "" Then UXBRuntimeWriteOutput ctx.runtime, separatorText, RT_PRINT
         Return UXBInterpValueVoid()
 
     Case "PRINTLN"
@@ -988,8 +1063,8 @@ Private Function UXBMIRInterpExecuteControl(ByRef ins As UXBMIRInstructionRecord
         End If
         sig.returnNow = 1
         If ins.operandCount > 0 Then sig.returnValue = UXBMIRInterpGetOperand(st, ins.operands(0))
-        sig.returnValue = UXBInterpLibraryValueCopy(sig.returnValue)
-        If UXBInterpIsError(sig.returnValue) <> 0 Then Return UXBMIRInterpControlFail(currentIndex, sig.returnValue.errorCode, sig.returnValue.errorText)
+        ' B3: managed RETURN transfer is made explicit by TYPE.COPY in MIR
+        ' lowering. Provider-produced call results move through RET unchanged.
         Return sig
     End Select
     Return sig

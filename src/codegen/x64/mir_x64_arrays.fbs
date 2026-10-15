@@ -46,7 +46,8 @@ Private Function MIRX64ArrayElementBytes(ByRef typeNameRaw As String) As Integer
     Dim abiPayload As Integer
     Dim abiAlign As Integer
     Dim abiStride As Integer
-    If UXBTypeAbi(typeNameRaw, abiPayload, abiAlign, abiStride) = 0 Then Return 0
+    Dim storageType As String = UXBStep3StorageType(typeNameRaw)
+    If UXBTypeAbi(storageType, abiPayload, abiAlign, abiStride) = 0 Then Return 0
     Return abiStride
 End Function
 
@@ -171,7 +172,7 @@ Function MIRX64RegisterParamArrays(ByRef cg As MIRX64Context, ByRef fn As MIRFun
         cg.arrays(idx).lowerBound = 0
         cg.arrays(idx).upperBound = 0
         cg.arrays(idx).elementCount = 0
-        cg.arrays(idx).elementType = elemType
+        cg.arrays(idx).elementType = UXBStep3StorageType(elemType)
         cg.arrays(idx).elementBytes = MIRX64ArrayElementBytes(elemType)
         cg.arrays(idx).byteLength = 0
         cg.arrays(idx).isParam = 1
@@ -251,7 +252,7 @@ Function MIRX64EnsureArraySlot(ByRef cg As MIRX64Context, ByRef nameText As Stri
     cg.arrays(idx).upperBound = upperBound
     cg.arrays(idx).elementCount = upperBound - lowerBound + 1
     cg.arrays(idx).elementType = MIRX64ArrayTypeForName(cg, nameText)
-    If Trim(elementTypeOverride) <> "" Then cg.arrays(idx).elementType = UCase(Trim(elementTypeOverride))
+    If Trim(elementTypeOverride) <> "" Then cg.arrays(idx).elementType = UCase(Trim(UXBStep3StorageType(elementTypeOverride)))
     cg.arrays(idx).elementBytes = MIRX64ArrayElementBytes(cg.arrays(idx).elementType)
     If elementBytesOverride > 0 Then cg.arrays(idx).elementBytes = elementBytesOverride
     If cg.arrays(idx).elementBytes <= 0 Then
@@ -589,19 +590,49 @@ Function MIRX64EmitLoadIndexed(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64
     Dim elemType As String
     elemType = UCase(Trim(cg.arrays(arrIdx).elementType))
     If elemType = "F64" Or elemType = "DOUBLE" Then
+        ' S-503: MIRX64StoreXmmToVar allocates unseen temporaries as I64.
+        ' Register the widened float slot before emitting the store so the
+        ' helper writes the same 8-byte representation that later consumers
+        ' load and classify as F64.
+        Dim floatTempOffset As Integer
+        If MIRX64EnsureLocalSlot(cg, ins.result, floatTempOffset) = 0 Then
+            errText = "MIR x64 arrays: cannot allocate F64 indexed-load result"
+            Return 0
+        End If
+        MIRX64SetLocalType cg, ins.result, "F64"
         MIRX64Emit cg, "    movsd xmm0, qword [rcx]"
         If MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText) = 0 Then Return 0
         MIRX64MarkOperandTypeName cg, ins.result, "F64"
         Return 1
     ElseIf elemType = "F32" Or elemType = "SINGLE" Then
+        ' F32 array cells are widened to the canonical 8-byte XMM slot, but
+        ' retain F32 type/format semantics for PRINT, STR and later operators.
+        Dim f32TempOffset As Integer
+        If MIRX64EnsureLocalSlot(cg, ins.result, f32TempOffset) = 0 Then
+            errText = "MIR x64 arrays: cannot allocate F32 indexed-load result"
+            Return 0
+        End If
+        Dim f32TempIndex As Integer
+        If MIRX64FindLocalIndex(cg, ins.result, f32TempIndex) = 0 Then
+            errText = "MIR x64 arrays: cannot find F32 indexed-load result"
+            Return 0
+        End If
+        cg.locals(f32TempIndex).isFloatWide = 1
+        MIRX64SetLocalType cg, ins.result, "F32"
         MIRX64Emit cg, "    movss xmm0, dword [rcx]"
         MIRX64Emit cg, "    cvtss2sd xmm0, xmm0"
         If MIRX64StoreXmmToVar(cg, "xmm0", ins.result, errText) = 0 Then Return 0
-        MIRX64MarkOperandTypeName cg, ins.result, "F64"
+        MIRX64MarkOperandTypeName cg, ins.result, "F32"
         Return 1
     ElseIf elemType = "F80" Or elemType = "EXTENDED" Or elemType = "EXT" Then
         ' S-079: the element cell is 16 bytes whose first 10 are the x87 extended
         ' payload. Read it with a real `fld tword`, narrow to the 8-byte float slot.
+        Dim f80TempOffset As Integer
+        If MIRX64EnsureLocalSlot(cg, ins.result, f80TempOffset) = 0 Then
+            errText = "MIR x64 arrays: cannot allocate F80 indexed-load result"
+            Return 0
+        End If
+        MIRX64SetLocalType cg, ins.result, "F64"
         MIRX64Emit cg, "    fld tword [rcx]"
         MIRX64Emit cg, "    sub rsp, 16"
         MIRX64Emit cg, "    fstp qword [rsp]"
@@ -627,6 +658,19 @@ Function MIRX64EmitLoadIndexed(ByRef ins As MIRIRInstruction, ByRef cg As MIRX64
     Case 8: MIRX64Emit cg, "    mov rax, qword [rcx]"
     Case Else: errText = "MIR x64 arrays: LOAD_INDEXED element width unsupported: " & MIRX64ToStr(cg.arrays(arrIdx).elementBytes): Return 0
     End Select
+    ' A loaded integer element keeps its underlying width and unsignedness.
+    ' Temporary slots otherwise default to I64, losing U64 display/order metadata.
+    Dim loadedType As String
+    If UXBStep3TypeIsInteger(elemType) <> 0 Then
+        loadedType = UXBStep3TypeLegacyName(UXBStep3StorageType(elemType))
+        Dim integerTempOffset As Integer
+        If MIRX64EnsureLocalSlot(cg, ins.result, integerTempOffset) = 0 Then
+            errText = "MIR x64 arrays: cannot allocate integer indexed-load result"
+            Return 0
+        End If
+        MIRX64SetLocalType cg, ins.result, loadedType
+        MIRX64MarkOperandTypeName cg, ins.result, loadedType
+    End If
     If MIRX64StoreRegToVar(cg, "rax", ins.result, errText) = 0 Then Return 0
     ' Same registry gap as the float case above, and it turned out to be the
     ' WHOLE bug for STRING arrays too: PRINT/etc. check MIRX64OperandIsString

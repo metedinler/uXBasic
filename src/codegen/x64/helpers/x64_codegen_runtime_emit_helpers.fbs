@@ -1,4 +1,4 @@
-﻿' Extracted from code_generator.fbs for wave-14 modular split (phase 4)
+' Extracted from code_generator.fbs for wave-14 modular split (phase 4)
 
 #include once "../../../parser/ast_enum_lookup.fbs"
 
@@ -65,7 +65,8 @@ Private Function X64ParamArrayElemBytes(ByRef cg As X64CodegenContext, ByRef var
             Dim abiPayload As Integer
             Dim abiAlign As Integer
             Dim abiStride As Integer
-            If UXBTypeAbi(Left(ptype, Len(ptype) - 2), abiPayload, abiAlign, abiStride) = 0 Then Return 0
+            Dim storageType As String = UXBStep3StorageType(Left(ptype, Len(ptype) - 2))
+            If UXBTypeAbi(storageType, abiPayload, abiAlign, abiStride) = 0 Then Return 0
             elemBytesOut = abiStride
             Return 1
         End If
@@ -1031,6 +1032,45 @@ Private Sub X64CollectRoutineLocals(ByRef ps As ParseState, ByVal nodeIdx As Int
     Loop
 End Sub
 
+Private Function X64EmitImplicitBaseCtorChain(ByRef ps As ParseState, ByRef classTypeName As String, ByRef cg As X64CodegenContext, ByVal depth As Integer, ByRef errText As String) As Integer
+    If depth > 64 Then
+        errText = "x64-codegen: constructor inheritance chain too deep for " & X64Upper(Trim(classTypeName))
+        Return 0
+    End If
+
+    Dim baseType As String
+    baseType = ""
+    If X64GetClassBaseTypeName(ps, classTypeName, baseType) = 0 Then Return 1
+    If baseType = "" Or X64Upper(Trim(baseType)) = X64Upper(Trim(classTypeName)) Then Return 1
+
+    If X64EmitImplicitBaseCtorChain(ps, baseType, cg, depth + 1, errText) = 0 Then Return 0
+
+    Dim baseCtorName As String
+    baseCtorName = X64Upper(Trim(baseType)) & "_CTOR"
+    Dim exactBaseCtor As String
+    If X64FindRoutineSymbolName(ps, baseCtorName, exactBaseCtor) <> 0 Then baseCtorName = exactBaseCtor Else baseCtorName = LCase(baseCtorName)
+
+    Dim baseArgCount As Integer
+    Dim baseIsFunction As Integer
+    If X64TryGetRoutineSignature(cg, baseCtorName, baseArgCount, baseIsFunction) = 0 Then Return 1
+    ' The receiver is the sole ABI argument for an implicit constructor call.
+    ' Parameterized base constructors require an explicit SUPER(...) path.
+    If baseArgCount <> 1 Then Return 1
+
+    Dim skipBase As String
+    skipBase = X64NextLabel(cg, "new_base_ctor_skip")
+    X64EmitText cg, "    cmp rax, 0"
+    X64EmitText cg, "    je " & skipBase
+    X64EmitText cg, "    sub rsp, 48"
+    X64EmitText cg, "    mov [rsp + 32], rax"
+    X64EmitText cg, "    mov rcx, rax"
+    X64EmitText cg, "    call " & baseCtorName
+    X64EmitText cg, "    mov rax, [rsp + 32]"
+    X64EmitText cg, "    add rsp, 48"
+    X64EmitLabel cg, skipBase
+    Return 1
+End Function
+
 Private Function X64EmitNewExpr(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef cg As X64CodegenContext, ByRef errText As String) As Integer
     Dim classTypeName As String
     classTypeName = UCase(Trim(ps.ast.nodes(nodeIdx).value))
@@ -1059,6 +1099,8 @@ Private Function X64EmitNewExpr(ByRef ps As ParseState, ByVal nodeIdx As Integer
 
     X64EmitText cg, "    lea rdx, [rel " & X64ClassVTableLabel(classTypeName) & "]"
     X64EmitText cg, "    mov [rax], rdx"
+
+    If X64EmitImplicitBaseCtorChain(ps, classTypeName, cg, 0, errText) = 0 Then Return 0
 
     Dim ctorName As String
     ctorName = classTypeName & "_CTOR"
@@ -1167,6 +1209,7 @@ End Function
 
 Private Function X64RuntimeExprIsStringLike(ByRef ps As ParseState, ByVal exprNode As Integer, ByRef cg As X64CodegenContext) As Integer
     If exprNode < 0 Or exprNode >= ps.ast.count Then Return 0
+    If UXBStep3TypeIsString(ps.ast.nodes(exprNode).typeName) <> 0 Then Return 1
 
     Dim k As String
     k = X64Upper(Trim(ps.ast.nodes(exprNode).kind))
@@ -1842,6 +1885,20 @@ Private Function X64EmitExprToRax(ByRef ps As ParseState, ByVal nodeIdx As Integ
         Dim binUnsigned64 As Integer
         binUnsigned64 = IIf(UXBExprIsU64(ps, lhs) <> 0 Or UXBExprIsU64(ps, rhs) <> 0, 1, 0)
 
+        Dim rotateTypeForOp As String
+        If opKey = "ROL" Or opKey = "ROR" Then
+            rotateTypeForOp = Trim(ps.ast.nodes(lhs).typeName)
+            If rotateTypeForOp = "" Then
+                Dim rotateKindForOp As String
+                rotateKindForOp = X64Upper(Trim(ps.ast.nodes(lhs).kind))
+                If rotateKindForOp = "IDENT" Or rotateKindForOp = "IDENTIFIER" Or rotateKindForOp = "VAR" Or rotateKindForOp = "NAME" Or rotateKindForOp = "VAR_REF" Or rotateKindForOp = "KEYWORD_REF" Then
+                    X64FindDeclaredTypeName ps, ps.ast.nodes(lhs).value, rotateTypeForOp
+                End If
+            End If
+            rotateTypeForOp = X64Upper(Trim(UXBStep3StorageType(rotateTypeForOp)))
+            If Left(rotateTypeForOp, 5) = "TYPE_" Then rotateTypeForOp = Mid(rotateTypeForOp, 6)
+        End If
+
         Select Case opKey
         Case "+", "ADD"
             X64EmitText cg, "    add rax, rbx"
@@ -1912,10 +1969,20 @@ Private Function X64EmitExprToRax(ByRef ps As ParseState, ByVal nodeIdx As Integ
             If X64ExprIsUnsignedInteger(ps, lhs, cg) <> 0 Then X64EmitText cg, "    shr rax, cl" Else X64EmitText cg, "    sar rax, cl"
         Case "ROL"
             X64EmitText cg, "    mov ecx, ebx"
-            X64EmitText cg, "    rol rax, cl"
+            Select Case rotateTypeForOp
+            Case "U8", "UBYTE", "I8", "BYTE", "SBYTE": X64EmitText cg, "    rol al, cl"
+            Case "U16", "USHORT", "I16", "SHORT": X64EmitText cg, "    rol ax, cl"
+            Case "U32", "UINTEGER", "UINT", "ULONG", "I32", "INTEGER", "INT", "LONG": X64EmitText cg, "    rol eax, cl"
+            Case Else: X64EmitText cg, "    rol rax, cl"
+            End Select
         Case "ROR"
             X64EmitText cg, "    mov ecx, ebx"
-            X64EmitText cg, "    ror rax, cl"
+            Select Case rotateTypeForOp
+            Case "U8", "UBYTE", "I8", "BYTE", "SBYTE": X64EmitText cg, "    ror al, cl"
+            Case "U16", "USHORT", "I16", "SHORT": X64EmitText cg, "    ror ax, cl"
+            Case "U32", "UINTEGER", "UINT", "ULONG", "I32", "INTEGER", "INT", "LONG": X64EmitText cg, "    ror eax, cl"
+            Case Else: X64EmitText cg, "    ror rax, cl"
+            End Select
         Case "**", "POW"
             X64EmitIntegerPowRaxRbx cg
         Case "NAND"
@@ -1992,6 +2059,21 @@ Private Function X64EmitExprToRax(ByRef ps As ParseState, ByVal nodeIdx As Integ
             Return 0
         End Select
 
+        ' S-219: rotate width is the left operand's declared integer width,
+        ' even though the legacy emitter rotates in RAX as a 64-bit scratch.
+        If opKey = "ROL" Or opKey = "ROR" Then
+            Dim rotateType As String
+            rotateType = Trim(ps.ast.nodes(lhs).typeName)
+            If rotateType = "" Then
+                Dim rotateKind As String
+                rotateKind = X64Upper(Trim(ps.ast.nodes(lhs).kind))
+                If rotateKind = "IDENT" Or rotateKind = "IDENTIFIER" Or rotateKind = "VAR" Or rotateKind = "NAME" Or rotateKind = "VAR_REF" Or rotateKind = "KEYWORD_REF" Then
+                    X64FindDeclaredTypeName ps, ps.ast.nodes(lhs).value, rotateType
+                End If
+            End If
+            If rotateType <> "" Then X64TryEmitNarrowRegToType cg, "rax", rotateType
+        End If
+
         ' S-088: an expression whose static type is U32 wraps modulo 2^32 (mov eax,eax zero-extends)
         If UXBStep3TypeIsU32(ps.ast.nodes(nodeIdx).typeName) <> 0 Then X64EmitText cg, "    mov eax, eax"
         Return 1
@@ -2012,9 +2094,19 @@ Private Function X64EmitExprToRax(ByRef ps As ParseState, ByVal nodeIdx As Integ
         elseLabel = X64NextLabel(cg, "tern_else")
         endLabel = X64NextLabel(cg, "tern_end")
 
-        If X64EmitExprToRax(ps, condNode, cg, errText) = 0 Then Return 0
-        X64EmitText cg, "    cmp rax, 0"
-        X64EmitText cg, "    je " & elseLabel
+        If X64InferFloatKindOfExpr(ps, condNode, cg) <> UXF_UNKNOWN Then
+            Dim trueLabel As String = X64NextLabel(cg, "tern_true")
+            If X64EmitExprToXmm0As(ps, condNode, cg, UXF_F64, errText) = 0 Then Return 0
+            X64EmitText cg, "    pxor xmm1, xmm1"
+            X64EmitText cg, "    ucomisd xmm0, xmm1"
+            X64EmitText cg, "    jp " & trueLabel
+            X64EmitText cg, "    je " & elseLabel
+            X64EmitLabel cg, trueLabel
+        Else
+            If X64EmitExprToRax(ps, condNode, cg, errText) = 0 Then Return 0
+            X64EmitText cg, "    test rax, rax"
+            X64EmitText cg, "    jz " & elseLabel
+        End If
         If X64EmitExprToRax(ps, thenNode, cg, errText) = 0 Then Return 0
         X64EmitText cg, "    jmp " & endLabel
         X64EmitLabel cg, elseLabel

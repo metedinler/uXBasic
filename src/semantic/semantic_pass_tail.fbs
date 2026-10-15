@@ -20,10 +20,46 @@ Private Function SemScopedRoutineName(ByRef ps As ParseState, ByVal nodeIdx As I
     Return routineName
 End Function
 
+Private Function SemRoutineTypeSpec(ByRef ps As ParseState, ByVal nodeIdx As Integer) As String
+    Dim specText As String = UCase(Trim(ps.ast.nodes(nodeIdx).value))
+    Dim ch As Integer = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        specText &= "[" & UCase(Trim(ps.ast.nodes(ch).kind)) & ":" & SemRoutineTypeSpec(ps, ch) & "]"
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return specText
+End Function
+
+Private Function SemRoutineSignature(ByRef ps As ParseState, ByVal nodeIdx As Integer) As String
+    Dim signature As String
+    signature = IIf(InStr(UCase(ps.ast.nodes(nodeIdx).kind), "FUNCTION") > 0, "FUNCTION", "SUB")
+    Dim ch As Integer = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        Dim ck As String = UCase(Trim(ps.ast.nodes(ch).kind))
+        If ck = "PARAM_DECL" Then
+            Dim paramMode As String = UCase(Trim(ps.ast.nodes(ch).op))
+            If paramMode = "" Then paramMode = "BYVAL"
+            signature &= "|" & paramMode
+            Dim typeChild As Integer = ps.ast.nodes(ch).firstChild
+            Do While typeChild <> -1
+                signature &= ":" & SemRoutineTypeSpec(ps, typeChild)
+                typeChild = ps.ast.nodes(typeChild).nextSibling
+            Loop
+        ElseIf ck = "RETURN_TYPE" Or ck = "GENERIC_PARAM" Then
+            signature &= "|" & ck & ":" & SemRoutineTypeSpec(ps, ch)
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+    Return signature
+End Function
+
 Private Function SemValidateOverloadResolution(ByRef ps As ParseState, ByRef errText As String) As Integer
     Dim names() As String
     Dim arities() As Integer
     Dim genericArities() As Integer
+    Dim signatureNodes() As Integer
+    Dim seenDeclaration() As Integer
+    Dim seenDefinition() As Integer
     Dim sigCount As Integer
     Dim i As Integer
 
@@ -40,26 +76,50 @@ Private Function SemValidateOverloadResolution(ByRef ps As ParseState, ByRef err
             gargc = SemCountRoutineGenericParams(ps, i)
 
             Dim j As Integer
+            Dim isDeclaration As Integer = IIf(Left(k, 8) = "DECLARE_", 1, 0)
+            Dim mergedPair As Integer = 0
             For j = 0 To sigCount - 1
                 If names(j) = nameKey And arities(j) = argc And genericArities(j) = gargc Then
+                    If (isDeclaration <> 0 And seenDeclaration(j) = 0) Or (isDeclaration = 0 And seenDefinition(j) = 0) Then
+                        Dim previousNode As Integer = signatureNodes(j)
+                        If InStr(UCase(ps.ast.nodes(i).typeName), "LIB=") = 0 And InStr(UCase(ps.ast.nodes(previousNode).typeName), "LIB=") = 0 Then
+                            If SemRoutineSignature(ps, previousNode) <> SemRoutineSignature(ps, i) Then
+                                errText = "semantic: declaration signature mismatch " & nameKey
+                                Return 0
+                            End If
+                            If isDeclaration <> 0 Then seenDeclaration(j) = 1 Else seenDefinition(j) = 1
+                            mergedPair = 1
+                            Exit For
+                        End If
+                    End If
                     errText = "semantic: duplicate overload signature " & nameKey & "(" & Str(argc) & ")"
                     Return 0
                 End If
             Next j
+            If mergedPair <> 0 Then Continue For
 
             If sigCount = 0 Then
                 ReDim names(0)
                 ReDim arities(0)
                 ReDim genericArities(0)
+                ReDim signatureNodes(0)
+                ReDim seenDeclaration(0)
+                ReDim seenDefinition(0)
             Else
                 ReDim Preserve names(sigCount)
                 ReDim Preserve arities(sigCount)
                 ReDim Preserve genericArities(sigCount)
+                ReDim Preserve signatureNodes(sigCount)
+                ReDim Preserve seenDeclaration(sigCount)
+                ReDim Preserve seenDefinition(sigCount)
             End If
 
             names(sigCount) = nameKey
             arities(sigCount) = argc
             genericArities(sigCount) = gargc
+            signatureNodes(sigCount) = i
+            seenDeclaration(sigCount) = isDeclaration
+            seenDefinition(sigCount) = IIf(isDeclaration = 0, 1, 0)
             sigCount += 1
         End If
     Next i
@@ -335,6 +395,33 @@ Private Sub SemFoldConstantsNode(ByRef ps As ParseState, ByVal nodeIdx As Intege
 
     Dim k As String
     k = UCase(ps.ast.nodes(nodeIdx).kind)
+    If k = "UNARY" Then
+        Dim unaryChild As Integer = ps.ast.nodes(nodeIdx).left
+        If unaryChild = -1 Then unaryChild = ps.ast.nodes(nodeIdx).right
+        Dim unaryOp As String = Trim(ps.ast.nodes(nodeIdx).op)
+        If unaryChild >= 0 And unaryChild < ps.ast.count And (unaryOp = "-" Or unaryOp = "+") Then
+            If UCase(ps.ast.nodes(unaryChild).kind) = "NUMBER" AndAlso UXBNumberLiteralIsFloat(ps.ast.nodes(unaryChild).value) = 0 Then
+                ' Negating an integer literal is exact text, not a trip through
+                ' Double (which rounded I64 minima and U64 values into exponents).
+                Dim exactText As String = Trim(ps.ast.nodes(unaryChild).value)
+                If unaryOp = "-" Then
+                    If Left(exactText, 1) = "-" Then
+                        exactText = Mid(exactText, 2)
+                    Else
+                        If Left(exactText, 1) = "+" Then exactText = Mid(exactText, 2)
+                        exactText = "-" & exactText
+                    End If
+                End If
+                ps.ast.nodes(nodeIdx).kind = "NUMBER"
+                ps.ast.nodes(nodeIdx).value = exactText
+                ps.ast.nodes(nodeIdx).op = ""
+                ps.ast.nodes(nodeIdx).left = -1
+                ps.ast.nodes(nodeIdx).right = -1
+                ps.ast.nodes(nodeIdx).firstChild = -1
+                Exit Sub
+            End If
+        End If
+    End If
     If k = "BINARY" Or k = "UNARY" Then
         Dim foldedValue As Double
         Dim foldedInt As Integer
@@ -1286,7 +1373,7 @@ End Function
 Private Function SemIsExecutableTopLevelKind(ByRef kindUpper As String) As Integer
     Select Case kindUpper
     Case "ASSIGN_STMT", "EXPR_STMT", "PRINT_STMT", "INPUT_STMT", "INPUT_FILE_STMT", "INPUTF_STMT", _
-         "IF_STMT", "SELECT_STMT", "FOR_STMT", "FOR_EACH_STMT", "DO_STMT", "DO_EACH_STMT", "EXIT_STMT", _
+         "IF_STMT", "SELECT_STMT", "FOR_STMT", "FOR_EACH_STMT", "DO_STMT", "DO_EACH_STMT", "EXIT_STMT", "CONTINUE_STMT", _
          "RETURN_STMT", "GOTO_STMT", "GOSUB_STMT", "LABEL_STMT", "CALL_STMT", "CALL_DLL_STMT", "CALL_API_STMT", _
          "TRY_STMT", "THROW_STMT", "ASSERT_STMT", "END_STMT", "RANDOMIZE_STMT", "INCDEC_STMT", _
          "OPEN_STMT", "CLOSE_STMT", "GET_STMT", "PUT_STMT", "SEEK_STMT", "LOCATE_STMT", "COLOR_STMT", "CLS_STMT", _
@@ -1325,6 +1412,37 @@ Private Function SemValidateMainBlockExclusive(ByRef ps As ParseState, ByRef err
     Return 1
 End Function
 
+Private Function SemNormalizeIffCalls(ByRef ps As ParseState, ByRef errText As String) As Integer
+    For i As Integer = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "CALL_EXPR" Then Continue For
+        If UCase(Trim(ps.ast.nodes(i).value)) <> "IFF" Then Continue For
+        If SemChildCount(ps, i) <> 3 Then
+            errText = "semantic: UXB_IFF_ARGUMENT_COUNT: IFF requires exactly three arguments (condition,true,false); got " & LTrim(Str(SemChildCount(ps, i)))
+            errText &= " @" & LTrim(Str(ps.ast.nodes(i).lineNo)) & ":" & LTrim(Str(ps.ast.nodes(i).colNo))
+            Return 0
+        End If
+        Dim conditionNode As Integer = SemChildAt(ps, i, 0)
+        Dim trueNode As Integer = SemChildAt(ps, i, 1)
+        Dim falseNode As Integer = SemChildAt(ps, i, 2)
+        ' Reuse the lazy conditional-expression contract on every engine.
+        ' Infix IFF remains a BINARY logical-equivalence operator.
+        ps.ast.nodes(conditionNode).nextSibling = -1
+        ps.ast.nodes(trueNode).nextSibling = -1
+        ps.ast.nodes(falseNode).nextSibling = -1
+        ps.ast.nodes(i).kind = "TERNARY_EXPR"
+        ps.ast.nodes(i).op = "IFF"
+        ps.ast.nodes(i).typeName = ""
+        ps.ast.nodes(i).firstChild = trueNode
+        ASTSetLeft ps.ast, i, conditionNode
+        ASTSetRight ps.ast, i, falseNode
+        ps.ast.nodes(trueNode).parent = i
+    Next i
+    Return 1
+End Function
+
+#include once "semantic_static_locals.fbs"
+#include once "semantic_mid_assignment.fbs"
+
 Function SemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Integer
     errText = ""
 
@@ -1333,9 +1451,13 @@ Function SemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Int
         Return 0
     End If
 
+    If SemNormalizeStaticLocals(ps, errText) = 0 Then Return 0
+    If SemNormalizeMidAssignments(ps, errText) = 0 Then Return 0
+
     If SemValidateReservedRoutineNames(ps, errText) = 0 Then Return 0
     If SemValidateVariableClassNameConflicts(ps, errText) = 0 Then Return 0
     If SemValidateMainBlockExclusive(ps, errText) = 0 Then Return 0
+    If SemNormalizeIffCalls(ps, errText) = 0 Then Return 0
     ' S-119: bare field / method names in member bodies become THIS.<name> for every engine
     If SemRewriteImplicitThis(ps, errText) = 0 Then Return 0
     If SemRewriteVarptrElementNodes(ps, errText) = 0 Then Return 0
@@ -1363,8 +1485,10 @@ Function SemanticAnalyze(ByRef ps As ParseState, ByRef errText As String) As Int
     If SemValidateOverloadResolution(ps, errText) = 0 Then Return 0
     If SemValidateReachability(ps, errText) = 0 Then Return 0
     If SemValidateThisMeUsage(ps, errText) = 0 Then Return 0
+    If SemValidateConstructorMeVirtualCalls(ps, errText) = 0 Then Return 0
     If SemValidateStaticMemberReceiverUsage(ps, errText) = 0 Then Return 0
     If SemValidateClassModifierContracts(ps, errText) = 0 Then Return 0
+    If SemValidateInheritedFieldHiding(ps, errText) = 0 Then Return 0
     If SemValidateClassPropertyContracts(ps, errText) = 0 Then Return 0
     If SemValidateClassOperatorContracts(ps, errText) = 0 Then Return 0
     If SemValidateClassMagicMethodContracts(ps, errText) = 0 Then Return 0

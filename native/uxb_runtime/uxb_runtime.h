@@ -113,6 +113,7 @@ UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_program_end(void);
 UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_print_i64(int64_t value);
 UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_print_cstr(const char* value);
 UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_print_newline(void);
+UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_print_separator(int64_t kind);
 UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_print_f64(double value);
 // S-142b: floating text (PRINT and STR/concat): F64 16 / F32 7 significant digits,
 // no padding zeros, exponent at least two digits. F32 rounds the value to single first.
@@ -134,6 +135,9 @@ UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_str_release(const char** slot);
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_str_temp(const char* value);
 UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_strlen(const char* value);
 UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_val_i64(const char* value);
+// S-179: the language's VAL() itself returns a Double; __uxb_rt_val_i64 truncates and is for other
+// integer-context callers only (e.g. an explicit VALINT once implemented).
+UXB_RT_API double UXB_RT_CDECL __uxb_rt_val_f64(const char* value);
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_str_i64(int64_t value);
 UXB_RT_API int64_t UXB_RT_CDECL __uxb_rt_asc(const char* value);
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_chr(int64_t value);
@@ -147,6 +151,8 @@ UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_ltrim(const char* value);
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_rtrim(const char* value);
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_trim(const char* value);
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_space(int64_t count);
+UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_string(int64_t count, int64_t code);
+UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_string_text(int64_t count, const char* text);
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_hex(int64_t value);
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_oct(int64_t value);
 UXB_RT_API const char* UXB_RT_CDECL __uxb_rt_bin(int64_t value);

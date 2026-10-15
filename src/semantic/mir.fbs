@@ -44,6 +44,7 @@ Declare Function MIRFindChildByKind(ByRef ps As ParseState, ByVal nodeIdx As Int
 Declare Function MIRBuildVTableMap(ByRef ps As ParseState, ByRef module As MIRModule, ByRef errText As String) As Integer
 Declare Function MIRBuildFieldPath(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef pathOut As String, ByRef errText As String) As Integer
 Declare Function MIRCanonicalTypeName(ByRef rawType As String) As String
+#include once "../type_binding/type_infer_expr_decl.fbs"
 Declare Function MIRSlotSafeName(ByRef rawName As String) As String
 Declare Sub MIRAppendFunctionParam(ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef paramNameRaw As String, ByRef paramTypeRaw As String = "I64", ByVal isByRef As Integer = 0)
 Declare Sub MIRAppendFunctionLocal(ByRef module As MIRModule, ByVal fnIdx As Integer, ByRef localNameRaw As String, ByRef localTypeRaw As String = "I64")
@@ -157,10 +158,12 @@ Private Sub MIRSetLastInstructionMetadata(ByRef module As MIRModule, ByVal fnIdx
     Dim inst As MIRIRInstruction Ptr
     inst = @blk->instructions(blk->instructionCount - 1)
     inst->resultType = MIRCanonicalTypeName(resultTypeRaw)
-    If inst->opcode = MIR_OP_STORE_VAR And inst->operandCount = 1 And UXBLibraryTypeNeedsManagedCopy(inst->resultType) <> 0 Then
+    Dim managedTransferMember As String
+    managedTransferMember = UXBLibraryTypeManagedTransferMember(inst->resultType)
+    If inst->opcode = MIR_OP_STORE_VAR And inst->operandCount = 1 And managedTransferMember <> "" Then
         inst->opcode = MIR_OP_CALL
         inst->operands(1) = inst->operands(0)
-        inst->operands(0) = UCase(inst->resultType) & ".COPY"
+        inst->operands(0) = UCase(inst->resultType) & "." & managedTransferMember
         inst->operandCount = 2
     End If
     inst->ffiStubId = ffiStubId
@@ -263,7 +266,8 @@ End Function
 
 Function MIRCanonicalTypeName(ByRef rawType As String) As String
     Dim t As String
-    t = UCase(Trim(rawType))
+    t = UCase(Trim(UXBStep3StorageType(rawType)))
+    If Left(t, 5) = "TYPE_" And (UXBStep3TypeIsKnownScalar(t) <> 0 Or t = "TYPE_TASK" Or t = "TYPE_TASKGROUP") Then t = Mid(t, 6)
 
     Select Case t
     Case "SINGLE", "SNG", "SNGLE"
@@ -552,6 +556,16 @@ Private Function MIRInferExprFloatKind(ByRef ps As ParseState, ByVal nodeIdx As 
         Return MIRInferExprFloatKind(ps, unaryNode)
 
     Case "BINARY"
+        ' Comparisons always produce the language Boolean (-1/0), regardless
+        ' of the numeric kind of their operands.  Keeping the operand kind
+        ' here makes unary arithmetic around a comparison choose FNEG/F32
+        ' instead of integer NEG (S-505; also preserves S-504's metadata rule).
+        Dim binaryOp As String
+        binaryOp = UCase(Trim(n.op))
+        Select Case binaryOp
+        Case "=", "==", "<>", "!=", "<", "<=", ">", ">=", "EQ", "NE", "LT", "LE", "GT", "GE", "ULT", "ULE", "UGT", "UGE"
+            Return MIR_UXF_UNKNOWN
+        End Select
         Dim lk As Integer
         Dim rk As Integer
         lk = MIRInferExprFloatKind(ps, n.left)
@@ -600,9 +614,9 @@ Private Function MIRInferExprFloatKind(ByRef ps As ParseState, ByVal nodeIdx As 
         End If
 
         Select Case callName
-        Case "CDBL", "VAL", "SQR", "SIN", "COS", "TAN", "ATN", "EXP", "LOG", "RND", "TIMER", "INPUTF"
+        Case "ABS", "CDBL", "VAL", "SQR", "SIN", "COS", "TAN", "ATN", "EXP", "LOG", "RND", "TIMER", "INPUTF"
             Return MIR_UXF_F64
-        Case "CSNG"
+        Case "CSNG", "F32"
             Return MIR_UXF_F32
         End Select
 
@@ -1428,6 +1442,15 @@ Private Function MIRResolveOperatorOwnerType(ByRef ps As ParseState, ByRef start
             Return 1
         End If
 
+        Dim magicOpName As String = "MAGIC_" & Mid(opSuffix, 4)
+        If opSuffix = "OP_BAND" Then magicOpName = "MAGIC_AND"
+        If opSuffix = "OP_BOR" Then magicOpName = "MAGIC_OR"
+        If MIRFindClassMethodDeclNode(ps, curType, magicOpName) <> -1 Then
+            ownerTypeOut = curType
+            routineSuffixOut = magicOpName
+            Return 1
+        End If
+
         If opSuffix = "OP_ADD" And MIRFindClassMethodDeclNode(ps, curType, "ADD") <> -1 Then
             ownerTypeOut = curType
             routineSuffixOut = "ADD"
@@ -1946,8 +1969,7 @@ Private Function MIRTryInferExprTypeName(ByRef ps As ParseState, ByVal nodeIdx A
     End If
 
     If Trim(n.typeName) <> "" Then
-        typeOut = UCase(Trim(n.typeName))
-        If Left(typeOut, 5) = "TYPE_" Then typeOut = Mid(typeOut, 6)
+        typeOut = MIRCanonicalTypeName(n.typeName)
         Return 1
     End If
 
@@ -2000,6 +2022,14 @@ Private Function MIRTryInferExprTypeName(ByRef ps As ParseState, ByVal nodeIdx A
     If k = "NEW_EXPR" Then
         typeOut = UCase(Trim(n.value))
         Return IIf(typeOut <> "", 1, 0)
+    End If
+
+    If k = "CALL_EXPR" Then
+        Dim callTypeError As String
+        If UXBStep3InferExprType(ps, nodeIdx, typeOut, callTypeError) <> 0 Then
+            typeOut = MIRCanonicalTypeName(typeOut)
+            Return IIf(typeOut <> "", 1, 0)
+        End If
     End If
 
     Return 0

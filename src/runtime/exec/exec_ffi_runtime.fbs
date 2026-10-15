@@ -13,12 +13,7 @@ Sub ExecSetFfiPolicyPath(ByRef pathText As String)
         gFfiAllowlistLoadFailed = 0
         gFfiAllowlistLoadFailReason = ""
         gFfiAllowEntryCount = 0
-        gFfiAllowEntryCap = 0
         Erase gFfiAllowEntries
-        gFfiIndexBuilt = 0
-        gFfiIndexCap = 0
-        Erase gFfiIndexSlots
-        Erase gFfiChainNext
     End If
 End Sub
 
@@ -884,8 +879,6 @@ Private Function ExecEvalDllArgAsMixedSlot(ByRef ps As ParseState, ByRef es As E
 
     Case "STRPTR"
         If ExecEvalNodeAsText(ps, es, argNode, stringKeepAlive, errText) = 0 Then Return 0
-        ' S-145: FreeBASIC StrPtr of an empty string is NULL; "" must reach the callee as a real empty C string.
-        If Len(stringKeepAlive) = 0 Then stringKeepAlive = Chr(0)
 #Ifdef __FB_64BIT__
         u64Out = CULngInt(CLngInt(CPtr(Any Ptr, StrPtr(stringKeepAlive))))
 #Else
@@ -905,16 +898,20 @@ Private Function ExecEvalDllArgAsMixedSlot(ByRef ps As ParseState, ByRef es As E
             Return 0
         End If
 
-        If t = "PTR" Or t = "U64" Or t = "I64" Then
-            u64Out = ExecValueToU64(iv)
+        If t = "PTR" Or t = "U64" Or t = "I64" Or t = "STRPTR" Then
+            If iv.valueType = "U64_PTR" Or iv.valueType = "I64_VALUE" Then
+                u64Out = iv.u64Value
+            Else
+                u64Out = CULngInt(iv.intValue)
+            End If
         ElseIf t = "I32" Then
             u64Out = CULngInt(CLng(ExecValueToInteger(iv)))
         ElseIf t = "U32" Then
-            u64Out = CULngInt(CUInt(ExecValueToU64(iv)))
+            u64Out = CULngInt(CUInt(ExecValueToU64(iv) And &hFFFFFFFFULL))
         ElseIf t = "I64" Then
-            u64Out = CULngInt(CLngInt(iv.intValue))
+            u64Out = ExecValueToU64(iv)
         Else
-            u64Out = CULngInt(iv.intValue)
+            u64Out = ExecValueToU64(iv)
         End If
         Return 1
     End Select
@@ -968,31 +965,27 @@ Private Function ExecTryInvokeResolvedX64Mixed(ByRef ps As ParseState, ByRef es 
     Dim bridgeU64 As ULongInt
     Dim bridgeF64 As Double
     Dim bridgeResult As ExecValue
-    If ExecFfiBridge10Invoke(dllName, symbolName, retType, callingConventionText, argTypes(), argCount, argValuesU64(), argValuesF64(), bridgeU64, bridgeF64, bridgeInvoked, errText) = 0 Then Return 0
-    If bridgeInvoked <> 0 Then
-        Select Case retType
-        Case "F64"
-            ExecValueSetFloat bridgeResult, bridgeF64
-        Case "STRPTR"
-            Dim bridgeText As String
-            If ExecFfiBridge10CopyString(bridgeU64, bridgeText, errText) = 0 Then Return 0
-            ExecValueSetString bridgeResult, bridgeText
-        Case "VOID"
-            ExecValueSetInteger bridgeResult, 0
-        Case "I32"
-            ' I32 is a scalar integer, not an opaque pointer-width token.
-            ' Keeping it as U64_PTR breaks typed wrapper arguments on the next call.
-            ExecValueSetInteger bridgeResult, CInt(bridgeU64)
-        Case "I64"
-            ExecValueSetI64 bridgeResult, CLngInt(bridgeU64)
-        Case Else
-            ExecValueSetU64 bridgeResult, bridgeU64
-        End Select
-        gExecLastCallValueEx = bridgeResult
-        gExecLastCallValueExValid = 1
-        valueOut = ExecValueToInteger(bridgeResult)
-        invokedOut = 1
-        Return 1
+    If retType <> "STRPTR" Or ExecIsFreeBasicRuntimeDll(dllName) = 0 Then
+        If ExecFfiBridge10Invoke(dllName, symbolName, retType, callingConventionText, argTypes(), argCount, argValuesU64(), argValuesF64(), bridgeU64, bridgeF64, bridgeInvoked, errText) = 0 Then Return 0
+        If bridgeInvoked <> 0 Then
+            Select Case retType
+            Case "F64"
+                ExecValueSetFloat bridgeResult, bridgeF64
+            Case "STRPTR"
+                Dim bridgeText As String
+                If ExecFfiBridge10CopyString(bridgeU64, bridgeText, errText) = 0 Then Return 0
+                ExecValueSetString bridgeResult, bridgeText
+            Case "VOID"
+                ExecValueSetInteger bridgeResult, 0
+            Case Else
+                ExecValueSetU64 bridgeResult, bridgeU64
+            End Select
+            gExecLastCallValueEx = bridgeResult
+            gExecLastCallValueExValid = 1
+            valueOut = ExecValueToInteger(bridgeResult)
+            invokedOut = 1
+            Return 1
+        End If
     End If
 
     ' Compatibility fallback for old installations without uxffi.dll.
@@ -1072,6 +1065,19 @@ Private Function ExecConsumeLoopExit(ByRef es As ExecState, ByRef loopKind As St
 
     Dim req As String
     req = UCase(es.runtime.exitRequest)
+
+    ' CONTINUE is consumed by the current loop after its body. Return 3 so
+    ' callers skip the remaining body statements but still run the loop's
+    ' increment/post-condition phase; an unmatched target propagates upward.
+    If Left(req, 9) = "CONTINUE:" Then
+        Dim continueKind As String
+        continueKind = Mid(req, 10)
+        If continueKind = "ANY" Or continueKind = UCase(loopKind) Then
+            es.runtime.exitRequest = ""
+            Return 3
+        End If
+        Return 2
+    End If
 
     If req = "ANY" Or req = UCase(loopKind) Then
         es.runtime.exitRequest = ""
@@ -1294,15 +1300,10 @@ Private Function ExecNormalizeFfiSignerToken(ByRef signerIn As String, ByRef sig
 End Function
 
 Private Sub ExecFfiAllowlistAppend(ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByRef hashText As String, ByRef signerText As String)
-    If gFfiAllowEntryCount >= gFfiAllowEntryCap Then
-        Dim newCap As Integer
-        newCap = gFfiAllowEntryCap
-        If newCap < 1 Then newCap = 64
-        Do While newCap <= gFfiAllowEntryCount
-            newCap *= 2
-        Loop
-        ReDim Preserve gFfiAllowEntries(newCap - 1)
-        gFfiAllowEntryCap = newCap
+    If gFfiAllowEntryCount = 0 Then
+        ReDim gFfiAllowEntries(0)
+    Else
+        ReDim Preserve gFfiAllowEntries(gFfiAllowEntryCount)
     End If
 
     gFfiAllowEntries(gFfiAllowEntryCount).dllName = UCase(Trim(dllName))
@@ -1459,12 +1460,7 @@ Private Sub ExecLoadFfiAllowlistIfNeeded()
     gFfiAllowlistLoadFailed = 0
     gFfiAllowlistLoadFailReason = ""
     gFfiAllowEntryCount = 0
-    gFfiAllowEntryCap = 0
     Erase gFfiAllowEntries
-    gFfiIndexBuilt = 0
-    gFfiIndexCap = 0
-    Erase gFfiIndexSlots
-    Erase gFfiChainNext
 
     Dim policyPath As String
     policyPath = ExecGetFfiPolicyPath()
@@ -1623,48 +1619,23 @@ Private Function ExecValidateDllMarshalArg(ByRef ps As ParseState, ByRef es As E
     Select Case sig
     Case "I32"
         If argValue.valueType <> "INTEGER" And argValue.valueType <> "I64_VALUE" Then
-            errText = "exec: CALL(DLL) I32 requires a 32-bit integer argument"
+            errText = "exec: CALL(DLL) " & sig & " requires integer argument"
             Return 0
-        End If
-        If argValue.valueType = "I64_VALUE" Then
-            Dim signedI32Candidate As LongInt = CLngInt(argValue.u64Value)
-            If signedI32Candidate < -2147483648LL Or signedI32Candidate > 2147483647LL Then
-                errText = "exec: CALL(DLL) I32 argument is outside the 32-bit signed range"
-                Return 0
-            End If
         End If
 
     Case "I64"
         If argValue.valueType <> "INTEGER" And argValue.valueType <> "I64_VALUE" And argValue.valueType <> "U64_PTR" Then
-            errText = "exec: CALL(DLL) I64 requires integer argument"
+            errText = "exec: CALL(DLL) " & sig & " requires integer argument"
             Return 0
         End If
 
-    Case "U32"
-        ' U32 casts are represented by ExecValueSetU64 as U64_PTR.  Accept that
-        ' representation here and retain the explicit 32-bit range check below.
+    Case "U32", "U64"
         If argValue.valueType <> "INTEGER" And argValue.valueType <> "I64_VALUE" And argValue.valueType <> "U64_PTR" Then
-            errText = "exec: CALL(DLL) U32 requires a 32-bit integer argument"
+            errText = "exec: CALL(DLL) " & sig & " requires integer argument"
             Return 0
         End If
-        Dim unsignedI32Candidate As LongInt
-        If argValue.valueType = "I64_VALUE" Or argValue.valueType = "U64_PTR" Then
-            unsignedI32Candidate = CLngInt(argValue.u64Value)
-        Else
-            unsignedI32Candidate = CLngInt(argValue.intValue)
-        End If
-        If unsignedI32Candidate < 0 Or CULngInt(unsignedI32Candidate) > 4294967295ULL Then
-            errText = "exec: CALL(DLL) U32 argument is outside the 32-bit unsigned range"
-            Return 0
-        End If
-
-    Case "U64"
-        If argValue.valueType <> "INTEGER" And argValue.valueType <> "I64_VALUE" And argValue.valueType <> "U64_PTR" Then
-            errText = "exec: CALL(DLL) U64 requires integer/pointer-width argument"
-            Return 0
-        End If
-        If argValue.valueType = "INTEGER" And argValue.intValue < 0 Then
-            errText = "exec: CALL(DLL) U64 argument cannot be negative"
+        If argValue.intValue < 0 Then
+            errText = "exec: CALL(DLL) " & sig & " argument cannot be negative"
             Return 0
         End If
 
@@ -1790,97 +1761,6 @@ Private Function ExecTryParseAliasDllTarget(ByRef targetText As String, ByRef dl
     Return IIf(ffiKind = "DLL", 1, 0)
 End Function
 
-Private Function ExecFfiIndexHashOf(ByRef key As String) As UInteger
-    Dim h As UInteger = 2166136261
-    Dim i As Integer
-    For i = 1 To Len(key)
-        h = (h Xor Asc(Mid(key, i, 1))) * 16777619
-    Next i
-    Return h
-End Function
-
-Private Function ExecFfiIndexKey(ByRef dllKey As String, ByRef symbolKey As String, ByRef sigKey As String) As String
-    Return dllKey & Chr(1) & symbolKey & Chr(1) & sigKey
-End Function
-
-' Inserts entryIdx under key, appending to the tail of any existing chain so
-' lookup visits same-key entries in the original append order (order matters:
-' callers stop at the first entry whose calling convention/attestation passes).
-Private Sub ExecFfiIndexInsert(ByRef key As String, ByVal entryIdx As Integer)
-    Dim baseSlot As UInteger
-    baseSlot = ExecFfiIndexHashOf(key) Mod gFfiIndexCap
-    Dim probe As Integer
-    For probe = 0 To gFfiIndexCap - 1
-        Dim slotPos As Integer
-        slotPos = (baseSlot + probe) Mod gFfiIndexCap
-        If gFfiIndexSlots(slotPos).used = 0 Then
-            gFfiIndexSlots(slotPos).used = 1
-            gFfiIndexSlots(slotPos).key = key
-            gFfiIndexSlots(slotPos).headIdx = entryIdx
-            gFfiIndexSlots(slotPos).tailIdx = entryIdx
-            gFfiChainNext(entryIdx) = -1
-            Exit Sub
-        End If
-        If gFfiIndexSlots(slotPos).key = key Then
-            gFfiChainNext(gFfiIndexSlots(slotPos).tailIdx) = entryIdx
-            gFfiChainNext(entryIdx) = -1
-            gFfiIndexSlots(slotPos).tailIdx = entryIdx
-            Exit Sub
-        End If
-    Next probe
-End Sub
-
-Private Function ExecFfiIndexFindHead(ByRef key As String) As Integer
-    If gFfiIndexCap <= 0 Then Return -1
-    Dim baseSlot As UInteger
-    baseSlot = ExecFfiIndexHashOf(key) Mod gFfiIndexCap
-    Dim probe As Integer
-    For probe = 0 To gFfiIndexCap - 1
-        Dim slotPos As Integer
-        slotPos = (baseSlot + probe) Mod gFfiIndexCap
-        If gFfiIndexSlots(slotPos).used = 0 Then Return -1
-        If gFfiIndexSlots(slotPos).key = key Then Return gFfiIndexSlots(slotPos).headIdx
-    Next probe
-    Return -1
-End Function
-
-' Builds a (dll|symbol|signature) -> entry-chain index over gFfiAllowEntries once
-' per load, so ExecDllCallIsAllowlisted no longer has to rescan the entire
-' project-wide allowlist (which keeps growing as more libraries get audited) for
-' every single CALL(DLL) site.
-Private Sub ExecBuildFfiIndexIfNeeded()
-    If gFfiIndexBuilt <> 0 Then Exit Sub
-
-    Dim cap As Integer
-    cap = 64
-    Do While cap * 100 < gFfiAllowEntryCount * 200
-        cap *= 2
-    Loop
-
-    ReDim gFfiIndexSlots(cap - 1)
-    Dim s As Integer
-    For s = 0 To cap - 1
-        gFfiIndexSlots(s).used = 0
-        gFfiIndexSlots(s).key = ""
-        gFfiIndexSlots(s).headIdx = -1
-        gFfiIndexSlots(s).tailIdx = -1
-    Next s
-    gFfiIndexCap = cap
-
-    If gFfiAllowEntryCount > 0 Then
-        ReDim gFfiChainNext(gFfiAllowEntryCount - 1)
-    End If
-
-    Dim i As Integer
-    For i = 0 To gFfiAllowEntryCount - 1
-        Dim key As String
-        key = ExecFfiIndexKey(gFfiAllowEntries(i).dllName, gFfiAllowEntries(i).symbolName, gFfiAllowEntries(i).signatureText)
-        ExecFfiIndexInsert key, i
-    Next i
-
-    gFfiIndexBuilt = 1
-End Sub
-
 Private Function ExecDllCallIsAllowlisted(ByRef dllName As String, ByRef symbolName As String, ByRef signatureText As String, ByRef callingConventionText As String, ByVal requireAttestation As Integer, ByRef denyReasonOut As String) As Integer
     ExecLoadFfiAllowlistIfNeeded
 
@@ -1888,8 +1768,6 @@ Private Function ExecDllCallIsAllowlisted(ByRef dllName As String, ByRef symbolN
         denyReasonOut = "deny-policy-load-failed"
         Return 0
     End If
-
-    ExecBuildFfiIndexIfNeeded
 
     Dim dllKey As String
     Dim symbolKey As String
@@ -1902,11 +1780,14 @@ Private Function ExecDllCallIsAllowlisted(ByRef dllName As String, ByRef symbolN
     convKey = UCase(Trim(callingConventionText))
 
     Dim i As Integer
-    i = ExecFfiIndexFindHead(ExecFfiIndexKey(dllKey, symbolKey, sigKey))
-    Do While i <> -1
-        Dim allowConv As String
-        allowConv = UCase(Trim(gFfiAllowEntries(i).callingConventionText))
-        If ExecAreDllCallingConventionsCompatible(convKey, allowConv) <> 0 Then
+    For i = 0 To gFfiAllowEntryCount - 1
+        If dllKey = gFfiAllowEntries(i).dllName And symbolKey = gFfiAllowEntries(i).symbolName And sigKey = gFfiAllowEntries(i).signatureText Then
+            Dim allowConv As String
+            allowConv = UCase(Trim(gFfiAllowEntries(i).callingConventionText))
+            If ExecAreDllCallingConventionsCompatible(convKey, allowConv) = 0 Then
+                GoTo NextAllowEntry
+            End If
+
             If requireAttestation <> 0 Then
                 If gFfiAllowEntries(i).hashText = "" Or gFfiAllowEntries(i).signerText = "" Then
                     denyReasonOut = "deny-attestation-required"
@@ -1946,9 +1827,8 @@ Private Function ExecDllCallIsAllowlisted(ByRef dllName As String, ByRef symbolN
             denyReasonOut = ""
             Return 1
         End If
-
-        i = gFfiChainNext(i)
-    Loop
+NextAllowEntry:
+    Next i
 
     denyReasonOut = "deny-not-allowlisted"
     Return 0

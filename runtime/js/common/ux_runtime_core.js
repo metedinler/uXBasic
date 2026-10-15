@@ -33,17 +33,15 @@
     throw error;
   };
 
-  // S-142b: the language's floating-point text rule, identical on every engine: a non-integer (or
-  // very large) number prints with 16 significant digits and no padding zeros, the exponent form
-  // ("1e+20", "1e-07") has at least two digits, and inf/nan read "inf", "-inf", "nan". A safe integer
-  // prints as its plain digits, so integer values are unaffected. Mirrors "%.16g".
-  const formatNumber = (value) => {
+  // S-142b: the language's floating-point text rule, parameterized by the
+  // declared precision. F64 uses 16 significant digits; F32 uses 7 after
+  // Math.fround. This keeps JS PRINT/STR aligned with the other engines.
+  const formatSignificantNumber = (value, digits) => {
     if (typeof value !== "number") return String(value);
     if (value === 0) return "0";
     if (Number.isNaN(value)) return "nan";
     if (!Number.isFinite(value)) return value < 0 ? "-inf" : "inf";
-    if (Number.isSafeInteger(value)) return String(value);
-    const digits = 16;
+    if (digits >= 16 && Number.isSafeInteger(value)) return String(value);
     const scientific = value.toExponential(digits - 1);
     const parts = scientific.split("e");
     const exponent = Number(parts[1]);
@@ -55,6 +53,9 @@
     const fixed = value.toFixed(Math.max(0, digits - 1 - exponent));
     return fixed.indexOf(".") >= 0 ? fixed.replace(/\.?0+$/, "") : fixed;
   };
+
+  const formatNumber = (value) => formatSignificantNumber(value, 16);
+  const formatF32 = (value) => formatSignificantNumber(Math.fround(Number(value)), 7);
 
   const uxb = {
     contractVersion: CONTRACT_VERSION,
@@ -96,6 +97,7 @@
       }
       return line;
     },
+    formatF32,
     clear() {
       state.out.length = 0;
       state.pending = "";
@@ -366,6 +368,7 @@
 
   uxb.object = {
     classes: new Map(),
+    unions: new Map(),
     async create(className = "OBJECT", ...args) {
       const name = String(className || "OBJECT").toUpperCase();
       const spec = this.classes.get(name);
@@ -386,6 +389,47 @@
       if (!object) return fail("UXB_OBJECT_TARGET_MISSING", "fieldStore target is missing");
       object[key] = value;
       return value;
+    },
+    unionFieldLoad(root, field, offset, width, type) {
+      const rootKey = String(root || "").toUpperCase();
+      const off = Number(offset) | 0;
+      const w = Number(width) | 0;
+      const t = String(type || "").toUpperCase().replace(/^TYPE_/, "");
+      if (!rootKey || !String(field || "") || off < 0 || ![1, 2, 4, 8].includes(w) || off + w > 256) return fail("UXB_UNION_FIELD_RANGE", "invalid UNION field range");
+      if (!this.unions.has(rootKey)) this.unions.set(rootKey, new ArrayBuffer(256));
+      const dv = new DataView(this.unions.get(rootKey));
+      if (t === "F32" || t === "SINGLE") { if (w !== 4) return fail("UXB_UNION_FIELD_TYPE", "F32 UNION field must be 4 bytes"); return dv.getFloat32(off, true); }
+      if (t === "F64" || t === "DOUBLE") { if (w !== 8) return fail("UXB_UNION_FIELD_TYPE", "F64 UNION field must be 8 bytes"); return dv.getFloat64(off, true); }
+      if (t === "I8" || t === "BYTE" || t === "SBYTE") return w === 1 ? dv.getInt8(off) : fail("UXB_UNION_FIELD_TYPE", "I8 UNION field must be 1 byte");
+      if (t === "I16" || t === "SHORT") return w === 2 ? dv.getInt16(off, true) : fail("UXB_UNION_FIELD_TYPE", "I16 UNION field must be 2 bytes");
+      if (t === "I32" || t === "INTEGER" || t === "INT" || t === "LONG") return w === 4 ? dv.getInt32(off, true) : fail("UXB_UNION_FIELD_TYPE", "I32 UNION field must be 4 bytes");
+      if (t === "U8" || t === "UBYTE" || t === "BOOLEAN" || t === "BOOL") return w === 1 ? dv.getUint8(off) : fail("UXB_UNION_FIELD_TYPE", "U8 UNION field must be 1 byte");
+      if (t === "U16" || t === "USHORT") return w === 2 ? dv.getUint16(off, true) : fail("UXB_UNION_FIELD_TYPE", "U16 UNION field must be 2 bytes");
+      if (t === "U32" || t === "UINTEGER" || t === "UINT" || t === "ULONG") return w === 4 ? dv.getUint32(off, true) : fail("UXB_UNION_FIELD_TYPE", "U32 UNION field must be 4 bytes");
+      if (t === "I64" || t === "LONGINT") return w === 8 ? dv.getBigInt64(off, true) : fail("UXB_UNION_FIELD_TYPE", "I64 UNION field must be 8 bytes");
+      if (t === "U64" || t === "ULONGINT") return w === 8 ? dv.getBigUint64(off, true) : fail("UXB_UNION_FIELD_TYPE", "U64 UNION field must be 8 bytes");
+      return fail("UXB_UNION_FIELD_TYPE", `unsupported UNION field type: ${type}`);
+    },
+    unionFieldStore(root, field, value, offset, width, type) {
+      const rootKey = String(root || "").toUpperCase();
+      const off = Number(offset) | 0;
+      const w = Number(width) | 0;
+      const t = String(type || "").toUpperCase().replace(/^TYPE_/, "");
+      if (!rootKey || !String(field || "") || off < 0 || ![1, 2, 4, 8].includes(w) || off + w > 256) return fail("UXB_UNION_FIELD_RANGE", "invalid UNION field range");
+      if (!this.unions.has(rootKey)) this.unions.set(rootKey, new ArrayBuffer(256));
+      const dv = new DataView(this.unions.get(rootKey));
+      const n = Number(value);
+      if (t === "F32" || t === "SINGLE") { if (w !== 4) return fail("UXB_UNION_FIELD_TYPE", "F32 UNION field must be 4 bytes"); dv.setFloat32(off, n, true); return value; }
+      if (t === "F64" || t === "DOUBLE") { if (w !== 8) return fail("UXB_UNION_FIELD_TYPE", "F64 UNION field must be 8 bytes"); dv.setFloat64(off, n, true); return value; }
+      if (t === "I8" || t === "BYTE" || t === "SBYTE") { if (w !== 1) return fail("UXB_UNION_FIELD_TYPE", "I8 UNION field must be 1 byte"); dv.setInt8(off, n); return value; }
+      if (t === "I16" || t === "SHORT") { if (w !== 2) return fail("UXB_UNION_FIELD_TYPE", "I16 UNION field must be 2 bytes"); dv.setInt16(off, n, true); return value; }
+      if (t === "I32" || t === "INTEGER" || t === "INT" || t === "LONG") { if (w !== 4) return fail("UXB_UNION_FIELD_TYPE", "I32 UNION field must be 4 bytes"); dv.setInt32(off, n, true); return value; }
+      if (t === "U8" || t === "UBYTE" || t === "BOOLEAN" || t === "BOOL") { if (w !== 1) return fail("UXB_UNION_FIELD_TYPE", "U8 UNION field must be 1 byte"); dv.setUint8(off, n); return value; }
+      if (t === "U16" || t === "USHORT") { if (w !== 2) return fail("UXB_UNION_FIELD_TYPE", "U16 UNION field must be 2 bytes"); dv.setUint16(off, n, true); return value; }
+      if (t === "U32" || t === "UINTEGER" || t === "UINT" || t === "ULONG") { if (w !== 4) return fail("UXB_UNION_FIELD_TYPE", "U32 UNION field must be 4 bytes"); dv.setUint32(off, n, true); return value; }
+      if (t === "I64" || t === "LONGINT") { if (w !== 8) return fail("UXB_UNION_FIELD_TYPE", "I64 UNION field must be 8 bytes"); dv.setBigInt64(off, typeof value === "bigint" ? value : BigInt(Math.trunc(n)), true); return value; }
+      if (t === "U64" || t === "ULONGINT") { if (w !== 8) return fail("UXB_UNION_FIELD_TYPE", "U64 UNION field must be 8 bytes"); dv.setBigUint64(off, typeof value === "bigint" ? value : BigInt(Math.trunc(n)), true); return value; }
+      return fail("UXB_UNION_FIELD_TYPE", `unsupported UNION field type: ${type}`);
     },
     async callStaticMethod(target, args = []) {
       const fn = uxb.exports[String(target).toUpperCase()];
@@ -519,6 +563,7 @@
     set wasm(value) { uxb.wasm.instance = value; },
     print: (...args) => uxb.console.print(...args),
     println: (...args) => uxb.console.println(...args),
+    formatF32: value => uxb.console.formatF32(value),
     input: async (...args) => await uxb.input.prompt(...args),
     cls: () => { uxb.console.clear(); return uxb.canvas.clear(); },
     color: (...args) => { state.colorState = args; return 0; },
@@ -545,6 +590,8 @@
     objectNew: (...args) => uxb.object.create(...args),
     fieldLoad: (...args) => uxb.object.fieldLoad(...args),
     fieldStore: (...args) => uxb.object.fieldStore(...args),
+    unionFieldLoad: (...args) => uxb.object.unionFieldLoad(...args),
+    unionFieldStore: (...args) => uxb.object.unionFieldStore(...args),
     registerClass: (...args) => uxb.object.registerClass(...args),
     callStaticMethod: (...args) => uxb.object.callStaticMethod(...args),
     callMethod: (...args) => uxb.object.callMethod(...args),

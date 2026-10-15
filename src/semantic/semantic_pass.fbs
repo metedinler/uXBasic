@@ -1404,6 +1404,48 @@ Private Function SemValidateThisMeUsage(ByRef ps As ParseState, ByRef errText As
     Return 1
 End Function
 
+Private Function SemFindConstructorMeVirtualCall(ByRef ps As ParseState, ByVal nodeIdx As Integer, ByRef errText As String) As Integer
+    If nodeIdx < 0 Or nodeIdx >= ps.ast.count Then Return 1
+
+    Dim nodeKind As String
+    nodeKind = UCase(Trim(ps.ast.nodes(nodeIdx).kind))
+    If nodeKind = "CALL_EXPR" Then
+        Dim receiverNode As Integer
+        receiverNode = ps.ast.nodes(nodeIdx).left
+        If receiverNode >= 0 And receiverNode < ps.ast.count Then
+            If UCase(Trim(ps.ast.nodes(receiverNode).kind)) = "IDENT" And UCase(Trim(ps.ast.nodes(receiverNode).value)) = "ME" Then
+                errText = "semantic: ME virtual method call is not allowed in CONSTRUCTOR"
+                Return 0
+            End If
+        End If
+    End If
+
+    If ps.ast.nodes(nodeIdx).left <> -1 Then
+        If SemFindConstructorMeVirtualCall(ps, ps.ast.nodes(nodeIdx).left, errText) = 0 Then Return 0
+    End If
+    If ps.ast.nodes(nodeIdx).right <> -1 Then
+        If SemFindConstructorMeVirtualCall(ps, ps.ast.nodes(nodeIdx).right, errText) = 0 Then Return 0
+    End If
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(nodeIdx).firstChild
+    Do While ch <> -1
+        If SemFindConstructorMeVirtualCall(ps, ch, errText) = 0 Then Return 0
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 1
+End Function
+
+Private Function SemValidateConstructorMeVirtualCalls(ByRef ps As ParseState, ByRef errText As String) As Integer
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "CLASS_CONSTRUCTOR_DECL" Then Continue For
+        If SemFindConstructorMeVirtualCall(ps, i, errText) = 0 Then Return 0
+    Next i
+    Return 1
+End Function
+
 Private Function SemFindInterfaceNode(ByRef ps As ParseState, ByRef interfaceNameRaw As String) As Integer
     Dim needle As String
     needle = UCase(Trim(interfaceNameRaw))
@@ -1465,6 +1507,75 @@ Private Function SemClassBaseName(ByRef ps As ParseState, ByVal classNode As Int
     Loop
 
     Return 0
+End Function
+
+Private Function SemClassHasDirectFieldNamed(ByRef ps As ParseState, ByVal classNode As Integer, ByRef fieldNameRaw As String) As Integer
+    If classNode < 0 Or classNode >= ps.ast.count Then Return 0
+
+    Dim targetName As String
+    targetName = UCase(Trim(fieldNameRaw))
+    If targetName = "" Then Return 0
+
+    Dim ch As Integer
+    ch = ps.ast.nodes(classNode).firstChild
+    Do While ch <> -1
+        Dim kindText As String
+        kindText = UCase(Trim(ps.ast.nodes(ch).kind))
+        If kindText = "CLASS_FIELD" Or kindText = "CLASS_PROPERTY_DECL" Then
+            If UCase(Trim(ps.ast.nodes(ch).value)) = targetName Then Return 1
+        End If
+        ch = ps.ast.nodes(ch).nextSibling
+    Loop
+
+    Return 0
+End Function
+
+Private Function SemValidateInheritedFieldHiding(ByRef ps As ParseState, ByRef errText As String) As Integer
+    ' OOP contract: a derived class may inherit a field, but may not silently
+    ' redeclare the same member name and make the selected storage engine differ.
+    Dim i As Integer
+    For i = 0 To ps.ast.count - 1
+        If UCase(Trim(ps.ast.nodes(i).kind)) <> "CLASS_STMT" Then Continue For
+
+        Dim className As String
+        className = UCase(Trim(ps.ast.nodes(i).value))
+        Dim baseName As String
+        If SemClassBaseName(ps, i, baseName) = 0 Then Continue For
+
+        Dim ch As Integer
+        ch = ps.ast.nodes(i).firstChild
+        Do While ch <> -1
+            Dim childKind As String
+            childKind = UCase(Trim(ps.ast.nodes(ch).kind))
+            If childKind = "CLASS_FIELD" Or childKind = "CLASS_PROPERTY_DECL" Then
+                Dim memberName As String
+                memberName = UCase(Trim(ps.ast.nodes(ch).value))
+
+                Dim curBase As String
+                curBase = UCase(Trim(baseName))
+                Dim hop As Integer
+                Do While curBase <> ""
+                    hop += 1
+                    If hop > 64 Then Exit Do
+
+                    Dim baseNode As Integer
+                    baseNode = SemFindClassNode(ps, curBase)
+                    If baseNode = -1 Then Exit Do
+                    If SemClassHasDirectFieldNamed(ps, baseNode, memberName) <> 0 Then
+                        errText = "semantic: CLASS field hides inherited member " & className & "." & memberName & " from " & curBase
+                        Return 0
+                    End If
+
+                    Dim nextBase As String
+                    If SemClassBaseName(ps, baseNode, nextBase) = 0 Then Exit Do
+                    curBase = UCase(Trim(nextBase))
+                Loop
+            End If
+            ch = ps.ast.nodes(ch).nextSibling
+        Loop
+    Next i
+
+    Return 1
 End Function
 
 Private Function SemClassMethodNode(ByRef ps As ParseState, ByVal classNode As Integer, ByRef methodNameRaw As String) As Integer

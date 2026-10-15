@@ -749,6 +749,29 @@ Private Sub MIRAnnotateModuleResultTypes(ByRef module As MIRModule)
     Next passNo
 End Sub
 
+' S-505: a comparison is represented as BOOLEAN (-1/0), but unary numeric
+' negation is arithmetic and therefore produces an integer value (1/0).  The
+' semantic pass may annotate the source UNARY node as BOOL before MIR lowering;
+' normalize the completed module as the final authority so every MIR consumer
+' (interpreter, x64 emitter and bridge) sees the same result type.
+Private Sub MIRNormalizeBooleanNegationResults(ByRef module As MIRModule)
+    Dim fi As Integer
+    For fi = 0 To module.functionCount - 1
+        Dim bi As Integer
+        For bi = 0 To module.functions(fi).blockCount - 1
+            Dim ii As Integer
+            For ii = 0 To module.functions(fi).blocks(bi).instructionCount - 1
+                Dim inst As MIRIRInstruction Ptr
+                inst = @module.functions(fi).blocks(bi).instructions(ii)
+                If UCase(Trim(inst->opcode)) <> "NEG" Then Continue For
+                Dim resultType As String
+                resultType = UCase(Trim(inst->resultType))
+                If resultType = "BOOL" Or resultType = "BOOLEAN" Then inst->resultType = "I64"
+            Next ii
+        Next bi
+    Next fi
+End Sub
+
 
 Private Function MIRRegisterStaticClassMembers(ByRef ps As ParseState, ByRef module As MIRModule, ByRef errText As String) As Integer
     Dim i As Integer
@@ -921,6 +944,8 @@ Function MIRBuildModuleFromAST(ByRef ps As ParseState, ByRef moduleOut As MIRMod
 
     ' S-160: istisna rutin sinirini gecer (her kullanici cagrisindan sonra bayrak denetimi).
     If MIRExcPassModule(ps, moduleOut, tempSeed, errText) = 0 Then Return 0
+
+    MIRNormalizeBooleanNegationResults moduleOut
 
     If MIRFinalizeCfg(moduleOut, errText) = 0 Then Return 0
 

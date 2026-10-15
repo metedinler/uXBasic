@@ -29,20 +29,16 @@ Type ExecVar
     arrayLower As Integer
     arrayUpper As Integer
     arrayBytes As LongInt
-    ' S-071: raw, declared-width storage for a scalar whose address escaped
-    ' through VARPTR (es.vars is a fixed array, so this cell's address is
-    ' stable). ExecValue keeps separate int/u64/float fields and which one is
-    ' "live" depends on the RUNTIME value type of the last assignment -- a
-    ' declared-I64 variable holding a small literal lives in intValue while
-    ' VARPTR used to point at u64Value -- so the value's own fields are not
-    ' the variable's typed storage. See ExecVarPinStore/PinLoad.
+    ' Stable, declared-width storage for VARPTR and native PEEK/POKE.
     pinned As Integer
     pinWidth As Integer
     pinType As String
     pinCell(0 To 15) As UByte
-    ' S-167: BYREF parametre cagiranin yuvasinin takma adidir: 0 degilse bu yuva yalniz bir ad
-    ' tasir, ExecFindVar (refIdxPlus1 - 1) yuvasini dondurur. Hedef daima daha eski bir yuvadir.
+    ' BYREF parameters alias the caller slot.  Zero means an ordinary slot.
     refIdxPlus1 As Integer
+    ' DIM ownership marker used to distinguish the same declaration from a
+    ' later local shadow with the same name.
+    dimDeclNodePlus1 As Integer
     ' typeBinding As TypeBinding
 End Type
 
@@ -51,14 +47,8 @@ Type ExecArray
     bounds(Any) As Integer  ' lower/upper pairs
     elements(Any) As ExecValue
     totalElements As Integer
-    ' S-036: for arrays whose element type is a plain native scalar (I8..U64,
-    ' F32/F64, PTR/BOOL -- see ExecDeclTypeIsNativeScalar), indexed reads/
-    ' writes AND VARPTR/PEEK/POKE/MEMCOPY/MEMFILL all go through this one
-    ' tightly-packed raw byte buffer instead of `elements()`, so real
-    ' byte-based pointer arithmetic (VARPTR(arr) + i*elemStride) lands on the
-    ' same storage ordinary array access uses -- no second, VM-mirrored copy.
-    ' `elements()` stays untouched/unused for such arrays. Aggregate/class
-    ' element arrays keep using `elements()` exactly as before (isNativeScalar=0).
+    ' Native scalar arrays use one tightly packed byte store for indexed access
+    ' and VARPTR/PEEK/POKE so both views address the same storage.
     isNativeScalar As Integer
     elemStride As Integer
     rawData(Any) As UByte
@@ -133,10 +123,6 @@ Type ExecFfiAllowEntry
     signerText As String
 End Type
 
-' Open-addressing hash slot indexing ffiAllowEntries by dll|symbol|signature key.
-' headIdx/tailIdx point into ffiChainNext so every entry sharing a key (e.g. the
-' same symbol allowlisted under multiple calling conventions) is still visited,
-' in original append order, without rescanning the whole entries array.
 Type ExecFfiIndexSlot
     used As Integer
     key As String
@@ -173,9 +159,6 @@ Type ExecRoutineDef
     routineKind As String
 End Type
 
-' Open-addressing name -> routineDefs index. Registration already rejects
-' duplicate names (case-insensitive, dot/underscore-normalized), so a single
-' slot per key (no chaining) is enough.
 Type ExecRoutineIndexSlot
     used As Integer
     key As String
@@ -192,9 +175,6 @@ Type ExecRuntimeContext
     routineIndexCap As Integer
     routineIndexCount As Integer
     callContextDepth As Integer
-    ' Activation-record boundaries for the legacy ExecState interpreter.
-    ' Each routine call appends locals after its frame base; lookup searches
-    ' the newest frame first, then enclosing frames/globals.
     callFrameBase(0 To 63) As Integer
     callReturnValue As Integer
     callReturnValueEx As ExecValue
@@ -245,9 +225,12 @@ Type ExecRuntimeContext
 End Type
 
 Type ExecState
-    vars(0 to 255) As ExecVar
+    ' Keep the legacy fixed layout, but leave enough slots for ordinary large
+    ' modules. Slot tables remain independently capped at 256.
+    vars(0 to 1023) As ExecVar
     count As Integer
     nextVarAddr As UInteger
+    variableStorageError As String
     fileIo As UxbFileRuntime
     consts(Any) As ExecConstEntry
     constCount As Integer

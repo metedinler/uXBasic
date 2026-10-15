@@ -4,6 +4,8 @@
 #include once "interp_error_codes.fbs"
 #include once "../../semantic/library_type_contract.fbs"
 #include once "library_payload.fbs"
+#include once "../../common/float_integer_conversion.fbs"
+#include once "../../common/type_storage_contract.fbs"
 
 Const UXB_VAL_VOID As String = "VAL_VOID"
 Const UXB_VAL_BOOL As String = "VAL_BOOL"
@@ -81,7 +83,8 @@ Private Function UXBInterpU(ByVal textValue As String) As String
 End Function
 
 Function UXBInterpCanonicalType(ByVal typeText As String) As String
-    Dim t As String = UXBInterpU(typeText)
+    Dim t As String = UXBInterpU(UXBStep3StorageType(typeText))
+    If Left(t, 5) = "TYPE_" Then t = Mid(t, 6)
     Dim parameterPos As Integer = InStr(t, "(")
     If parameterPos > 1 And Right(t, 1) = ")" Then t = Trim(Left(t, parameterPos - 1))
     Select Case t
@@ -173,7 +176,7 @@ End Function
 
 Function UXBInterpApplyDeclaredType(ByVal sourceValue As UXBInterpValue, ByVal declaredTypeRaw As String) As UXBInterpValue
     Dim v As UXBInterpValue = sourceValue
-    Dim declaredType As String = UXBInterpU(declaredTypeRaw)
+    Dim declaredType As String = UXBInterpU(UXBStep3StorageType(declaredTypeRaw))
     If declaredType = "" Then Return v
     If Left(declaredType, 5) = "TYPE_" Then declaredType = Mid(declaredType, 6)
 
@@ -208,6 +211,13 @@ Function UXBInterpApplyDeclaredType(ByVal sourceValue As UXBInterpValue, ByVal d
 
     Dim rawBits As ULongInt
     rawBits = IIf(v.kind = UXB_VAL_U32 Or v.kind = UXB_VAL_U64, v.uintValue, CULngInt(v.intValue))
+    If v.kind = UXB_VAL_F32 Or v.kind = UXB_VAL_F64 Then
+        Select Case declaredType
+        Case "U8", "UBYTE", "U16", "USHORT", "U32", "UINTEGER", "UINT", "ULONG", "U64", "ULONGINT", _
+             "I8", "BYTE", "SBYTE", "I16", "SHORT", "I32", "INTEGER", "INT", "LONG", "I64", "LONGINT"
+            If UXBFloatTruncateIntegerBits(v.floatValue, rawBits) = 0 Then Return UXBInterpValueError(22, "UXB_FLOAT_INTEGER_RANGE: floating value cannot be converted to an integer")
+        End Select
+    End If
     Select Case declaredType
     Case "U8", "UBYTE"
         v.kind = UXB_VAL_U32: v.uintValue = rawBits And &hFFULL: v.intValue = CLngInt(v.uintValue)
@@ -237,6 +247,10 @@ Function UXBInterpApplyDeclaredType(ByVal sourceValue As UXBInterpValue, ByVal d
         ElseIf v.kind <> UXB_VAL_F32 And v.kind <> UXB_VAL_F64 Then
             v.floatValue = CDbl(v.intValue)
         End If
+        ' F32 is a storage type, not only a display hint.  Keep the runtime
+        ' value at IEEE single precision before later arithmetic or casts read
+        ' its mirrored Double field (S-510).
+        v.floatValue = CDbl(CSng(v.floatValue))
         v.kind = UXB_VAL_F32
     Case "F64", "DOUBLE", "F80", "EXTENDED", "EXT"
         ' S-077: an unsigned source converts by its unsigned magnitude (2^64-1 is
