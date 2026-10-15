@@ -1,0 +1,42 @@
+- [Her kusur SORUN_TAKIP'a (2026-10-11)](feedback_her_kusur_sorun_takibe.md) — bulunan her kusur/sınır ayrı S-kaydı; sinirlar.txt → sorun_takibe_isle.py; testi gevşetmek çözüm değil; tasarımda olup kodda olmayan her şey kılavuzda ◇ HEDEF.
+- [Anlatım iddiaları da sınanır (2026-10-12)](feedback_anlatim_iddialari_da_sinanir.md) — kılavuzda örnek dışı cümle/tablo iddiaları dört motorda sınanır (parantezsiz SUB çağrısı, CONST, UNION örnekleri); iddia_denetle.py yöntemi.
+- [Kılavuz V2 üretimi 2026-10-08→14](project_uxb_kilavuz_v2_20261008.md) — uret.py + tuzaklar, referans 20261014_0253 (hat ardisik5.ps1 bitti), DERSLER: kapanışları değer düzeyinde sına; kitap örnekleri + külliyat yetmez, TAM MODEL PAKETLERİ de koş (GOSUB/GOTO bayat anlatımı böyle bulundu), açılan kayıtlar S-513…S-542, AST gerilemeleri S-535/539/540, ek_k_yaz3.py + K5 dosyaları, kalan işler.
+- [Tek dosya + köprü + eğitim 2026-10-07](project_uxb_tekdosya_koprusu_egitim_20261007.md) — uxb\tekdosyaklsoru, paketleyici31 (-F), env yolu, kopru_* zinciri, CPU LoRA koşusu, host.cmd düzeltmesi.
+# Memory Index
+
+- [Kod analizi + RAG zinciri 2026-10-06](project_uxb_kod_analiz_ve_rag_20261006.md) — uxb_kod_analiz/ek_amac/günlük zincir, legacy modül kök nedenleri, latest_summary tuzağı, OpenClaw tetik uyarısı.
+- [Groq/token/emir araçları: gerçek durum](project_groq_token_bridge_20260930.md) — 09-30 oturumunun "çalışıyor" iddiaları; 10-06'da neyin doğrulandığı (Groq evet, token_manager yeniden yazıldı, emir_* denenmedi).
+
+- [Git repo + MinGit](project_no_git_manual_zip_backups.md) — MinGit at %LOCALAPPDATA%\Programs\MinGit\cmd; origin metedinler/uXBasic, main 1 commit önde (07550bb, gönderilmemiş, gerçek e-postayla); placeholder identity in config; `git add -A` YASAK (15 427 yeni dosya); gönderme Mete onayı ister (2026-10-14 ölçüldü).
+- [uXBasic type naming rules](feedback_uxb_type_naming_rules.md) — no LONG/INTEGER/DOUBLE, no $#%! suffixes; conversion is I8(x)/U8(x)/F32(x).
+- [Dil Tanımı (tek kanonik belge) 2026-09-28](project_uxb_dil_tanimi_20260928.md) — YONERGE, alanlar/, birleştirici, ornek_dogrula, dis_danis; team = workflow + Codex CLI + Kimi/Gemini API; quota facts.
+- [Codex + a second Claude are concurrent collaborators](project_codex_concurrent_collaborator.md) — this session is "Claude 1"; check mtimes, avoid game/ without asking.
+- [User is not a programmer](user_not_a_programmer.md) — explain jargon in plain Turkish, negotiate before changes.
+- [uXBasic fix-plan decisions log](uxb_fix_plan_decisions_2026_09.md) — decide-then-fix workflow + running decision log from the 3 audits.
+- [Do once, near-perfect](feedback_do_once_near_perfect.md) — don't ship a fix just to check a box; favor complete implementations.
+- [dist deps kuralları; eski "git bozuk" bulguları ÇÖZÜLDÜ](project_git_infrastructure_broken.md) — .gitignore artık 69 satır, geçmiş var; geçerli kalan: dist\runtime_ext\deps ONNX kuralları (uxonnx2 1.18.1 dokunulmaz), build\ bilerek tutulur.
+- [uXBasic web-bridge vision](project_uxbasic_vision_web_bridge.md) — long-term goal: bidirectional native-exe/browser comms; guides need a WASM/JS/WAT working-commands list.
+- [Verify before destructive action](feedback_verify_before_destructive_action.md) — investigate root cause + blast radius, then ask one final explicit confirmation, every time.
+- [No placeholders, ever](feedback_no_placeholders_ever.md) — no stubs/TODOs/fake code under any name; see the whole picture before deciding a fix.
+- [Clean-build repair effort](uxb_clean_build_effort.md) — running log of pre-existing, unrelated build-order bugs found while rebuilding from scratch; fix every layer, root-cause only.
+- [Give frequent status updates](feedback_frequent_status_updates.md) — during long debugging loops, check in every few steps in plain Turkish, not just at the end.
+- [No Bash tool — use PowerShell](project_no_bash_tool_use_powershell.md) — Git for Windows was uninstalled (2026-09-07) after heavy Bash usage strained RAM; use PowerShell for all shell work here.
+- [uXBasic memory architecture (S-036)](uxb_memory_architecture_2026_09.md) — NATIVE=real memory primary, VIRTUAL=opt-in configurable RAM/disk region, single array backing storage.
+- [Harita/RAG araç değerlendirmesi 2026-09-19](uxb_map_tooling_evaluation_2026_09_19.md) — tree-sitter-freebasic %90 hata (kullanma), ctags ~%97 uyumlu, purpose %4.5 dolu, embed hızı.
+- [PowerShell "erase" alias trap](feedback_powershell_erase_alias_blocked.md) — any PowerShell command containing that word is rejected whole ("Remove-Item ... blocked"); use Edit/Write for such text.
+- [uXBasic memory architecture (S-036)](uxb_memory_architecture_2026_09.md) — see also the S-077/S-079/S-056 entries appended to the fix-plan decisions log (U64 rule, type ABI table, MemoryRef registry).
+- [Write status of every finding to the notebooks](feedback_notebooks_status_closed_open.md) — closed/partial/open/decision per S-xxx in ai_koordinasyon, continuously and at the end; never stop between items, pick the next one.
+- [build\ deletion permission](feedback_build_folder_deletion_permission.md) — Mete 2026-09-20: previous days' build\<date-time> run folders deletable when disk is needed; old reports only after asking him; rest of build\ protected.
+- [MIR interpreter perf + disk-full incident](project_mir_perf_and_disk_incident.md) — S-109: registry lookups memoized (string_memo.fbs), 100x faster; runaway PRINT loop filled C: (0.02 GB) — time-box probes, watch free disk.
+
+- [PowerShell tr-TR / -split / removal-text traps](feedback_powershell_culture_and_split_traps.md) — .ToUpper() gives İ (use *Invariant), never rewrite files from a -split result, removal-cmdlet text in a script is blocked, glued PRINT/log lines.
+- [S-146 Model D state 2026-09-26](project_s146_model_d_state_20260926.md) — step 1 done (auto-sync/LOCK/ATOMIC/MUTEX/UNSAFE, 3 engines); code map, pass order, open S-160/161/162.
+- [S-030 task model state 2026-09-25](project_s030_task_model_state_20260925.md) — Faz 1B/2A done, S-146 isolation, where code/tests live, open objections İ1–İ6, DLL rebuild rule.
+- [Konuşma arşivi + eski belgeler](feedback_arsiv_konusma_eski_belge.md) — transcript'leri asla silme; okunur kopya UXBc\claude_arsiv\konusmalar; eskiyen belgelerim eski_belgeler'e taşınır.
+- [OpenClaw uxb yöneticisi 2026-09-28](project_openclaw_uxb_manager_20260928.md) — Kimi ajanı + korumalı yama hattı + harita zinciri; exec izin listesi yerel modda UYGULANMIYOR.
+- [Claude otomasyon kurulumu 2026-09-27](project_claude_automation_setup_20260927.md) — hooks/izinler/skill'ler/motor-esitligi ajanı + MIMARI.md; derle/test yalnız tools\claude betikleriyle.
+- [OmniRoute + harita kurulumu 2026-09-24](project_omniroute_and_map_setup_20260924.md) — .mcp.json with ${OMNIROUTE_API_KEY}, uxb-harita skill, purpose-fill run, disk-full note.
+- [uxsdl3 finished 2026-09-23](project_uxsdl3_complete_20260923.md) — SDL3 wrapper complete (319 exports, 8 headless tests x 4 engines, guide in docs/); layout, generator, out-of-scope list; raylib 3D/Shaders still open.
+- [Eski AST-x64 bulguları 2026-10-14](project_uxb_eski_astx64_bulgulari_20261014.md) — S-524…S-542 işlendi (eski AST-x64 kusurları, AST gerilemeleri, GOSUB); S-157-L kapsamı: 32 yuvalık metin halkası (20 örneğin nedeni bilinir); yama yöntemi; ham dosya ai_koordinasyon\CLAUDE_ESKI_ASTX64_BULGULAR_20261014.md.
+- [Eski AST-x64 DONDURULMAZ (Mete 2026-10-14)](feedback_eski_astx64_dondurulmaz_20261014.md) — tüm motorlar gibi aynı sonucu verecek; açık ret ara durum; kusurlar (S-524…S-538, S-157-L, S-086, S-091) açık kalır; Codex uygular, ben altı yolda doğrularım.
+- [Dosya envanteri + temizlik + GitHub planı 2026-10-14](project_uxb_temizlik_github_plani_20261014.md) — reports 40 GB'ın 36,5 GB'ı DLL kopyası (34,72 GB SHA-256 doğrulandı, SİLİNMEDİ); kök neden S-117/G-ARAC-7; Mete'nin 8 kararı bekleniyor; belge ai_koordinasyon\DOSYA_ENVANTERI_VE_TEMIZLIK_ONERISI_20261014.md.
