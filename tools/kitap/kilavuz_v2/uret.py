@@ -377,7 +377,8 @@ def sorun_eslemesi_oku():
 SORUN_TAKIP_YOLU = os.path.join(KOK, "ai_koordinasyon", "SORUN_TAKIP.md")
 DURUM_KISA = {"YAPILDI-DOGRULANDI": "✔ kapandı", "YAPILDI": "✔ kapandı", "KISMEN-YAPILDI": "◐ kısmen", "KISMEN-DUZELTILDI": "◐ kısmen",
               "KISMEN-YAPILDI-DOGRULANDI": "◐ kısmen", "KISMI-YAPILDI": "◐ kısmen", "KISMI-DOGRULANDI": "◐ kısmen",
-              "ACIK": "açık", "KARAR-BEKLIYOR": "karar bekliyor", "KARAR-VERILDI-POLITIKA-BELGELENDI": "karar verildi"}
+              "ACIK": "açık", "KARAR-BEKLIYOR": "karar bekliyor", "KARAR-VERILDI-POLITIKA-BELGELENDI": "karar verildi",
+              "ACIK-TASARIM-KARARI-KAYITLI": "açık (tasarım onaylı)"}
 
 
 def sorun_durumlari_oku():
@@ -785,7 +786,9 @@ def kararlari_topla(sablonlar):
                 continue
             if not acik:
                 continue
-            if s.startswith("* "):
+            if s.startswith("* ") or s.startswith("- "):
+                # 2026-10-17: 02_derleme_cli.md bir biçimlendirici tarafından «- » madde imine çevrilmişti (karar bölümü yok sayılıyordu);
+                # iki imi de kabul etmek, şablonu yeniden biçimlendirmeye karşı dayanıklı kılar.
                 maddeler.append(s[2:].strip())
             elif s.startswith("  ") and s.strip() and maddeler:
                 maddeler[-1] += " " + s.strip()

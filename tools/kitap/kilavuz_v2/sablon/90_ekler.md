@@ -224,6 +224,12 @@ Bu kılavuz, `docs/tasarim` altındaki belgelerin **hedef sözleşmesini** bugü
 | `UXB_S502_F32_ARRAY_DIRECT_20261014_TR.md`, `UXB_S503_F32_STORAGE_20261014_TR.md`, `UXB_S510_S511_S512_F32_DEGER_PARITESI_20261014_TR.md` | `F32` dizi okuma, saklama yuvarlaması ve değer paritesi sözleşmesi | 4.3 (G-TIP-13 … G-TIP-27) |
 | `UXB_S508_FIX_TYPE_20261014_TR.md` | `FIX(x)` statik tür kuralı | 4.7 (G-TIP-18) |
 | `UXB_S464_BOTH_KARSILASTIRMA_KAPISI_20261014_TR.md` | `--interpreter-backend BOTH` karşılaştırma kapısı (`UXB_INTERPRETER_COMPARE_MISMATCH`, çıkış 25) | 2 (CLI), 1.6 |
+| `UXB_S550_S551_DATA_READ_RESTORE_VE_VERI_SABITLERI_20261015_TR.md` | Etiketli `DATA` / `READ` / `RESTORE` (BASIC tarzı) ve Python tarzı veri sabitleri (dizi, `LIST`, `DICT`, `SET`); Mete'nin 2026-10-15 kararı, tasarım onaylı, uygulanmadı | 10.5 (G-VERI-14, G-VERI-15) |
+| `UXB_S544_S549_S564_DECLARE_DOSYA_TUTAMACI_NULL_20261015_TR.md` | Sıkı `DECLARE` kuralı, `FILE_HANDLE` ve `FREEFILE`, `NULL` / `NOTHING`; `NONE` / `NODE` eklenmez; çoklu kalıtım son onay bekliyor | 8.5, 13.2, 4.4, 11.12 (G-YORDAM-9, G-DOSYA-9, G-DOSYA-10, G-TIP-30, G-TIP-31) |
+| `UXB OPP SISTEMI TASARIM VE TARTISMALARI.md` | Mete'nin OOP tasarım konuşması: çoklu kalıtım, `THIS` / `ME` / `SUPER[Taban]`, karışımlar, motorlara indirgeme, eksik ve deneysel özellikler | 11.13 (G-HEDEF-31 … G-HEDEF-40) |
+| `uXBasic_OOP_Tam_Sistem_Denetimi_2026-10-16.md` | OOP kaynak denetimi (K-01 … K-12, P0 … P3); her bulgu altı yolda denendi, sonuç 11.13.1'de | 11.13 (G-NESNE-37, G-JS-15, G-JS-16, G-WASM-26, G-TIP-32, G-HIZ-4) |
+| `UXB_S555_COKLU_KALITIM_B_VE_CAKISMA_DENETIMI_20261016_TR.md` | Çoklu kalıtım (B), çakışma çözüm cümleleri, tanı kodları, aşamalar M0 … M3, kabul testleri T1 … T20 | 11.12, 11.13 (G-NESNE-30, G-HEDEF-40) |
+| `ai_koordinasyon/OOP_DUZELTME_PLANI_20261016.md` | OOP düzeltme planı: bulguların doğrulanması, iş paketleri F1 … P4, bu turda yapılan düzeltmeler | 11.13 |
 
 ## Ek J. Sorunların düzeltme sırası
 

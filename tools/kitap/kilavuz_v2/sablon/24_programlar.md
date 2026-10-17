@@ -42,7 +42,7 @@ Bu programda **bilerek** yapılan seçimler, her biri bir sınırdan kaçınır:
 
 | Teknik | Not |
 |---|---|
-| Karşılıklı özyineleme | `Toplam` → `Terim` → `Carpan` → `Toplam`; `DECLARE` yazılmaz (Bölüm 8.4) |
+| Karşılıklı özyineleme | `Toplam` → `Terim` → `Carpan` → `Toplam`; sonra tanımlanan `Toplam` önden `DECLARE FUNCTION` ile bildirilir (sıkı kural, Bölüm 8.5) |
 | Karakter karşılaştırması | `c >= "0" AND c <= "9"` metin karşılaştırmasıdır; üç motorda aynı çalışır |
 | Ondalık sayı | Tam kısım basamak basamak, kesir `olcek` ile toplanır (`1.5+2.25 = 3.75`) |
 | Hata taşıma | `THROW` en içteki işlevde, `TRY/CATCH` yalnız en dışta (`Hesapla`) |

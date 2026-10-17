@@ -29,7 +29,7 @@ END FUNCTION
 > **G-YORDAM-6, derleyici sürümüne göre iki durumdur.** *20261007 ikilisinde* (bu kılavuzdaki örneklerin ölçüldüğü sürüm) karara aykırı **sessiz bir kusurdu (✖ SESSİZ)**: `Selam "Ayse"`, `Selam` ya da `Artir n` yazarsanız derleyici hata **vermez**, çağrı da **yapılmaz** (dört motorda çıktı yoktur, `BYREF` değişkeni değişmez, çıkış kodu 0); çok argümanlı `Topla 3, 4` ayrıştırma hatasıdır; `o.Selam` AST'de hata verir, MIR ve JS'te hiçbir şey yapmaz, x64'te derlenmez.
 > *20261013 ve sonrası derlemelerde* (S-440, Codex) karar uygulanmıştır: parantezsiz çağrı yordam, işlev ve metot için dört motorda **ayrıştırmada reddedilir**: `UXB_CALL_PAREN_REQUIRED: CALL: missing ( after selam; use selam(...)` (çıkış 1). Bu kılavuzdaki her örnekte çağrılar zaten parantezlidir.
 * Sonucu kullanılmayan işlev çağrısı deyim olarak yazılabilir: `Kare(5)`.
-* `SUB`/`FUNCTION` tanımları dosyada çağrıdan **önce ya da sonra** olabilir; `DECLARE` zorunlu değildir.
+* `SUB`/`FUNCTION` tanımı çağrıdan **önce** yazılırsa `DECLARE` gerekmez. Tanım çağrıdan **sonra** gelecekse (ileri kullanım, karşılıklı özyineleme) çağrıdan önce `DECLARE` ile bildirilmelidir: **sıkı kural** (Mete, 2026-10-15; ayrıntı 8.5). Derleyici bu kuralı bugün denetlemez (G-YORDAM-9); yeni kodda kurala uyun.
 
 {{ORNEK:06_rutin/sub_function|baslik=SUB ve FUNCTION}}
 
@@ -66,7 +66,7 @@ END FUNCTION
 * `RETURN değer` işlevi bitirir ve değeri verir. Değerin tipi, bildirilen dönüş tipine uymalıdır: `RETURN 2.5` yazıp işlevi `AS I32` bildirirseniz
   derleme hatası alırsınız (`assignment requires explicit cast TYPE_F64 to TYPE_I32`).
 * `SUB`'dan erken çıkmak için değersiz `RETURN` yazılır (`EXIT SUB` ve `EXIT FUNCTION` **yoktur**).
-* **✖ SINIR (G-YORDAM-2):** `RETURN` hiç çalışmadan biten bir `FUNCTION` AST ve MIR'de `0`, x64'te rastgele bir değer döndürür. Her yolun `RETURN` ile bittiğinden emin olun.
+* **✖ SINIR (G-YORDAM-2, G-YORDAM-12):** `RETURN` hiç çalışmadan biten bir `FUNCTION` ya da değer döndüren `METHOD` AST ve MIR'de `0`, x64'te rastgele bir değer, JS'te `undefined` döndürür; WASM'da derlenmez, eski AST-x64'te son hesaplanan değeri verir. Eski AST-x64'te `F = değer` yazıp sonra başka deyim çalıştıran işlev de atanan değeri vermez. **Kaynakta düzeltildi** (2026-10-17, testler `function_result_zero`, `float_function_result`): işlevin sonuç değişkeni (işlev adı) türün sıfırıyla başlar; gövde `RETURN` olmadan biterse altı yolda bu değişken döner. Ölçüm ikilisinde her yolun `RETURN` ile bittiğinden emin olun.
 
 ## 8.4 Özyineleme
 
@@ -82,7 +82,7 @@ Bir işlev kendini çağırabilir. Her özyinelemeli işlevde **durma koşulu** 
 
 ### Karşılıklı özyineleme
 
-İki işlev birbirini çağırabilir. Bu derleyicide imzaları önceden bildirmek (`DECLARE`) **zorunlu değildir**, ama okunaklılık için tavsiye edilir;
+İki işlev birbirini çağırabilir. Sonra tanımlanacak işlevi, ilk çağrıdan önce `DECLARE` ile **bildirmeniz gerekir** (sıkı kural, 8.5; derleyici bugün yazmasanız da kabul eder);
 bu örnek beş hedefte de çalışan nadir programlardandır:
 
 {{ORNEK:46_kv_yordam/karsilikli_ozyineleme|baslik=DECLARE ile karşılıklı özyineleme}}
@@ -125,7 +125,7 @@ Bu derleyicide kullanımı: karşılıklı özyinelemeyi belirginleştirmek ve *
 | `DECLARE` var, tanım yok, çağrı da yok | hata yok (kullanılmayan bildirim) |
 | `DECLARE` var, tanım **yok**, çağrı var | ✖ **FARK**: AST ve MIR çalışma anında, x64 derlemede, JS yürütmede, eski AST-x64 bağlamada durur; **WASM hata vermez, `0` yazar** (G-DIL-7, G-WASM-23) |
 
-**Karar bekleniyor (S-544):** ileri kullanım derleme hatası mı olsun (sıkı kural), uyarı mı, yoksa isteğe bağlı mı kalsın? Sıkı kuralın bedeli küçüktür: kaynak metin sezgisiyle sayıldığında, rutin tanımlayan 66 örnek dosyasının 2'sinde, 133 test dosyasının 2'sinde ve 80 kütüphane kaynağının 1'inde tanımdan önce `DECLARE`siz çağrı vardır (toplam yaklaşık 5 dosya). **Yeni kod yazarken kuralı şimdiden uygulayın:** ileri kullanacağınız her rutin için tanımdan önce `DECLARE` yazın.
+**Karar (Mete, 2026-10-15): sıkı kural.** Tanımdan önce `DECLARE`siz kullanım **derleme hatası** olacaktır (◇ HEDEF, S-544; altı yolda aynı ortak tanı). Kural: **tanım çağrıdan önce gelmişse `DECLARE` gerekmez; tanım çağrıdan sonra geliyorsa (ya da başka modüldeyse) çağrıdan önce `DECLARE` yazılır; `DECLARE` imzası tanımla bire bir uyuşur** (bu son denetim bugün çalışır). Bedeli küçüktür: kaynak metin sezgisiyle sayıldığında, rutin tanımlayan 66 örnek dosyasının 2'sinde, 133 test dosyasının 2'sinde ve 80 kütüphane kaynağının 1'inde tanımdan önce `DECLARE`siz çağrı vardır (toplam 5 dosya); bu kılavuzdaki iki örnek (`sub_tanimdan_once`, `ifade_hesaplayici`) yeni kurala göre güncellendi ve yeniden doğrulandı. Görev yapılarına (`DECLARE THREAD …`) aynı kural, bu biçimler eklenince (S-395) uygulanır. Sözleşme ve kabul ölçütleri: `docs/tasarim/UXB_S544_S549_S564_DECLARE_DOSYA_TUTAMACI_NULL_20261015_TR.md`. **Yeni kod yazarken kuralı şimdiden uygulayın:** ileri kullanacağınız her rutin için tanımdan önce `DECLARE` yazın.
 
 ## 8.6 `STATIC` yerel değişken
 
@@ -167,12 +167,13 @@ Bir işlevin sonucu başka bir işlevin argümanı olabilir; `T(K(3), K(K(2)))` 
 
 * **Her çağrıyı parantezle yazın** (`Selam("Ayse")`, `Say()`, `o.Metot()`): parantezsiz çağrı 20261007'de sessizce hiçbir şey yapardı, 20261013 ve sonrasında derleme hatasıdır (G-YORDAM-6).
 * Bir **değer üretiyorsanız `FUNCTION`**, yalnız bir iş yapıyorsanız `SUB` yazın. Birden çok sonuç gerekiyorsa **`BYREF` çıkış parametreleri** kullanın (`Bol(a, b, BYREF bolum, BYREF kalan)`).
-* **Her işlevin her yolu `RETURN` ile bitsin** (G-YORDAM-2): `RETURN` çalışmadan biten işlev AST/MIR'de `0`, x64'te rastgele değer verir. Erken çıkış için `RETURN` yazın; `EXIT SUB`/`EXIT FUNCTION` yoktur.
+* **Her işlevin her yolu `RETURN` ile bitsin** (G-YORDAM-2, G-YORDAM-12): `RETURN` çalışmadan biten işlev ölçüm ikilisinde AST/MIR'de `0`, x64'te rastgele değer verir (kaynakta düzeltildi). Erken çıkış için `RETURN` yazın; `EXIT SUB`/`EXIT FUNCTION` yoktur.
+* **Gövdesi boş rutin (`SUB Taslak() : END SUB`) ölçüm ikilisinde bozuktu** (✖ ÇÖKME, G-YORDAM-11): AST çöker, MIR, x64 ve JS çağrıyı bulamaz, eski AST-x64 boş sınıf rutinini derleyemez (WASM doğru). **Kaynakta düzeltildi** (2026-10-17, test `tests/oop_parity/empty_routine_bodies`); ölçüm ikilisinde taslak rutine bir deyim koyun (`DIM bos AS I32`).
 * Argüman tipini **kendiniz dönüştürün** (`I32(x)`, `STR(n)`): tip uyuşmazlığı bugün çağrıda sessizce kabul edilir ve yanlış değer üretir (G-YORDAM-3, G-YORDAM-4).
 * Parametreye varsayılan değer yazmayın (yoktur); aynı adlı işlevi **parametre sayısıyla ayırmaya** çalışmayın, her işleve ayrı ad verin (G-YORDAM-1).
 * **Kaydı (`TYPE`) parametre olarak vermeyin**, kayıt döndürmeyin: alanları ayrı parametre ve `BYREF` çıkış olarak geçirin (G-VERI-6, G-VERI-3). Dizi parametresi her zaman başvuruyladır.
 * Özyinelemeli işleve **durma koşulunu ilk satıra** yazın. Derinliği küçük tutun (AST 100'den az, MIR 50'den az, x64 yaklaşık 8000); derin işleri döngüyle yazın (G-YORDAM-5).
-* Karşılıklı özyineleme için imzaları `DECLARE` ile önceden bildirmek zorunlu değildir, ama okunaklılığı artırır; çağrıdan sonra tanım yazmak da serbesttir.
+* İleri kullanacağınız ve karşılıklı özyinelemeli her rutini çağrıdan önce `DECLARE` ile bildirin (sıkı kural, 8.5); tanımı çağrıdan önce yazarsanız `DECLARE` gerekmez.
 * Çağrılar arasında durum saklamak için **`STATIC` yerel**; yalnız gerçekten paylaşılan durum için genel değişken kullanın.
 * Yerleşik işlev adıyla aynı adlı işlev yazmayın (G-DIL-9); kütüphane işlev adlarıyla aynı adlı değişken tanımlamayın (G-KUT-5).
 * Çağrıları iç içe yazabilirsiniz (`T(K(3), K(K(2)))`); okunaklılık için uzun zincirleri `|>` ile soldan sağa ya da ara değişkenlerle yazın.

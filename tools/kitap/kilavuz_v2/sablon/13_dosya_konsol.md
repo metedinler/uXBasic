@@ -32,8 +32,8 @@ Dosya **kanal numarası** (`#1`) ile açılır, yazılır ya da okunur, sonra ka
 | `CLOSE #n` | Kanalı kapat |
 
 * Kanal numarası bir değişkenle de verilebilir: `OPEN "x" FOR OUTPUT AS #f`. Numara bir `I32` değişkenden, bir `TYPE` alanından (`AS #k.no`) ya da ifadeden (`AS #(1 + 1)`) gelebilir; AST, MIR, x64 ve eski AST-x64'te ölçüldü (`20261014_0253`).
-* **Tipli dosya tutamacı yoktur** (◇ HEDEF, G-DOSYA-10): Mete (2026-10-15) kanal numarası yerine bir değişkenin ya da bir `TYPE` değişkeninin verilebilmesini istedi. `DIM f AS FILE` `unknown type: FILE`, `DIM f AS FILE_HANDLE` ayrıştırma hatasıyla reddedilir; `OPEN "x" FOR OUTPUT AS f` (`#` işaretsiz) ve `f = OPEN(…)` biçimleri de yoktur. `FILE_HANDLE`, tasarımın 35 kanonik tipinden biridir (G-TIP-8).
-* **`FREEFILE` yoktur** (G-DOSYA-9): boş kanal numarasını bulan işlev olmadığı için numaraları kendiniz dağıtın.
+* **Tipli dosya tutamacı (◇ HEDEF, tasarım onaylandı 2026-10-15, G-DOSYA-10, S-549):** `DIM f AS FILE_HANDLE` gerçek bir tip olacak; `OPEN "x" FOR OUTPUT AS f` boş bir kanal numarasını kendisi seçip `f`ye verecek; `PRINT #f`, `INPUT #f`, `EOF(f)`, `LOF(f)` ve `CLOSE f` hem tutamaçla hem eski `#n` sayısıyla çalışacak; tutamaç bir `TYPE` alanı da olabilecek ve `#n` yazımı bozulmayacak. Bugün `DIM f AS FILE` `unknown type: FILE`, `DIM f AS FILE_HANDLE` bir ayrıştırma hatasıyla reddedilir; `OPEN "x" FOR OUTPUT AS f` (`#` işaretsiz) ve `f = OPEN(…)` biçimleri yoktur. `FILE_HANDLE`, tasarımın 35 kanonik tipinden biridir (G-TIP-8). Sözleşme: `docs/tasarim/UXB_S544_S549_S564_DECLARE_DOSYA_TUTAMACI_NULL_20261015_TR.md` Bölüm 2.
+* **`FREEFILE` (◇ HEDEF, tasarım onaylandı, G-DOSYA-9, S-548):** boş kanal numarasını döndürecek (`TIMER` gibi parantezsiz); bugün yoktur, numaraları kendiniz dağıtın.
 * **Dosyadan okunan her şey metindir**; sayı gerekiyorsa `CINT(VAL(satir))` ile çevrilir (bkz. örnek).
 * Kapatılmamış bir dosya program bitince sessizce bırakılır; `CLOSE` her zaman yazın.
 

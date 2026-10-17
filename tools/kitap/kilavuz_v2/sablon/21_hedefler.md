@@ -43,8 +43,9 @@ Grup grup tablo Bölüm 1.3'tedir. Düşük JS ve WASM sayıları iki nedenden g
 | `&H`, `&O`, `&B` sabitleri | ✔ | ✔ | ✔ | ⚠ `undefined` (G-JS-1) | ⚠ geçersiz WAT (G-WASM-9) |
 | `HEX`, `OCT`, `BIN` | ✔ | ✔ | ✔ | ✔ | ⚠ boş ya da `0` (G-WASM-4) |
 | `TRY` / `THROW` (yordamdan fırlatma) | ✔ | ✔ | ✔ | ⚠ yakalanmaz (G-JS-2) | — |
-| `CLASS`, `NEW` | ✔ | ✔ | ✔ | ✔ | ⚠ alanlar `0` okunur (G-WASM-1) |
-| `INTERFACE` çağrısı | ✔ | ✔ | ✔ | ⚠ `nan` (G-JS-3) | — |
+| `CLASS`, `NEW` | ✔ | ✔ | ✔ | ✔ | ⚠ alanlar `0` okunur (G-WASM-1; kök neden G-WASM-26, kaynakta düzeltildi) |
+| `INTERFACE` çağrısı | ✔ | ✔ | ✔ | ⚠ `nan` (G-JS-3; asıl neden G-JS-15, kaynakta düzeltildi) | — |
+| Sınıf alanını yazmadan okumak (`x.n = x.n + 1`) | ✔ sıfırdan başlar | ✔ | ✔ | ⚠ `undefined` / `nan` (G-JS-17; kaynakta düzeltildi) | ✔ |
 | `MAGIC` ile `+`, `AND`, `OR`, `XOR` işleci | ✔ | ✔ | ✔ | ✔ (`20261013` ve sonrası; öncesinde `AND`/`OR`/`XOR` açık ret) | ⚠ `0` (G-WASM-6) |
 | `DICT`, `SET` | ✔ | ✔ | ✔ | ⚠ `TRUE` yerine `1` (G-JS-5) | ⚠ boş (G-WASM-3) |
 | `ATOMIC` | ✔ | ✔ | ✔ | — | ⚠ boş ya da `0` (G-WASM-5) |
@@ -281,7 +282,7 @@ Daha eski bir politika (`docs/KEYWORD_LAYER_MATRIX_POLICY.md`, 2026-05-29) anaht
 | `I32`, `F64` | yerel | `Number` | `i32`, `f64` | ✔ (WASM'da `F64` yok, G-WASM-7) |
 | `I64`, `U64` | yerel | `BigInt` | `i64` | JS `Number`'a düşer (G-JS-4); WASM 32 bit sığmazsa geçersiz WAT (G-WASM-9) |
 | `F80`, `F128`, `BIG*` | yerel / çalışma zamanı sağlayıcısı | çalışma zamanı nesnesi | doğrusal bellekte çalışma zamanı | yalnız AST'de kısmen (G-TIP-9) |
-| `CLASS` | nesne + vtable | çalışma zamanı sınıfı | yerleşim + tip/vtable kimliği | JS'te metotla alan yazma ✖ (G-JS-13); WASM'da alanlar `0` (G-WASM-1) |
+| `CLASS` | nesne + vtable | çalışma zamanı sınıfı | yerleşim + tip/vtable kimliği | JS'te metot argümanları düşer (G-JS-13 → G-JS-15, kaynakta düzeltildi); WASM'da alanlar `0` (G-WASM-1 → G-WASM-26, kaynakta düzeltildi) |
 | `THREAD` / `PARALEL` | işçi çalışma zamanı | Worker havuzu | WASM iş parçacığı / konak işçisi | JS ve WASM'da yok (G-GOREV-6, G-GOREV-7, G-HEDEF-12) |
 | `ATOMIC` | yerel atomik | `SharedArrayBuffer` + `Atomics` | WASM atomikleri | JS yok, WASM boş çıktı (G-WASM-5) |
 | `PTR` / MemoryRef | yerel / MemoryRef | `DataView` / MemoryRef | doğrusal bellekte ofset | `VARPTR` JS'te açık ret (G-JS-10) |

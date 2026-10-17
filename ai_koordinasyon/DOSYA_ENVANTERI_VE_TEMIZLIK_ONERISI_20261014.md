@@ -354,7 +354,7 @@ Yazım saati: 2026-10-15 14:50. Yukarıdaki bölümler 14 Ekim'deki öneriyi old
 | 5 | Tasarım belgeleri GitHub'da yayınlansın mı | **Karar değişti:** "tasarım ve tüm dokümantasyon gitsin" | **Yayınlandı** (`docs/tasarim`, `ai_koordinasyon`, `spec`; yalnız okumak için, lisans vermez) |
 | 6 | Git kimliği | noreply önerisi kabul | Tüm yayın commit'leri `metedinler <62749570+metedinler@users.noreply.github.com>` |
 | 7 | Gönderme yolu | yeni dal önerisi kabul | `yayin/20261015` (main'e doğrudan itilmedi) |
-| 8 | DLL paketleri GitHub Release olsun mu | "önce üçüncü taraf lisans kontrolü" önerisi kabul | **Yapılmadı:** lisans kontrolü bekliyor; hiçbir DLL gönderilmedi |
+| 8 | DLL paketleri GitHub Release olsun mu | Önce "önerdiğin gibi"; sonra (akşam): "DLL paketlerini Release olarak yükle; lisans umrumda değil, seçerken lisanslara göre seçtim" | **Yapıldı (2026-10-15 18:45):** `libraries-win64-20261015` Release'i, 7 varlık, 54,5 MB (bölüm 11.6) |
 
 Ek istek: Claude, Codex ve ChatGPT konuşma ve hafıza dosyaları da gitsin (dosya başına 100 MB sınırı). **Yapıldı** (`konusma_arsivi/`).
 
@@ -416,3 +416,21 @@ Parçaların art arda eklenmesi, canlı kaydın dondurulduğu andaki (2026-10-15
 **Gönderim kesintileri (kök neden: zayıf yukarı yön bağlantısı).** İlk tek parçalı ek (28 MB sıkıştırılmış paket) iki kez `HTTP 408` / `curl 55 Connection was reset` ile düştü, bir an `github.com` adı çözülemedi; bağdaştırıcı Wi-Fi, bağlantı hızı 29 Mbit/sn; 46 MB'lık ilk parça ≈ 64 sn'de gitti, aynı boyutlu ikinci parça iki denemede de koptu (89 ve 166 sn sonra). Hiçbir yarım veri uzağa işlenmedi (uzak uç her seferinde değişmeden kaldı). Çözüm: arşiv ≤ 16 MiB'lık parçalara ve birer commit'e bölündü, commit'ler tek tek gönderildi (her biri 7–25 sn). Yerel nesne veri tabanında gönderilmeyen, hiçbir ref'in göstermediği birkaç ara commit (örn. `ae03644`, `5365bdb`) kalır; zararsızdır.
 
 **Ders:** büyük dosyalı gönderiler yukarı yön bağlantısına göre küçük paketlere (≈ 3 MB sıkıştırılmış) bölünmeli; `GIT_TERMINAL_PROMPT=0`, `git push --dry-run` ve gönderiden sonra `git ls-remote` ile uç doğrulanmalı.
+
+### 11.6 DLL paketleri GitHub Release olarak yüklendi (2026-10-15, 18:30–18:46)
+
+Mete'nin kararı: "DLL paketlerini GitHub Release olarak yükle; lisans çok umrumda değil, seçerken lisanslara göre seçtim; e-postamın belgelerde geçmesi sorun değil; GitHub hesabını bugüne dek yalnız ben, Claude, Codex ve GitHub Copilot kullandı."
+
+| Konu | Değer |
+|---|---|
+| Release | `https://github.com/metedinler/uXBasic/releases/tag/libraries-win64-20261015` · ad "uXBasic library DLL packages (Windows x64, 2026-10-15)" |
+| Etiket ve hedef | `libraries-win64-20261015` → `750b14d` (`yayin/20261015` ucu). `Latest` etiketi eskisi gibi `v0.1.0-preview.20260924`'te kaldı (yeni Release `latest=false` ile açıldı) |
+| Kaynak | `dist\libraries\bin` (58 dosya: 57 DLL ve `libuxscalar_module.dll.a`) ve `dist\libraries\deps` (49 DLL); toplam 107 dosya, 152 MB ham. Git bu klasörleri izlemiyor |
+| Varlıklar (7, toplam 54,5 MB) | `uxbasic-libraries-bin-…zip` (7,8 MB) · `…-deps-…zip` (15,2 MB, 45 DLL) · `…-deps-duckdb-…zip` (12,1 MB) · `…-deps-openblas-…zip` (14,1 MB) · `…-deps-onnxruntime-…zip` (5,3 MB) · `SHA256SUMS.txt` · `DLL_LISTESI.txt` (107 dosyanın SHA-256'sı) |
+| Düzen | Zip içi yollar `bin/…` ve `deps/…`; hepsi aynı klasöre açılınca `dist\libraries` düzeni oluşur. Ağır ve isteğe bağlı bağımlılıklar (DuckDB, OpenBLAS, ONNX Runtime) ayrı zip'tedir; bölme aynı zamanda zayıf yukarı yön bağlantısında yeniden denemeyi ucuz tutar |
+| Doğrulama | Her zip yazıldıktan sonra açılıp kaynakla bayt bayt karşılaştırıldı; GitHub'ın hesapladığı SHA-256 ile yerel özet **7/7 eşleşti**; kimliksiz (herkesin gördüğü) yoldan iki dosya indirilip yerelle aynı bulundu; taslak yayınlanmadan önce boyutlar denetlendi |
+| Yöntem | `gh` (kurulu; `metedinler` olarak oturum açık): önce **taslak** Release, dosyalar tek tek (3 denemeye kadar; hepsi ilk denemede gitti, 0,3–1,2 MB/sn), doğrulama, sonra yayın. Belirteç okunmadı, yazılmadı |
+| Lisans | Kontrol yapılmadı (Mete istemedi). Sürüm notu `THIRD_PARTY_NOTICES.md` ve `LICENSE.md`'ye işaret eder |
+| Kapsam dışı | `dist\libraries\{lib, sdk, variants, manifests}`, `dist\runtime_ext` (1 GB; ONNX ve DuckDB'nin FreeBASIC çalışma zamanı uzantıları) ve `dist\uxb_runtimes.zip`; istenirse ayrı bir Release olur |
+
+Geri alma: Release GitHub arayüzünden ya da `gh release delete libraries-win64-20261015 --cleanup-tag` ile kaldırılır (kaldırmak kalıcıdır; bu belge yalnız yolu not eder).

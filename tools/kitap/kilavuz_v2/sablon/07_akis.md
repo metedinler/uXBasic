@@ -164,6 +164,10 @@ Virgüllü bir liste verildiğinde ikisinin **ne zaman hesaplama yaptığı** fa
 > Beklenen `6`; AST `1` yazar, MIR, MIR-x64, JS ve WASM `6` yazar. `DO WHILE` ve `WHILE … WEND` içinde de aynıdır. Döngü dışındaki `GOSUB` ve alt programın kendi içindeki döngü doğrudur.
 >
 > **✖ SINIR (G-AKIS-5):** Önceden `GOSUB` yapılmamış bir `RETURN` her yolda başka davranır: AST `exec: RETURN used without GOSUB (9301)` ile durur (çıkış 5); MIR, MIR-x64, JS ve WASM **sessizce** biter (çıkış 0, ileti yok, sonraki satırlar çalışmaz); eski AST-x64 erişim ihlaliyle çöker. Her `RETURN`'ün bir `GOSUB`'tan geldiğinden emin olun; ana akışı etiketlerden `END` ile ayırın.
+>
+> **✖ SINIR (G-AKIS-6, yalnız AST):** Etiketi ve `GOTO`yu bir `SUB` **içinde** yazarsanız AST `exec: GOTO target not found` ile durur (çıkış 5); MIR, MIR-x64, eski AST-x64, JS ve WASM doğru çalışır (`SUB` içinde ileriye ve geriye `GOTO`: `2` ve `3`). Modül düzeyindeki etiket altı yolda çalışır. **Etiketleri modül düzeyinde kullanın**; etiketli `DATA` tasarımı da böyledir (Bölüm 10.5).
+>
+> **✖ SINIR (G-AKIS-7):** Bir `RETURN` satırından hemen sonra gelen etiketli satır, `GOTO` ile ulaşılabilir olsa da altı yolda `semantic: unreachable statement after RETURN_STMT` ile reddedilir (`PRINT` sonrasında etiket reddedilmez). Etiketten önceki `RETURN`'ü bir `IF` içine alın.
 
 > **Tavsiye:** Yeni kodda `GOTO`/`GOSUB` yerine döngü, `IF` ve `SUB` kullanın. `GOSUB`'u en azından bir döngünün içinden çağırmayın (G-AKIS-4).
 

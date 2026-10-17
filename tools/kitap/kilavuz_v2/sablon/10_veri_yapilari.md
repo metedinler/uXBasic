@@ -87,6 +87,8 @@ ile çevrilir ya da doğrudan `PRINT`/`FOR EACH` ile kullanılır.
 
 > **Sınır (G-KOLEKSIYON-1):** Koleksiyondaki **metin** değeri doğrudan `PRINT LISTGET(l, 1)` ile yazdırırsanız motorlar farklı davranır (AST `0`, MIR doğru, x64 çöp sayı). Metinleri
 > `FOR EACH s IN l` ile (typed `STRING` değişkenle) okuyun. `DICT` değeri için `DICTGET` sonucu doğrudan `STRING` değişkene atanamaz (`explicit cast TYPE_OBJECT to TYPE_STRING`).
+>
+> **Sınır (G-KOLEKSIYON-7):** `PRINT DICTHAS(d, "a")` ve `PRINT SETHAS(s, 5)` doğru değeri AST, MIR ve x64'te `-1`, JS'te `1` yazdırır (`IF` içinde dördü de doğrudur; karşılaştırma işleçlerinin doğrusu altı yolda `-1`dir). WASM `SETHAS`i hata vermeden `0` yazar (koleksiyon işlevleri WASM'da bağsızdır, G-WASM-23). Sonucu `PRINT` etmek yerine `IF` ile sınayın.
 
 ### Koleksiyonların iç içe kullanımındaki sınırlar
 
@@ -98,9 +100,9 @@ Koleksiyonlar birbirinin içine konabilir (Bölüm 22.4'te tablo halinde), ama d
 * **Tipli koleksiyon yoktur** (◇ HEDEF, G-HEDEF-26): `DIM l AS LIST OF I32` "unknown symbol: of" ile reddedilir (iletide tipli koleksiyondan söz edilmez); `n = LISTGET(l, 0)` ile `I32` değişkene doğrudan atanamaz ("explicit cast TYPE_OBJECT to TYPE_I32"). Değeri `FOR EACH v IN l` ya da `CINT(LISTGET(l, i))` ile okuyun.
 * **`TYPE` kaydı `LIST` içinde saklanamaz** (G-KOLEKSIYON-5): `LISTADD(l, kayit)` hata vermez, ama okunan kaydın alanları `0` gelir. Kayıtları kayıt dizisinde tutun.
 
-### Veriyi kısa yoldan tanımlamak: bugün yok
+### Veriyi kısa yoldan tanımlamak (◇ HEDEF: tasarım onaylandı, uygulanmadı)
 
-Mete (2026-10-15) değişkenlere, dizilere ve `LIST`, `DICT`, `SET`, demet, veri çerçevesi gibi yapılara **Python tarzı** parantez, süslü parantez ve köşeli parantezle veri tanımlanabilmesini; eski `DATA` / `READ` / `RESTORE` komutlarının da bu yapılara veri yerleştirmekte kullanılabilmesini istedi. Altı yolda ölçülen durum (`20261014_0253`):
+Mete (2026-10-15) iki şey istedi ve tasarımlarını onayladı: **(1)** değişkenlere, dizilere ve `LIST`, `DICT`, `SET` yapılarına Python tarzı parantez, süslü parantez ve köşeli parantezle kolayca veri yazılabilmesi; **(2)** klasik BASIC'in `DATA` / `READ` / `RESTORE` deyimlerinin **etiketli** olarak eklenmesi: program içi veri BASIC tarzında okunacak, dizilere ve koleksiyonlara aktarılabilecek (büyük veriler zaten dosyalardan okunacağı için bu, BASIC uyumluluğu ve kolaylık içindir). Altı yolda ölçülen bugünkü durum (`20261014_0253`):
 
 | İstek | Örnek | Bugün |
 |---|---|---|
@@ -112,14 +114,57 @@ Mete (2026-10-15) değişkenlere, dizilere ve `LIST`, `DICT`, `SET`, demet, veri
 | Veri çerçevesi | `DIM df AS DATAFRAME` | ✖ `unknown type: DATAFRAME`; `uxdataframe` kütüphanesi işlev tabanlıdır — G-VERI-16 |
 | Klasik veri satırları | `DATA 10, 20, 30`, `READ a`, `RESTORE` | ✖ üçü de yok: `UXB_CALL_PAREN_REQUIRED` — G-VERI-14 |
 
-`DATA` bir anahtar sözcük bile değildir: `DIM data AS I32 = 5` altı yolda çalışır. Bu komutların eski sözcük çözümleyicide bulunduğu bilgisi (Mete) bu çalışmada kaynakla doğrulanamadı; bugünkü yüzey kaydında ve 239 anahtar sözcüğün listesinde (Ek A) yoktur. Koleksiyonlar bugün yalnız işlevlerle kurulur (`LISTADD`, `DICTSET`, `SETADD`, yukarıdaki tablolar). Hepsi ◇ HEDEF'tir; kayıtlar: S-550 … S-552.
+`DATA` bir anahtar sözcük bile değildir: `DIM data AS I32 = 5` altı yolda çalışır ve tasarım bu adlı değişkenleri bozmaz (aşağıda). Bu komutların eski sözcük çözümleyicide bulunduğu bilgisi (Mete) kaynakla doğrulanamadı; bu yüzden eski uygulama aranmadan **yeniden tasarlandı**. Koleksiyonlar bugün yalnız işlevlerle kurulur (`LISTADD`, `DICTSET`, `SETADD`, yukarıdaki tablo). Ayrıntılı sözleşme, tanı kodları ve kabul ölçütleri: `docs/tasarim/UXB_S550_S551_DATA_READ_RESTORE_VE_VERI_SABITLERI_20261015_TR.md`. Kayıtlar: S-550, S-551, S-552.
+
+**Hedef 1: veri sabitleri (S-551).** Sabit **hedef tipe göre** yorumlanır. Kanonik yazımlar: dizi `{1, 2, 3}`, `LIST` `[1, "iki", 3.5]`, `SET` `{1, 2, 3}`, `DICT` `{"a": 1, "b": 2}`; hedef tipin bilindiği yerde üç ayraç da (`( )`, `{ }`, `[ ]`) kabul edilir, iç içe öğede ayraç belirler. Sabit, eşdeğer `LISTADD` / `DICTSET` / `SETADD` çağrılarına indirgenir; böylece altı yol aynı çalışır. Kapsam dışı: `TUPLE`, `DATAFRAME` (S-552), `TYPE` kaydı sabiti, tür çıkarımı. Önce çözülmesi gerekenler: sözcük çözümleyicide `{ }` ve `[ ]`, MIR-x64'te `CONST` adlı dizi sınırı (S-326), dizi bildiriminde skaler başlangıç değerinin sessiz yok sayılması (S-568).
+
+```basic
+' ◇ HEDEF: bugün derlenmez
+DIM a(2) AS I32 = {1, 2, 3}
+DIM l AS LIST = [1, "iki", 3.5]
+DIM s AS SET = {1, 2, 3}
+DIM d AS DICT = {"a": 1, "b": 2}
+```
+
+**Hedef 2: etiketli `DATA` / `READ` / `RESTORE` (S-550).** `DATA` dosyanın düzeyinde sabitleri sıralar; `ad:` etiketi bir giriş noktası olur; `RESTORE etiket` okuma yerini oraya alır, `RESTORE` tek başına en başa; `READ` sıradaki öğeleri değişkenlere, dizi elemanlarına ve alanlara okur. Tür uyuşmazlığı ve verinin bitmesi sessiz değil, açık çalışma anı hatasıdır (`UXB_DATA_TYPE_MISMATCH`, `UXB_DATA_EXHAUSTED`). `DATA`, `READ`, `RESTORE` yalnız deyim başında sözcüktür; bu adlı değişken, parametre ve metot adları bozulmaz.
+
+```basic
+' ◇ HEDEF: bugün derlenmez
+Renkler:
+    DATA 3, "kirmizi", "yesil", "mavi"
+Puanlar:
+    DATA 2, "ali", 90, "veli", 75
+
+DIM n AS I32
+DIM i AS I32
+DIM ad AS STRING
+DIM p AS I32
+DIM renkler AS LIST
+DIM puan AS DICT
+
+RESTORE Renkler
+READ n
+FOR i = 1 TO n
+    READ ad
+    LISTADD(renkler, ad)
+NEXT
+
+RESTORE Puanlar
+READ n
+FOR i = 1 TO n
+    READ ad, p
+    DICTSET(puan, ad, p)
+NEXT
+```
 
 ## 10.6 Dizi yapısı için ek sınırlar
 
 | Konu | Durum |
 |---|---|
 | Tüm diziyi kopyalama `b = a` | ✖ SINIR (G-VERI-4): MIR kopyalar, AST ve x64 **kopyalamaz** (sessiz). Elemanları döngüyle kopyalayın |
-| Dizi ilk değer listesi `= {1, 2, 3}` | ✖ Yoktur |
+| Dizi ilk değer listesi `= {1, 2, 3}` | ✖ Yoktur; **◇ HEDEF** (tasarım onaylandı, 10.5) |
+| Dizi bildiriminde skaler başlangıç değeri `DIM a(2) AS I32 = 7` | ✖ **SESSİZ** (G-VERI-18): AST, MIR, x64 ve JS değeri yok sayar (`a(0)` = `0`); eski AST-x64 yalnız ilk elemanı doldurur (`7 0 0`); WASM yürütme anında `UXB_WASM_ARRAY_MISSING` ile durur. Bildirimde `= değer` yazmayın, elemanlara ayrı atayın |
+| `CONST` adıyla dizi sınırı (`CONST N = 6`, `DIM a(N)`) | ✖ MIR-x64 derlemez (G-DIL-1); WASM'da dizinin `UBOUND`'u başka kullanım yoksa sessizce `0` verir (✖ SESSİZ, G-WASM-25). Sınırı sayısal sabitle yazın |
 | `DIM a(n)` değişken sınır | AST/MIR ✔; x64 yalnız sayısal sabit kabul eder (G-DIL-1) |
 
 ## 10.7 Benzerlerinden farkı

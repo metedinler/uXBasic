@@ -3088,3 +3088,38 @@ Kaynak: Mete'nin sohbet mesajı (2026-10-15). Uygulama ve kanıt: `ai_koordinasy
 **Bekleyen kararlar (Mete).** S-544 (öneri: sıkı kural), S-555 (öneri: seçenek C), S-554/S-564 (öneri: `NONE`/`NODE` eklenmesin, `NULL`/`NOTHING` çalışsın), S-549 ve S-551 tasarım onayı, eski `DATA`/`READ`/`RESTORE` kaynağının yeri, konuşma kayıtlarında görünen hizmet anahtarlarının yenilenmesi, `yayin/20261015` dalının `main`'e birleştirilmesi, DLL paketlerinin GitHub Release olarak yüklenmesi (önce üçüncü taraf lisans kontrolü).
 
 **Görev sahipleri.** Kaynak düzeltmeleri: Codex. Altı yolda değer düzeyinde doğrulama ve kitabın yeniden üretimi: Claude. Yerel `main` (07550bb) gerçek e-postalı bir commit taşır ve olduğu gibi gönderilmemelidir; yayın `yayin/20261015` dalındadır.
+
+## 2026-10-15 (akşam) Mete kararları — sıkı DECLARE, tasarım onayları, NULL/NOTHING, anahtarlar
+Kaynak: Mete'nin sohbet mesajı (2026-10-15 akşam). Uygulama ve kanıt: `ai_koordinasyon/DURUM.md` 2026-10-15 18:35; sözleşmeler: `docs/tasarim/UXB_S544_S549_S564_DECLARE_DOSYA_TUTAMACI_NULL_20261015_TR.md` ve `docs/tasarim/UXB_S550_S551_DATA_READ_RESTORE_VE_VERI_SABITLERI_20261015_TR.md`.
+
+**Verilen kararlar.**
+1. "Kararların hepsi önerdiğim gibi olsun": önceki turdaki öneriler geçerlidir. Sonuç: `NONE` ve `NODE` **eklenmeyecek**; yokluk `NULL`/`NOTHING` ile, düğüm `CLASS`/`TYPE` ile ifade edilir (S-554).
+2. **`DECLARE` kuralı sıkı olacak:** tanımdan önce `DECLARE`siz kullanım derleme hatasıdır; tanım çağrıdan önce geliyorsa `DECLARE` gerekmez (S-544).
+3. **`NULL` ve `NOTHING` çalışacak** (S-564); `NIL` istenmedi.
+4. **Tipli dosya tutamacı (`FILE_HANDLE`) ve `FREEFILE`** (S-549, S-548) ile **Python tarzı veri sabitleri** (S-551) tasarımları onaylandı.
+5. **`DATA` / `READ` / `RESTORE` etiket tasarımlı olacak** ve BASIC tarzında program içi veriyi okuyacak; dizilere, `LIST`, `DICT`, `SET`'e aktarım için kullanılabilecek (S-550). Eski uygulamanın kaynağı aranmaz, yeniden tasarlandı.
+6. Parantez, küme parantezi ve köşeli parantezle yazılan sabitler `LIST`, `DICT`, `SET` yapılarına kolayca yüklenecek; sabit hedef tipe göre yorumlanır (S-551).
+7. **Anahtarlar:** yapay zekâ hizmeti anahtarları GitHub'a **gönderilmez**; yerel belgelerde olduğu gibi **kalır** (yenileme istenmedi). Yayın kopyalarında anahtarlar silinmeye devam eder, özgün dosyalar değiştirilmez.
+8. **Çoklu kalıtım (A/B/C):** seçeneklerin içeriği anlaşılmadı; sade anlatım kitabın 11.12 bölümüne yazıldı. Son onay bekleniyor (S-555, varsayılan C).
+
+**Bekleyen kararlar (Mete).** S-555 son onay (A/B/C); kararın kapsamı dışında kalan küçük öneriler: tanımsız `DECLARE` için derleme hatası (belge 1.7), `DELETE k` sonrası `k = NOTHING` otomatiği (belge 3.4), DATA ve veri sabitleri belgesindeki varsayılanlar V1–V8; bu turun belgelerinin GitHub dalına eklenmesi; `yayin/20261015` dalının birleştirilmesi; DLL paketleri için GitHub Release (önce üçüncü taraf lisans kontrolü, "önerdiğin gibi" kapsamında ama henüz yapılmadı).
+
+**DLL Release (aynı akşam, ikinci mesaj).** Mete: DLL paketleri GitHub Release olarak yüklensin; **lisans kontrolü gerekmiyor** (kütüphaneleri seçerken lisanslara göre seçti); **e-posta adresinin belgelerde geçmesi sorun değil**; GitHub hesabını bugüne dek yalnız Mete, Claude, Codex ve GitHub Copilot kullandı (bu yüzden `gh` oturumuyla Release ve dal işlemleri yapılabilir). Sonuç: `libraries-win64-20261015` Release'i yayında (DURUM 2026-10-15 18:48). Yukarıdaki bekleyenler listesinden "DLL Release (lisans)" maddesi düştü.
+
+**Uygulama sırası önerisi (Codex karar verir).** (1) `NULL`/`NOTHING` anlam kapısı, (2) tanımsız rutin çağrısı açık ret (S-545/S-329) ve `DECLARE THREAD/…` biçimleri (S-395), (3) sıkı `DECLARE` ve üç dosyanın güncellenmesi, (4) `FREEFILE` ve `FILE_HANDLE`, (5) veri sabitleri ve etiketli `DATA`/`READ`/`RESTORE`. Altı yolda doğrulama ve kitap: Claude.
+
+
+## 2026-10-16 (gece) Mete kararları — çoklu kalıtım B, çakışma anahtar sözcükleri, varsayılanlar, belgelerin GitHub'a eklenmesi
+Kaynak: Mete'nin sohbet mesajı (2026-10-16 23:03). Uygulama ve kanıt: `ai_koordinasyon/DURUM.md` 2026-10-17; plan: `ai_koordinasyon/OOP_DUZELTME_PLANI_20261016.md`; tasarım: `docs/tasarim/UXB_S555_COKLU_KALITIM_B_VE_CAKISMA_DENETIMI_20261016_TR.md`.
+
+**Verilen kararlar.**
+1. **Çoklu kalıtım: B seçeneği** («b ile devam»): gerçek çoklu kalıtım. Karar S-555'e (`ACIK-TASARIM-KARARI-KAYITLI`) işlendi.
+2. **Çakışma:** aynı adlı iki metot çakışırsa derleyici onları sessizce birleştirmez; miras alan sınıf anahtar sözcüklerle kararını yazar (`OVERRIDE`, `PREFER`, `RENAME … AS`, `EXCLUDE`, `SUPER[Taban]`; bağlamsal sözcükler, yeni ayrılmış sözcük yok). Mete'nin sorusuna cevap: **evet**. Kayıt S-595.
+3. **«Sorularının cevapları varsayılanlarını uygulamandır»:** önceki turlarda önerilen varsayılanlar geçerlidir. Sonuçlar: tanımsız `DECLARE` derleme hatası (`UXB_DECLARE_MISSING_DEFINITION`, S-544 notu); `DELETE k` sonrası `k = NOTHING` (S-574 hedefi, `NOTHING` için S-564); yapısal arayüz eklenmez (S-590, nominal kalır); DATA/READ/RESTORE ve veri sabitleri belgesindeki V1–V8 varsayılanları.
+4. **Belgelerin GitHub'a eklenmesi:** evet (bu turun belgeleri `yayin/20261015` dalına). Mete'nin yapıştırdığı başka bir yapay zekâ analizi de çoklu kalıtım için seçenek C, belgelerin gönderilmesi, tanımsız `DECLARE` hatası, `DELETE` sonrası `NOTHING` ve DLL Release için «evet» demişti; çoklu kalıtımda Mete'nin kendi cümlesi «b ile devam» olduğundan karar **B**dir.
+5. **`THIS` doğrudan / `ME` sanal:** karar Mete'nin kendi tasarım belgesinde yazılıdır (`UXB OPP SISTEMI TASARIM VE TARTISMALARI.md`, `THIS vs ME`); uygulandı (S-484, S-576, 2026-10-17). Niteliksiz metot çağrısı `ME` gibi sanaldır; kurucu ve yıkıcıda sanal hedefe `ME`/niteliksiz çağrı derleme hatasıdır.
+
+**Hâlâ Mete'nin kararını bekleyenler.** Türkçe harfli tanımlayıcı (S-579; önerim evet), deneysel öneriler (S-590 … S-593), kaynak düzeltmelerinin ve testlerin `yayin/20261015` dalına eklenmesi (yalnız belgeler istendi), `yayin/20261015` dalının `main`'e birleştirilmesi.
+
+**Görev sahipleri.** Bu turun kaynak düzeltmelerini Mete'nin açık isteğiyle (2026-10-16 «çözmeye başla») Claude yaptı; kalan uygulama kuyruğu (S-544, S-564, S-574, S-485/S-487, S-578, S-585, çoklu kalıtım M0 … M3) Codex'te ya da Mete'nin göstereceği ajanda; her teslimde altı yolda doğrulama ve kitabın yeniden üretimi.
+

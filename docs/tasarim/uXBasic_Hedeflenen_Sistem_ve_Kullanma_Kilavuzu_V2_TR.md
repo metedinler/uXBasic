@@ -1,6 +1,6 @@
 # uXBasic Hedeflenen Sistem ve Kullanma Kılavuzu
 
-**Sürüm 2 · 2026-10-15 · Ana başvuru belgesi**
+**Sürüm 2 · 2026-10-17 · Ana başvuru belgesi**
 
 > Bu belge uXBasic'in **bugün çalışan** hâlini ile **tasarım kararlarıyla hedeflenen** hâlini aynı yerde, ama birbirine
 > karıştırmadan anlatır. Her kod örneği gerçek derleyicide çalıştırılmış, çıktısı karşılaştırılmıştır. Çalışmayan ya da henüz
@@ -540,39 +540,42 @@ Başka bir hata kodu görürseniz `build/.../json/diagnostics/all_diagnostics.js
 
 # 2. Derleyiciyi FreeBASIC ile derleme ve komut satırı (CLI)
 
-Bu bölüm iki şeyi anlatır: **(a)** uXBasic derleyicisinin kendisini FreeBASIC ile nasıl derleyeceğinizi, **(b)** derleyiciyi
-komut satırından nasıl kullanacağınızı.
+Bu bölüm iki şeyi anlatır: **(a)** uXBasic derleyicisinin kendisini FreeBASIC ile nasıl derleyeceğinizi, **(b)** UxBasic derleyicisini komut satırından nasıl kullanacağınızı.
 
 ## 2.1 Gereken araçlar
 
-| Araç | Ne için? | Nerede? | Zorunlu mu? |
-|---|---|---|---|
-| **FreeBASIC 1.10.1 (win64)** | uXBasic derleyicisini derler | `tools/FreeBASIC-1.10.1-win64/fbc64.exe` (projede hazır gelir) | Derleyiciyi derlemek için **evet** |
-| **PowerShell 7** | Derleme ve test betikleri | Sistem | Betikleri kullanacaksanız evet |
-| **MSYS2 UCRT64 (g++, libuv, oneTBB)** | `uxb_runtime.dll` (çalışma zamanı) derlemesi | `C:\msys64\ucrt64\bin` | Yalnız çalışma zamanını yeniden derlemek için |
-| **NASM** | x64 hedefinde assembly → nesne dosyası | PATH'te `nasm`; derleyici `C:\Program Files\CodeBlocks\MinGW\bin\nasm.exe` varsa onu seçer. Başka bir NASM için `UXB_ASM` değişkenine **tam yol** verin (2.9, G-CLI-12) | `uxb bld` ile EXE üretmek için **evet** |
-| **Bağlayıcı (MinGW `gcc`)** | Nesne dosyasını çalışma zamanı kitaplığıyla EXE'ye bağlar | PATH'te `gcc` (varsa CodeBlocks MinGW klasörü); başka biri için `UXB_LINK` değişkenine tam yol | `uxb bld` için evet |
-| **Node.js** | JS ve WASM çıktısını çalıştırmak/sınamak | `node` | Yalnız JS/WASM denemesi için |
-| **wabt (wat2wasm)** | WAT metnini WASM ikilisine çevirir | `tools/wabt/bin/wat2wasm.exe` | WASM üretimi için evet |
+
+| Araç                                 | Ne için?                                                           | Nerede?                                                                                                                                                                      | Zorunlu mu?                                          |
+|---------------------------------------|---------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------|
+| **FreeBASIC 1.10.1 (win64)**          | uXBasic derleyicisini derler                                        | `tools/FreeBASIC-1.10.1-win64/fbc64.exe` (projede hazır gelir)                                                                                                              | Derleyiciyi derlemek için **evet**                  |
+| **PowerShell 7**                      | Derleme ve test betikleri                                           | Sistem                                                                                                                                                                       | Betikleri kullanacaksanız evet                      |
+| **MSYS2 UCRT64 (g++, libuv, oneTBB)** | `uxb_runtime.dll` (çalışma zamanı) derlemesi                    | `C:\msys64\ucrt64\bin`                                                                                                                                                       | Yalnız çalışma zamanını yeniden derlemek için |
+| **NASM**                              | x64 hedefinde assembly → nesne dosyası                           | PATH'te `nasm`; derleyici `C:\Program Files\CodeBlocks\MinGW\bin\nasm.exe` varsa onu seçer. Başka bir NASM için `UXB_ASM` değişkenine **tam yol** verin (2.9, G-CLI-12) | `uxb bld` ile EXE üretmek için **evet**            |
+| **Bağlayıcı (MinGW `gcc`)**        | Nesne dosyasını çalışma zamanı kitaplığıyla EXE'ye bağlar | PATH'te `gcc` (varsa CodeBlocks MinGW klasörü); başka biri için `UXB_LINK` değişkenine tam yol                                                                         | `uxb bld` için evet                                 |
+| **Node.js**                           | JS ve WASM çıktısını çalıştırmak/sınamak                  | `node`                                                                                                                                                                       | Yalnız JS/WASM denemesi için                       |
+| **wabt (wat2wasm)**                   | WAT metnini WASM ikilisine çevirir                                 | `tools/wabt/bin/wat2wasm.exe`                                                                                                                                                | WASM üretimi için evet                             |
+
 
 ## 2.2 Proje dizini
 
-| Klasör | İçeriği |
-|---|---|
-| `src/` | Derleyicinin FreeBASIC kaynağı (`main.bas` giriş noktası; `lexer`, `parser`, `semantic`, `mir`, `codegen`, `interpreter`, `cli`, `preprocessor`, `surface` …) |
-| `compiler/` | Derleme betikleri (`scripts/build_uxb_main_64.ps1`) ve sarmalayıcı (`wrappers/uxb_main_wrapper.bas`) |
-| `native/uxb_runtime/` | C++ çalışma zamanı (`uxb_runtime.dll`): görevler, eşzamanlılık, SHELL |
-| `include/modules/` | Standart kütüphane başlıkları (`*.uxmh`) |
-| `libsx/` | Kütüphane kaynakları (örn. `uxsdl3`, `uxraylib`) |
-| `runtime_ext/` | Kütüphane adaptörleri (DLL tarafı) |
-| `bin/` | Derlenmiş araçlar: `uxb.exe`, çalışma zamanı DLL'leri |
-| `tests/` | Model test paketleri (`run_all_model_tests.ps1`) |
-| `tools/` | FreeBASIC, wabt, kitap/üretici araçları |
-| `docs/tasarim/` | Tasarım kararları (bu kılavuzun dayanağı) |
-| `docs/kitaplar/` | Doğrulanmış örnekler ve kitap araçları |
-| `docs/uxbasic_5_cilt/` | Kaynak odaklı 5 ciltlik kitaplık (ayrıntılı derleyici/FFI konuları) |
-| `build/` | Her çalıştırmanın çıktı klasörleri (tarih-saat adlı) |
-| `ai_koordinasyon/` | Geliştirme defterleri: durum, sorun takibi, karar günlüğü |
+
+| Klasör                | İçeriği                                                                                                                                                          |
+|------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `src/`                 | Derleyicinin FreeBASIC kaynağı (`main.bas` giriş noktası; `lexer`, `parser`, `semantic`, `mir`, `codegen`, `interpreter`, `cli`, `preprocessor`, `surface` …) |
+| `compiler/`            | Derleme betikleri (`scripts/build_uxb_main_64.ps1`) ve sarmalayıcı (`wrappers/uxb_main_wrapper.bas`)                                                              |
+| `native/uxb_runtime/`  | C++ çalışma zamanı (`uxb_runtime.dll`): görevler, eşzamanlılık, SHELL                                                                                       |
+| `include/modules/`     | Standart kütüphane başlıkları (`*.uxmh`)                                                                                                                       |
+| `libsx/`               | Kütüphane kaynakları (örn. `uxsdl3`, `uxraylib`)                                                                                                                |
+| `runtime_ext/`         | Kütüphane adaptörleri (DLL tarafı)                                                                                                                              |
+| `bin/`                 | Derlenmiş araçlar: `uxb.exe`, çalışma zamanı DLL'leri                                                                                                         |
+| `tests/`               | Model test paketleri (`run_all_model_tests.ps1`)                                                                                                                    |
+| `tools/`               | FreeBASIC, wabt, kitap/üretici araçları                                                                                                                          |
+| `docs/tasarim/`        | Tasarım kararları (bu kılavuzun dayanağı)                                                                                                                      |
+| `docs/kitaplar/`       | Doğrulanmış örnekler ve kitap araçları                                                                                                                        |
+| `docs/uxbasic_5_cilt/` | Kaynak odaklı 5 ciltlik kitaplık (ayrıntılı derleyici/FFI konuları)                                                                                           |
+| `build/`               | Her çalıştırmanın çıktı klasörleri (tarih-saat adlı)                                                                                                      |
+| `ai_koordinasyon/`     | Geliştirme defterleri: durum, sorun takibi, karar günlüğü                                                                                                      |
+
 
 ## 2.3 Derleyiciyi derleme
 
@@ -584,22 +587,21 @@ Proje kökünde (`uxb/`):
 .\build_64.ps1 -Force
 ```
 
-`-Force`, kaynak değişmemiş olsa bile yeniden derlemeyi zorlar; `-Force` yokken `bin\uxb.exe` kaynak dosyalarından yeniyse betik `COMPILER_UP_TO_DATE` yazıp derlemeden çıkar. Bu betik `compiler/scripts/build_uxb_main_64.ps1` dosyasını çağırır.
-Betiğin davranışı (aşağıdaki adımlar, çıktı dosyaları, `-Debug`, `-Release -Debug` çakışması, `UXB_BUILD_X86`) gerçek ağaca dokunmadan, FreeBASIC'e bağlanan yalıtılmış bir kopya kökte küçük bir `main.bas` ile sınanmıştır.
-Yaptığı işler:
+`-Force`, kaynak değişmemiş olsa bile yeniden derlemeyi zorlar; `-Force` yokken `bin\uxb.exe` kaynak dosyalarından yeniyse betik `COMPILER_UP_TO_DATE` yazıp derlemeden çıkar. Bu betik `compiler/scripts/build_uxb_main_64.ps1` dosyasını çağırır.Betiğin davranışı (aşağıdaki adımlar, çıktı dosyaları, `-Debug`, `-Release -Debug` çakışması, `UXB_BUILD_X86`) gerçek ağaca dokunmadan, FreeBASIC'e bağlanan yalıtılmış bir kopya kökte küçük bir `main.bas` ile sınanmıştır.Yaptığı işler:
 
 1. `tools/FreeBASIC-1.10.1-win64/fbc64.exe`'nin varlığını denetler.
 2. `PATH`'e FreeBASIC'in `bin\win64`, `bin\win32`, `C:\msys64\ucrt64\bin` ve `tools\wabt\bin` klasörlerini ekler.
 3. Giriş kaynağı olarak `compiler/wrappers/uxb_main_wrapper.bas` dosyasını (varsa) yoksa `src/main.bas` dosyasını seçer.
 4. `fbc64` ile derler (aşağıdaki komut).
-5. Eski `bin/uxb.exe`'yi `bin/uxb.exe.pre_library_patch.bak` olarak yedekler, sonra çıkan dosyayı `bin/uxb.exe` olarak yerleştirir;
-   `bin/uxb_x64.exe`, kökteki `uxb.exe` ve `compiler/wrappers/uxb_main_wrapper_64.exe` kopyalarını yazar, `build/compiler/compiler_hosts.json` özetini bırakır.
-   Çalışan bir `uxb.exe` üzerine yazılamayacağı için eski görüntüyü yan tarafa (`uxb.exe.replaced_<zaman>`) alır.
+5. Eski `bin/uxb.exe`'yi `bin/uxb.exe.pre_library_patch.bak` olarak yedekler, sonra çıkan dosyayı `bin/uxb.exe` olarak yerleştirir;`bin/uxb_x64.exe`, kökteki `uxb.exe` ve `compiler/wrappers/uxb_main_wrapper_64.exe` kopyalarını yazar, `build/compiler/compiler_hosts.json` özetini bırakır.Çalışan bir `uxb.exe` üzerine yazılamayacağı için eski görüntüyü yan tarafa (`uxb.exe.replaced_<zaman>`) alır.
 6. Günlüğü `reports/libraries/logs/compiler_x64_fbc.log` dosyasına yazar.
+
 
 Seçenekler: `-Release` (varsayılan, en iyilemeli), `-Debug` (hata ayıklama bilgili), `-Force`. Birlikte `-Release -Debug` verilemez (`-Release ve -Debug birlikte kullanilamaz.` hatası).
 
+> 
 > **Dikkat:** `build_64.ps1` her zaman `bin\uxb.exe` dosyasının yerine yenisini koyar. Çalışan derleyiciyi korumak istiyorsanız 2.3.3'teki elle komutla **yeni bir adla** derleyin.
+> 
 
 ### 2.3.2 Elle `fbc` komutuyla
 
@@ -615,21 +617,25 @@ Hata ayıklama sürümü için `-O 2 -strip` yerine `-g` yazılır:
 fbc64.exe -v -lang fb -gen gas64 -w all -exx -mt -g -x bin\uxb_hata_ayikla.exe compiler\wrappers\uxb_main_wrapper.bas
 ```
 
-| `fbc` bayrağı | Anlamı |
-|---|---|
-| `-v` | Ayrıntılı çıktı (hangi araç hangi sırayla çalıştı) |
-| `-lang fb` | FreeBASIC'in kendi dil kipi |
-| `-gen gas64` | x64 için GNU assembler üretimi (32 bit için `-gen gas`) |
-| `-w all` | Bütün uyarıları aç |
-| `-exx` | Genişletilmiş çalışma zamanı denetimi (dizi sınırı, boş işaretçi) |
-| `-mt` | Çok iş parçacıklı çalışma zamanı kitaplığı |
-| `-O 2` | Orta düzey eniyileme |
-| `-strip` | Sembol bilgisini ayıkla (daha küçük dosya) |
-| `-g` | Hata ayıklama bilgisi ekle (`-O 2 -strip` ile birlikte kullanılmaz) |
-| `-x <dosya>` | Çıktı dosyasının adı |
 
+| `fbc` bayrağı    | Anlamı                                                                       |
+|--------------------|-------------------------------------------------------------------------------|
+| `-v`               | Ayrıntılı çıktı (hangi araç hangi sırayla çalıştı)                |
+| `-lang fb`         | FreeBASIC'in kendi dil kipi                                                   |
+| `-gen gas64`       | x64 için GNU assembler üretimi (32 bit için `-gen gas`)                    |
+| `-w all`           | Bütün uyarıları aç                                                       |
+| `-exx`             | Genişletilmiş çalışma zamanı denetimi (dizi sınırı, boş işaretçi) |
+| `-mt`              | Çok iş parçacıklı çalışma zamanı kitaplığı                        |
+| `-O 2`             | Orta düzey eniyileme                                                         |
+| `-strip`           | Sembol bilgisini ayıkla (daha küçük dosya)                                |
+| `-g`               | Hata ayıklama bilgisi ekle (`-O 2 -strip` ile birlikte kullanılmaz)         |
+| `-x <dosya>` | Çıktı dosyasının adı                                                    |
+
+
+> 
 > **Önemli kural:** Derleme çıktısı mimari denetiminden geçer. Betik, üretilen dosyanın gerçekten x64 olduğunu PE başlığından
 > okur; farklıysa `Compiler host mimarisi yanlis` hatasıyla durur (kapalı başarısızlık).
+> 
 
 ### 2.3.3 Başka bir adla derleme (eski sürümü bozmadan)
 
@@ -641,8 +647,7 @@ tools\FreeBASIC-1.10.1-win64\fbc64.exe -lang fb -gen gas64 -w all -exx -mt -O 2 
 
 ### 2.3.4 32 bit derleyici eşliği (isteğe bağlı)
 
-Varsayılan olarak yalnızca x64 derleyici üretilir. 32 bit eşlik dosyası (`bin\uxb_x86.exe`) için ortam değişkeni verilir, ama **kökteki `build_64.ps1` ile değil**:
-o betik alttaki betiğe her zaman `-SkipX86` geçirir ve değişkeni yok sayar, uyarı da vermez (✖ G-CLI-15). Alttaki betiği doğrudan çağırın:
+Varsayılan olarak yalnızca x64 derleyici üretilir. 32 bit eşlik dosyası (`bin\uxb_x86.exe`) için ortam değişkeni verilir, ama **kökteki `build_64.ps1` ile değil**:o betik alttaki betiğe her zaman `-SkipX86` geçirir ve değişkeni yok sayar, uyarı da vermez (✖ G-CLI-15). Alttaki betiği doğrudan çağırın:
 
 ```
 $env:UXB_BUILD_X86 = '1'; .\compiler\scripts\build_uxb_main_64.ps1 -Force
@@ -658,40 +663,41 @@ Görevler (`SPAWN`, `THREAD`, …), SHELL ve bazı çalışma zamanı işlevleri
 .\native\uxb_runtime\build_runtime_dll.ps1 -Variant auto
 ```
 
-| `-Variant` | Ne içerir? |
-|---|---|
-| `auto` | libuv ve oneTBB bulunduysa ikisini de kullanır (varsayılan) |
-| `std` | Yalnızca standart C++ `std::thread` yedek yolu |
-| `libuv` | libuv ile (olay döngüsü, iş kuyruğu) |
-| `tbb` | oneTBB ile (görev grupları) |
-| `full` | libuv + oneTBB zorunlu; eksikse hata verir |
+
+| `-Variant` | Ne içerir?                                                   |
+|------------|---------------------------------------------------------------|
+| `auto`     | libuv ve oneTBB bulunduysa ikisini de kullanır (varsayılan) |
+| `std`      | Yalnızca standart C++ `std::thread` yedek yolu               |
+| `libuv`    | libuv ile (olay döngüsü, iş kuyruğu)                     |
+| `tbb`      | oneTBB ile (görev grupları)                                 |
+| `full`     | libuv + oneTBB zorunlu; eksikse hata verir                    |
+
 
 Betiğin kullandığı derleme komutunun özü (g++, MSYS2 UCRT64):
 
 ```
-g++ -std=gnu++17 -O2 -Wall -Wextra -Werror -DUXB_RT_BUILD_DLL -shared -I<kaynak> \
-    [-DUXB_WITH_LIBUV] [-DUXB_WITH_TBB] uxb_runtime.cpp uxb_runtime_mir.cpp uxb_runtime_state.cpp \
-    uxb_runtime_task.cpp uxb_runtime_task_v2.cpp uxb_runtime_sync.cpp uxb_runtime_shell.cpp \
-    backends/*.cpp [libuv bayrakları] [tbb bayrakları] \
+g++ -std=gnu++17 -O2 -Wall -Wextra -Werror -DUXB_RT_BUILD_DLL -shared -I<kaynak> \    
+    [-DUXB_WITH_LIBUV] [-DUXB_WITH_TBB] uxb_runtime.cpp uxb_runtime_mir.cpp uxb_runtime_state.cpp \    
+    uxb_runtime_task.cpp uxb_runtime_task_v2.cpp uxb_runtime_sync.cpp uxb_runtime_shell.cpp \    
+    backends/*.cpp [libuv bayrakları] [tbb bayrakları] \    
     -static-libgcc -static-libstdc++ -Wl,--enable-auto-import -Wl,--out-implib,libuxb_runtime.dll.a -o uxb_runtime.dll
 ```
 
-Çıkan `uxb_runtime.dll`, `bin/`, `dist/runtime_ext/` ve `dist/libraries/bin/` klasörlerine kopyalanır; gerekli bağımlı DLL'ler
-(`libwinpthread-1.dll`, varsa `libuv-1.dll`, `libtbb12.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll`) de aynı yerlere konur. **Bir uXBasic EXE'sinin yanında bu DLL bulunmalıdır;** `uxb bld` bunları EXE'nin klasörüne kendisi kopyalar (2.5).
+Çıkan `uxb_runtime.dll`, `bin/`, `dist/runtime_ext/` ve `dist/libraries/bin/` klasörlerine kopyalanır; gerekli bağımlı DLL'ler(`libwinpthread-1.dll`, varsa `libuv-1.dll`, `libtbb12.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll`) de aynı yerlere konur. **Bir uXBasic EXE'sinin yanında bu DLL bulunmalıdır;** `uxb bld` bunları EXE'nin klasörüne kendisi kopyalar (2.5).
 
 **Yalıtılmış derleme.** Çalışan sürümleri bozmadan denemek için iki parametre vardır:
 
-| Parametre | Anlamı |
-|---|---|
-| `-OutputDirectory <klasör>` | DLL'i ve dosyalarını `native\uxb_runtime\build\` yerine verilen klasöre yazar |
-| `-SkipPublish` | `bin\`, `dist\` klasörlerine **hiçbir kopya yazmaz**; günlük ve `build_result.json` çıktı klasöründe kalır (`published: false`) |
+
+| Parametre                          | Anlamı                                                                                                                                   |
+|------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
+| `-OutputDirectory <klasör>` | DLL'i ve dosyalarını `native\uxb_runtime\build\` yerine verilen klasöre yazar                                                          |
+| `-SkipPublish`                     | `bin\`, `dist\` klasörlerine **hiçbir kopya yazmaz**; günlük ve `build_result.json` çıktı klasöründe kalır (`published: false`) |
 
 ```
 .\native\uxb_runtime\build_runtime_dll.ps1 -Variant auto -OutputDirectory $env:TEMP\rt_deneme -SkipPublish
 ```
 
-Bu kılavuz yazılırken `-Variant std` (44 sn) ve `-Variant auto` (29 sn) bu biçimde derlenmiştir: `std` yukarıdaki g++ komutunu `-DUXB_WITH_*` bayrakları **olmadan**, `auto` ise `-DUXB_WITH_LIBUV -DUXB_WITH_TBB` ile çalıştırır.
-Çıktı klasöründeki `uxb_runtime_<varyant>_gxx.log` dosyasının `LIBUV=` ve `TBB=` satırları hangi kitaplıkların bulunup kullanıldığını gösterir.
+Bu kılavuz yazılırken `-Variant std` (44 sn) ve `-Variant auto` (29 sn) bu biçimde derlenmiştir: `std` yukarıdaki g++ komutunu `-DUXB_WITH_*` bayrakları **olmadan**, `auto` ise `-DUXB_WITH_LIBUV -DUXB_WITH_TBB` ile çalıştırır.Çıktı klasöründeki `uxb_runtime_<varyant>_gxx.log` dosyasının `LIBUV=` ve `TBB=` satırları hangi kitaplıkların bulunup kullanıldığını gösterir.
 
 Ortam değişkenleri: `UXB_GXX` / `CXX` (g++ yolu), `UXB_MINGW_ROOT`, `UXB_PKG_CONFIG` (libuv/oneTBB bayraklarını bulmak için).
 
@@ -703,26 +709,29 @@ Ortam değişkenleri: `UXB_GXX` / `CXX` (g++ yolu), `UXB_MINGW_ROOT`, `UXB_PKG_C
 program.uxb ─(MIR)→ program.asm ─(nasm -f win64)→ obj/program.obj ─(bağlayıcı)→ program.exe
 ```
 
-* Birinci adım derleyicinin içindedir.
-* İkinci adım (`build_program.bat`): `"%UXB_ASM_CMD%" -f win64 program.asm -o obj\program.obj`
-* Üçüncü adım (`link_program.bat`): `"%UXB_LINK_CMD%" @program_link_args.rsp -o program.exe`. Bağlayıcı olarak **MinGW `gcc`** kullanılır (FreeBASIC değil); argüman dosyasında yalnız `obj/program.obj` ve çalışma zamanı kitaplığının içe aktarma dosyası `libuxb_runtime.dll.a` vardır.
-* Dördüncü adım: aynı betik, çalışma zamanı DLL'lerini EXE'nin klasörüne **kendisi kopyalar** (önce `native\uxb_runtime\build\`, bulamazsa `bin\` altından). `uxb_runtime.dll` hiçbir yerde bulunamazsa üretilen betik `[x64-build] missing uxb_runtime.dll` yazıp durur.
+- Birinci adım derleyicinin içindedir.
+- İkinci adım (`build_program.bat`): `"%UXB_ASM_CMD%" -f win64 program.asm -o obj\program.obj`
+- Üçüncü adım (`link_program.bat`): `"%UXB_LINK_CMD%" @program_link_args.rsp -o program.exe`. Bağlayıcı olarak **MinGW `gcc`** kullanılır (FreeBASIC değil); argüman dosyasında yalnız `obj/program.obj` ve çalışma zamanı kitaplığının içe aktarma dosyası `libuxb_runtime.dll.a` vardır.
+- Dördüncü adım: aynı betik, çalışma zamanı DLL'lerini EXE'nin klasörüne **kendisi kopyalar** (önce `native\uxb_runtime\build\`, bulamazsa `bin\` altından). `uxb_runtime.dll` hiçbir yerde bulunamazsa üretilen betik `[x64-build] missing uxb_runtime.dll` yazıp durur.
 
-`UXB_ASM_CMD` ve `UXB_LINK_CMD` **ayar değildir**, betiklerin içinde kurulan sonuç değişkenleridir: `interop\toolchain.env.bat` bunları `UXB_ASM`, `UXB_LINK` ve `*_PATH` değerlerinden hesaplar.
-Dışarıdan vermenin etkisi yoktur; bozuk bir değerle bile `bld` başarıyla biter. Hangi NASM ve bağlayıcının kullanılacağını **2.9'daki** değişkenlerle belirleyin.
+`UXB_ASM_CMD` ve `UXB_LINK_CMD` **ayar değildir**, betiklerin içinde kurulan sonuç değişkenleridir: `interop\toolchain.env.bat` bunları `UXB_ASM`, `UXB_LINK` ve `*_PATH` değerlerinden hesaplar.Dışarıdan vermenin etkisi yoktur; bozuk bir değerle bile `bld` başarıyla biter. Hangi NASM ve bağlayıcının kullanılacağını **2.9'daki** değişkenlerle belirleyin.
 
 **`bld` çıktı klasörü** (EXE'nin yazıldığı klasör; en küçük program için de aynı dosyalar oluşur):
 
-| Dosya | Ne işe yarar? |
-|---|---|
-| `k.exe` | Üretilen program |
-| `uxb_runtime.dll`, `libwinpthread-1.dll`, `libuv-1.dll`, `libtbb12.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll` | Çalışma zamanı ve bağımlıları; program görev kullanmasa bile **hepsi** konur (toplam yaklaşık 6,8 MB). EXE'yi taşırken birlikte taşıyın |
-| `program.asm`, `obj\program.obj` | Üretilen assembly ve nesne dosyası |
-| `build_all.bat`, `build_program.bat`, `link_program.bat`, `program_link_args.rsp` | Zinciri yeniden çalıştıran betikler. Bu bilgisayarın mutlak yollarını gömer; başka makineye taşınmaz |
-| `interop\` | `toolchain.env.bat` (araç zinciri), `build_import.bat`, `link_command.bat` … (içe aktarma bildirimi olmasa da oluşur) |
-| `codegen_status_report.md`, `build_all.stdout.txt`, `build_all.stderr.txt` | Rapor ve araç çıktıları |
 
+| Dosya                                                                                                            | Ne işe yarar?                                                                                                                                          |
+|------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `k.exe`                                                                                                          | Üretilen program                                                                                                                                       |
+| `uxb_runtime.dll`, `libwinpthread-1.dll`, `libuv-1.dll`, `libtbb12.dll`, `libgcc_s_seh-1.dll`, `libstdc++-6.dll` | Çalışma zamanı ve bağımlıları; program görev kullanmasa bile **hepsi** konur (toplam yaklaşık 6,8 MB). EXE'yi taşırken birlikte taşıyın |
+| `program.asm`, `obj\program.obj`                                                                                 | Üretilen assembly ve nesne dosyası                                                                                                                    |
+| `build_all.bat`, `build_program.bat`, `link_program.bat`, `program_link_args.rsp`                                | Zinciri yeniden çalıştıran betikler. Bu bilgisayarın mutlak yollarını gömer; başka makineye taşınmaz                                         |
+| `interop\`                                                                                                       | `toolchain.env.bat` (araç zinciri), `build_import.bat`, `link_command.bat` … (içe aktarma bildirimi olmasa da oluşur)                              |
+| `codegen_status_report.md`, `build_all.stdout.txt`, `build_all.stderr.txt`                                       | Rapor ve araç çıktıları                                                                                                                            |
+
+
+> 
 > **✖ EKSİK (G-ARAC-7, S-117): her çıktı klasörü kendi DLL setini taşır.** İki program aynı klasöre derlenince tek set paylaşılır (ölçüldü: `a.exe` ve `b.exe` → altı DLL); her ayrı klasör yaklaşık 6,5 MB'lık yeni bir set alır ve bunu kapatan ya da setleri tek yerden paylaşan bir seçenek yoktur (`uxb hlp`). FFI çağrısı (`CALL(DLL, …)`) içeren programlar ayrıca ortak bağımlıları kopyalar (`libopenblas.dll` tek başına 42 MB; S-117 ölçümü yaklaşık 53 MB). Yüzlerce programı ayrı klasörlere derleyen test koşuları bu yüzden `reports\` klasörünü 40 GB'a çıkardı (2026-10-14 ölçümü: 23 589 DLL kopyası = 36,5 GB, okunabilir kanıt 2 GB). **Ne yapmalı:** çok sayıda programı derlerken çıktıları tek klasöre yazın ve işiniz bitince kopyaları silin.
+> 
 
 Araç zinciri hatası `uxb bld` çıkış kodu **14** ve `build_all.bat failed with exit code 1` iletisiyle bildirilir; ayrıntı `build_all.stdout.txt` ve `build_all.stderr.txt` dosyalarındadır.
 
@@ -740,33 +749,36 @@ Yalnız bazı paketleri çalıştırmak için `-Only` (bilinmeyen paket adı **h
 .\tests\run_all_model_tests.ps1 -Uxb .\bin\uxb.exe -Only task_model,iterators
 ```
 
-| Parametre | Anlamı |
-|---|---|
-| `-Uxb` | Denenecek derleyici (varsayılan `.\bin\uxb.exe`) |
-| `-Only` | Paket adları; bilinmeyen ad `Unknown test suite: …` ile durur (çıkış 1) |
-| `-ReportPath` | Markdown özet raporu (varsayılan `.\test_results\model_suite_summary.md`); her koşuda **üzerine yazılır**, bu yüzden kendi denemeniz için ayrı bir ad verin. Yanında `<rapor>.progress.json` ilerleme dosyası da yazılır. **Yalnız göreli yol verin:** mutlak yolda rapor yazılamaz, betik yine de "Tum paketler temiz." yazıp çıkış 0 verir (✖ G-CLI-14) |
-| `-KeepBuildFolders` | Varsayılan olarak her `uxb` çağrısı geçici bir `--out-root` altına yönlendirilir ve paket bitince silinir; `build\<zaman>` klasörlerini saklamak için bu anahtarı verin |
 
-Betik, her paketin kendi koşucusunu (`run_*.ps1`) çalıştırıp `Toplam: N PASS: N FAIL: N` satırını okur ve paketi `GECTI`, `DUSTU`, `CALISMADI` (koşucu bu satırı üretmedi) ya da `KOSUCU-YOK` (koşucu dosyası yok) olarak işaretler.
-Süre paketten pakete çok değişir: yalnız `cli_flags` (25 denetim) yaklaşık 70 saniye sürer.
+| Parametre           | Anlamı                                                                                                                                                                                                                                                                                                                                                                                |
+|---------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `-Uxb`              | Denenecek derleyici (varsayılan `.\bin\uxb.exe`)                                                                                                                                                                                                                                                                                                                                      |
+| `-Only`             | Paket adları; bilinmeyen ad `Unknown test suite: …` ile durur (çıkış 1)                                                                                                                                                                                                                                                                                                         |
+| `-ReportPath`       | Markdown özet raporu (varsayılan `.\test_results\model_suite_summary.md`); her koşuda **üzerine yazılır**, bu yüzden kendi denemeniz için ayrı bir ad verin. Yanında `<rapor>.progress.json` ilerleme dosyası da yazılır. **Yalnız göreli yol verin:** mutlak yolda rapor yazılamaz, betik yine de "Tum paketler temiz." yazıp çıkış 0 verir (✖ G-CLI-14) |
+| `-KeepBuildFolders` | Varsayılan olarak her `uxb` çağrısı geçici bir `--out-root` altına yönlendirilir ve paket bitince silinir; `build\<zaman>` klasörlerini saklamak için bu anahtarı verin                                                                                                                                                                                               |
 
-| Paket | Neyi sınar? |
-|---|---|
-| `compiler_consolidation` | matris, dosya/metin, SELECT, DIM, DECLARE, PRINT, ondalık/PROPERTY ve Win64 ABI |
-| `numeric_model` | U64/I64, dar tamsayılar, onaltılık sabitler |
-| `library_type_contract` | `LIBTYPE`, yaşam döngüsü, `RATIONAL` değer aktarımı, sağlayıcı tanıları (MIR) |
-| `abi_model` | `SIZEOF`, F80 ABI, `TYPE` alanları, `VARPTR(a(i))` |
-| `memoryref_model`, `memory_model` | Bellek bölgesi/ömür denetimi, AUTO/NATIVE/VIRTUAL, işaretçi aritmetiği |
-| `array_params`, `array_bounds` | Dizi parametreleri, `LBOUND`/`UBOUND` |
-| `sadd_model` | `SADD`, `CODEPTR`, `LPTR` |
-| `language_guards` | Ayrılmış adlar, bellek deyimleri kapısı |
-| `oop_parity` | Sanal çağrı, `SUPER`, kalıtım, erişim, boş alıcı |
-| `iterators` | `FOR EACH` / `DO EACH` |
-| `typed_task`, `task_model`, `task_native`, `task_sync` | Tipli görevler, `SPAWN`/`TASK`/`TASKGROUP`, gerçek eşzamanlılık, otomatik senkron/`LOCK`/`MUTEX`/`ATOMIC` |
+
+Betik, her paketin kendi koşucusunu (`run_*.ps1`) çalıştırıp `Toplam: N PASS: N FAIL: N` satırını okur ve paketi `GECTI`, `DUSTU`, `CALISMADI` (koşucu bu satırı üretmedi) ya da `KOSUCU-YOK` (koşucu dosyası yok) olarak işaretler.Süre paketten pakete çok değişir: yalnız `cli_flags` (25 denetim) yaklaşık 70 saniye sürer.
+
+
+| Paket                                                                                              | Neyi sınar?                                                                                                          |
+|----------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `compiler_consolidation`                                                                           | matris, dosya/metin, SELECT, DIM, DECLARE, PRINT, ondalık/PROPERTY ve Win64 ABI                                      |
+| `numeric_model`                                                                                    | U64/I64, dar tamsayılar, onaltılık sabitler                                                                        |
+| `library_type_contract`                                                                            | `LIBTYPE`, yaşam döngüsü, `RATIONAL` değer aktarımı, sağlayıcı tanıları (MIR)                             |
+| `abi_model`                                                                                        | `SIZEOF`, F80 ABI, `TYPE` alanları, `VARPTR(a(i))`                                                                   |
+| `memoryref_model`, `memory_model`                                                                  | Bellek bölgesi/ömür denetimi, AUTO/NATIVE/VIRTUAL, işaretçi aritmetiği                                          |
+| `array_params`, `array_bounds`                                                                     | Dizi parametreleri, `LBOUND`/`UBOUND`                                                                                 |
+| `sadd_model`                                                                                       | `SADD`, `CODEPTR`, `LPTR`                                                                                             |
+| `language_guards`                                                                                  | Ayrılmış adlar, bellek deyimleri kapısı                                                                          |
+| `oop_parity`                                                                                       | Sanal çağrı, `SUPER`, kalıtım, erişim, boş alıcı                                                             |
+| `iterators`                                                                                        | `FOR EACH` / `DO EACH`                                                                                                |
+| `typed_task`, `task_model`, `task_native`, `task_sync`                                             | Tipli görevler, `SPAWN`/`TASK`/`TASKGROUP`, gerçek eşzamanlılık, otomatik senkron/`LOCK`/`MUTEX`/`ATOMIC`        |
 | `program_end`, `string_lifetime`, `routine_scope`, `exceptions_cross`, `const_scope`, `float_text` | `END` davranışı, metin ömrü, `BYREF`/kapsam, rutin sınırını geçen `THROW`, `CONST` kapsamı, ondalık metin |
-| `uxgsl`, `uxraylib`, `uxsdl3` | Kütüphane duman testleri (dört motorda) |
-| `wasm_model` | WASM/WAT davranışı (Node ile gerçek çalıştırma) |
-| `cli_flags` | CLI fiil/bayrakları |
+| `uxgsl`, `uxraylib`, `uxsdl3`                                                                      | Kütüphane duman testleri (dört motorda)                                                                            |
+| `wasm_model`                                                                                       | WASM/WAT davranışı (Node ile gerçek çalıştırma)                                                               |
+| `cli_flags`                                                                                        | CLI fiil/bayrakları                                                                                                  |
+
 
 Bir paket çalışmazsa tabloda `CALISMADI` olarak görünür; paket düşerse betik çıkış kodu `1` verir.
 
@@ -776,96 +788,97 @@ Bir paket çalışmazsa tabloda `CALISMADI` olarak görünür; paket düşerse b
 uxb <fiil> [kaynak.uxb] [seçenekler...]
 ```
 
-* Kaynak uzantısı `.uxb`, `.bas` ya da `.uxm` olmalıdır; başka uzantı `Desteklenmeyen kaynak dosya uzantisi` hatasıyla reddedilir (çıkış kodu 2). **Var olmayan dosya da aynı iletiyle, ama boş uzantıyla bildirilir** (`Desteklenmeyen kaynak dosya uzantisi:  (.bas/.uxm/.uxb bekleniyor)`); bu iletiyi görünce önce yolu denetleyin (✖ G-CLI-11).
-* Seçeneklerin değerleri bir sonraki argümandır: `--out-root klasör`. Bazı seçenekler `=` ile de verilir: `--wat2wasm=yol`.
-* Bilinmeyen seçenek çıkış kodu **20** ile reddedilir (`Bilinmeyen CLI secenegi`). **Bilinmeyen ya da eksik fiil ise reddedilmez:** `uxb rnu k.uxb`, `uxb k.uxb` yalnız `INFO: uXBasic started` yazıp çıkış 0 verir ve hiçbir iş yapmaz (✖ G-CLI-32). Fiil adları büyük/küçük harf duyarsızdır.
-* **Her ileti stdout'a yazılır:** `INFO`, `ERROR` ve tanılar dahil derleyicinin bütün çıktısı ile çalıştırılan programın çıktısı aynı akıştadır; stderr her zaman boştur (✖ G-CLI-20). `uxb run k.uxb > dosya.txt` hata iletisini de dosyaya alır; program çıktısını ayırmak için `--stdout-out`, iletileri kısmak için `--quiet` kullanın.
+- Kaynak uzantısı `.uxb`, `.bas` ya da `.uxm` olmalıdır; başka uzantı `Desteklenmeyen kaynak dosya uzantisi` hatasıyla reddedilir (çıkış kodu 2). **Var olmayan dosya da aynı iletiyle, ama boş uzantıyla bildirilir** (`Desteklenmeyen kaynak dosya uzantisi:  (.bas/.uxm/.uxb bekleniyor)`); bu iletiyi görünce önce yolu denetleyin (✖ G-CLI-11).
+- Seçeneklerin değerleri bir sonraki argümandır: `--out-root klasör`. Bazı seçenekler `=` ile de verilir: `--wat2wasm=yol`.
+- Bilinmeyen seçenek çıkış kodu **20** ile reddedilir (`Bilinmeyen CLI secenegi`). **Bilinmeyen ya da eksik fiil ise reddedilmez:** `uxb rnu k.uxb`, `uxb k.uxb` yalnız `INFO: uXBasic started` yazıp çıkış 0 verir ve hiçbir iş yapmaz (✖ G-CLI-32). Fiil adları büyük/küçük harf duyarsızdır.
+- **Her ileti stdout'a yazılır:** `INFO`, `ERROR` ve tanılar dahil derleyicinin bütün çıktısı ile çalıştırılan programın çıktısı aynı akıştadır; stderr her zaman boştur (✖ G-CLI-20). `uxb run k.uxb > dosya.txt` hata iletisini de dosyaya alır; program çıktısını ayırmak için `--stdout-out`, iletileri kısmak için `--quiet` kullanın.
 
 ### 2.7.1 Üç harfli fiiller
 
-uXBasic komut satırının her işi **üç harfli bir fiille** başlar. Fiil, derleme hattının hangi aşamasına kadar gidileceğini ya da
-ne yapılacağını seçer.
+uXBasic komut satırının her işi **üç harfli bir fiille** başlar. Fiil, derleme hattının hangi aşamasına kadar gidileceğini ya dane yapılacağını seçer.
 
-| Fiil | Açılımı | Ne yapar? | Gözlenen çıktı | Durum |
-|---|---|---|---|---|
-| `lex` | *lexer* (sözcük çözümleyici) | Önişlemciyi çalıştırır, kaynağı belirteçlere böler | `tokens.json`, `preprocessed.uxb`, ön yüz raporları (21 dosya) | ✔ |
-| `par` | *parse* (çözümle) | Yalnızca sözdizimini denetler | `lex` ile aynı 21 dosya (`ast.json` dahil) | ✔ |
-| `ast` | *AST* (soyut sözdizimi ağacı) | AST üretir, AST sözleşmesini denetler | `lex` ile aynı 21 dosya (`ast.json` dahil) | ✔ |
-| `sem` | *semantic* (anlam) | Tip bağlama, ad çözümü, yerleşim | + `symbols.json`, `types.json`, `layouts.json`, `enums.json`, `type_infer_report.csv` (34 dosya) | ✔ |
-| `hir` | *HIR* (yüksek düzey ara temsil) | `sem` sonrası yüksek düzey aşama | `sem` ile aynı raporlar | ◐ |
-| `mir` | *MIR* (orta düzey ara kod) | MIR üretir ve doğrular | `canonical_mir.json`, `semantic_mir.json`, `mir_verify_*.json` | ◐ `--semantic` gerekir (G-CLI-1) |
-| `int` | *interpret* (yorumla) | AST yorumlayıcıyla çalıştırır | program çıktısı + `execution/ast_*` | ✔ |
-| `run` | *run* (çalıştır) | Yorumlayıcıyla çalıştırır; `--interpreter-backend MIR` ile MIR yorumlayıcı, `BOTH` ile ikisini birlikte çalıştırıp karşılaştırır (ayrışma yalnız `--interpreter-compare-json-out` dosyasında görünür, ✖ G-CLI-26) | program çıktısı + `execution/` | ✔ |
-| `x64` | *x64* | MIR'den NASM assembly üretir | `.asm` + backend raporları | ✔ |
-| `bld` | *build* (derle) | Tam yerel derleme: assembly → nesne → EXE | `.exe`, `asm/x64_mir/output.asm` | ✔ |
-| `jsw` | *JS web* | JavaScript (ve `--emit-browser` ile HTML) üretir | `.js`, `.html` | ◐ |
-| `wat` | *WAT* | WebAssembly metni; `--emit-wasm` ile ikili | `.wat`, `.wasm` | ◐ |
-| `chk` | *check* (denetle) | Toplu doğrulama (`validate-all`) | — | ✖ `tools\run_validate_all_gate.ps1` yok (G-CLI-3) |
-| `fmt` | *format* | Biçim denetimi | `lex` ile aynı | ✖ özel çıktı gözlenmedi |
-| `map` | *map* (harita) | Kaynak haritası | `lex` ile aynı | ✖ `--source-map-json-out` 0 bayt (G-CLI-2) |
-| `doc` | *document* (belge) | Belge üretimi | `lex` ile aynı | ✖ `--doc-json-out` 0 bayt (G-CLI-2) |
-| `rel` | *release* (yayın) | Yayın kapısı denetimi | `lex` ile aynı | ✖ `--release-json-out` 0 bayt (G-CLI-2) |
-| `hlp` | *help* (yardım) | Yardım metnini yazar | 322 satır (311'i dolu) | ✔ (`--verbose` reddedilir: G-CLI-7) |
-| `ver` | *version* (sürüm) | `uXBasic CLI Adim12` yazar | — | ✔ |
 
+| Fiil  | Açılımı                       | Ne yapar?                                                                                                                                                                                                                                     | Gözlenen çıktı                                                                               | Durum                                               |
+|-------|-----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------|-----------------------------------------------------|
+| `lex` | *lexer* (sözcük çözümleyici) | Önişlemciyi çalıştırır, kaynağı belirteçlere böler                                                                                                                                                                                 | `tokens.json`, `preprocessed.uxb`, ön yüz raporları (21 dosya)                                | ✔                                                 |
+| `par` | *parse* (çözümle)              | Yalnızca sözdizimini denetler                                                                                                                                                                                                               | `lex` ile aynı 21 dosya (`ast.json` dahil)                                                      | ✔                                                 |
+| `ast` | *AST* (soyut sözdizimi ağacı)  | AST üretir, AST sözleşmesini denetler                                                                                                                                                                                                      | `lex` ile aynı 21 dosya (`ast.json` dahil)                                                      | ✔                                                 |
+| `sem` | *semantic* (anlam)                | Tip bağlama, ad çözümü, yerleşim                                                                                                                                                                                                        | + `symbols.json`, `types.json`, `layouts.json`, `enums.json`, `type_infer_report.csv` (34 dosya) | ✔                                                 |
+| `hir` | *HIR* (yüksek düzey ara temsil) | `sem` sonrası yüksek düzey aşama                                                                                                                                                                                                          | `sem` ile aynı raporlar                                                                         | ◐                                                 |
+| `mir` | *MIR* (orta düzey ara kod)       | MIR üretir ve doğrular                                                                                                                                                                                                                      | `canonical_mir.json`, `semantic_mir.json`, `mir_verify_*.json`                                   | ◐ `--semantic` gerekir (G-CLI-1)                  |
+| `int` | *interpret* (yorumla)             | AST yorumlayıcıyla çalıştırır                                                                                                                                                                                                          | program çıktısı + `execution/ast_*`                                                          | ✔                                                 |
+| `run` | *run* (çalıştır)              | Yorumlayıcıyla çalıştırır; `--interpreter-backend MIR` ile MIR yorumlayıcı, `BOTH` ile ikisini birlikte çalıştırıp karşılaştırır (ayrışma yalnız `--interpreter-compare-json-out` dosyasında görünür, ✖ G-CLI-26) | program çıktısı + `execution/`                                                               | ✔                                                 |
+| `x64` | *x64*                             | MIR'den NASM assembly üretir                                                                                                                                                                                                                 | `.asm` + backend raporları                                                                      | ✔                                                 |
+| `bld` | *build* (derle)                   | Tam yerel derleme: assembly → nesne → EXE                                                                                                                                                                                                 | `.exe`, `asm/x64_mir/output.asm`                                                                 | ✔                                                 |
+| `jsw` | *JS web*                          | JavaScript (ve `--emit-browser` ile HTML) üretir                                                                                                                                                                                             | `.js`, `.html`                                                                                   | ◐                                                 |
+| `wat` | *WAT*                             | WebAssembly metni; `--emit-wasm` ile ikili                                                                                                                                                                                                    | `.wat`, `.wasm`                                                                                  | ◐                                                 |
+| `chk` | *check* (denetle)                 | Toplu doğrulama (`validate-all`)                                                                                                                                                                                                             | —                                                                                              | ✖ `tools\run_validate_all_gate.ps1` yok (G-CLI-3) |
+| `fmt` | *format*                          | Biçim denetimi                                                                                                                                                                                                                               | `lex` ile aynı                                                                                  | ✖ özel çıktı gözlenmedi                      |
+| `map` | *map* (harita)                    | Kaynak haritası                                                                                                                                                                                                                              | `lex` ile aynı                                                                                  | ✖ `--source-map-json-out` 0 bayt (G-CLI-2)        |
+| `doc` | *document* (belge)                | Belge üretimi                                                                                                                                                                                                                                | `lex` ile aynı                                                                                  | ✖ `--doc-json-out` 0 bayt (G-CLI-2)               |
+| `rel` | *release* (yayın)                | Yayın kapısı denetimi                                                                                                                                                                                                                      | `lex` ile aynı                                                                                  | ✖ `--release-json-out` 0 bayt (G-CLI-2)           |
+| `hlp` | *help* (yardım)                  | Yardım metnini yazar                                                                                                                                                                                                                         | 322 satır (311'i dolu)                                                                          | ✔ (`--verbose` reddedilir: G-CLI-7)               |
+| `ver` | *version* (sürüm)               | `uXBasic CLI Adim12` yazar                                                                                                                                                                                                                    | —                                                                                              | ✔                                                 |
+
+
+>
 > **Hangi fiili seçmeli?** Programı çalıştırmak istiyorsan `run`; EXE istiyorsan `bld`; sözdizimini öğrenmek istiyorsan `lex`/`ast`;
 > tipleri görmek istiyorsan `sem`; ara kodu görmek istiyorsan `mir --semantic`; assembly görmek istiyorsan `x64`;
 > web için `jsw` ya da `wat`.
+>
 
 ### 2.7.2 Sık kullanılan tarifler
 
-Aşağıdaki tariflerin her biri `bin\uxb_kilavuz_20261014_0253.exe` ile (31 komut; `20261007` ile aynı çıkış kodları ve iletilerle) çalıştırılıp çıktı dosyasının oluştuğu doğrulanmıştır (`k.uxb` küçük bir örnek programdır).
-**WAT/WASM tarifleri için `k.uxb` metin sabiti içermemelidir:** `PRINT "merhaba"` gibi bir satır `WAT string linear-memory lowering is not implemented` ile reddedilir (çıkış 23, ✖ G-WASM-8); `PRINT a` gibi yalnız sayı yazdıran bir program sorunsuz derlenir.
+Aşağıdaki tariflerin her biri `bin\uxb_kilavuz_20261014_0253.exe` ile (31 komut; `20261007` ile aynı çıkış kodları ve iletilerle) çalıştırılıp çıktı dosyasının oluştuğu doğrulanmıştır (`k.uxb` küçük bir örnek programdır).**WAT/WASM tarifleri için `k.uxb` metin sabiti içermemelidir:** `PRINT "merhaba"` gibi bir satır `WAT string linear-memory lowering is not implemented` ile reddedilir (çıkış 23, ✖ G-WASM-8); `PRINT a` gibi yalnız sayı yazdıran bir program sorunsuz derlenir.
 
-| İş | Komut |
-|---|---|
-| Çalıştır (AST) | `uxb run k.uxb` |
-| Çalıştır (MIR) | `uxb run k.uxb --interpreter-backend MIR` |
-| Sonsuz döngüyü sınırla | `uxb run k.uxb --max-steps 1000000` (aşılırsa AST'de çıkış kodu 5, `--interpreter-backend MIR` ile 13) |
+
+| İş                                        | Komut                                                                                                                                                                                                              |
+|---------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Çalıştır (AST)                          | `uxb run k.uxb`                                                                                                                                                                                                    |
+| Çalıştır (MIR)                          | `uxb run k.uxb --interpreter-backend MIR`                                                                                                                                                                          |
+| Sonsuz döngüyü sınırla                 | `uxb run k.uxb --max-steps 1000000` (aşılırsa AST'de çıkış kodu 5, `--interpreter-backend MIR` ile 13)                                                                                                      |
 | AST ve MIR yorumlayıcıyı karşılaştır | `uxb run k.uxb --interpreter-backend BOTH --interpreter-compare-json-out cmp.json` (sonuç `cmp.json` içindeki `status` ve `stdout_match` alanlarındadır; ayrışsa bile çıkış kodu 0 kalır: ✖ G-CLI-26) |
-| EXE üret | `uxb bld k.uxb --build-x64 --build-x64-out cikti\k.exe` (EXE adının önünde klasör olmalı; yalın `k.exe` çıkış 14 verir: ✖ G-CLI-21) |
-| Eski AST-x64 yolu | `uxb bld k.uxb --build-x64 --build-x64-out cikti\k.exe --x64-mode AST` |
-| NASM assembly gör | `uxb x64 k.uxb --emit-x64-nasm --emit-x64-nasm-out k.asm` |
-| JavaScript üret | `uxb jsw k.uxb --js-out k.js` ardından `node k.js` |
-| Tarayıcı sayfası | `uxb jsw k.uxb --emit-browser --html-out k.html --js-out k.js` |
-| WAT metni | `uxb wat k.uxb --emit-wat --wat-out k.wat` |
-| WASM ikilisi | `uxb wat k.uxb --emit-wasm --wasm-out k.wasm --wat-out k.wat --wat2wasm=tools\wabt\bin\wat2wasm.exe` |
-| Önişlemci sonucunu gör | `uxb lex k.uxb --preprocessed-out k_genisletilmis.uxb` |
-| Belirteçleri gör | `uxb lex k.uxb --tokens-json-out tokenler.json` |
-| AST'yi gör | `uxb ast k.uxb --ast-json-out ast.json` |
-| Sembol ve tip **sayıları** (özet) | `uxb sem k.uxb --symbol-table-json-out s.json --type-table-json-out t.json` (yalnız sayaç yazar; ad ve tip listesi için sonraki tarife bakın, ✖ G-CLI-10) |
-| Ad ve tip listesi | `uxb sem k.uxb --out-root klasör` ardından `klasör\<zaman>\logs\adim5_type_table.csv` (ad, tip, durum) ve `adim5_layout_report.csv` (boyut, hizalama) |
-| Ara kodu (MIR) gör | `uxb mir k.uxb --semantic --canonical-mir-json-out mir.json` |
-| MIR işlem kodları | `uxb mir k.uxb --semantic --mir-opcodes-json-out ops.json` |
-| Yerleşik işlev tip kaydı | `uxb sem k.uxb --type-infer-report-csv-out tir.csv` |
-| Aşama süreleri | `uxb run k.uxb --time-passes --layer-timing-json-out sure.json` |
-| Hataları JSON al | `uxb run k.uxb --diag-format json` (art arda JSON nesneleri verir, tek belge değildir; `INFO` satırlarını da kapatır: ✖ G-CLI-18) |
-| Sessiz çalıştır | `uxb run k.uxb --quiet` (yalnız program çıktısı ve hatalar) |
-| Çıktıyı dosyaya yönlendir | `uxb run k.uxb --stdout-out cikti.txt` |
-| Native görev işçisi sayısı | `uxb bld k.uxb --build-x64 --build-x64-out cikti\k.exe --task-workers 4` |
-| Geçici çıktı klasörü | her komuta `--out-root %TEMP%\uxb_deneme` ekleyin |
+| EXE üret                                   | `uxb bld k.uxb --build-x64 --build-x64-out cikti\k.exe` (EXE adının önünde klasör olmalı; yalın `k.exe` çıkış 14 verir: ✖ G-CLI-21)                                                                   |
+| Eski AST-x64 yolu                           | `uxb bld k.uxb --build-x64 --build-x64-out cikti\k.exe --x64-mode AST`                                                                                                                                             |
+| NASM assembly gör                          | `uxb x64 k.uxb --emit-x64-nasm --emit-x64-nasm-out k.asm`                                                                                                                                                          |
+| JavaScript üret                            | `uxb jsw k.uxb --js-out k.js` ardından `node k.js`                                                                                                                                                                |
+| Tarayıcı sayfası                         | `uxb jsw k.uxb --emit-browser --html-out k.html --js-out k.js`                                                                                                                                                     |
+| WAT metni                                   | `uxb wat k.uxb --emit-wat --wat-out k.wat`                                                                                                                                                                         |
+| WASM ikilisi                                | `uxb wat k.uxb --emit-wasm --wasm-out k.wasm --wat-out k.wat --wat2wasm=tools\wabt\bin\wat2wasm.exe`                                                                                                               |
+| Önişlemci sonucunu gör                   | `uxb lex k.uxb --preprocessed-out k_genisletilmis.uxb`                                                                                                                                                             |
+| Belirteçleri gör                          | `uxb lex k.uxb --tokens-json-out tokenler.json`                                                                                                                                                                    |
+| AST'yi gör                                 | `uxb ast k.uxb --ast-json-out ast.json`                                                                                                                                                                            |
+| Sembol ve tip **sayıları** (özet)        | `uxb sem k.uxb --symbol-table-json-out s.json --type-table-json-out t.json` (yalnız sayaç yazar; ad ve tip listesi için sonraki tarife bakın, ✖ G-CLI-10)                                                    |
+| Ad ve tip listesi                           | `uxb sem k.uxb --out-root klasör` ardından `klasör\<zaman>\logs\adim5_type_table.csv` (ad, tip, durum) ve `adim5_layout_report.csv` (boyut, hizalama)                                                     |
+| Ara kodu (MIR) gör                         | `uxb mir k.uxb --semantic --canonical-mir-json-out mir.json`                                                                                                                                                       |
+| MIR işlem kodları                         | `uxb mir k.uxb --semantic --mir-opcodes-json-out ops.json`                                                                                                                                                         |
+| Yerleşik işlev tip kaydı                 | `uxb sem k.uxb --type-infer-report-csv-out tir.csv`                                                                                                                                                                |
+| Aşama süreleri                            | `uxb run k.uxb --time-passes --layer-timing-json-out sure.json`                                                                                                                                                    |
+| Hataları JSON al                           | `uxb run k.uxb --diag-format json` (art arda JSON nesneleri verir, tek belge değildir; `INFO` satırlarını da kapatır: ✖ G-CLI-18)                                                                           |
+| Sessiz çalıştır                         | `uxb run k.uxb --quiet` (yalnız program çıktısı ve hatalar)                                                                                                                                                   |
+| Çıktıyı dosyaya yönlendir              | `uxb run k.uxb --stdout-out cikti.txt`                                                                                                                                                                             |
+| Native görev işçisi sayısı             | `uxb bld k.uxb --build-x64 --build-x64-out cikti\k.exe --task-workers 4`                                                                                                                                           |
+| Geçici çıktı klasörü                  | her komuta `--out-root %TEMP%\uxb_deneme` ekleyin                                                                                                                                                                  |
+
 
 ### 2.7.3 Toplu komut (yanıt) dosyası `.uxcli`
 
-Uzun bir komutu dosyaya yazıp çağırmak için tasarlanmıştır. Dosyada her satır bir argümandır; `#` ile başlayan bölüm yorumdur;
-boşluk içeren değerler çift tırnak içine alınır; dosya içinde başka `@dosya` yazılabilir (en çok 8 derinlik).
+Uzun bir komutu dosyaya yazıp çağırmak için tasarlanmıştır. Dosyada her satır bir argümandır; `#` ile başlayan bölüm yorumdur;boşluk içeren değerler çift tırnak içine alınır; dosya içinde başka `@dosya` yazılabilir (en çok 8 derinlik).
 
 ```
-# kargo merkezini AST yorumlayıcı ile çalıştırır
-int
-docs/uxbasic_5_cilt/examples/projects/kargo_merkezi/main.uxb
---execmem
---interpreter-backend
+# kargo merkezini AST yorumlayıcı ile çalıştırır    
+int    
+docs/uxbasic_5_cilt/examples/projects/kargo_merkezi/main.uxb    
+--execmem    
+--interpreter-backend    
 AST
 ```
 
-Çağrı biçimi `uxb @komutlar.uxcli`'dir. Çözümleme kodu (`src/cli/cli_response_file.fbs`) yazılıdır; ancak bugünkü derleyicide bu çağrı
-`Desteklenmeyen kaynak dosya uzantisi: .uxcli` hatasıyla reddedilmektedir: **✖ SINIR (G-CLI-8)**.
+Çağrı biçimi `uxb @komutlar.uxcli`'dir. Çözümleme kodu (`src/cli/cli_response_file.fbs`) yazılıdır; ancak bugünkü derleyicide bu çağrı`Desteklenmeyen kaynak dosya uzantisi: .uxcli` hatasıyla reddedilmektedir: **✖ SINIR (G-CLI-8)**.
 
 ## 2.8 Seçenek listesi (kayıttan, eksiksiz)
 
-Aşağıdaki tablolar derleyicinin kayıt defterindeki **bütün** seçenekleri gösterir. "Kısa kod" derleyicinin içindeki üç harfli takma addır.
-*(denetlendi)* yazan satırlar bu kılavuz yazılırken çalıştırılarak sınanmıştır; *(etkisiz)* ve ✖ yazanlar Ek G'de açıklanır.
+Aşağıdaki tablolar derleyicinin kayıt defterindeki **bütün** seçenekleri gösterir. "Kısa kod" derleyicinin içindeki üç harfli takma addır.*(denetlendi)* yazan satırlar bu kılavuz yazılırken çalıştırılarak sınanmıştır; *(etkisiz)* ve ✖ yazanlar Ek G'de açıklanır.
 
 Kayıtlı seçenek sayısı: **169**; aşağıda açıklamalı olarak **169** seçenek gruplanmıştır.
 
@@ -1091,18 +1104,20 @@ Kayıtlı seçenek sayısı: **169**; aşağıda açıklamalı olarak **169** se
 
 ## 2.9 Ortam değişkenleri
 
-| Değişken | Kim kullanır? | Ne işe yarar? |
-|---|---|---|
-| `UXB_TASK_WORKERS` | Native çalışma zamanı | Görev işçisi sayısı; derleme sırasında gömülen `--task-workers` değerinden **önce** gelir. Ölçüm: 8 görev × 300 ms bekleme, gömülü 4 işçiyle ≈ 0,75 sn, `UXB_TASK_WORKERS=1` ile ≈ 1,3 sn, `=8` ile ≈ 0,37 sn; `--task-workers 1` ile derlemek `=1` ile aynı süreyi verir |
-| `UXB_ASM`, `UXB_LINK` | `uxb bld` | NASM ve bağlayıcı **programı** (varsayılan `nasm`, `gcc`). Başka bir araç için **tam yol** verin (`UXB_ASM=C:\araclar\nasm\nasm.exe`); bozuk ad ya da yol `build_all.bat failed with exit code 1` ile çıkış 14 verir |
-| `UXB_CC`, `UXB_CXX` | `uxb bld` | C ve C++ derleyici adı (varsayılan `gcc`, `g++`); `toolchain.env.bat` içine yazılır, `ffi_resolver.c` ve içe aktarma adımlarında kullanılır |
-| `UXB_ASM_PATH`, `UXB_LINK_PATH`, `UXB_CC_PATH`, `UXB_CXX_PATH` | `uxb bld` | Bu araçların klasörü. ✖ Araç adı varsayılan (`nasm`/`gcc`/`g++`) ve `C:\Program Files\CodeBlocks\MinGW\bin` varsa verdiğiniz klasör **sessizce yok sayılır** (G-CLI-12) |
-| `UXB_TARGET_ARCH` | `uxb bld` | Betiğe yazılır, ama EXE her zaman x64'tür (✖ G-CLI-13) |
-| `UXB_ASM_CMD`, `UXB_LINK_CMD`, `UXB_CC_CMD`, `UXB_CXX_CMD` | üretilen `interop\toolchain.env.bat` | **Sonuç** değişkenleri: betik bunları yukarıdaki değerlerden kendisi kurar. **Dışarıdan vermeyin**: üzerine yazılır, bozuk bir değerle bile derleme başarılı olur (✖ G-CLI-12) |
-| `UXB_GXX`, `CXX` | `build_runtime_dll.ps1` | g++ yolu |
-| `UXB_MINGW_ROOT` | `build_runtime_dll.ps1` | MSYS2 UCRT64 kök klasörü |
-| `UXB_PKG_CONFIG` | `build_runtime_dll.ps1` | libuv/oneTBB bayraklarını bulan araç |
-| `UXB_BUILD_X86` | `compiler\scripts\build_uxb_main_64.ps1` | `1` ise 32 bit derleyici eşliği de üretilir. Kökteki `build_64.ps1` bu değişkeni **yok sayar** (✖ G-CLI-15) |
+
+| Değişken                                                     | Kim kullanır?                           | Ne işe yarar?                                                                                                                                                                                                                                                                                         |
+|----------------------------------------------------------------|------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `UXB_TASK_WORKERS`                                             | Native çalışma zamanı                | Görev işçisi sayısı; derleme sırasında gömülen `--task-workers` değerinden **önce** gelir. Ölçüm: 8 görev × 300 ms bekleme, gömülü 4 işçiyle ≈ 0,75 sn, `UXB_TASK_WORKERS=1` ile ≈ 1,3 sn, `=8` ile ≈ 0,37 sn; `--task-workers 1` ile derlemek `=1` ile aynı süreyi verir |
+| `UXB_ASM`, `UXB_LINK`                                          | `uxb bld`                                | NASM ve bağlayıcı **programı** (varsayılan `nasm`, `gcc`). Başka bir araç için **tam yol** verin (`UXB_ASM=C:\araclar\nasm\nasm.exe`); bozuk ad ya da yol `build_all.bat failed with exit code 1` ile çıkış 14 verir                                                                       |
+| `UXB_CC`, `UXB_CXX`                                            | `uxb bld`                                | C ve C++ derleyici adı (varsayılan `gcc`, `g++`); `toolchain.env.bat` içine yazılır, `ffi_resolver.c` ve içe aktarma adımlarında kullanılır                                                                                                                                                  |
+| `UXB_ASM_PATH`, `UXB_LINK_PATH`, `UXB_CC_PATH`, `UXB_CXX_PATH` | `uxb bld`                                | Bu araçların klasörü. ✖ Araç adı varsayılan (`nasm`/`gcc`/`g++`) ve `C:\Program Files\CodeBlocks\MinGW\bin` varsa verdiğiniz klasör **sessizce yok sayılır** (G-CLI-12)                                                                                                                   |
+| `UXB_TARGET_ARCH`                                              | `uxb bld`                                | Betiğe yazılır, ama EXE her zaman x64'tür (✖ G-CLI-13)                                                                                                                                                                                                                                           |
+| `UXB_ASM_CMD`, `UXB_LINK_CMD`, `UXB_CC_CMD`, `UXB_CXX_CMD`     | üretilen `interop\toolchain.env.bat`    | **Sonuç** değişkenleri: betik bunları yukarıdaki değerlerden kendisi kurar. **Dışarıdan vermeyin**: üzerine yazılır, bozuk bir değerle bile derleme başarılı olur (✖ G-CLI-12)                                                                                                       |
+| `UXB_GXX`, `CXX`                                               | `build_runtime_dll.ps1`                  | g++ yolu                                                                                                                                                                                                                                                                                               |
+| `UXB_MINGW_ROOT`                                               | `build_runtime_dll.ps1`                  | MSYS2 UCRT64 kök klasörü                                                                                                                                                                                                                                                                            |
+| `UXB_PKG_CONFIG`                                               | `build_runtime_dll.ps1`                  | libuv/oneTBB bayraklarını bulan araç                                                                                                                                                                                                                                                                |
+| `UXB_BUILD_X86`                                                | `compiler\scripts\build_uxb_main_64.ps1` | `1` ise 32 bit derleyici eşliği de üretilir. Kökteki `build_64.ps1` bu değişkeni **yok sayar** (✖ G-CLI-15)                                                                                                                                                                                    |
+
 
 ## 2.10 Komut satırında bilinen sınırlar
 
@@ -1147,16 +1162,16 @@ Aşağıdaki kayıtların tamamı bu kılavuz yazılırken **çalıştırılarak
 
 ## 2.11 Derleme ve komut satırıyla ilgili programlama kararları
 
-* **Derleyiciyi `.\build_64.ps1 -Force` ile derleyin; ama bu betik her zaman `bin\uxb.exe` dosyasının yerine yenisini koyar** (eskisini `.pre_library_patch.bak` olarak yedekler). Çalışan derleyiciyi korumak için değişiklik denerken 2.3.3'teki elle komutla yeni bir adla derleyin (`-x bin\uxb_deneme.exe`) ve eski sürümle yan yana karşılaştırın.
-* Derleme betiğinin mimari denetimini **atlamayın**: üretilen dosya x64 değilse betik `Compiler host mimarisi yanlis` hatasıyla durur (kapalı başarısızlık).
-* **`uxb_runtime.dll` ve bağımlı DLL'leri bir uXBasic EXE'sinin yanında bulunmalıdır;** `uxb bld` bunları kendisi kopyalar (2.5). Çalışma zamanı kaynağını değiştirince önce `build_runtime_dll.ps1 -OutputDirectory <geçici klasör> -SkipPublish` ile **yalıtılmış** derleyip deneyin; beğenirseniz `-SkipPublish` olmadan çalıştırın (DLL `bin\` ve `dist\` klasörlerine yayımlanır, her `bld` bunu EXE'nin yanına koyar).
-* Değişiklikten sonra `tests\run_all_model_tests.ps1` ile **bütün paketleri** koşturun; yalnız ilgili paketler için `-Only` verin. Raporu kendi adınıza yazın (`-ReportPath .\test_results\denemem.md`, **göreli** yol) ki varsayılan rapor ezilmesin (G-CLI-14). `CALISMADI` görünen paket başarılı sayılmaz. Reddetme testinin geçmesi özelliğin çalıştığını kanıtlamaz: gerçek AST, MIR, x64, JS ve WASM yürütmesini ayrıca doğrulayın.
-* **Fiili işe göre seçin** (2.7.1): çalıştırmak → `run`; EXE → `bld`; aşamaları incelemek → `lex`, `ast`, `sem`, `mir --semantic`, `x64`; web → `jsw` ya da `wat`.
-* Her komuta **`--out-root` ile geçici klasör** verin (2.7.2); proje klasörü şişmez. Sonsuz döngü ihtimali olan denemede `--max-steps` verin ve betiklerde çıkış kodunu denetleyin.
-* Hataları makineyle okumak için `--diag-format json` kullanın, ama nesneleri tek tek okuyun (art arda gelirler, G-CLI-18) ve `E.xxxx` koduna değil **çıkış koduna ve ileti metnine** dayanın (G-HATA-10); yalnız program çıktısı için `--quiet`, çıktıyı dosyaya almak için `--stdout-out` kullanın. `--diag-format` değerini kendiniz denetleyin (yalnız `text` ya da `json`; yanlış yazım sessizce metin kipine düşer, G-CLI-19).
-* **Çalışmayan fiil ve seçeneklere dayanan betik yazmayın**: `chk`, `fmt`, `map`, `doc`, `rel` fiilleri (G-CLI-2, G-CLI-3), `.uxcli` yanıt dosyası (G-CLI-8) ve `--stop-after` (G-CLI-5) bugün çalışmaz ya da etkisizdir.
-* Eski AST-x64 yolunu (`--x64-mode AST`) yalnız karşılaştırma ve geriye dönük uyumluluk için kullanın; görev gibi yeni özellikleri bugün açıkça reddeder (ara durum, korunan yol).
-* Native görev işçisi sayısını `--task-workers N` ya da `UXB_TASK_WORKERS` ile ayarlayın (ortam değişkeni önceliklidir). NASM ve bağlayıcıyı `UXB_ASM` ve `UXB_LINK` değişkenlerine **tam yol** vererek belirtin; `UXB_ASM_CMD` ve `UXB_LINK_CMD` betiğin sonuç değişkenleridir, dışarıdan verilen değer üzerine yazılır (G-CLI-12).
+- **Derleyiciyi `.\build_64.ps1 -Force` ile derleyin; ama bu betik her zaman `bin\uxb.exe` dosyasının yerine yenisini koyar** (eskisini `.pre_library_patch.bak` olarak yedekler). Çalışan derleyiciyi korumak için değişiklik denerken 2.3.3'teki elle komutla yeni bir adla derleyin (`-x bin\uxb_deneme.exe`) ve eski sürümle yan yana karşılaştırın.
+- Derleme betiğinin mimari denetimini **atlamayın**: üretilen dosya x64 değilse betik `Compiler host mimarisi yanlis` hatasıyla durur (kapalı başarısızlık).
+- **`uxb_runtime.dll` ve bağımlı DLL'leri bir uXBasic EXE'sinin yanında bulunmalıdır;** `uxb bld` bunları kendisi kopyalar (2.5). Çalışma zamanı kaynağını değiştirince önce `build_runtime_dll.ps1 -OutputDirectory <geçici klasör> -SkipPublish` ile **yalıtılmış** derleyip deneyin; beğenirseniz `-SkipPublish` olmadan çalıştırın (DLL `bin\` ve `dist\` klasörlerine yayımlanır, her `bld` bunu EXE'nin yanına koyar).
+- Değişiklikten sonra `tests\run_all_model_tests.ps1` ile **bütün paketleri** koşturun; yalnız ilgili paketler için `-Only` verin. Raporu kendi adınıza yazın (`-ReportPath .\test_results\denemem.md`, **göreli** yol) ki varsayılan rapor ezilmesin (G-CLI-14). `CALISMADI` görünen paket başarılı sayılmaz. Reddetme testinin geçmesi özelliğin çalıştığını kanıtlamaz: gerçek AST, MIR, x64, JS ve WASM yürütmesini ayrıca doğrulayın.
+- **Fiili işe göre seçin** (2.7.1): çalıştırmak → `run`; EXE → `bld`; aşamaları incelemek → `lex`, `ast`, `sem`, `mir --semantic`, `x64`; web → `jsw` ya da `wat`.
+- Her komuta **`--out-root` ile geçici klasör** verin (2.7.2); proje klasörü şişmez. Sonsuz döngü ihtimali olan denemede `--max-steps` verin ve betiklerde çıkış kodunu denetleyin.
+- Hataları makineyle okumak için `--diag-format json` kullanın, ama nesneleri tek tek okuyun (art arda gelirler, G-CLI-18) ve `E.xxxx` koduna değil **çıkış koduna ve ileti metnine** dayanın (G-HATA-10); yalnız program çıktısı için `--quiet`, çıktıyı dosyaya almak için `--stdout-out` kullanın. `--diag-format` değerini kendiniz denetleyin (yalnız `text` ya da `json`; yanlış yazım sessizce metin kipine düşer, G-CLI-19).
+- **Çalışmayan fiil ve seçeneklere dayanan betik yazmayın**: `chk`, `fmt`, `map`, `doc`, `rel` fiilleri (G-CLI-2, G-CLI-3), `.uxcli` yanıt dosyası (G-CLI-8) ve `--stop-after` (G-CLI-5) bugün çalışmaz ya da etkisizdir.
+- Eski AST-x64 yolunu (`--x64-mode AST`) yalnız karşılaştırma ve geriye dönük uyumluluk için kullanın; görev gibi yeni özellikleri bugün açıkça reddeder (ara durum, korunan yol).
+- Native görev işçisi sayısını `--task-workers N` ya da `UXB_TASK_WORKERS` ile ayarlayın (ortam değişkeni önceliklidir). NASM ve bağlayıcıyı `UXB_ASM` ve `UXB_LINK` değişkenlerine **tam yol** vererek belirtin; `UXB_ASM_CMD` ve `UXB_LINK_CMD` betiğin sonuç değişkenleridir, dışarıdan verilen değer üzerine yazılır (G-CLI-12).
 
 
 # 3. Program yapısı ve dilin yazım kuralları
@@ -1179,7 +1194,7 @@ Başka bir uzantıyla çağırırsanız derleyici `Desteklenmeyen kaynak dosya u
 
 ## 3.2 Programın iskeleti
 
-Bir uXBasic programı **yukarıdan aşağıya** çalışır. Dosyada yordam ve işlevler (`SUB`, `FUNCTION`) ile görev yapıları (`THREAD` …) **çağrıdan önce ya da sonra** tanımlanabilir.
+Bir uXBasic programı **yukarıdan aşağıya** çalışır. Yordam ve işlevler (`SUB`, `FUNCTION`) çağrıdan **önce** tanımlanabilir; tanım çağrıdan **sonra** geliyorsa çağrıdan önce `DECLARE` ile bildirilmelidir (**sıkı kural**, Mete 2026-10-15; derleyici bugün denetlemez, Bölüm 8.5). Görev yapıları (`THREAD` …) için de aynı kural hedeflenir (◇ HEDEF, Bölüm 15.3).
 İsteğe bağlı olarak giriş noktası `MAIN ... END MAIN` ile belirtilir:
 
 | Biçim | Ne zaman? |
@@ -1216,10 +1231,11 @@ END MAIN
 
 *Motor durumu: AST ✔ · MIR ✔ · x64 ✔ · JS ✔ · WASM ✔*
 
-**Yordam tanımından önce çağırma**
+**Yordam tanımı çağrıdan sonra gelirse DECLARE ile bildirilir**
 
 
 ```basic
+DECLARE SUB Selam()
 Selam()
 SUB Selam()
     PRINT "merhaba"
@@ -1789,9 +1805,20 @@ tip adı olarak **kullanılamaz** (`unknown type: … [canonical=…]`, G-TIP-8)
 | `OBJECT` | ✔ kabul edilir (`DIM x AS OBJECT`) | Koleksiyon işlevlerinin dönüş tipi (Bölüm 10.5) |
 | `ANY`, `VARIANT`, `VOID` | ✖ `unknown type` | İç tip olarak var, yüzeyden reddedilir (G-TIP-8) |
 | `FILE_HANDLE`, `FUNCTION_PTR`, `DLL_HANDLE`, `JS_OBJECT`, `WASM_EXTERNREF` | ✖ reddedilir | Tasarımın 35 kanonik tipindendir (G-TIP-8) |
-| `NONE`, `NODE` | ✖ `unknown type` | **İç karşılığı da yoktur**; tasarımın 35 tipinde de yoktur. `NONE` yalnız seçenek adı olarak geçer (yıkım kipi, çağrı sözleşmesi sınıfı). Karar bekleniyor (G-TIP-30) |
-| `NULL`, `NOTHING`, `NIL` | ✖ `unknown symbol` | Boş değer sabiti yoktur; MIR indirgeyicisinde kod var, anlam kapısı tanımıyor (G-TIP-31) |
+| `NONE`, `NODE` | ✖ `unknown type` | **İç karşılığı da yoktur**; tasarımın 35 tipinde de yoktur. `NONE` yalnız seçenek adı olarak geçer (yıkım kipi, çağrı sözleşmesi sınıfı). **Karar (Mete, 2026-10-15): eklenmeyecek**; yokluk `NULL`/`NOTHING` ile, düğüm `CLASS`/`TYPE` ile ifade edilir (G-TIP-30) |
+| `NULL`, `NOTHING` | ✖ `unknown symbol` (bugün) | **Karar (Mete, 2026-10-15): çalışacak** (◇ HEDEF, G-TIP-31, S-564). MIR indirgeyicisinde kod var, anlam kapısı tanımıyor. `NIL` istenmedi, eklenmeyecek |
 | `NAN` (tip ya da sabit), `INF`, `ISNAN()` | ✖ yok | NaN yalnız kayan nokta işleminden doğar ve motorlar farklıdır (G-HATA-5, G-TIP-29) |
+
+**Hedef anlam (◇ HEDEF, S-564).** `NULL` ve `NOTHING` aynı boş değerin iki yazılışıdır; işaretçiye (`PTR`), nesne başvurusuna ve (gelince) işlev göstericisine atanır, `=` / `<>` ile sınanır; sayı, metin ya da `BOOLEAN` değişkene atanması derleme hatasıdır; `PRINT NULL` `0` yazar. Boş işaretçi, dış kütüphane çağrılarında (`BYVAL NULL`) da gerekir. Örnek (bugün çalışmaz):
+
+```basic
+DIM k AS Kutu = NEW Kutu(3)
+DELETE k
+k = NOTHING
+IF k = NOTHING THEN PRINT "bos"
+```
+
+Sözleşme: `docs/tasarim/UXB_S544_S549_S564_DECLARE_DOSYA_TUTAMACI_NULL_20261015_TR.md` Bölüm 3.
 
 ## 4.5 Mantıksal tip: `BOOLEAN`
 
@@ -3299,6 +3326,10 @@ sonra
 > Beklenen `6`; AST `1` yazar, MIR, MIR-x64, JS ve WASM `6` yazar. `DO WHILE` ve `WHILE … WEND` içinde de aynıdır. Döngü dışındaki `GOSUB` ve alt programın kendi içindeki döngü doğrudur.
 >
 > **✖ SINIR (G-AKIS-5):** Önceden `GOSUB` yapılmamış bir `RETURN` her yolda başka davranır: AST `exec: RETURN used without GOSUB (9301)` ile durur (çıkış 5); MIR, MIR-x64, JS ve WASM **sessizce** biter (çıkış 0, ileti yok, sonraki satırlar çalışmaz); eski AST-x64 erişim ihlaliyle çöker. Her `RETURN`'ün bir `GOSUB`'tan geldiğinden emin olun; ana akışı etiketlerden `END` ile ayırın.
+>
+> **✖ SINIR (G-AKIS-6, yalnız AST):** Etiketi ve `GOTO`yu bir `SUB` **içinde** yazarsanız AST `exec: GOTO target not found` ile durur (çıkış 5); MIR, MIR-x64, eski AST-x64, JS ve WASM doğru çalışır (`SUB` içinde ileriye ve geriye `GOTO`: `2` ve `3`). Modül düzeyindeki etiket altı yolda çalışır. **Etiketleri modül düzeyinde kullanın**; etiketli `DATA` tasarımı da böyledir (Bölüm 10.5).
+>
+> **✖ SINIR (G-AKIS-7):** Bir `RETURN` satırından hemen sonra gelen etiketli satır, `GOTO` ile ulaşılabilir olsa da altı yolda `semantic: unreachable statement after RETURN_STMT` ile reddedilir (`PRINT` sonrasında etiket reddedilmez). Etiketten önceki `RETURN`'ü bir `IF` içine alın.
 
 > **Tavsiye:** Yeni kodda `GOTO`/`GOSUB` yerine döngü, `IF` ve `SUB` kullanın. `GOSUB`'u en azından bir döngünün içinden çağırmayın (G-AKIS-4).
 
@@ -3378,7 +3409,7 @@ END FUNCTION
 > **G-YORDAM-6, derleyici sürümüne göre iki durumdur.** *20261007 ikilisinde* (bu kılavuzdaki örneklerin ölçüldüğü sürüm) karara aykırı **sessiz bir kusurdu (✖ SESSİZ)**: `Selam "Ayse"`, `Selam` ya da `Artir n` yazarsanız derleyici hata **vermez**, çağrı da **yapılmaz** (dört motorda çıktı yoktur, `BYREF` değişkeni değişmez, çıkış kodu 0); çok argümanlı `Topla 3, 4` ayrıştırma hatasıdır; `o.Selam` AST'de hata verir, MIR ve JS'te hiçbir şey yapmaz, x64'te derlenmez.
 > *20261013 ve sonrası derlemelerde* (S-440, Codex) karar uygulanmıştır: parantezsiz çağrı yordam, işlev ve metot için dört motorda **ayrıştırmada reddedilir**: `UXB_CALL_PAREN_REQUIRED: CALL: missing ( after selam; use selam(...)` (çıkış 1). Bu kılavuzdaki her örnekte çağrılar zaten parantezlidir.
 * Sonucu kullanılmayan işlev çağrısı deyim olarak yazılabilir: `Kare(5)`.
-* `SUB`/`FUNCTION` tanımları dosyada çağrıdan **önce ya da sonra** olabilir; `DECLARE` zorunlu değildir.
+* `SUB`/`FUNCTION` tanımı çağrıdan **önce** yazılırsa `DECLARE` gerekmez. Tanım çağrıdan **sonra** gelecekse (ileri kullanım, karşılıklı özyineleme) çağrıdan önce `DECLARE` ile bildirilmelidir: **sıkı kural** (Mete, 2026-10-15; ayrıntı 8.5). Derleyici bu kuralı bugün denetlemez (G-YORDAM-9); yeni kodda kurala uyun.
 
 **SUB ve FUNCTION**
 
@@ -3536,7 +3567,7 @@ PRINT Ortalama(w)
 * `RETURN değer` işlevi bitirir ve değeri verir. Değerin tipi, bildirilen dönüş tipine uymalıdır: `RETURN 2.5` yazıp işlevi `AS I32` bildirirseniz
   derleme hatası alırsınız (`assignment requires explicit cast TYPE_F64 to TYPE_I32`).
 * `SUB`'dan erken çıkmak için değersiz `RETURN` yazılır (`EXIT SUB` ve `EXIT FUNCTION` **yoktur**).
-* **✖ SINIR (G-YORDAM-2):** `RETURN` hiç çalışmadan biten bir `FUNCTION` AST ve MIR'de `0`, x64'te rastgele bir değer döndürür. Her yolun `RETURN` ile bittiğinden emin olun.
+* **✖ SINIR (G-YORDAM-2, G-YORDAM-12):** `RETURN` hiç çalışmadan biten bir `FUNCTION` ya da değer döndüren `METHOD` AST ve MIR'de `0`, x64'te rastgele bir değer, JS'te `undefined` döndürür; WASM'da derlenmez, eski AST-x64'te son hesaplanan değeri verir. Eski AST-x64'te `F = değer` yazıp sonra başka deyim çalıştıran işlev de atanan değeri vermez. **Kaynakta düzeltildi** (2026-10-17, testler `function_result_zero`, `float_function_result`): işlevin sonuç değişkeni (işlev adı) türün sıfırıyla başlar; gövde `RETURN` olmadan biterse altı yolda bu değişken döner. Ölçüm ikilisinde her yolun `RETURN` ile bittiğinden emin olun.
 
 ## 8.4 Özyineleme
 
@@ -3646,7 +3677,7 @@ PRINT Fib(40)
 
 ### Karşılıklı özyineleme
 
-İki işlev birbirini çağırabilir. Bu derleyicide imzaları önceden bildirmek (`DECLARE`) **zorunlu değildir**, ama okunaklılık için tavsiye edilir;
+İki işlev birbirini çağırabilir. Sonra tanımlanacak işlevi, ilk çağrıdan önce `DECLARE` ile **bildirmeniz gerekir** (sıkı kural, 8.5; derleyici bugün yazmasanız da kabul eder);
 bu örnek beş hedefte de çalışan nadir programlardandır:
 
 **DECLARE ile karşılıklı özyineleme**
@@ -3734,7 +3765,7 @@ END FUNCTION
 | `DECLARE` var, tanım yok, çağrı da yok | hata yok (kullanılmayan bildirim) |
 | `DECLARE` var, tanım **yok**, çağrı var | ✖ **FARK**: AST ve MIR çalışma anında, x64 derlemede, JS yürütmede, eski AST-x64 bağlamada durur; **WASM hata vermez, `0` yazar** (G-DIL-7, G-WASM-23) |
 
-**Karar bekleniyor (S-544):** ileri kullanım derleme hatası mı olsun (sıkı kural), uyarı mı, yoksa isteğe bağlı mı kalsın? Sıkı kuralın bedeli küçüktür: kaynak metin sezgisiyle sayıldığında, rutin tanımlayan 66 örnek dosyasının 2'sinde, 133 test dosyasının 2'sinde ve 80 kütüphane kaynağının 1'inde tanımdan önce `DECLARE`siz çağrı vardır (toplam yaklaşık 5 dosya). **Yeni kod yazarken kuralı şimdiden uygulayın:** ileri kullanacağınız her rutin için tanımdan önce `DECLARE` yazın.
+**Karar (Mete, 2026-10-15): sıkı kural.** Tanımdan önce `DECLARE`siz kullanım **derleme hatası** olacaktır (◇ HEDEF, S-544; altı yolda aynı ortak tanı). Kural: **tanım çağrıdan önce gelmişse `DECLARE` gerekmez; tanım çağrıdan sonra geliyorsa (ya da başka modüldeyse) çağrıdan önce `DECLARE` yazılır; `DECLARE` imzası tanımla bire bir uyuşur** (bu son denetim bugün çalışır). Bedeli küçüktür: kaynak metin sezgisiyle sayıldığında, rutin tanımlayan 66 örnek dosyasının 2'sinde, 133 test dosyasının 2'sinde ve 80 kütüphane kaynağının 1'inde tanımdan önce `DECLARE`siz çağrı vardır (toplam 5 dosya); bu kılavuzdaki iki örnek (`sub_tanimdan_once`, `ifade_hesaplayici`) yeni kurala göre güncellendi ve yeniden doğrulandı. Görev yapılarına (`DECLARE THREAD …`) aynı kural, bu biçimler eklenince (S-395) uygulanır. Sözleşme ve kabul ölçütleri: `docs/tasarim/UXB_S544_S549_S564_DECLARE_DOSYA_TUTAMACI_NULL_20261015_TR.md`. **Yeni kod yazarken kuralı şimdiden uygulayın:** ileri kullanacağınız her rutin için tanımdan önce `DECLARE` yazın.
 
 ## 8.6 `STATIC` yerel değişken
 
@@ -3796,12 +3827,13 @@ Bir işlevin sonucu başka bir işlevin argümanı olabilir; `T(K(3), K(K(2)))` 
 
 * **Her çağrıyı parantezle yazın** (`Selam("Ayse")`, `Say()`, `o.Metot()`): parantezsiz çağrı 20261007'de sessizce hiçbir şey yapardı, 20261013 ve sonrasında derleme hatasıdır (G-YORDAM-6).
 * Bir **değer üretiyorsanız `FUNCTION`**, yalnız bir iş yapıyorsanız `SUB` yazın. Birden çok sonuç gerekiyorsa **`BYREF` çıkış parametreleri** kullanın (`Bol(a, b, BYREF bolum, BYREF kalan)`).
-* **Her işlevin her yolu `RETURN` ile bitsin** (G-YORDAM-2): `RETURN` çalışmadan biten işlev AST/MIR'de `0`, x64'te rastgele değer verir. Erken çıkış için `RETURN` yazın; `EXIT SUB`/`EXIT FUNCTION` yoktur.
+* **Her işlevin her yolu `RETURN` ile bitsin** (G-YORDAM-2, G-YORDAM-12): `RETURN` çalışmadan biten işlev ölçüm ikilisinde AST/MIR'de `0`, x64'te rastgele değer verir (kaynakta düzeltildi). Erken çıkış için `RETURN` yazın; `EXIT SUB`/`EXIT FUNCTION` yoktur.
+* **Gövdesi boş rutin (`SUB Taslak() : END SUB`) ölçüm ikilisinde bozuktu** (✖ ÇÖKME, G-YORDAM-11): AST çöker, MIR, x64 ve JS çağrıyı bulamaz, eski AST-x64 boş sınıf rutinini derleyemez (WASM doğru). **Kaynakta düzeltildi** (2026-10-17, test `tests/oop_parity/empty_routine_bodies`); ölçüm ikilisinde taslak rutine bir deyim koyun (`DIM bos AS I32`).
 * Argüman tipini **kendiniz dönüştürün** (`I32(x)`, `STR(n)`): tip uyuşmazlığı bugün çağrıda sessizce kabul edilir ve yanlış değer üretir (G-YORDAM-3, G-YORDAM-4).
 * Parametreye varsayılan değer yazmayın (yoktur); aynı adlı işlevi **parametre sayısıyla ayırmaya** çalışmayın, her işleve ayrı ad verin (G-YORDAM-1).
 * **Kaydı (`TYPE`) parametre olarak vermeyin**, kayıt döndürmeyin: alanları ayrı parametre ve `BYREF` çıkış olarak geçirin (G-VERI-6, G-VERI-3). Dizi parametresi her zaman başvuruyladır.
 * Özyinelemeli işleve **durma koşulunu ilk satıra** yazın. Derinliği küçük tutun (AST 100'den az, MIR 50'den az, x64 yaklaşık 8000); derin işleri döngüyle yazın (G-YORDAM-5).
-* Karşılıklı özyineleme için imzaları `DECLARE` ile önceden bildirmek zorunlu değildir, ama okunaklılığı artırır; çağrıdan sonra tanım yazmak da serbesttir.
+* İleri kullanacağınız ve karşılıklı özyinelemeli her rutini çağrıdan önce `DECLARE` ile bildirin (sıkı kural, 8.5); tanımı çağrıdan önce yazarsanız `DECLARE` gerekmez.
 * Çağrılar arasında durum saklamak için **`STATIC` yerel**; yalnız gerçekten paylaşılan durum için genel değişken kullanın.
 * Yerleşik işlev adıyla aynı adlı işlev yazmayın (G-DIL-9); kütüphane işlev adlarıyla aynı adlı değişken tanımlamayın (G-KUT-5).
 * Çağrıları iç içe yazabilirsiniz (`T(K(3), K(K(2)))`); okunaklılık için uzun zincirleri `|>` ile soldan sağa ya da ara değişkenlerle yazın.
@@ -4633,6 +4665,8 @@ PRINT
 
 > **Sınır (G-KOLEKSIYON-1):** Koleksiyondaki **metin** değeri doğrudan `PRINT LISTGET(l, 1)` ile yazdırırsanız motorlar farklı davranır (AST `0`, MIR doğru, x64 çöp sayı). Metinleri
 > `FOR EACH s IN l` ile (typed `STRING` değişkenle) okuyun. `DICT` değeri için `DICTGET` sonucu doğrudan `STRING` değişkene atanamaz (`explicit cast TYPE_OBJECT to TYPE_STRING`).
+>
+> **Sınır (G-KOLEKSIYON-7):** `PRINT DICTHAS(d, "a")` ve `PRINT SETHAS(s, 5)` doğru değeri AST, MIR ve x64'te `-1`, JS'te `1` yazdırır (`IF` içinde dördü de doğrudur; karşılaştırma işleçlerinin doğrusu altı yolda `-1`dir). WASM `SETHAS`i hata vermeden `0` yazar (koleksiyon işlevleri WASM'da bağsızdır, G-WASM-23). Sonucu `PRINT` etmek yerine `IF` ile sınayın.
 
 ### Koleksiyonların iç içe kullanımındaki sınırlar
 
@@ -4644,9 +4678,9 @@ Koleksiyonlar birbirinin içine konabilir (Bölüm 22.4'te tablo halinde), ama d
 * **Tipli koleksiyon yoktur** (◇ HEDEF, G-HEDEF-26): `DIM l AS LIST OF I32` "unknown symbol: of" ile reddedilir (iletide tipli koleksiyondan söz edilmez); `n = LISTGET(l, 0)` ile `I32` değişkene doğrudan atanamaz ("explicit cast TYPE_OBJECT to TYPE_I32"). Değeri `FOR EACH v IN l` ya da `CINT(LISTGET(l, i))` ile okuyun.
 * **`TYPE` kaydı `LIST` içinde saklanamaz** (G-KOLEKSIYON-5): `LISTADD(l, kayit)` hata vermez, ama okunan kaydın alanları `0` gelir. Kayıtları kayıt dizisinde tutun.
 
-### Veriyi kısa yoldan tanımlamak: bugün yok
+### Veriyi kısa yoldan tanımlamak (◇ HEDEF: tasarım onaylandı, uygulanmadı)
 
-Mete (2026-10-15) değişkenlere, dizilere ve `LIST`, `DICT`, `SET`, demet, veri çerçevesi gibi yapılara **Python tarzı** parantez, süslü parantez ve köşeli parantezle veri tanımlanabilmesini; eski `DATA` / `READ` / `RESTORE` komutlarının da bu yapılara veri yerleştirmekte kullanılabilmesini istedi. Altı yolda ölçülen durum (`20261014_0253`):
+Mete (2026-10-15) iki şey istedi ve tasarımlarını onayladı: **(1)** değişkenlere, dizilere ve `LIST`, `DICT`, `SET` yapılarına Python tarzı parantez, süslü parantez ve köşeli parantezle kolayca veri yazılabilmesi; **(2)** klasik BASIC'in `DATA` / `READ` / `RESTORE` deyimlerinin **etiketli** olarak eklenmesi: program içi veri BASIC tarzında okunacak, dizilere ve koleksiyonlara aktarılabilecek (büyük veriler zaten dosyalardan okunacağı için bu, BASIC uyumluluğu ve kolaylık içindir). Altı yolda ölçülen bugünkü durum (`20261014_0253`):
 
 | İstek | Örnek | Bugün |
 |---|---|---|
@@ -4658,14 +4692,57 @@ Mete (2026-10-15) değişkenlere, dizilere ve `LIST`, `DICT`, `SET`, demet, veri
 | Veri çerçevesi | `DIM df AS DATAFRAME` | ✖ `unknown type: DATAFRAME`; `uxdataframe` kütüphanesi işlev tabanlıdır — G-VERI-16 |
 | Klasik veri satırları | `DATA 10, 20, 30`, `READ a`, `RESTORE` | ✖ üçü de yok: `UXB_CALL_PAREN_REQUIRED` — G-VERI-14 |
 
-`DATA` bir anahtar sözcük bile değildir: `DIM data AS I32 = 5` altı yolda çalışır. Bu komutların eski sözcük çözümleyicide bulunduğu bilgisi (Mete) bu çalışmada kaynakla doğrulanamadı; bugünkü yüzey kaydında ve 239 anahtar sözcüğün listesinde (Ek A) yoktur. Koleksiyonlar bugün yalnız işlevlerle kurulur (`LISTADD`, `DICTSET`, `SETADD`, yukarıdaki tablolar). Hepsi ◇ HEDEF'tir; kayıtlar: S-550 … S-552.
+`DATA` bir anahtar sözcük bile değildir: `DIM data AS I32 = 5` altı yolda çalışır ve tasarım bu adlı değişkenleri bozmaz (aşağıda). Bu komutların eski sözcük çözümleyicide bulunduğu bilgisi (Mete) kaynakla doğrulanamadı; bu yüzden eski uygulama aranmadan **yeniden tasarlandı**. Koleksiyonlar bugün yalnız işlevlerle kurulur (`LISTADD`, `DICTSET`, `SETADD`, yukarıdaki tablo). Ayrıntılı sözleşme, tanı kodları ve kabul ölçütleri: `docs/tasarim/UXB_S550_S551_DATA_READ_RESTORE_VE_VERI_SABITLERI_20261015_TR.md`. Kayıtlar: S-550, S-551, S-552.
+
+**Hedef 1: veri sabitleri (S-551).** Sabit **hedef tipe göre** yorumlanır. Kanonik yazımlar: dizi `{1, 2, 3}`, `LIST` `[1, "iki", 3.5]`, `SET` `{1, 2, 3}`, `DICT` `{"a": 1, "b": 2}`; hedef tipin bilindiği yerde üç ayraç da (`( )`, `{ }`, `[ ]`) kabul edilir, iç içe öğede ayraç belirler. Sabit, eşdeğer `LISTADD` / `DICTSET` / `SETADD` çağrılarına indirgenir; böylece altı yol aynı çalışır. Kapsam dışı: `TUPLE`, `DATAFRAME` (S-552), `TYPE` kaydı sabiti, tür çıkarımı. Önce çözülmesi gerekenler: sözcük çözümleyicide `{ }` ve `[ ]`, MIR-x64'te `CONST` adlı dizi sınırı (S-326), dizi bildiriminde skaler başlangıç değerinin sessiz yok sayılması (S-568).
+
+```basic
+' ◇ HEDEF: bugün derlenmez
+DIM a(2) AS I32 = {1, 2, 3}
+DIM l AS LIST = [1, "iki", 3.5]
+DIM s AS SET = {1, 2, 3}
+DIM d AS DICT = {"a": 1, "b": 2}
+```
+
+**Hedef 2: etiketli `DATA` / `READ` / `RESTORE` (S-550).** `DATA` dosyanın düzeyinde sabitleri sıralar; `ad:` etiketi bir giriş noktası olur; `RESTORE etiket` okuma yerini oraya alır, `RESTORE` tek başına en başa; `READ` sıradaki öğeleri değişkenlere, dizi elemanlarına ve alanlara okur. Tür uyuşmazlığı ve verinin bitmesi sessiz değil, açık çalışma anı hatasıdır (`UXB_DATA_TYPE_MISMATCH`, `UXB_DATA_EXHAUSTED`). `DATA`, `READ`, `RESTORE` yalnız deyim başında sözcüktür; bu adlı değişken, parametre ve metot adları bozulmaz.
+
+```basic
+' ◇ HEDEF: bugün derlenmez
+Renkler:
+    DATA 3, "kirmizi", "yesil", "mavi"
+Puanlar:
+    DATA 2, "ali", 90, "veli", 75
+
+DIM n AS I32
+DIM i AS I32
+DIM ad AS STRING
+DIM p AS I32
+DIM renkler AS LIST
+DIM puan AS DICT
+
+RESTORE Renkler
+READ n
+FOR i = 1 TO n
+    READ ad
+    LISTADD(renkler, ad)
+NEXT
+
+RESTORE Puanlar
+READ n
+FOR i = 1 TO n
+    READ ad, p
+    DICTSET(puan, ad, p)
+NEXT
+```
 
 ## 10.6 Dizi yapısı için ek sınırlar
 
 | Konu | Durum |
 |---|---|
 | Tüm diziyi kopyalama `b = a` | ✖ SINIR (G-VERI-4): MIR kopyalar, AST ve x64 **kopyalamaz** (sessiz). Elemanları döngüyle kopyalayın |
-| Dizi ilk değer listesi `= {1, 2, 3}` | ✖ Yoktur |
+| Dizi ilk değer listesi `= {1, 2, 3}` | ✖ Yoktur; **◇ HEDEF** (tasarım onaylandı, 10.5) |
+| Dizi bildiriminde skaler başlangıç değeri `DIM a(2) AS I32 = 7` | ✖ **SESSİZ** (G-VERI-18): AST, MIR, x64 ve JS değeri yok sayar (`a(0)` = `0`); eski AST-x64 yalnız ilk elemanı doldurur (`7 0 0`); WASM yürütme anında `UXB_WASM_ARRAY_MISSING` ile durur. Bildirimde `= değer` yazmayın, elemanlara ayrı atayın |
+| `CONST` adıyla dizi sınırı (`CONST N = 6`, `DIM a(N)`) | ✖ MIR-x64 derlemez (G-DIL-1); WASM'da dizinin `UBOUND`'u başka kullanım yoksa sessizce `0` verir (✖ SESSİZ, G-WASM-25). Sınırı sayısal sabitle yazın |
 | `DIM a(n)` değişken sınır | AST/MIR ✔; x64 yalnız sayısal sabit kabul eder (G-DIL-1) |
 
 ## 10.7 Benzerlerinden farkı
@@ -4704,9 +4781,9 @@ Mete (2026-10-15) değişkenlere, dizilere ve `LIST`, `DICT`, `SET`, demet, veri
 |---|---|---|---|
 | Sınıf | `CLASS` ... `END CLASS` | Alan + metot topluluğu | ✔ |
 | Nesne oluşturma / silme | `NEW`, `DELETE` | Belleğe nesne ayırır / yıkıcıyı çalıştırır | ✔ |
-| Kurucu / yıkıcı | `CONSTRUCTOR`, `DESTRUCTOR` | Başlangıç ve temizlik kodu | ◐ Tek sınıfta ✔ (yıkıcı `DELETE` ile çalışır; sayısı motora göre değişir: ✖ G-NESNE-23). **Kalıtımda taban kurucusu AST ve MIR'de çalışmaz** (✖ FARK, G-NESNE-25) |
+| Kurucu / yıkıcı | `CONSTRUCTOR`, `DESTRUCTOR` | Başlangıç ve temizlik kodu | ◐ Tek sınıfta ✔ (yıkıcı `DELETE` ile çalışır; sayısı motora göre değişir: ✖ G-NESNE-23). Kalıtımda **parametresiz** taban kurucusu altı yolda çalışır (türetilmiş sınıfın kendi kurucusu yoksa MIR çalıştırmıyordu: **kaynakta düzeltildi**, G-NESNE-25); **parametreli** taban kurucusunda altı yol beş ayrı davranır (✖ FARK, G-NESNE-25) |
 | Metot | `METHOD` ... `END METHOD` | Sınıfın işlevi | ✔ |
-| Kendine başvuru | `THIS`, `ME` | Geçerli nesne | ◐ Dışarıdan ✔; taban sınıf metodunun içinden sanal çağrıda **motorlar farklı** (✖ FARK, G-NESNE-24) |
+| Kendine başvuru | `THIS`, `ME` | Geçerli nesne | ✔ `THIS.m()` **doğrudan**, `ME.m()` ve niteliksiz `m()` **sanal** çağırır; altı yolda aynı (**kaynakta düzeltildi**, G-NESNE-24, G-NESNE-46; ölçüm ikilisinde AST üçünü de doğrudan, öbür motorlar üçünü de sanal çağırır) |
 | Erişim belirteci | `PUBLIC`, `PRIVATE`, `PROTECTED` | Üyenin kimler tarafından kullanılacağı | ◐ (metotta denetlenir, alanda **denetlenmez**) |
 | Kalıtım | `EXTENDS` | Başka sınıfın üyelerini devralma | ✔ |
 | Sanal metot | `VIRTUAL`, `OVERRIDE` | Çalışma anında gerçek sınıfın metodunu seçme | ✔ |
@@ -4714,12 +4791,12 @@ Mete (2026-10-15) değişkenlere, dizilere ve `LIST`, `DICT`, `SET`, demet, veri
 | Arayüz | `INTERFACE`, `IMPLEMENTS` | Uyulması gereken metot sözleşmesi | ✔ |
 | Özellik | `PROPERTY ad AS tip GET SET` | Alan gibi görünen okuma/yazma | ◐ (yalnız kısa biçim) |
 | Sihirli metot | `MAGIC ... END MAGIC` | Özel davranışlar: işleç, `TOSTRING` | ✔ |
-| Soyut / son / mühürlü | `ABSTRACT`, `FINAL`, `SEALED` | Sınıf nitelikleri | ✖ Parser'da yok (G-NESNE-6) |
+| Soyut / son / mühürlü | `ABSTRACT`, `FINAL`, `SEALED` | Sınıf nitelikleri | ✖ Ölçüm ikilisinde (`20261014_0253`) ayrıştırılamaz (G-NESNE-6, kök neden G-NESNE-38); **kaynakta düzeltildi**, yeni ikilide ✔ |
 | Değişmezlik niteleyicileri | `READONLY`, `IMMUTABLE` (alana yazma zorlanır: AST'de çalışma anı, MIR ve x64'te derleme hatası), `MUTABLE` | Alanın değişip değişmeyeceği | ✔ |
 | Erişim bölümleri | `RESTRICTED`, `FRIEND liste` | `RESTRICTED` bölümü kabul edilir ama yalnız AST'de metot çağrısında zorlanır; `FRIEND` bir arkadaş listesi ister ve `PUBLIC` bölümünde yazılamaz | ◐ FARK (G-NESNE-19) |
 | Statik üye | `STATIC` | Nesnesiz üye | ✖ Motorlar farklı (G-NESNE-1) |
-| Karışım | `MIXIN` | Kod paylaşımı | ✖ Yok (G-NESNE-6) |
-| Çoklu kalıtım | `EXTENDS A, B` | Birden çok tabandan devralma | ✖ Yok; 15 Eylül tasarımı bilerek dışarıda bırakmıştı, **Mete'nin 2026-10-15 kararıyla istenir**, ayrıntılar karar bekliyor (G-NESNE-30, 11.12) |
+| Karışım | `MIXIN` | Kod paylaşımı | ◐ Sınıf gövdesinde **tek** `MIXIN Sinif` altı yolda ✔; iki karışım, `EXTENDS` ile birlikte karışım ve `MIXIN … END MIXIN` bloğu ✖ (G-NESNE-6, G-HEDEF-39) |
+| Çoklu kalıtım | `EXTENDS A, B` | Birden çok tabandan devralma | ✖ Yok (altı yolda ayrıştırma hatası); 15 Eylül tasarımı bilerek dışarıda bırakmıştı, **Mete'nin 2026-10-15 kararıyla istenir, 2026-10-16'da B (gerçek çoklu kalıtım) seçildi** ve çakışmayı anahtar sözcüklerle çözen tasarım yazıldı (11.12, 11.13; G-NESNE-30, G-HEDEF-40) |
 | Arayüz mirası, iç içe sınıf, sınıf sabiti, arayüzde gövdeli metot, kurucu aşırı yükleme | `INTERFACE IB EXTENDS IA`, sınıf içinde `CLASS` ve `CONST` … | Zengin OOP yetenekleri | ✖ Yok (G-NESNE-31 … G-NESNE-35; 11.12) |
 | Genel tipler, `USES`, `DECORATOR`, geçişli immutable, weak/döngü referansı | `Polynomial<F64>` gibi | İleri OOP | ✖ ◇ HEDEF (G-HEDEF-4, G-HEDEF-25; ayrıntı 11.10) |
 | `PROPERTY` blok biçimi | `PROPERTY Ad AS T GET … END GET SET(v) … END SET` | Okuma/yazma mantığı olan özellik | ✖ ◇ HEDEF (G-HEDEF-3, 11.6) |
@@ -4741,12 +4818,13 @@ END CLASS
 DIM p AS Nokta = NEW Nokta(3, 4)
 ```
 
-* `DIM d AS Sinif = NEW Sinif(...)` ile oluşturulur. **`DIM` satırında başlangıç değeri `NEW` olmak zorundadır**; farklı bir nesne atamak için ayrı satır yazılır.
+* `DIM d AS Sinif = NEW Sinif(...)` ile oluşturulur. **`DIM` satırında başlangıç değeri ölçüm ikilisinde `NEW` olmak zorundadır**; farklı bir nesne atamak için ayrı satır yazılır (G-NESNE-45). **Kaynakta düzeltildi:** fabrika işlevi, başka değişken ya da `MAGIC` işleç sonucu da başlangıç değeri olabilir ve tür derleme zamanında sınanır.
 * **Sınıf adı ve değişken adı aynı ad uzayındadır**: `CLASS K` varken `DIM k AS K` yazılamaz. Derleyici `variable K conflicts with CLASS K` der. Değişkene farklı ad verin.
-* Boş bırakılan nesne değişkenine (`DIM k AS Kutu`) alan erişimi **çalışma anı hatasıdır**: `field access on a null object reference` (üç yerel motorda aynı; **JS'te alan okuma hata vermez**, `undefined` yazdırıp devam eder — G-HATA-6).
+* Boş bırakılan nesne değişkenine (`DIM k AS Kutu`) alan erişimi **çalışma anı hatasıdır**: `field access on a null object reference` (AST, x64 ve eski AST-x64 böyle durur). **İki kusur** kaynakta düzeltildi ama bu kılavuzun ölçüm ikilisinde (`20261014_0253`) hâlâ geçerlidir: **MIR**, programda başka bir nesne varsa boş başvuruyu **programın ilk nesnesine** çözer (okuma onun alanını verir, yazma onu bozar; ✖ SESSİZ, G-NESNE-37) ve **JS** alan okumada hata vermeyip `undefined` yazdırır (G-HATA-6, G-JS-16).
 * Aynı sınıfta aynı adlı iki metot (aşırı yükleme) `duplicate member name` ile **reddedilir**.
 * **Aynı sınıfın iki metodunda aynı adlı ama farklı tipli parametre** geçerli programı reddettirir (G-NESNE-16): `METHOD SetS(v AS STRING)` ve `METHOD SetF(v AS F64)` birlikte yazılırsa ikincide `v` hâlâ `STRING` sayılır (`assignment cannot convert TYPE_STRING to TYPE_F64`). Parametrelere farklı ad verin; farklı sınıflarda aynı ad sorun çıkarmaz.
-* **Durumu metotla değiştiren sınıflar JS'te yanlış çalışır** (G-JS-13): metot içinde alana yazma (`deger = deger + d` ya da `THIS.deger = …`) `nan`/`undefined` üretir; yalnız kurucuda yazma ve dışarıdan `nesne.alan = …` çalışır.
+* **Parametreli metot JS'te parametresini göremez** (✖ SESSİZ, G-JS-13, kök neden G-JS-15): her `METHOD` çağrısında argümanlar çağrılana ulaşmaz, parametre `undefined` olur; bu yüzden `deger = deger + d` `nan`, metot içinde `PRINT d` `undefined` verir (alana yazmak kendi başına bozuk değildir: kurucuda yazma ve dışarıdan `nesne.alan = …` çalışır). **Kaynakta düzeltildi** (2026-10-16, test: `tests/oop_parity/method_args`); ölçüm ikilisinde hâlâ geçerlidir.
+* **Hiç yazılmamış alan sıfırdan başlar** (sayı `0`, metin boş): AST, MIR, x64, WASM ve eski AST-x64'te öyledir. **JS ölçüm ikilisinde `undefined` okur** (✖ SESSİZ, G-JS-17): `x.n = x.n + 1` `nan` olur. **Kaynakta düzeltildi** (2026-10-17, test `tests/oop_parity/field_default_zero`); ölçüm ikilisinde alanı kurucuda başlatın.
 * **Sınıfın `BOOLEAN` alanını `STR` ile yazdırmak AST'de `255` verir** (G-NESNE-17; MIR, x64 ve JS `-1`). Mantık değerini `IF alan THEN …` ile sınayın.
 * **Sınıf alanı olarak başka bir sınıf, `TYPE` ya da dizi** kullanımının sınırları vardır: nesne alanı `0` okunur (G-NESNE-10), `TYPE` alanına metot içinden erişim MIR/JS'te yanlış, x64'te derlenmez (G-NESNE-11), dizi alanı metot içinde reddedilir (G-NESNE-12). Ayrıntı: Bölüm 22.4.
 
@@ -4806,9 +4884,9 @@ silindi
 *Motor durumu: AST ✔ · MIR ✔ · x64 ✔ · JS ✔ · WASM ◌*
 
 > **Nesneler otomatik yıkılmaz.** Bir yordam bitince onun yerel nesnelerinin yıkıcısı **çalışmaz** (dört motorda aynı); yıkıcıyı yalnız `DELETE` çalıştırır. Kaynak
-> (dosya, bellek) tutan sınıflarda `DELETE`'i unutmayın. **Ama yıkıcının kaç kez çalışacağı motora göre değişir (✖ FARK, G-NESNE-23):** aynı değişkene iki kez `DELETE` yazarsanız AST yıkıcıyı bir kez, MIR, x64 ve JS iki kez çalıştırır; program sonunda `DELETE` edilmemiş genel nesneler için yalnız AST yıkıcıları (ters sırayla) çalıştırır. Her nesneyi tam bir kez `DELETE` edin.
+> (dosya, bellek) tutan sınıflarda `DELETE`'i unutmayın. **Ama yıkıcının kaç kez çalışacağı motora göre değişir (✖ FARK, G-NESNE-23):** aynı değişkene iki kez `DELETE` yazarsanız AST ve eski AST-x64 yıkıcıyı bir kez, MIR, x64, JS ve WASM iki kez çalıştırır; program sonunda `DELETE` edilmemiş genel nesneler için yalnız AST yıkıcıları (ters sırayla) çalıştırır. Her nesneyi tam bir kez `DELETE` edin.
 
-> **`DELETE`'ten sonra değişkeni kullanmayın (✖ SESSİZ, G-NESNE-20).** `DELETE o` sonrasında `o.v` okumak AST ve x64'te "field access on a null object reference" hatasıyla durur; ama **MIR silinmiş nesnenin eski değerini okur** (`3`) ve JS `undefined` yazdırır. Silinen nesne değişkenini bir daha okumayın. Aynı nesneye **başka bir değişkenle** (`b = a`, sonra `DELETE a`) erişmek ise dört motorda da hata vermez ve nesne yıkıcısı çalışmış olduğu halde kullanılabilir kalır (✖ SESSİZ, G-NESNE-22).
+> **`DELETE`'ten sonra değişkeni kullanmayın (✖ SESSİZ, G-NESNE-20, G-NESNE-37).** `DELETE o` sonrasında `o.v` okumak AST, x64, eski AST-x64 ve WASM'da hatayla durur; **MIR** ise silinmiş nesnenin eski değerini okur (`3`) ya da, silinen nesne programın ilk nesnesi değilse, **başka bir nesnenin alanını** okur (`DELETE` değişkene boş başvuruyu yazar ve MIR boş başvuruyu programın ilk nesnesine çözer); JS `undefined` yazdırır. Silinen nesne değişkenini bir daha okumayın. Aynı nesneye **başka bir değişkenle** (`b = a`, sonra `DELETE a`) erişmek ise altı yolda da hata vermez ve nesne yıkıcısı çalışmış olduğu halde kullanılabilir kalır (✖ SESSİZ, G-NESNE-22).
 
 ### Nesne ataması referanstır
 
@@ -4983,15 +5061,18 @@ dikdortgen
 | `SUPER.Ad()` | ✔ |
 | `BASE.Ad()` | ✖ Yoktur (`unknown symbol: base`) |
 | Orta sınıfın `OVERRIDE`'ını alt-alt sınıfta yeniden yazmadan kullanmak | ✖ SINIR (G-NESNE-7): MIR `MIR method target not found: C1_F` verir. Alt-alt sınıfta metodu yeniden yazın |
-| `VIRTUAL METHOD ... AS F64` x64'te | ✖ SINIR (G-NESNE-8): ondalıklı dönüş `0`/çöp çıkar; ondalıklı **alana tamsayı sabiti** (`d.en = 3`) yazmak da x64'te çöp üretir. Ondalıklı sabiti `3.0` yazın, sanal metot için tamsayı döndürün |
+| Bir metotta **iki F64 alanı aynı ifadede** okumak, x64'te | ✖ SESSİZ (G-NESNE-43, G-NESNE-8): `RETURN k * k` ya da `RETURN k + k` `0`/çöp verir; sanal olmak şart değildir, tek başına sanal F64 metot doğrudur. Alanı önce yerel değişkene kopyalayın (`DIM a AS F64 = k`). **Kaynakta düzeltildi** (kök neden: üye okumasının kayan nokta türü bilinmiyordu; test `f64_field_arith`), ölçüm ikilisinde hâlâ geçerlidir. Ondalıklı **alana tamsayı sabiti** (`d.en = 3`) yazmak da x64'te çöp üretir; `3.0` yazın |
 | `INSTANCEOF(nesne, Sinif)` | ✖ Yalnız AST'de |
 | Nesne dizisi (`DIM d(1) AS Sinif`) | AST/MIR ✔; x64 `STORE_INDEXED element width unsupported: 16` ile reddeder |
 | Yöntem zinciri (`RETURN THIS` ile kendi tipini döndürmek) | ✖ (G-NESNE-5): `explicit cast TYPE_OBJECT to ...` |
-| Taban sınıfın kurucusu (`CLASS A` kurucusu `x = 5`, `CLASS B EXTENDS A`, `NEW B()`) | ✖ **FARK, SESSİZ (G-NESNE-25):** AST ve MIR taban kurucusunu **hiç çalıştırmaz** (`x` = `0`), x64 ve JS çalıştırır (`x` = `5`) ve `NEW`'a verilen argümanları tabana da geçirir. Yıkıcılar dört motorda türetilmişten tabana çalışır |
-| `SUPER(değer)` ile tabana kurucu çağrısı | ✖ Yoktur (G-NESNE-27): AST `MAGIC_CALL missing`, MIR `RT_LIBRARY_CALL` bağlı değil, x64 derlemez, JS yürütme anında durur |
-| Taban sınıf metodunun içinden sanal çağrı (`Value()`, `THIS.Value()`, `ME.Value()`) | ✖ **FARK (G-NESNE-24):** AST üçünde de taban uygulamasını (`10`), MIR, x64 ve JS türetilmiş geçersiz kılmayı (`20`) çağırır. Dışarıdan `c.Value()` dört motorda `20` verir |
-| Taban tipli değişkenle `DELETE` (`DIM x AS A = NEW B()`, `DELETE x`) | ✖ **FARK (G-NESNE-26):** AST `B.dtor` ve `A.dtor` çalıştırır; MIR, x64 ve JS yalnız `A.dtor` çalıştırır, türetilmiş yıkıcı atlanır |
-| Aynı adlı alanı taban ve türetilmiş sınıfta yinelemek; kurucuda `ME` ile sanal çağrı; parametreli tabanı `SUPER(...)` olmadan kurmak | ✖ SESSİZ (G-NESNE-28): hata vermez |
+| Taban sınıfın kurucusu (`CLASS A`, `CLASS B EXTENDS A`, `NEW B()`) | ✔ **Parametresiz** taban kurucusu altı yolda çalışır (üç seviyede her kurucu bir sayı yazarsa `1 2 3`; yıkıcılar `3 2 1`). Türetilmiş sınıfın kendi kurucusu yoksa MIR taban kurucusunu çalıştırmıyordu (**kaynakta düzeltildi**, test `ctor_chain_derived_without_ctor`). ✖ **FARK (G-NESNE-25):** taban kurucusu **parametreliyse** altı yol beş ayrı davranır: türetilmiş kurucu yokken `NEW D(7)` x64 ve JS'te `x = 7`, ötekilerde `0` bırakır; türetilmiş sınıfın kendi parametresiz kurucusu varsa AST, WASM ve eski AST-x64 tabanı çalıştırmaz (`0`), MIR çalışma anında, x64 derlemede durur, JS `undefined` yazar |
+| `SUPER(değer)` ile tabana kurucu çağrısı | ✖ Yoktur (G-NESNE-27): AST `MAGIC_CALL missing`, MIR kurucu argüman sayısı hatası, x64 derlemez, JS yürütme anında durur; **WASM ve eski AST-x64 hata vermeden yok sayar** (`0`) |
+| Taban sınıf metodunun içinden `Value()`, `THIS.Value()`, `ME.Value()` | ✔ **Kaynakta düzeltildi (G-NESNE-24, G-NESNE-46):** `THIS.Value()` taban uygulamasını (`10`) doğrudan, `ME.Value()` ve niteliksiz `Value()` türetilmiş geçersiz kılmayı (`20`) sanal çağırır; altı yolda aynı. **Ölçüm ikilisinde (`20261014_0253`)** AST üçünde de taban uygulamasını (`10`), öbür beş motor üçünde de türetilmiş geçersiz kılmayı (`20`) çağırır. Dışarıdan `c.Value()` her zaman `20` verir |
+| Taban tipli değişkenle `DELETE` (`DIM x AS A = NEW B()`, `DELETE x`) | ✖ **FARK (G-NESNE-26):** AST `B.dtor` ve `A.dtor` çalıştırır; MIR, x64, JS, WASM ve eski AST-x64 yalnız `A.dtor` çalıştırır, türetilmiş yıkıcı atlanır |
+| Aynı adlı alanı taban ve türetilmiş sınıfta yinelemek | ✔ Altı yolda `semantic: CLASS field hides inherited member …` ile **reddedilir** (kapandı; G-NESNE-28, test `neg_inherited_field_hiding`) |
+| Kurucuda ve yıkıcıda metot çağrısı | ✔ **Kaynakta düzeltildi (G-NESNE-40):** **sanal** bir `m` için `ME.m()` ve niteliksiz `m()` derleme hatasıdır (altı yolda «ME virtual method call is not allowed in CONSTRUCTOR» / «… DESTRUCTOR»); `THIS.m()` (doğrudan, kurucunun kendi sınıfının uygulaması) ve **sanal olmayan** her biçim serbesttir. **Ölçüm ikilisinde** yalnız açık `ME.` öneki reddedilirdi (sanal olmayanı da), `THIS.Sanal()` ve niteliksiz `Sanal()` kabul edilir ve motorlar ayrışırdı (AST `1`, x64, JS, WASM ve eski AST-x64 `2`, **MIR hiçbir şey yazmazdı**) |
+| Parametreli tabanı `SUPER(...)` olmadan kurmak | ✖ SESSİZ: hata vermez (G-NESNE-28, G-NESNE-25) |
+| `ABSTRACT CLASS`, `FINAL CLASS`, `SEALED CLASS` | ✖ Ölçüm ikilisinde ayrıştırılamaz (G-NESNE-38). Kaynakta düzeltildi: soyut sınıfa `NEW` ve `FINAL`/`SEALED` sınıfı türetmek derleme hatasıdır, soyut tipli değişken türemiş nesneyi tutabilir |
 | Bir işlevin/`MAGIC` işlecin döndürdüğü nesneleri art arda saklamak (`x = Yap(2)`, `y = Yap(3)`) ya da işleç sonucunu zincirlemek (`a = a * b`) | ✖ SINIR (G-NESNE-9): AST iki sonucu aynı nesneye bağlar (`3 3`); MIR ve x64 doğru (`2 3`). İşleç sonucunu hemen kullanın, nesneleri `NEW Sinif(...)` ile yaratın |
 
 ## 11.5 Arayüz
@@ -5353,14 +5434,14 @@ yetersiz
 | `TYPE` ve `CLASS` | `TYPE` değer tipi (atama kopyalar), davranışı yok; `CLASS` referans tipi, metotları var |
 | `EXTENDS` ve `IMPLEMENTS` | Başka sınıftan **gerçek kod** devralma / arayüzün **sözleşmesine** uyma |
 | `VIRTUAL` ve `OVERRIDE` | Metodu değiştirilebilir ilan etme / alt sınıfta değiştirme |
-| `THIS` ve `ME` | İkisi de geçerli nesnedir. **Tasarımda ayrıdırlar** (`THIS` doğrudan, `ME` sanal çağırır; 11.10), bugün ayrılmazlar ve motorlar farklıdır: MIR, x64, JS ikisini de sanal, AST ikisini de doğrudan çağırır (✖ G-NESNE-24) |
+| `THIS` ve `ME` | İkisi de geçerli nesnedir; ayrı çağırırlar: `THIS.m()` yazıldığı sınıfın uygulamasını **doğrudan**, `ME.m()` (ve niteliksiz `m()`) gerçek nesne türüne göre **sanal** çağırır (11.10; **kaynakta düzeltildi**, G-NESNE-24: ölçüm ikilisinde AST ikisini de doğrudan, öbür motorlar ikisini de sanal çağırırdı) |
 | `SUPER` ve `BASE` | `SUPER` çalışır; `BASE` yoktur |
 | `MAGIC` ve `METHOD` | `MAGIC` dilin tanıdığı özel davranışları bağlar (işleç, `STR`); `METHOD` sıradan metottur |
 | `NEW`/`DELETE` ve kapsam çıkışı | Nesne yaşamı **elle** yönetilir; kapsam bitince yıkıcı çalışmaz. Yeniden atama (`a = NEW …`) eski nesneyi yıkmaz (dört motorda aynı) |
 
 ## 11.10 Tasarlanan OOP sözleşmesi (◇ HEDEF)
 
-`docs/OOP_HEDEF_TASARIM_VE_UYGULAMA_PLANI_20260915_TR.md` (2026-09-15), nesne yönelimli yüzeyi tek bir sözleşme altında toplayan bir **tasarım önerisidir** ("v1"). Belge, uygulandığı ya da motorların geçtiği iddiası olmadığını yazar; `THIS`'in doğrudan anlamı, `DELETE`/başvuru sayımı modeli, `MIXIN`'in trait'e geçişi ve `VALUE` profili gibi başlıkları da **ürün onayına** bırakır. Aşağıdakiler bu yüzden kesin karar değil ◇ HEDEF'tir (G-HEDEF-4, G-HEDEF-25); "Bugün" sütunları bu kılavuzun hazırlığında ölçülenleri gösterir.
+`docs/OOP_HEDEF_TASARIM_VE_UYGULAMA_PLANI_20260915_TR.md` (2026-09-15), nesne yönelimli yüzeyi tek bir sözleşme altında toplayan bir **tasarım önerisidir** ("v1"). Belge, uygulandığı ya da motorların geçtiği iddiası olmadığını yazar; `DELETE`/başvuru sayımı modeli, `MIXIN`'in trait'e geçişi ve `VALUE` profili gibi başlıkları da **ürün onayına** bırakır (`THIS`'in doğrudan anlamı da böyleydi; Mete'nin 2026-10-16 tasarım belgesi `THIS` doğrudan, `ME` sanal diye açıkça yazdığından karar verilmiş ve uygulanmıştır: aşağıda). Aşağıdakiler bu yüzden kesin karar değil ◇ HEDEF'tir (G-HEDEF-4, G-HEDEF-25); "Bugün" sütunları bu kılavuzun hazırlığında ölçülenleri gösterir.
 
 ### `THIS`, `ME` ve `SUPER`: görev ayrımı
 
@@ -5370,7 +5451,7 @@ yetersiz
 | `ME` | Aynı nesnenin çok biçimli davranışı | Sanal ya da arayüz yuvası varsa **gerçek nesne türüne göre**; sıradan metotta doğrudan |
 | `SUPER` | Bu gövdenin sahibinin **doğrudan** tabanından başlayan uygulama | Doğrudan taban uygulaması; türetilmiş geçersiz kılmaya dönmez |
 
-Üçü de aynı nesnenin kimliğini taşır; fark üye çözümlemesinde ve çağrı seçimindedir. Gövdedeki niteliksiz üye kullanımı `THIS` ile eşdeğerdir; dinamik niyet `ME` ile açık yazılır. Planın ayırt edici örneği:
+Üçü de aynı nesnenin kimliğini taşır; fark üye çözümlemesinde ve çağrı seçimindedir. Gövdedeki niteliksiz **alan** kullanımı `THIS.alan` ile eşdeğerdir; niteliksiz **metot çağrısı** `ME.metot()` (sanal) ile eşdeğerdir, doğrudan çağrı `THIS.metot()` ile açık yazılır. Planın ayırt edici örneği:
 
 ```basic
 CLASS Base
@@ -5392,7 +5473,7 @@ DIM c AS Child = NEW Child()
 PRINT c.Inspect()
 ```
 
-Tasarıma göre sonuç **`1020`** olmalıdır: `THIS.Value()` taban uygulamasını (10), `ME.Value()` türetilmiş uygulamayı (20) çağırır. **Bugün** AST `1010`, MIR, x64 ve JS `2020` yazar (✖ FARK, G-NESNE-24): hiçbir motor ayrımı uygulamaz ve iki grup birbirinden de farklıdır. Ek kurallar (◇ HEDEF): `ME` dinamik üye araması değildir, yani taban sınıf kodu yalnız türetilmiş sınıftaki bir alana `ME` ile erişemez (bugün de reddedilir, ama iletisi yanıltıcıdır: `explicit cast TYPE_OBJECT to …`); `THIS` ve `ME` yeniden atanamaz (`THIS = NEW K()` bugün de reddedilir, ama iletisi yine yanıltıcıdır: `assignment requires explicit cast K to TYPE_OBJECT`); `SUPER` tek başına değer değildir (`x = SUPER` bugün aynı yanıltıcı iletiyle reddedilir); `STATIC` üyede üçü de yasaktır (bugün de `THIS/ME cannot be used in a STATIC class member` ile reddedilir); `THIS`/`ME` erişim denetimini aşmaz; kurucu ve yıkıcı içinden `ME` ile sanal çağrı yasaktır (bugün sessizce kabul edilir, G-NESNE-28). Yeni sözleşme **sürümlü** açılır; eski `THIS.Sanal()` kodunun davranışı değişeceğinden bir geçiş aracı eski kullanımları listeler.
+Sonuç **`1020`** olur: `THIS.Value()` taban uygulamasını (10), `ME.Value()` türetilmiş uygulamayı (20) çağırır. **Kaynakta düzeltildi (2026-10-17, G-NESNE-24, G-NESNE-46):** altı yolda `1020`. Ölçüm ikilisinde (`20261014_0253`) hiçbir motor ayrımı uygulamıyordu: AST `1010`, MIR, x64, JS, WASM ve eski AST-x64 `2020` yazıyordu. Ek kurallar (◇ HEDEF): `ME` dinamik üye araması değildir, yani taban sınıf kodu yalnız türetilmiş sınıftaki bir alana `ME` ile erişemez (bugün de reddedilir, ama iletisi yanıltıcıdır: `explicit cast TYPE_OBJECT to …`); `THIS` ve `ME` yeniden atanamaz (`THIS = NEW K()` bugün de reddedilir, ama iletisi yine yanıltıcıdır: `assignment requires explicit cast K to TYPE_OBJECT`); `SUPER` tek başına değer değildir (`x = SUPER` bugün aynı yanıltıcı iletiyle reddedilir); `STATIC` üyede üçü de yasaktır (bugün de `THIS/ME cannot be used in a STATIC class member` ile reddedilir); `THIS`/`ME` erişim denetimini aşmaz; kurucu ve yıkıcı içinden sanal çağrı yasaktır (**kaynakta uygulandı**, G-NESNE-40: `ME.m()` ve niteliksiz `m()` **sanal** `m` için derleme hatasıdır, `THIS.m()` ve sanal olmayan çağrı serbesttir). Eski `THIS.sanalMetot()` kodunun davranışı değişti (artık doğrudan çağırır): depodaki 565 programın (413'ü sınıflı ya da arayüzlü) anlamsal denetimi eski ve yeni derleyicide karşılaştırıldı ve yeni kurallarla reddedilen hiçbir mevcut program çıkmadı; kendi kodunuzda dinamik davranış istediğiniz yerde `ME.sanalMetot()` yazın.
 
 ### Türler, kimlik ve kopyalama
 
@@ -5403,7 +5484,7 @@ Tasarıma göre sonuç **`1020`** olmalıdır: `THIS.Value()` taban uygulamasın
 | `UNION … ABI C` | Ortak bayt depolama; yönetilen başvuru reddedilir | Bölüm 10 (G-VERI-11) |
 | `ENUM` | Adlandırılmış sabit kümesi; tamsayı taban türü; aralık doğrulaması; açık sayısal dönüşüm | Bölüm 10 |
 | `CLASS` | Kimlikli başvuru nesnesi; atama başvuruyu paylaşır, kopyalamaz | Dört motorda ✔ |
-| `INTERFACE` | Ayrı nesne oluşturmayan, kimlik + arayüz dağıtım görünümü | AST, MIR, x64 ✔; JS'te `nan` (G-JS-3) |
+| `INTERFACE` | Ayrı nesne oluşturmayan, kimlik + arayüz dağıtım görünümü | AST, MIR, x64 ✔; JS'te `nan` (G-JS-3; asıl neden argümanın düşmesi, G-JS-15, kaynakta düzeltildi); `IMPLEMENTS`'siz sınıf: G-NESNE-41; eski AST-x64'te arayüz tipli parametre: G-NESNE-42 |
 
 * Varsayılan eşitlik **kimlik eşitliğidir** (`a = b`, iki değişken aynı nesneyi gösteriyorsa `-1`; bugün dört motorda ✔). Değer eşitliği kullanıcı sözleşmesiyle gelir; `EQ` ve `HASH` birlikte tutarlı olmalı, eşit nesneler aynı özeti vermelidir.
 * Kopyalama: `CloneShallow` ile `CloneDeep` ayrımı açık yazılır; derin kopya döngüleri ve ortak başvuruları koruyan bir ziyaret tablosu ister; yerel kaynaklar varsayılan olarak kopyalanamaz. Bugün ikisi de yoktur.
@@ -5413,7 +5494,7 @@ Tasarıma göre sonuç **`1020`** olmalıdır: `THIS.Value()` taban uygulamasın
 
 * 15 Eylül önerisi: bir sınıfın **tek uygulama tabanı** ve **çok arayüzü** vardır; çoklu durum kalıtımı yoktur (bugün de böyledir). **Bu madde 2026-10-15'te Mete'nin kararıyla değişti:** uXBasic nesne yönelimli paradigmayla doğduğu için OOP, çoklu kalıtım ve karışım dahil çok güçlü olmalıdır (G-NESNE-30, karar bekliyor; seçenekler 11.12'de).
 * `OVERRIDE` yalnız var olan sanal yuvayla, aynı parametre / `BYREF` yönü ve dönüşle eşleşir (ilk sürümde dönüş tipi birebir; kovaryans sonradan). Bugün imza uyuşmazlığı ayrıştırmada reddedilir (`METHOD: OVERRIDE signature …`).
-* `FINAL` sınıf türetilemez, `FINAL` metot geçersiz kılınamaz; `SEALED`, `FINAL CLASS`'ın belgelenmiş eşanlamlısıdır; `ABSTRACT` sınıf doğrudan oluşturulamaz ve soyut ya da arayüz yuvaları tamamlanmadan somut sınıf olmaz. **Bugün ayrıştırıcıda yoktur** (G-NESNE-6).
+* `FINAL` sınıf türetilemez, `FINAL` metot geçersiz kılınamaz; `SEALED`, `FINAL CLASS`'ın belgelenmiş eşanlamlısıdır; `ABSTRACT` sınıf doğrudan oluşturulamaz ve soyut ya da arayüz yuvaları tamamlanmadan somut sınıf olmaz. **Ölçüm ikilisinde ayrıştırılamaz** (G-NESNE-6): anlamsal ve çalışma anı denetimleri vardı (soyut sınıfa `NEW` reddi, `FINAL`/`SEALED` sınıfı türetme reddi) ama `ABSTRACT CLASS` yazımına kaynaktan ulaşılamıyordu; kök neden bulundu ve kaynakta düzeltildi (G-NESNE-38).
 * `PUBLIC` herkese, `PRIVATE` yalnız bildiren sınıfa, `PROTECTED` bildiren sınıfa ve türevlerine açıktır; `PROTECTED` için alıcı kuralı da denetlenir (türetilmiş sınıf rastgele bir taban örneğinin korumalı durumuna erişemez). `RESTRICTED` paket ya da modül içi erişimdir (ham klasör yoluna bağlı değildir); `FRIEND` yalnız açıkça adı geçen sembollere sınırlı yetki verir. Bugün alanlarda erişim denetimi yoktur (G-NESNE-2) ve `RESTRICTED` yalnız AST'de zorlanır (G-NESNE-19).
 * Alan adını kalıtımla gizlemek **varsayılan hatadır** (bugün sessiz: G-NESNE-28). Aşırı yükleme ile geçersiz kılma farklı şeylerdir; aşırı yükleme derleme zamanında çözülür, eşit iyi aday belirsizlik hatasıdır ve dönüş tipi tek başına aşırı yüklemeyi ayıramaz. Bugün aynı adlı iki metot `duplicate member` ile reddedilir.
 * **Genel (jenerik) sınıf ve arayüzler** hedeftedir: açık tür parametreleri, kısıt denetimi, varsayılan değişmezlik (invariance); ilk uygulama somutlaştırmadır (monomorphization). Bugün yoktur (G-HEDEF-4).
@@ -5430,7 +5511,7 @@ Tasarıma göre sonuç **`1020`** olmalıdır: `THIS.Value()` taban uygulamasın
 * `MIXIN` gizlice tek tabana dönüştürülmez; **açık trait bileşimi** olur. Trait varsayılan metot gövdelerini ve gereken arayüzleri bildirir, ilk sürümde durum taşımaz. İki trait aynı imzayı verirse sonuncusu kazanmaz: açık seçim, yeniden adlandırma ya da sınıfta geçersiz kılma gerekir. Trait içinde `SUPER` yasaktır. `USES` ise nesne bileşimidir (içerilen parça + açık delegasyon) ve `MIXIN` ile eşanlamlı değildir.
 * `DECORATOR`'ın her biri için kimlik/sürüm, tür, geçerli hedef, argüman tipleri, tekrarlanabilirlik ve sıra kayıtlıdır. Üç türü vardır: **metadata** (türlenmiş öznitelik kaydı), **derleme dönüşümü** (normal AST üyeleri üretir), **çağrı sarmalama** (tek genel giriş + özgün gövde çağrısı). Bilinmeyen dekoratör hatadır; metadata kendi başına iş yapmaz; `D`, `E` sırasıyla bildirilirse `D(E(gövde))` olur (giriş `D`, `E`; çıkış `E`, `D`; temizlik `FINALLY` güvencesiyle).
 * **Nesne ömrü:** yönetilen `CLASS` için güçlü başvuru sayımı + **zayıf (weak) başvuru**; güçlü döngüler otomatik toplanmış sayılmaz, zayıf bağlantı ya da açık döngü kırma gerekir. `NEW` önce taban alanlarını, sonra türetilmiş alanları hazırlar; taban kurucu önce çalışır; parametreli tabanda `SUPER(...)` zorunludur. Kurucu hata verirse yalnız kurulmuş parçalar ters sırayla temizlenir ve nesne yayımlanmaz. Son güçlü başvuru bırakılınca yıkıcı **türetilmişten tabana, bir kez** çalışır; yıkıcıdan istisna dışarı kaçmaz. `DELETE` hedef değişkendeki güçlü başvuruyu bırakıp `NULL` yapar, öbür takma adları geçersizleştirmez; `Close`/`Dispose` kaynağı erken kapatır ve tekrar çağrılabilir. Nesne durumları: `allocated`, `constructing`, `live`, `disposing`, `disposed`.
-* Bugün: başvuru sayımı ve zayıf başvuru yoktur (yaşam **elle** yönetilir, 11.2); taban kurucusu AST ve MIR'de çalışmaz (G-NESNE-25); `SUPER(...)` yoktur (G-NESNE-27); taban tipli değişkenle `DELETE` MIR, x64 ve JS'te türetilmiş yıkıcıyı atlar (G-NESNE-26).
+* Bugün: başvuru sayımı ve zayıf başvuru yoktur (yaşam **elle** yönetilir, 11.2); parametresiz taban kurucusu altı yolda çalışır, parametreli olanı beş ayrı davranır (G-NESNE-25); `SUPER(...)` yoktur (G-NESNE-27); taban tipli değişkenle `DELETE` AST dışında beş yolda türetilmiş yıkıcıyı atlar (G-NESNE-26); `DELETE` aslında «statik yıkıcı zinciri + değişken = 0»dır ve nesnede ölü işareti yoktur (G-HEDEF-31).
 
 ### `UXClazz` profilleri ve kütüphane sınırı
 
@@ -5451,9 +5532,9 @@ Bugün bu profiller derleyicide yoktur; üretici `tools/uxclazz/uxclazz.py` dı�
 
 ## 11.11 Nesne yönelimli programlamayla ilgili programlama kararları
 
-* **Kalıtımda taban sınıfın kurucusuna güvenmeyin** (G-NESNE-25, G-NESNE-27): AST ve MIR onu çalıştırmaz, x64 ve JS çalıştırır. Ortak başlatmayı bir `Baslat()` metoduna koyup `NEW`'dan sonra açıkça çağırın; parametreli kurucusu olan bir sınıftan türetmeyin (`SUPER(...)` yoktur).
-* **Taban sınıf metodunun, türetilmiş sınıfın geçersiz kılmasını çağırmasına dayanan tasarım yazmayın** (G-NESNE-24): AST taban uygulamasını, öbür motorlar türetilmiş uygulamayı çağırır. Kurucuda sanal metot çağırmayın ve taban/türetilmiş sınıfta aynı alan adını yinelemeyin (G-NESNE-28).
-* Nesneyi **yarattığınız sınıfın tipiyle** tutup `DELETE` edin: taban tipli değişkenle silmek türetilmiş yıkıcıyı üç motorda atlar (G-NESNE-26).
+* **Parametreli taban kurucusuna güvenmeyin** (G-NESNE-25, G-NESNE-27): parametresiz taban kurucusu altı yolda çalışır; ama taban kurucusu parametre istiyorsa altı yol beş ayrı davranır ve `SUPER(...)` yoktur. Ortak başlatmayı bir `Baslat()` metoduna koyup `NEW`'dan sonra açıkça çağırın; parametreli kurucusu olan bir sınıftan türetmeyin.
+* **Şablon-metot için (taban metodunun türetilmiş geçersiz kılmayı çağırması) `ME.m()` ya da niteliksiz `m()` yazın**; `THIS.m()` her zaman yazıldığı sınıfın uygulamasını çağırır (G-NESNE-24, altı yolda aynı; ölçüm ikilisinde AST'de ikisi de doğrudandı). Kurucuda ve yıkıcıda sanal metodu `ME`/niteliksiz çağırmak derleme hatasıdır; ortak işi sanal olmayan bir metoda koyun ya da `THIS.m()` yazın (G-NESNE-40); taban ve türetilmiş sınıfta aynı alan adını yinelemek artık derleme hatasıdır.
+* Nesneyi **yarattığınız sınıfın tipiyle** tutup `DELETE` edin: taban tipli değişkenle silmek türetilmiş yıkıcıyı AST dışında beş yolda atlar (G-NESNE-26).
 
 * **Veri ile davranış birlikteyse `CLASS`, yalnız veriyse `TYPE`** yazın. `TYPE` değer tipidir (atama kopyalar), `CLASS` referans tipidir (atama aynı nesneye ikinci ad verir).
 * Nesneyi `DIM d AS Sinif = NEW Sinif(...)` ile üretin ve **değişken adını sınıf adından farklı** seçin (`CLASS Kutu` varken `DIM kutu1 AS Kutu`); aynı ad `variable K conflicts with CLASS K` hatası verir.
@@ -5461,9 +5542,9 @@ Bugün bu profiller derleyicide yoktur; üretici `tools/uxclazz/uxclazz.py` dı�
 * Nesneyi kopyalamak için `b = a` yazmayın: aynı nesneye ikinci ad verir. Kopya gerekiyorsa **yeni nesne üretip alanları tek tek kopyalayın**.
 * Alanları metotlarla yönetin, kuralları `THROW`/`ASSERT` ile koruyun; **`PRIVATE` alan erişimi dışarıdan denetlenmez** (G-NESNE-2), yani dilin sizi korumasına güvenmeyin.
 * Çok biçimlilik için `VIRTUAL` + `OVERRIDE` kullanın; üst sınıf metodunu `SUPER.Ad()` ile çağırın (`BASE` yoktur). Ara sınıfın `OVERRIDE`'ını alt-alt sınıfta **yeniden yazın** (G-NESNE-7).
-* Soyutluk gerektiğinde `INTERFACE` kullanın (`ABSTRACT`, `FINAL`, `SEALED`, `MIXIN` yoktur, G-NESNE-6). İşlev parametresini arayüz tipinde alırsanız bağımlılık tek yerde kalır; bir sınıf birden çok arayüz uygulayabilir.
+* Soyutluk gerektiğinde `INTERFACE` kullanın (`ABSTRACT`, `FINAL`, `SEALED` ölçüm ikilisinde ayrıştırılamaz; iki `MIXIN` ve `EXTENDS`'li `MIXIN` reddedilir: G-NESNE-6, G-NESNE-38). İşlev parametresini arayüz tipinde alırsanız bağımlılık tek yerde kalır; bir sınıf birden çok arayüz uygulayabilir; ama arayüz tipli parametreye `IMPLEMENTS` yazmamış sınıf verirseniz altı yol ayrışır (G-NESNE-41).
 * Nesneyi yazdırırken **her zaman `PRINT STR(n)`** yazın ve sınıfa `MAGIC TOSTRING()` ekleyin (G-NESNE-4); ama AST'de `MAGIC TOSTRING` tanımlı sınıfın sayısal dönüşlü metodunun sonucunu değişkene yazmayın (✖ G-NESNE-29, geçici çözüm yoktur: sonucu doğrudan `PRINT` edin ya da programı MIR, x64 ya da JS ile çalıştırın). İşleç sonucunu hemen kullanın; ardışık saklama ya da `a = a * b` zinciri AST'de yanlış olabilir (G-NESNE-9).
-* x64'e derleyecekseniz **sanal metottan ondalıklı değer döndürmeyin** ve ondalıklı alana tamsayı sabiti yazmayın (`3.0` yazın): sonuç çöp çıkar (G-NESNE-8). Nesne dizisi (`DIM d(n) AS Sinif`) x64'te derlenmez; bu hedefte nesneleri ayrı değişkenlerde tutun.
+* x64'e derleyecekseniz **bir ifadede iki ondalıklı alanı birlikte okumayın** (`k * k`, `k + k`: sonuç `0`/çöp çıkar, G-NESNE-43; alanı önce yerel değişkene kopyalayın) ve ondalıklı alana tamsayı sabiti yazmayın (`3.0` yazın): sonuç çöp çıkar (G-NESNE-8). Eski AST-x64'te `F64` parametreli **kurucu** alana çöp yazar (G-NESNE-44; kaynakta düzeltildi, `NEW` argümanı tamsayı yazmacında gidiyordu). Nesne dizisi (`DIM d(n) AS Sinif`) x64'te derlenmez; bu hedefte nesneleri ayrı değişkenlerde tutun.
 * `RETURN THIS` ile yöntem zinciri kurmayın (G-NESNE-5); `STATIC` üyeye güvenmeyin, motorlar farklı davranır (G-NESNE-1).
 * `PROPERTY` yalnız kısa biçimde (`PROPERTY Ad AS tip GET SET`) kullanın; yalnız okunur (`GET`) özelliğe yazmak AST'de reddedilir ama MIR ve x64'te sessizce çalışır (G-NESNE-3).
 
@@ -5475,35 +5556,136 @@ Mete (2026-10-15): uXBasic nesne yönelimli programlama paradigmasıyla doğdu; 
 |---|---|---|
 | Tek tabanlı kalıtım, `VIRTUAL`/`OVERRIDE`, `SUPER.Ad()` | ✔ (sınırlar 11.4'te) | G-NESNE-7, G-NESNE-24, G-NESNE-25 |
 | Çok arayüz (`IMPLEMENTS IA, IB`) | ✔ AST, MIR, x64; JS ≠, WASM ≠ | G-JS-3 |
-| **Çoklu kalıtım** (`EXTENDS A, B`) | ✖ ayrıştırma hatası; tasarım kararı değişti | G-NESNE-30 |
-| **Karışım / trait** (`MIXIN`) | ✖ tanınır ama ayrıştırılmaz; tasarımda açık trait bileşimi olarak ◇ HEDEF | G-NESNE-6, G-HEDEF-4 |
+| **Çoklu kalıtım** (`EXTENDS A, B`) | ✖ ayrıştırma hatası; **karar: B (2026-10-16)**, çakışma anahtar sözcükleriyle denetlenir (11.13) | G-NESNE-30, G-HEDEF-40 |
+| **Karışım / trait** (`MIXIN`) | ◐ gövdede tek `MIXIN Sinif` ✔ (altı yol); iki karışım, `EXTENDS`'li karışım, blok biçimi ✖; tasarımda açık trait bileşimi ◇ HEDEF | G-NESNE-6, G-HEDEF-4, G-HEDEF-39 |
 | `USES` bileşimi, jenerik sınıf, `DECORATOR` | ✖ ◇ HEDEF | G-HEDEF-4, G-HEDEF-25 |
-| `ABSTRACT`, `FINAL`, `SEALED` | ✖ ayrıştırıcıda yok | G-NESNE-6 |
+| `ABSTRACT`, `FINAL`, `SEALED` | ✖ ölçüm ikilisinde ayrıştırılamaz; kaynakta düzeltildi (anlamsal denetimler zaten vardı) | G-NESNE-6, G-NESNE-38 |
 | Arayüz mirası (`INTERFACE IB EXTENDS IA`) | ✖ ayrıştırma hatası | G-NESNE-31 |
 | Arayüzde gövdeli (varsayılan) metot | ✖ ayrıştırma hatası | G-NESNE-34 |
-| Taban kurucu zinciri, `SUPER(...)` | ✖ AST ve MIR taban kurucusunu çalıştırmaz; `SUPER(...)` yok (WASM ve eski AST-x64 sessizce `0` yazar) | G-NESNE-25, G-NESNE-27 |
+| Taban kurucu zinciri, `SUPER(...)` | ◐ parametresiz zincir altı yolda ✔; parametreli taban kurucusu beş ayrı davranış; `SUPER(...)` yok (WASM ve eski AST-x64 sessizce `0` yazar) | G-NESNE-25, G-NESNE-27 |
 | Kurucu aşırı yükleme (birden çok `CONSTRUCTOR`) | ✖ ayrıştırma hatası | G-NESNE-35 |
 | Metot aşırı yükleme | ✖ AST `duplicate routine`; MIR ve JS yanlış sonuç; x64 derlemez | G-YORDAM-1 |
 | İç içe sınıf | ✖ ayrıştırma hatası | G-NESNE-32 |
 | Sınıf sabiti (sınıf içinde `CONST`) | ✖ ayrıştırma hatası | G-NESNE-33 |
 | `STATIC` üye | ◐ motorlara göre değişir | G-NESNE-1 |
-| Tür sınama `INSTANCEOF(nesne, Sinif)` | ◐ yalnız AST (`-1`) | G-NESNE-36 |
-| Boş nesne / boş başvuru (`NULL`, `NOTHING`) | ✖ yüzeyde yok | G-TIP-31 |
+| Tür sınama `INSTANCEOF(nesne, Sinif)`, `IS`, `AS` | ◐ `INSTANCEOF` yalnız AST (`-1`); `s IS Kare` ve `s AS Kare` ayrıştırma hatası ◇ HEDEF | G-NESNE-36, G-HEDEF-32 |
+| Boş nesne / boş başvuru (`NULL`, `NOTHING`) | ✖ yüzeyde yok; **çalışacak (Mete kararı, ◇ HEDEF, S-564)** | G-TIP-31 |
 | Alan erişim denetimi | ✖ metotta denetlenir, alanda denetlenmez | G-NESNE-2 |
 | `PROPERTY` blok biçimi | ✖ ◇ HEDEF | G-HEDEF-3 |
 | Zayıf başvuru, başvuru sayımı, kapsam çıkışında yıkıcı | ✖ ◇ HEDEF (yaşam elle yönetilir) | G-HEDEF-25 |
 | İşleç yükleme (`MAGIC ADD` …) | ✔ AST, MIR, x64, JS; WASM ≠ | G-NESNE-9, G-NESNE-15 |
 | İşlev değeri / geri çağrı (`FUNCTION_PTR`), lambda | ✖ ◇ HEDEF | G-TIP-8, G-HEDEF-26 |
 
-### Çoklu kalıtım için tasarım seçenekleri (karar bekliyor, S-555)
+### Çoklu kalıtım nedir, A, B ve C ne demek? (karar: **B**, 2026-10-16, S-555)
 
-| Seçenek | Ne olur? | Artısı | Eksisi |
+**Mete'nin cevabı (2026-10-15):** «önerdiğin gibi» (C) dedi, ama seçeneklerin içeriğini tam anlamadığını söyledi; sade anlatım bu yüzden eklendi. **2026-10-16'da kararını verdi: «B ile devam».** Yani sınıf birden çok tabandan hem davranışı hem alanları devralabilecek. Aynı mesajda bir fikir getirdi: iki tabandan **aynı adlı metot** gelirse çakışma çıkar; miras alan sınıf bazı anahtar sözcüklerle bu birleştirmeyi durdurabilsin. **Cevap: evet**; tasarım 11.13'te ve `docs/tasarim/UXB_S555_COKLU_KALITIM_B_VE_CAKISMA_DENETIMI_20261016_TR.md` içindedir. Aşağıdaki A/B/C anlatımı, kararın neyi seçtiğini anlamak için bırakıldı.
+
+**Önce kısa bir anlatım.** *Kalıtım*, bir sınıfın başka bir sınıftan özellik ve davranış devralmasıdır: `Kopek` sınıfı `Hayvan` sınıfından türeyince hayvanın yaptığı her şeyi (yemek, uyumak) kendiliğinden yapar. Bugün bir sınıfın **tek bir** tabanı (ebeveyni) olabilir (`CLASS Kopek EXTENDS Hayvan`). Bir sınıf ayrıca istediği kadar **arayüz** imzalayabilir (`IMPLEMENTS`); arayüz yalnız bir sözdür ("şu işlevleri yapabilirim"), içinde hazır kod ve veri yoktur. *Çoklu kalıtım* ise bir sınıfın birden çok ebeveynden devralmasıdır; örneğin `AmfibiArac`, hem `KaraAraci` hem `SuAraci` sınıfından.
+
+Üç seçenek, bu işin ne kadarını ve hangi sırayla yapacağımızı belirler (örneklerdeki yazım yalnız anlatım içindir; gerçek yazım uygulamada kesinleşir):
+
+| Seçenek | Sade anlatım | Küçük örnek (◇ HEDEF; bugün çalışmaz) | Artısı | Eksisi |
+|---|---|---|---|---|
+| **A. Durumsuz karışım** | Sınıfın yine **tek** ebeveyni (verisini taşıyan sınıf) olur; üstüne istediği kadar "yetenek kutusu" (`MIXIN`) takılır. Kutuların içinde yalnız işlevler vardır, **veri (alan) yoktur** | `CLASS Rapor EXTENDS Belge MIXIN Yazdirilabilir, Kaydedilebilir` | Basit ve güvenli; kutularda veri olmadığı için çakışma çıkmaz; altı motora taşımak kolay | Kutu kendi verisini tutamaz (örneğin "kaç kez yazdırıldı" sayacı kutuya konamaz, sınıfın alanı olmalıdır) |
+| **B. Gerçek çoklu kalıtım** | Sınıfın birden çok **gerçek** ebeveyni olur; hem işlevlerini hem **verilerini** devralır | `CLASS AmfibiArac EXTENDS KaraAraci, SuAraci` | En güçlüsü; C++ ve Python bilenlere tanıdık | **"Elmas sorunu":** iki ebeveyn de aynı büyükbabadan (`Arac`) türemişse çocuğun içinde büyükbabanın verisinden (örneğin `hiz` alanı) bir mi, iki kopya mı olur? Çocuk `hiz`i kullanınca hangisi kastedilir? Kurucular hangi sırayla çalışır? `SUPER` hangi ebeveyni çağırır? Bu soruların kuralı yazılmalı ve **altı motor aynı cevabı vermeli**; JS ve WASM'da nesnenin bellekteki dizilişi farklı olduğundan en pahalısı budur |
+| **C. Aşamalı (önerim)** | **Önce A** yapılır; sonra kutular kendi verilerini de taşıyabilsin diye genişletilir (durum taşıyan karışım); **B**'ye ancak bunlar altı motorda sınanıp oturunca geçilir | A'dan B'ye yürümek | Her adım ayrı sınanır; mevcut programlar bozulmaz; B'nin zor kuralları (elmas, kurucu sırası) A'nın deneyimiyle yazılır | İki aşama sürer |
+
+**Neden C'yi önermiştim, B seçilince ne olur?** Riskli parçayı (B) temel taşlar sağlam olduktan sonra yapmak istiyordum. Mete B'yi seçti; bu yüzden uygulama planı B'yi **aşama aşama** teslim eder (M0: tek kalıtımı altı yolda eşitle, M1: ayrık hiyerarşilerde `EXTENDS A, B`, M2: elmas, M3: karışımlar). C'nin güvenli yanı B'nin içinde kalır. Doğrudan tek adımda B, altı motoru birden riske atardı.
+
+Hangisi seçilirse seçilsin ön koşullar aynıdır: taban kurucu zinciri (G-NESNE-25, G-NESNE-27), `ABSTRACT`/`FINAL` (G-NESNE-6), `THIS`/`ME` ayrımı (G-NESNE-24; uygulandı) ve altı motorda eşlik.
+
+## 11.13 Yeni OOP tasarım belgeleri ve kaynak denetimi (2026-10-16)
+
+Mete iki belge verdi ve «incele, kılavuza işle, bulduğun sorunları plan yaparak çözmeye başla» dedi: **`UXB OPP SISTEMI TASARIM VE TARTISMALARI.md`** (Mete'nin tasarım konuşması: çoklu kalıtım, `THIS`/`ME`/`SUPER[Taban]`, karışımlar, motorlara indirgeme, eksik ve deneysel özellikler) ve **`uXBasic_OOP_Tam_Sistem_Denetimi_2026-10-16.md`** (kaynak denetimi: bulgular K-01 … K-12, iş sırası P0 … P3). Denetim derleyiciyi çalıştırmadan, kaynak paketini okuyarak yapılmıştı; bu bölümdeki her satır ise **gerçek derleyicide altı yolda denendi** (123 küçük program; düzeltme turunda eklenen `THIS`/`ME`, kurucu zinciri, boş gövde ve `FUNCTION` sonucu vakalarıyla birlikte; vakalar `tools/kitap/kilavuz_v2/yoklama/iddia_oop_20261016/`, ham sonuçlar `docs/kitaplar/_ortak/oop_partisi_20261016/`). İş planı: `ai_koordinasyon/OOP_DUZELTME_PLANI_20261016.md`. Yeni kayıtlar S-570 … S-599.
+
+### 11.13.1 Denetim bulguları gerçekte nasıl çıktı?
+
+| Bulgu | Denetimin iddiası | Altı yolda ölçüm (`20261014_0253`) | Kayıt |
 |---|---|---|---|
-| **A. Durumsuz karışım** | Tek durum tabanı + çok `MIXIN`/trait (alan taşımaz) + çok arayüz | Elmas sorunu yoktur; altı motora taşımak kolay | Alan paylaşan karışım yazılamaz |
-| **B. Gerçek çoklu durum kalıtımı** | `EXTENDS A, B`: alanlar tabanların sırasıyla art arda yerleşir; kurucular soldan sağa çalışır; aynı tabanı iki yoldan almak hata (ya da C3 doğrusallaştırması) | En güçlü; C++ ve Python bilenlere tanıdık | Alan yerleşimi, `SUPER` çözümü ve JS/WASM taşıması pahalı |
-| **C. Aşamalı (önerim)** | Önce durum taşıyabilen `MIXIN` (açık çakışma çözümüyle), sonra B | Her aşama sınanır, geriye dönük bozulma olmaz | İki aşama sürer |
+| K-01 MIR `DELETE_OBJECT` | yalnız olay yazıyor, nesneyi öldürmüyor | ✔ doğru; ama asıl durum daha derin: **`DELETE` komutu o işlemi hiç üretmiyor** (statik yıkıcı zinciri + «değişken = 0»), ve **MIR boş başvuruyu (`0`) programın ilk nesnesine çözüyor**: boş değişkenden okumak başka nesnenin alanını verir, yazmak onu bozar (yeni bulgu) | G-NESNE-37 (S-570), G-NESNE-20 |
+| K-02 JS silinmiş nesne | `fieldLoad/fieldStore` canlılık sormuyor | ✔ doğru (`undefined`); `DELETE` hiç `objectDelete` çağırmadığından `__uxbDeleted` hiç ayarlanmıyor | G-JS-16 (S-573), G-HEDEF-31 |
+| K-03 `THIS`/`ME` ayrımı yok | MIR ikisini de sanal seçiyor | ✔ ve daha kötü: AST ikisini de **doğrudan**, MIR/x64/JS/eski AST-x64 ikisini de **sanal** çağırır (üç seviyede `100` ↔ `300`). **Kaynakta düzeltildi:** altı yolda `THIS` doğrudan, `ME` sanal | G-NESNE-24, G-NESNE-46 |
+| K-04 sınıf metodunda aşırı yükleme yok | aynı ad üye reddi | ✔ `CLASS: duplicate member name: F`, altı yolda aynı açık ret | G-NESNE-16, G-NESNE-35 |
+| K-05 WASM nesne modeli | eksik özellikler **açıkça** reddediliyor | ◐ metin ve ondalık açıkça reddedilir; ama **nesne alanları sessizce `0`** idi — kök neden bulundu (üç yerde yanlış operand tabanı) ve düzeltildi | G-WASM-26 (S-575), G-WASM-1 |
+| K-06 `MemoryRef` | ham adresleri eksik izliyor | ✔ ölçüldü: 4096 canlı bölgeden sonra koruma **sessizce kapanır** (4200 dizide bayat işaretçi `11` okur, çıkış 0) | G-TIP-32 |
+| K-07 parametreli taban kurucusu | `SUPER(...)` yok | ✔ beş ayrı davranış; `SUPER(5)` WASM ve eski AST-x64'te sessizce yok sayılır | G-NESNE-25, G-NESNE-27 |
+| K-08 `UXClazz` profilleri | yalnız üstveri | ✔ (`CLAZZ ACTOR` düz `CLASS` üretir) | G-ARAC-3, G-HEDEF-36 |
+| K-09 `MIXIN`/`DECORATOR` | en çok bir karışım | ✔ tek karışım çalışır, iki karışım ve `EXTENDS`'li karışım açık ret | G-HEDEF-39 |
+| K-10 JS argümanlar | kurucu argümanları paylaşılıyor | ✔ ve **metot argümanları JS'te tümden düşüyordu** (yeni bulgu) | G-JS-15 (S-571) |
+| K-12 yığıt ölçeği | `ReDim Preserve` her ayırmada | ✔ MIR'de 64 000 nesne 60 sn (aşırı doğrusal); AST doğrusal | G-HIZ-4 |
+| «`tests/oop_parity` yok» | paketlerde yok | bizde var: 126/126 geçiyordu; ama boş başvuru testleri hiç nesne yaratmadığından G-NESNE-37'yi yakalamıyordu | — |
 
-Hangisi seçilirse seçilsin ön koşullar aynıdır: taban kurucu zinciri (G-NESNE-25, G-NESNE-27), `ABSTRACT`/`FINAL` (G-NESNE-6), `THIS`/`ME` ayrımı (G-NESNE-24) ve altı motorda eşlik.
+**Ders:** «Reddetme testi geçiyor» demek özelliğin çalıştığını kanıtlamaz. `neg_null_*` testleri programın ilk ve tek nesnesi olmadan sınadığı için MIR'in sessiz bozulmasını yıllarca göstermedi; yeni testler (`null_read_after_alloc`, `null_write_after_alloc`) önce başka bir nesne yaratır.
+
+### 11.13.2 Tasarım belgesindeki örnekler altı yolda
+
+| Örnek (belgeden) | Sonuç | Neden | Kayıt |
+|---|---|---|---|
+| `Nokta` + `IF p = NOTHING` | ✖ derlenmez: `unknown symbol: nothing` | `NULL`/`NOTHING` yok (Mete kararı: çalışacak) | S-564 |
+| `BankaHesabi` (F64, `PRIVATE`, `ParaYatira`) | AST, MIR, x64 `150`; **JS `100`**; **eski AST-x64 `50`**; WASM ondalık reddi | JS: metot argümanı düşer; eski AST-x64: F64 kurucu parametresi çöp | G-JS-15, G-NESNE-44, G-WASM-7 |
+| `Sekil` / `Kare` / `IYazdirilabilir` (F64) | AST, MIR, JS `25`; **x64 ve eski AST-x64 `0`**; WASM ondalık reddi | x64: iki F64 alan çarpımı (`kenar * kenar`) | G-NESNE-43 |
+| `Vektor2D` + `MAGIC ADD`, `TOSTRING`; `DIM v3 AS Vektor2D = v1 + v2` | ✖ `DIM class initializer must be NEW` (altı yol); `DIM v3 …` sonra `v3 = v1 + v2` ✔ (tamsayılı sürümle AST, MIR, x64, JS, eski AST-x64 `6`, `4`) | `DIM` başlangıcı yalnız `NEW` | G-NESNE-45 |
+| `Ogrenci`: `PROPERTY Puan AS I32 … GET … END GET SET(v) … END SET` | ✖ `PROPERTY SET: unexpected trailing tokens near OP('(')` | `PROPERTY` blok biçimi yok; kısa biçim çalışır | G-HEDEF-3 |
+| `Arac.Sür()`, `Yüz()` (Türkçe harfli ad) | ✖ `Lexer diagnostic bridge hata buldu: 4` | tanımlayıcıda Türkçe harf yok; ileti nedeni söylemez | G-DIL-19 |
+| `ANDALSO` | ✔ AST, MIR, x64, JS ve eski AST-x64'te çalışır; WASM'da karşılaştırma sonucu `1` (öbürlerinde `-1`) | `IF` içinde fark görünmez | G-WASM-18 |
+| `CLASS AmfibiArac EXTENDS KaraAraci, SuAraci` | ✖ ayrıştırma hatası | çoklu kalıtım yok; karar B | G-NESNE-30, G-HEDEF-40 |
+| `SUPER[KaraAraci](t)` | ✖ `statement parse failed near OP('[')` | `SUPER[Taban]` yok | G-HEDEF-40 |
+| `CLASS Rapor EXTENDS Belge MIXIN A, B`; `MIXIN … END MIXIN` | ✖ `MIXIN currently supports single-base model` / `CALL: missing (` | tek `MIXIN` sınırı | G-HEDEF-39 |
+| `THIS.Value() * 100 + ME.Value()` (`1020`) | ✔ **kaynakta düzeltildi:** altı yolda `1020` (ölçüm ikilisinde AST `1010`, öbürleri `2020`) | `THIS`/`ME` ayrımı uygulandı | G-NESNE-24 |
+| `CLASS Depo<T>` | ✖ `CLASS: field identifier expected near OP('<')` | jenerik sınıf yok | G-HEDEF-4 |
+| `s IS Kare`, `s AS Kare` | ✖ `missing THEN near KEYWORD('IS')` | `IS`/`AS` yok; `INSTANCEOF` yalnız AST | G-HEDEF-32, G-NESNE-36 |
+| `CASE IS k AS Sekil` | ✖ `CASE IS: relational operator expected` | desen eşleme yok | G-HEDEF-33 |
+| `USING f AS Akis = NEW Akis() … END USING` | ✖ `USING: unexpected trailing tokens near KEYWORD('AS')` | `USING` bugün **ad uzayı içe aktarımıdır**; RAII bloğu aynı sözcüğü ister | G-HEDEF-34 |
+| `ACTOR CLASS`; `CLASS DATA_PARALLEL`; `BORROWED n AS Nokta` | ✖ ayrıştırma hataları | deneysel öneriler | G-HEDEF-36, G-HEDEF-37, G-HEDEF-38 |
+| `IMPLEMENTS` yazmadan arayüze sınıf vermek (yapısal arayüz) | AST, MIR `4`; x64, JS, WASM, eski AST-x64 derleme ya da çalışma anı hatası | anlamsal denetim `IMPLEMENTS`'e bakmıyor | G-NESNE-41, G-HEDEF-35 |
+
+### 11.13.3 Çoklu kalıtım (B) ve çakışma denetimi: kısa özet
+
+Mete (2026-10-16): «B ile devam» ve «aynı isimde iki metot varsa çakışma olabilir; miras alan sınıf bazı anahtar kelimelerle metotların birleştirilmesini durduramaz mı?» **Cevap: evet.** İlke: **derleyici aynı adlı iki üyeyi asla sessizce birleştirmez.** Çakışma varsa program derlenmez (`UXB_AMBIGUOUS_MEMBER`); miras alan sınıf kararını **yazar**:
+
+| Cümle | Anlamı |
+|---|---|
+| `OVERRIDE METHOD Sur() … END METHOD` | kendi metodunu yazar; iki tabanınkine `SUPER[Taban].Sur()` ile ulaşır |
+| `PREFER KaraAraci.Sur` | `Sur` adı KaraAraci'nın metodudur; öbürü bu sınıfın yüzeyinde görünmez |
+| `RENAME SuAraci.Sur AS SuSur` | sudaki metot yeni adıyla kalır; ikisi de kullanılabilir |
+| `EXCLUDE SuAraci.Sur` | tabanın o üyesi bu sınıfa alınmaz |
+
+```basic
+CLASS Amfibi EXTENDS KaraAraci, SuAraci     ' ◇ HEDEF: bugün çalışmaz
+    PUBLIC
+    RENAME SuAraci.Sur AS SuSur              ' Sur() karadaki, SuSur() sudaki
+END CLASS
+```
+
+`PREFER/RENAME/EXCLUDE` **bağlamsal sözcüklerdir** (yalnız sınıf gövdesinde satır başında anlam taşırlar); yeni ayrılmış sözcük oluşturmazlar. Ortak taban (elmas) bir kez saklanır; ortak tabandaki metodu yalnız bir kol geçersiz kıldıysa o kol kazanır (çakışma yok). Taban kurucusu parametre istiyorsa `SUPER[Taban](...)` yazılmalıdır (yoksa `UXB_BASE_CTOR_REQUIRED`). Uygulama aşamaları: M0 tek kalıtımı altı yolda eşitle → M1 ayrık hiyerarşilerde `EXTENDS A, B` → M2 elmas → M3 karışımlar (G-HEDEF-39). Kabul testleri T1 … T20 ve tüm kurallar: `docs/tasarim/UXB_S555_COKLU_KALITIM_B_VE_CAKISMA_DENETIMI_20261016_TR.md`. Kayıtlar: G-NESNE-30 (S-555), G-HEDEF-40 (S-595).
+
+### 11.13.4 Bu turda kaynakta düzeltilenler
+
+On sekiz hızlı ve yerel düzeltme (ve bir kısmi düzeltme) yapıldı, her biri `tests/oop_parity` içine eklenen testle altı yolda doğrulandı. **Bu kılavuzun ölçüm ikilisi `20261014_0253` olduğundan, yukarıdaki sütunlar o ikiliyi gösterir; düzeltmeler yeni ikilide (`bin\uxb_oop1024.exe`) geçerlidir ve kılavuz bu ikiliyle yeniden ölçülene kadar «düzeltildi» olarak anılır.**
+
+| Kayıt | Düzeltilen | Nasıl |
+|---|---|---|
+| G-NESNE-37 (S-570) | MIR'de boş başvuru ilk nesneye düşüyor | boş başvuru artık tutamaçsız (`-1`); alan okuma ve yazma önce canlılığı sınar |
+| G-JS-15 (S-571) | JS'te metot argümanları düşüyor | argümanlar tek dizi olarak geçirilir; `banka_hesabi`, `arayuz_coklu` doğru çıktı verir (G-JS-3, G-JS-13 de bununla kapanır) |
+| G-NESNE-38 (S-572) | `ABSTRACT/FINAL/SEALED CLASS` ayrıştırılamıyor | sözcük çözümleyici sonraki sözcüğü kimliğe indiriyordu; dağıtıcı artık metne göre eşler; soyut tipli değişkeni reddeden yanlış denetim kaldırıldı |
+| G-JS-16 (S-573) | JS'te boş nesneden alan okuma sessiz | artık hata, ileti ortak ifadeyi taşır |
+| G-WASM-26 (S-575) | WASM'da nesne alanları `0`, kurucu ve sanal çağrı argümanları kayıp | üç yerde operand tabanı düzeltildi (`OBJECT_NEW`, `FIELD_STORE`, sanal çağrı) |
+| G-NESNE-43 (S-580) | x64'te iki F64 alanın birlikte okunması (`k * k`) `0`/çöp | üye okumasına kayan nokta türü verildi; `FADD/FMUL` seçilir |
+| G-NESNE-44 (S-581) | Eski AST-x64'te F64 kurucu parametresi çöp | `NEW` argümanları xmm yazmacına yüklenir |
+| G-NESNE-45 (S-584) | `DIM x AS Sinif = ifade` reddi | yalnız `NEW`'ı sınayan kural kaldırıldı; tür adım-3 geçidinde sınanır; AST'nin çalışma sınıfı nesne başlığından okunur |
+| G-WASM-27 (S-586) | WASM'da `ME`/`SUPER` geçersiz WAT | `ME` ve `SUPER` alıcıyı (`THIS`) gösterir |
+| G-NESNE-41 (S-577) | `IMPLEMENTS` yazmamış sınıf arayüz parametresine verilebiliyor; altı yol ayrışıyor | düz adlı `SUB`/`FUNCTION` çağrısında argümanın sınıfı arayüzü gerçeklemiyorsa derleme hatası (`does not implement INTERFACE`) |
+| G-TIP-32 (S-582) | 4096'dan fazla canlı dizide `MemoryRef` koruması sessizce kapanıyor | tablo büyür (65536'ya kadar); dolarsa bilinmeyen adrese NATIVE erişim reddedilir |
+| G-HIZ-4 (S-583) | MIR'de nesne ayırma süresi nesne sayısıyla artıyor | yuva tablosu ikiye katlanır (her ayırmada kopya yok); boşta makinede 64 000 nesne 50,6 sn → 33,8 sn, nesne başına süre sabit |
+| G-NESNE-24 (S-484) | `THIS`/`ME`/niteliksiz çağrı ayrımı yok: AST üçünü doğrudan, öbürleri üçünü sanal çağırıyor | `THIS.m()` doğrudan, `ME.m()` ve niteliksiz `m()` sanal: örtük `THIS` dönüşümü niteliksiz çağrıyı `ME` yapar; MIR üretimi `THIS` alıcısında sanal yuvaya bakmaz; eski AST-x64 `THIS`'te sanal yuva aramaz |
+| G-NESNE-46 (S-596) | AST sanal çağrıyı `SUB` parametresinde ve `ME`'de bildirilen sınıfa göre dağıtıyor | alıcı sınıfı nesne başlığından okunur (sanal dağıtım); sanal olmayan bağlama bildirilen sınıfla; `THIS` doğrudan |
+| G-NESNE-40 (S-576) | Kurucu kuralı yalnız `ME.` önekini yakalıyor (sanal olmayanı da reddediyor); `THIS.`/niteliksiz çağrı delik, MIR kurucuda sessiz | kural kurucu **ve yıkıcıda** yalnız **sanal** hedefli `ME`/niteliksiz çağrıyı reddeder; `THIS.m()` ve sanal olmayan çağrı serbest |
+| G-NESNE-25 (S-485, kısmen) | Türetilmiş sınıfın kendi kurucusu yoksa MIR taban kurucusunu çalıştırmıyor | zincir kurucusu olmayan sınıfları atlar, kalanları çalıştırır (parametreli taban ve `SUPER(...)` hâlâ açık) |
+| G-YORDAM-11 (S-597) | Gövdesi boş rutin: AST çöküyor, MIR/x64/JS çağrıyı bulamıyor, eski AST-x64 derlemiyor | `And` → `AndAlso` (AST); boş `SUB`/`FUNCTION`/sınıf rutini MIR ve eski AST-x64'te de üretilir |
+| G-JS-17 (S-598) | JS'te hiç yazılmamış alan `undefined` / `nan` | `fieldLoad` türün sıfır değerini döndürür (metin için `""`) |
+| G-YORDAM-12 (S-599) | Sonucu atanmayan `FUNCTION`/`METHOD`: x64 çöp, JS `undefined`, WASM derlenmez, eski AST-x64 son değer; `F = değer` ardından başka deyim varsa eski AST-x64 yanlış | sonuç değişkeni girişte türün sıfırıyla başlar (MIR üretimi); eski AST-x64'te işlev adını taşıyan çerçeve yuvası |
+
+Çözülmeyen ve sıradaki işler (öncelik sırasıyla): nesne yaşam döngüsü (G-HEDEF-31: `DELETE` sözleşmesi, ölü işareti, gerçek türe göre yıkıcı), parametreli taban kurucusu ve `SUPER(...)` (G-NESNE-25, G-NESNE-27), eski AST-x64'te arayüz tipli parametre (G-NESNE-42) ve `NAMESPACE`/`USING` (G-MODUL-8), Türkçe tanımlayıcı (G-DIL-19), sonra `IS`/`AS`, desen eşleme, `USING` kaynak kapsamı ve çoklu kalıtım. Deneysel öneriler (yapısal arayüz, `ACTOR CLASS`, `DATA_PARALLEL`, `OWNED`/`BORROWED`) Mete'nin kararını bekler.
 
 
 # 12. Hata yönetimi, doğrulama ve tanılar
@@ -5793,9 +5975,9 @@ Aşağıdaki tablo, hatalı bir işlemin her motorda gerçekte ne yaptığını 
 | `EXP(1000)`, `1E308 * 10` | `inf` | `inf` | `inf` | `inf` | tutarlı |
 | Dizi sınır dışı okuma, yazma, negatif indeks | hata | hata | hata (1) | ✖ okuma `0`; yazma yok sayılır | G-HATA-6 |
 | `LISTGET` sınır dışı, `DICTGET` olmayan anahtar | hata | hata | hata | ✖ `undefined` | G-HATA-6 |
-| Boş nesne: metot çağrısı, alan yazma | hata | hata | hata | hata (`callMethod`/`fieldStore target is missing`) | — |
+| Boş nesne: metot çağrısı, alan yazma | hata | hata | hata | hata (`callMethod`/`fieldStore target is missing`; yeni ikilide ek olarak `fieldLoad`) | — |
 | Boş nesne: alan okuma | hata | hata | hata | ✖ `undefined` | G-HATA-6 |
-| `DELETE o` sonrası `o.v` okuma | hata | ✖ eski değer (`3`) | hata | ✖ `undefined` | G-NESNE-20 |
+| `DELETE o` sonrası `o.v` okuma | hata | ✖ eski değer (`3`) ya da başka nesnenin alanı (G-NESNE-37) | hata | ✖ `undefined` (G-JS-16) | G-NESNE-20 |
 | Olmayan dosyayı `OPEN … FOR INPUT` | durur (2; ham FreeBASIC iletisi) | durur (13) | ✖ sessizce devam (`EOF` `-1`) | ◌ `host binding missing: OPEN` | G-DOSYA-5, G-JS-7 |
 | `VAL("abc")` | `0` | `0` | `0` | `nan` | G-METIN-5 |
 | `ASC(CHR(300))` | hata | `44` | `44` | `300` | G-METIN-5 |
@@ -5822,7 +6004,7 @@ Aşağıdaki tablo, hatalı bir işlemin her motorda gerçekte ne yaptığını 
 * **Çalışma anı hatalarını (sıfıra bölme, dizi sınırı, boş nesne) `TRY` ile yakalamaya güvenmeyin**: yalnız AST yakalar (G-HATA-2). `IF b <> 0`, `LBOUND`/`UBOUND` ve nesnenin atandığına bakan denetimleri **önceden** yazın.
 * **JS'e gidecek programda bu denetimler zorunludur:** JS tamsayı sıfıra bölmede `inf`, sınır dışı okumada `0` ya da `undefined` verip **hata vermeden devam eder** (G-HATA-6, G-HATA-8); x64 ise tamsayı sıfıra bölmede iletisiz durur (G-HATA-9). Betiklerde çıkış kodunun sıfır olmasına bakın, ileti metnine değil (G-HATA-7).
 * Ondalık işlemlerde (`SQR`, `LOG`, `/`) alan dışı girdiyi önceden eleyin: AST ve MIR durur, x64 ve JS `nan`/`inf` yazıp devam eder (G-HATA-5); sonucu `nan`/`inf` için de denetleyin.
-* Dosya açmadan önce varlığını `uxfs.FileExists` ile sınayın: x64 olmayan dosyayı sessizce açmış gibi davranır (G-DOSYA-5). `DELETE`'ten sonra nesneyi okumayın: MIR eski değeri verir (G-NESNE-20).
+* Dosya açmadan önce varlığını `uxfs.FileExists` ile sınayın: x64 olmayan dosyayı sessizce açmış gibi davranır (G-DOSYA-5). `DELETE`'ten sonra nesneyi okumayın: MIR eski değeri ya da başka bir nesnenin alanını verir (G-NESNE-20, G-NESNE-37).
 * Her yordam yalnız bir iş yapsın ve önkoşullarını başında `ASSERT` ile belirtsin; kaynak açan yordamda temizliği `FINALLY` içine koyun.
 * Programda `ASSERT` ya da `TRY` varsa ve x64'e derleyecekseniz **dizileri yordamın en başında bildirin** (G-DIL-10).
 * Sessizce kabul edilen hataları (12.5) kendiniz denetleyin: her yolun `RETURN` ile bittiğine, argüman tiplerinin uyduğuna ve aynı adın iki kez `DIM` edilmediğine bakın.
@@ -5894,8 +6076,8 @@ Dosya **kanal numarası** (`#1`) ile açılır, yazılır ya da okunur, sonra ka
 | `CLOSE #n` | Kanalı kapat |
 
 * Kanal numarası bir değişkenle de verilebilir: `OPEN "x" FOR OUTPUT AS #f`. Numara bir `I32` değişkenden, bir `TYPE` alanından (`AS #k.no`) ya da ifadeden (`AS #(1 + 1)`) gelebilir; AST, MIR, x64 ve eski AST-x64'te ölçüldü (`20261014_0253`).
-* **Tipli dosya tutamacı yoktur** (◇ HEDEF, G-DOSYA-10): Mete (2026-10-15) kanal numarası yerine bir değişkenin ya da bir `TYPE` değişkeninin verilebilmesini istedi. `DIM f AS FILE` `unknown type: FILE`, `DIM f AS FILE_HANDLE` ayrıştırma hatasıyla reddedilir; `OPEN "x" FOR OUTPUT AS f` (`#` işaretsiz) ve `f = OPEN(…)` biçimleri de yoktur. `FILE_HANDLE`, tasarımın 35 kanonik tipinden biridir (G-TIP-8).
-* **`FREEFILE` yoktur** (G-DOSYA-9): boş kanal numarasını bulan işlev olmadığı için numaraları kendiniz dağıtın.
+* **Tipli dosya tutamacı (◇ HEDEF, tasarım onaylandı 2026-10-15, G-DOSYA-10, S-549):** `DIM f AS FILE_HANDLE` gerçek bir tip olacak; `OPEN "x" FOR OUTPUT AS f` boş bir kanal numarasını kendisi seçip `f`ye verecek; `PRINT #f`, `INPUT #f`, `EOF(f)`, `LOF(f)` ve `CLOSE f` hem tutamaçla hem eski `#n` sayısıyla çalışacak; tutamaç bir `TYPE` alanı da olabilecek ve `#n` yazımı bozulmayacak. Bugün `DIM f AS FILE` `unknown type: FILE`, `DIM f AS FILE_HANDLE` bir ayrıştırma hatasıyla reddedilir; `OPEN "x" FOR OUTPUT AS f` (`#` işaretsiz) ve `f = OPEN(…)` biçimleri yoktur. `FILE_HANDLE`, tasarımın 35 kanonik tipinden biridir (G-TIP-8). Sözleşme: `docs/tasarim/UXB_S544_S549_S564_DECLARE_DOSYA_TUTAMACI_NULL_20261015_TR.md` Bölüm 2.
+* **`FREEFILE` (◇ HEDEF, tasarım onaylandı, G-DOSYA-9, S-548):** boş kanal numarasını döndürecek (`TIMER` gibi parantezsiz); bugün yoktur, numaraları kendiniz dağıtın.
 * **Dosyadan okunan her şey metindir**; sayı gerekiyorsa `CINT(VAL(satir))` ile çevrilir (bkz. örnek).
 * Kapatılmamış bir dosya program bitince sessizce bırakılır; `CLOSE` her zaman yazın.
 
@@ -6601,9 +6783,9 @@ DECLARE PARALEL Toplu(bas AS I32, say AS I32) AS I32
 |---|---|
 | `DECLARE THREAD/EVENT/PIPE/PARALEL` | ◇ HEDEF: çözümleyici açıkça reddeder (`DECLARE: expected SUB or FUNCTION near KEYWORD('THREAD')`) |
 | `DECLARE FUNCTION` / `DECLARE SUB` | ✔ (Bölüm 8.5) |
-| Görevi **tanımdan önce** kullanmak (`SPAWN Kare(6)` satırı `THREAD Kare` tanımından önce) | ✔ AST, MIR, x64: DECLARE yazmadan da çalışır, çünkü derleyici görev adlarını önceden toplar |
+| Görevi **tanımdan önce** kullanmak (`SPAWN Kare(6)` satırı `THREAD Kare` tanımından önce) | ✔ AST, MIR, x64: DECLARE yazmadan da çalışır, çünkü derleyici görev adlarını önceden toplar (Mete'nin sıkı `DECLARE` kuralı görevlere de uygulanacaktır: ◇ HEDEF, S-544 ve S-395) |
 
-> **Aynı kural `SUB` ve `FUNCTION` için de istenmiştir** (Mete, 2026-10-15): ileri kullanımdan önce `DECLARE`. Görev yapılarının `DECLARE` biçimi G-HEDEF-5, `SUB`/`FUNCTION` için denetimin eksikliği G-YORDAM-9 olarak kayıtlıdır (Bölüm 8.5). Ölçüm (`20261014_0253`): `THREAD` ve `PARALEL` tanımdan önce `SPAWN` ile, `EVENT` ve `PIPE` tanımdan önce `TRIGGER` ile AST, MIR ve x64'te `DECLARE`siz çalışır (`25`, `5`, `7`, `8`); `DECLARE THREAD`, `EVENT`, `PIPE`, `PARALEL` ve `SLOT` altı yolda ayrıştırma hatasıyla reddedilir; `TRIGGER` ile SLOT adı (`TRIGGER Kaydet, 4`) altı yolda `TRIGGER hedefi bulunamadi` ile reddedilir.
+> **Aynı kural `SUB` ve `FUNCTION` için de geçerlidir ve sıkıdır** (Mete, 2026-10-15): ileri kullanımdan önce `DECLARE`, aksi derleme hatası. Görev yapılarının `DECLARE` biçimi G-HEDEF-5 (S-395, kuralın ön koşulu), `SUB`/`FUNCTION` için denetimin eksikliği G-YORDAM-9 (S-544, karar verildi) olarak kayıtlıdır (Bölüm 8.5). Ölçüm (`20261014_0253`): `THREAD` ve `PARALEL` tanımdan önce `SPAWN` ile, `EVENT` ve `PIPE` tanımdan önce `TRIGGER` ile AST, MIR ve x64'te `DECLARE`siz çalışır (`25`, `5`, `7`, `8`); `DECLARE THREAD`, `EVENT`, `PIPE`, `PARALEL` ve `SLOT` altı yolda ayrıştırma hatasıyla reddedilir; `TRIGGER` ile SLOT adı (`TRIGGER Kaydet, 4`) altı yolda `TRIGGER hedefi bulunamadi` ile reddedilir.
 
 ## 15.4 Nerede yazılır? İç içe ve özyinelemeli kullanım
 
@@ -7240,7 +7422,7 @@ JS'te Worker havuzu, WASM'da iş parçacığı ya da konak işçileri, `SharedAr
 * **Ortak veride en dar aracı seçin** (15.7): tek deyimlik erişim otomatik senkron; birden çok deyim → `LOCK a, b`; sayaç → `ATOMIC`; dış kaynak ya da kendi kritik bölgeniz → `MUTEX`. Bir kilidi tutarken, o veriye dokunan görevi `JOIN` ile beklemeyin (`LOCK_DEADLOCK`) ve içte aynı kilidi tekrar almayın (`SELF_DEADLOCK`).
 * Özyinelemeli görevde **eşik koyun** (`IF n < 12 THEN` sıradan işlev): her `SPAWN` yeni bir görev kaydı açar. İşçi sayısı `--task-workers N` ya da `UXB_TASK_WORKERS` ile ayarlanır.
 * Görev parametreleri değerle geçer (`BYREF` yoktur); görev gövdesinde `END` yazmayın, `RETURN` ya da `THROW` ile bitirin. `LIST`, `DICT`, `PTR`, `CLASS` değerlerini görev sınırından geçirmeyin; sayı ve metinle çalışın.
-* Görevleri `DECLARE` ile bildirmeniz gerekmez (`DECLARE THREAD …` henüz yoktur, 15.3): derleyici görev adlarını önceden toplar, tanımdan önce `SPAWN` edebilirsiniz.
+* Görevleri bugün `DECLARE` ile bildirmeniz gerekmez (`DECLARE THREAD …` henüz yoktur, 15.3): derleyici görev adlarını önceden toplar, tanımdan önce `SPAWN` edebilirsiniz. Mete'nin sıkı `DECLARE` kuralı (Bölüm 8.5) görevlere de uygulanacaktır (◇ HEDEF).
 * `SLOT` numarasını bir kez kullanın (G-GOREV-4) ve `OFF` başlangıç durumuna güvenmeyin (G-GOREV-5). Bir `EVENT`'e birden çok SLOT bağlayıp hepsinin çalışmasını beklemeyin (G-GOREV-11); her işleyiciyi ayrı `TRIGGER` ile çalıştırın.
 * `ERRORTEXT` metnini tam eşitlikle sınamayın, içeriğini arayın (`INSTR`, G-GOREV-9).
 * **Eşzamanlı programı JS ya da WASM hedefine derlemeyin**: görev yapıları orada çalışmaz (G-GOREV-6, G-GOREV-7). Eşzamanlı işi x64'te çalıştırın.
@@ -7406,6 +7588,7 @@ Aşağıdakiler bu bölüm yazılırken **çalıştırılarak** bulunmuştur. Ö
 | G-MODUL-5 | S-531 · açık | eski AST-x64 | ⚠ sessiz | `MODULE` içinde bildirilen değişkenin değeri okunamaz, adres benzeri bir sayı gelir; hata ve uyarı yoktur. `MODULE Depo` içinde `DIM adet AS I32`, `SUB Koy(n AS I32)` (`adet = n`) ve `FUNCTION Say() AS I32` (`RETURN adet`); `MAIN` içinde `Depo.Koy(10)` ve `PRINT Depo.Say()` → `140696778254814` (her çalıştırmada değişir; beklenen `10`). `DIM adet AS I32 = 5` başlangıç değeri de okunamaz (`0`); `+=` ile `=` aynıdır. Modül dışındaki genel değişken doğru çalışır. MIR-x64 `10` verir (kitap örneği AST ve MIR'de de geçer); `20261007` ve `20261014_0253`'te aynıdır. Kitap örneği `61_kv_modul/stok_moduller` `Depo: 7 parca` yerine `Depo: 140696700066439 parca` yazar | Eski AST-x64'te durumu modül değişkeniyle tutmayın; genel değişken kullanın |
 | G-MODUL-6 | S-539 · açık | AST | ◌ açık | **Gerileme:** AST'de `NAMESPACE`/`MODULE` içinde bildirilen **dizi** değişkenine dışarıdan nitelikli erişim (`ad.dizi(i)`) çalışmaz; skaler ve `STRING` çalışır. `NAMESPACE sayac`, `DIM kutu(3) AS I32`, `END NAMESPACE`, `sayac.kutu(2) = 7` → AST `exec: assign lhs must be ident, indexed array, or field` (çıkış 5); salt okuma `PRINT sayac.kutu(2)` `exec: namespace routine not found SAYAC_KUTU`; `MODULE` içinde aynıdır. `20261007` AST, MIR ve MIR-x64 `7` verir. S-480 Belirti A'nın (çok boyutlu dizi) kapanışı bu kalıbı kapsamadı; model testi `tests/task_sync/namespace_shared_vars` (AST) bu yüzden düşer. `20261013` 12:37'den `20261014_0253`'e kadar her derlemede vardır | Diziyi AST'de kullanmayın; programı MIR yorumlayıcıyla (`--interpreter-backend MIR`) ya da x64 ile çalıştırın |
 | G-MODUL-7 | S-541 · açık | AST, MIR, MIR-x64, JS | ◌ açık | `NAMESPACE`/`MODULE` içindeki bir işlevde, o ad alanının **dizi** elemanı doğrudan atama ya da `RETURN` kaynağı olunca anlam çözümleme elemanı `TYPE_OBJECT` sanar ve program derlenmez. `NAMESPACE sayac`, `DIM kutu(3) AS I32`, `FUNCTION Al() AS I32` içinde `RETURN kutu(1)` → dört yolda da `Semantic gate basarisiz: semantic-step3: return: type: assignment requires explicit cast TYPE_OBJECT to TYPE_I32`; `DIM v AS I32 = kutu(1)` de aynı nedenle derlenmez (`type: assignment requires explicit cast …`). `RETURN kutu(1) + 0` derlenir (MIR, MIR-x64, JS `0`; AST'de G-MODUL-6). Ad alanı dışındaki genel dizi (`RETURN g(1)`) ve ad alanı skaleri (`RETURN s`) doğrudur. `20261007` ve `20261014_0253`'te aynıdır | Dizi elemanını ifadeye sokun (`RETURN kutu(1) + 0`) ya da diziyi ad alanı dışında bildirin |
+| G-MODUL-8 | S-585 · açık | eski AST-x64 | ◌ açık | Eski AST-x64'te `NAMESPACE Ng … END NAMESPACE` içindeki `SUB` ve ardından `USING Ng` ile niteliksiz çağrı derlenmez («x64 build basarisiz: build_all.bat failed with exit code 1»); AST, MIR, x64, JS ve WASM `5` yazar. | Eski AST-x64 için ad uzayı kullanmayın ya da yordamı ad uzayı dışında tanımlayın |
 
 
 ## 16.5 Kütüphane başlığı: `INCLUDE "include/modules/….uxmh"`
@@ -12897,6 +13080,7 @@ Kütüphane çağrıları ve başlıklar yorumlayıcılarda yavaştır; ölçül
 | G-HIZ-1 | S-371 · açık | AST, MIR | ◔ yavaş | Yorumlayıcılar yerel koddan çok yavaştır ve birbirlerinden de farklıdır. Basit bir `FOR` döngüsünde (`t += i * 2`) ölçülen hız (i7-10610U dizüstü, makine meşgulken): AST ≈ 0,1 ms/tur, MIR ≈ 1 ms/tur, x64 pratikte sınırsız; her çalıştırmanın başlatma maliyeti yaklaşık 1 sn | Uzun döngüleri x64'te çalıştırın; AST ve MIR'yi küçük sınamalar için kullanın |
 | G-HIZ-2 | S-372 · açık | AST, MIR | ◔ yavaş | Kütüphane (DLL) çağrıları yorumlayıcılarda pahalıdır: 100 çağrı AST'de ≈ 9 sn (çağrı başına ≈ 90 ms, her çağrı ayrıca FFI politika uyarısı yazar), MIR'de ≈ 0,25 sn, x64'te ≈ 0. AST'de bin çağrılık bir döngü dakikalar sürer | Çok sayıda DLL çağrısı yapan programları MIR ya da x64'te çalıştırın |
 | G-HIZ-3 | S-373 · açık | AST, MIR, x64 derleme | ◔ yavaş | Kütüphane başlığı yükleme süresi işlev sayısıyla orantılı artar. Boş programa göre ek süre: `uxjson` (16 işlev) ≈ +1 sn, `uxgsl` (59) ≈ +8 sn, `uxraylib` (175) ≈ +8 sn, `uxsdl3` (334 işlev ve 387 sabit) AST'de ≈ +27 sn, MIR'de ≈ +36 sn; x64 derlemede `uxgsl` ≈ +12 sn, `uxsdl3` ≈ +43 sn. Aynı programa çok sayıda büyük başlık eklemek süreyi dakikalara çıkarır (20 kütüphanelik bir sürüm yoklaması MIR'de 3 dakikayı aştı) | Yalnız kullanacağınız kütüphaneleri ekleyin; büyük başlıklı programları x64 olarak bir kez derleyin |
+| G-HIZ-4 | S-583 · ✔ kapandı | MIR | ◔ yavaş | MIR yorumlayıcısında nesne ayırma, nesne sayısıyla aşırı doğrusal yavaşlar: `FOR` ile N nesne yaratmak N=8000'de 4,8 sn, 16000'de 10,8 sn, 32000'de 24,7 sn, 64000'de 59,9 sn sürer (nesne başına 0,56 ms'den 1,1 ms'ye); AST aynı ölçekte doğrusaldır (64000 için 15,6 sn). Mutlak hız da düşüktür (≈ 1 000 ayırma/sn). **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli):** boşta makinede 64 000 nesne 50,6 sn → 33,8 sn (−%33) ve nesne başına süre N'den bağımsız (≈ 0,53 ms), yani büyüme doğrusal; mutlak hız düşük kalır (MIR ≈ 1 900 ayırma/sn, AST ≈ 4 600/sn). | MIR'de çok sayıda küçük nesne yaratmak yerine dizi kullanın |
 
 
 ## 20.8 Yol haritalarında olup henüz olmayanlar (◇ HEDEF)
@@ -13119,8 +13303,9 @@ Grup grup tablo Bölüm 1.3'tedir. Düşük JS ve WASM sayıları iki nedenden g
 | `&H`, `&O`, `&B` sabitleri | ✔ | ✔ | ✔ | ⚠ `undefined` (G-JS-1) | ⚠ geçersiz WAT (G-WASM-9) |
 | `HEX`, `OCT`, `BIN` | ✔ | ✔ | ✔ | ✔ | ⚠ boş ya da `0` (G-WASM-4) |
 | `TRY` / `THROW` (yordamdan fırlatma) | ✔ | ✔ | ✔ | ⚠ yakalanmaz (G-JS-2) | — |
-| `CLASS`, `NEW` | ✔ | ✔ | ✔ | ✔ | ⚠ alanlar `0` okunur (G-WASM-1) |
-| `INTERFACE` çağrısı | ✔ | ✔ | ✔ | ⚠ `nan` (G-JS-3) | — |
+| `CLASS`, `NEW` | ✔ | ✔ | ✔ | ✔ | ⚠ alanlar `0` okunur (G-WASM-1; kök neden G-WASM-26, kaynakta düzeltildi) |
+| `INTERFACE` çağrısı | ✔ | ✔ | ✔ | ⚠ `nan` (G-JS-3; asıl neden G-JS-15, kaynakta düzeltildi) | — |
+| Sınıf alanını yazmadan okumak (`x.n = x.n + 1`) | ✔ sıfırdan başlar | ✔ | ✔ | ⚠ `undefined` / `nan` (G-JS-17; kaynakta düzeltildi) | ✔ |
 | `MAGIC` ile `+`, `AND`, `OR`, `XOR` işleci | ✔ | ✔ | ✔ | ✔ (`20261013` ve sonrası; öncesinde `AND`/`OR`/`XOR` açık ret) | ⚠ `0` (G-WASM-6) |
 | `DICT`, `SET` | ✔ | ✔ | ✔ | ⚠ `TRUE` yerine `1` (G-JS-5) | ⚠ boş (G-WASM-3) |
 | `ATOMIC` | ✔ | ✔ | ✔ | — | ⚠ boş ya da `0` (G-WASM-5) |
@@ -13289,7 +13474,7 @@ Bu sayfanın programı `tools\kitap\kilavuz_v2\web_ornekleri\kare.uxb` dosyasın
 |---|---|---|---|---|---|
 | G-JS-1 | S-242 · açık | JS | ⚠ sessiz | `&H`, `&O`, `&B` sabitleri `undefined` yazdırır | Onluk sabit yazın |
 | G-JS-2 | S-243 · açık | JS | ⚠ sessiz | Bir yordamdan fırlatılan `THROW`, çağıranın `TRY`'ı tarafından yakalanmaz (beklenen `yakalandi`, çıktıda yok) | Hata yakalama isteyen programı yerel motorda çalıştırın |
-| G-JS-3 | S-244 · açık | JS | ⚠ sessiz | `INTERFACE` üzerinden çağrılan metot `nan` döndürür (beklenen 14) | Arayüzlü programları yerel motorda çalıştırın |
+| G-JS-3 | S-244 · ✔ kapandı | JS | ⚠ sessiz | `INTERFACE` üzerinden çağrılan metot `nan` döndürür (beklenen 14); asıl neden argümanların düşmesidir (G-JS-15, kaynakta düzeltildi: `arayuz_coklu` yeni ikilide JS'te `3` `10` yazar) | Arayüzlü programları yerel motorda çalıştırın |
 | G-JS-4 | S-245 · açık | JS | ⚠ sessiz | `I64`/`U64` değerler `Number`'a düşer: 9223372036854775807 → 9.223372036854776e+18; 18446744073709551615 → 1.844674407370955e+19 `PEEKQ`/`POKEQ` ile okunan 64 bitlik değerler de aynı biçimde bozulur (`0123456789ABCDEF` yazılır, `0123456789ABCDF0` okunur). | 2^53'ten büyük tamsayıları JS'te kullanmayın |
 | G-JS-5 | S-246 · açık | JS | ⚠ sessiz | `DICT`/`SET` sorgularında `TRUE` değeri -1 yerine `1` yazdırılır | `IF` ile denetleyin, değeri yazdırmayın |
 | G-JS-6 | S-247 · açık | JS | ⚠ sessiz | `INSTR(başlangıç, …)` başlangıç verilince 0 döner (beklenen 4) | JS'te başlangıçlı `INSTR` kullanmayın; yerel motorla karşılaştırın |
@@ -13299,8 +13484,11 @@ Bu sayfanın programı `tools\kitap\kilavuz_v2\web_ornekleri\kare.uxb` dosyasın
 | G-JS-10 | S-343 · açık | JS | ◌ açık | `NATIVE` sınıflı `PEEK`/`POKE`/`MEMFILL`/`MEMCOPY` (ön ek ya da `AUTO` ile `PTR` kaynaklı) derlemede `NATIVE_ONLY_UNSUPPORTED_ON_JS` ile açıkça reddedilir; ama `VARPTR(x)` ve `SADD(s)` çağrısı derlemede reddedilmez, **yürütme anında** `UXB host binding missing: VARPTR` / `SADD` ile durur (çıkış kodu 1). `PTR(sayı) + n` yalnız sayı olarak çalışır | Sanal bellek (`VIRTUAL`) kullanın; `VARPTR` ve `SADD` çağıran bir programı JS'e göndermeyin |
 | G-JS-11 | S-363 · açık | JS (tarayıcı) | ✖ eksik | `uxb jsw --emit-browser` HTML kabuğuna `<pre id="uxb-console"></pre>` yazar ama hiçbir şey bu öğeye bağlanmaz: tarayıcıda PRINT satırları yalnız geliştirici konsoluna (`console.log`) gider, sayfa boş kalır. Üretilen giriş noktası ayrıca asenkrondur (`MAIN()` bir Promise döndürür) | Çıktıyı sayfaya almak için program.js'ten önce `uxb.console.setSink({ writeLine: … })` çağırın; bitişi beklemek için `uxb.autoRun = false` yapıp `uxbMain()` Promise'ini bekleyin (Bölüm 21.4) |
 | G-JS-12 | S-249 · açık | JS | ⚠ sessiz | Sınıf alanındaki `DICT` (kurucuda `DICT_NEW()` ile üretilmiş): iki `DICTSET` sonrası `DICTLEN` `1` (beklenen `2`), `DICTGET(d.kayit, "a")` `undefined` verir; AST, MIR ve x64 doğrudur | Nesne alanı olarak koleksiyon tutan programı JS'te çalıştırmayın |
-| G-JS-13 | S-412 · açık | JS | ⚠ sessiz | Bir `METHOD` içinde sınıf alanına yazmak (çıplak ad ya da `THIS.`) JS'te alanı bozar: `deger = deger + d` ya da `deger = d` sonrası okuma `nan`/`undefined` verir; yalnız kurucuda yazma ve dışarıdan `nesne.alan = …` çalışır (`banka_hesabi` ve `arayuz_coklu` örnekleri bu yüzden `nan` yazar; G-JS-3'ün asıl nedeni olabilir) | Durumu metotla değiştiren sınıfları JS'te çalıştırmayın |
+| G-JS-13 | S-412 · ✔ kapandı | JS | ⚠ sessiz | Parametreli bir `METHOD` JS'te parametresini göremez: metot içinde `deger = deger + d` sonrası okuma `nan`, parametreyi yazdırmak `undefined` verir (`banka_hesabi` ve `arayuz_coklu` örnekleri bu yüzden `nan` yazıyordu). Asıl neden alana yazmak değil, **argümanların çağrıda düşmesidir** (G-JS-15; kaynakta düzeltildi, ölçüm ikilisi `20261014_0253`'te geçerli); kurucuda yazma ve dışarıdan `nesne.alan = …` zaten çalışırdı | Parametreli metodu JS'te çağırmayın; değeri alan olarak dışarıdan yazın |
 | G-JS-14 | S-444 · ✔ kapandı | JS | ⚠ sessiz | **Yakalanmayan `THROW` ve başarısız `ASSERT` JS'te programı iletisiz ve başarı koduyla durdurur:** `PRINT "once"` sonra `THROW "hata"` ya da `ASSERT 1 = 2, "bozuk"` yazılırsa çıktı yalnız `once` olur, hata iletisi yazılmaz, çıkış kodu `0` kalır (sonraki satırlar çalışmaz). AST (çıkış 5), MIR (13) ve x64 (1) iletiyi yazıp sıfırdan farklı kodla çıkar. **Düzeltme (Codex, S-444; 20261013_1514 ve sonrası derlemeler):** yakalanmayan `THROW` ve başarısız `ASSERT` JS'te `uXBasic runtime error: kotu` / `uXBasic runtime error: ASSERT failed [line 2:1]` yazar ve çıkış kodu `1` olur (ölçüldü). Bir yordamdan fırlatılan `THROW`'un çağıranın `TRY`'ı ile yakalanması (G-JS-2) bu düzeltmeyle kapanmadı | Yakalanmayan `THROW` ve `ASSERT` JS'te `20261013_1514` ve sonrasında ileti yazar ve çıkış kodu `1` verir; eski ikililerde çıkış kodunu `0` sanmayın ve `ASSERT`'e güvenmeyin. Bir yordamdan fırlatılan `THROW` çağıranın `TRY`'ıyla yakalanmaz (G-JS-2): `THROW`'u kendi `TRY`'ında yakalayın |
+| G-JS-15 | S-571 · ✔ kapandı | JS (AST, MIR, x64, eski AST-x64 doğru) | ⚠ sessiz | JS'te bir `METHOD` çağrısında (doğrudan, sanal ya da `STATIC`) argümanlar çağrılana **ulaşmaz**; parametre `undefined` olur. `METHOD Art(d AS I32)` içinde `n = n + d`, `s1.n = 100`, `s1.Art(50)`, `PRINT s1.n` JS'te `nan` yazar (AST, MIR, x64, eski AST-x64: `150`); metot içinde `PRINT d` `undefined` yazar; sanal çağrı (`c.Scale(7)`) ve iki parametreli çağrı da aynıdır. Kitabın `banka_hesabi` ve `arayuz_coklu` örnekleri bu yüzden JS'te `nan` yazıyordu: G-JS-13 ve G-JS-3'ün asıl nedeni budur (o kayıtlardaki «metot içinde alana yazmak alanı bozar» yorumu yanlış kök nedendi). **Düzeltildi (kaynakta, 2026-10-16; ölçüm ikilisinde hâlâ geçerli).** | Parametreli metodu JS'te çağırmayın; değeri alan olarak dışarıdan yazıp metodu parametresiz çağırın |
+| G-JS-16 | S-573 · ✔ kapandı | JS (AST, x64, eski AST-x64 doğru) | ⚠ sessiz | JS'te boş (`NULL`) ya da `DELETE` edilmiş bir sınıf değişkeninden alan okumak hata vermez, `undefined` verir: `DELETE o` ardından `PRINT o.v` `undefined` yazar (AST ve x64 «field access on a null object reference» ile durur). Alan yazmak ve metot çağırmak JS'te de hata verirdi. **Düzeltildi (kaynakta, 2026-10-16).** | `DELETE`'ten sonra değişkeni kullanmayın |
+| G-JS-17 | S-598 · ✔ kapandı | JS (AST, MIR, x64, WASM, eski AST-x64 doğru) | ⚠ sessiz | JS'te bir sınıf nesnesinin hiç yazılmamış alanı `undefined` okunur: `CLASS Kutu` (`DIM v AS I32`, `DIM f AS F64`), `x = NEW Kutu()` ardından `PRINT x.v` `undefined`, `x.v = x.v + 1` sonrası `PRINT x.v` `nan` (AST, MIR, x64, eski AST-x64: `0` ve `1`; `f` için `0` ve `1.5`). Sayaç alanını kurucuda sıfırlamayan ve `n = n + 1` yazan her program JS'te `nan` üretir; çıkış kodu 0, ileti yok. Kurucusuz sınıf da boş kurucu da aynıdır. **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | Her alanı kurucuda açıkça başlatın |
 
 
 ## 21.5 WAT/WASM hedefi
@@ -13463,7 +13651,7 @@ Bu tablonun amacı çözüm göstermek değil, sessiz hataya karşı uyarmaktır
 
 | Kayıt | Sorun takip | Etkilenen | Tür | Ne olur? | Ne yapmalı? (geçici yol, sorunu çözmez) |
 |---|---|---|---|---|---|
-| G-WASM-1 | S-250 · açık | WASM | ⚠ sessiz | `NEW` ile oluşturulan nesnenin alanları `0` okunur (beklenen 33 / 66) | Nesne içeren programları yerel motorda çalıştırın |
+| G-WASM-1 | S-250 · ✔ kapandı | WASM | ⚠ sessiz | `NEW` ile oluşturulan nesnenin alanları `0` okunur (beklenen 33 / 66); kurucu argümanları, alan yazımı ve sanal çağrı argümanları da düşer (kök neden ve kaynakta düzeltme: G-WASM-26) | Nesne içeren programları yerel motorda çalıştırın |
 | G-WASM-2 | S-251 · açık | WASM | ⚠ sessiz | `PRINT a, b` virgül bölgesini uygulamaz, iki ayrı satır yazar | `;` kullanın |
 | G-WASM-3 | S-252 · açık | WASM | ⚠ sessiz | `DICT` ve `SET` boş satırlar ve `0` yazar | Koleksiyonları yerel motorda çalıştırın |
 | G-WASM-4 | S-253 · açık | WASM | ⚠ sessiz | `HEX`/`OCT`/`BIN` metin işlevleri boş ya da `0` üretir | `HEX`/`OCT`/`BIN`'i yerel motorda ya da JS'te kullanın |
@@ -13487,6 +13675,9 @@ Bu tablonun amacı çözüm göstermek değil, sessiz hataya karşı uyarmaktır
 | G-WASM-22 | S-514 · açık | WASM | ⚠ sessiz | `ROL` ve `ROR` (bit döndürme) WASM'da hiçbir tamsayı tipiyle çalışmaz, hep `0` verir; hata ve uyarı yoktur, çıkış 0. `DIM a AS U8 = 129` sonra `PRINT a ROL 1` → `0` (beklenen `3`), `PRINT a ROR 1` → `0` (beklenen `192`); `DIM i AS I32 = 20` sonra `PRINT i ROL 1` → `0` (beklenen `40`) ve `PRINT i ROR 1` → `0` (beklenen `10`); `U16` ve `U32` de `0` verir. 20261014_0253'te AST, MIR, MIR-x64 ve eski AST-x64 yolu `U8`, `U16`, `U32` ve `I32` için beklenen değerleri verir (G-ISLEC-1 kapanışı); JS de verir, ama `U64` değerlerinde sayı kesinliği biter (G-TIP-2). 20261007 ve 20261013_2224'te WASM `U8` için aynı `0` sonucunu verir | WASM'a gidecek programda `ROL`/`ROR` kullanmayın; `SHL`, `SHR` (yalnız `I32`) ve `OR` ile elle yazın ya da programı yerel x64 ya da JS ile çalıştırın |
 | G-WASM-23 | S-545 · açık | WASM | ⚠ sessiz | Tanımsız bir işlev ya da `SUB` çağrısı WASM'da derleme hatası vermez ve sessizce hiçbir şey yapmaz. `PRINT BuYokBoyleBirIslev(3)` `0` yazar, `BuYokSub(3)` çağrısı yok sayılır ve program devam eder (çıkış 0); yalnız `DECLARE` ile bildirilmiş ama hiç tanımlanmamış bir `FUNCTION` da `0` döndürür; yerleşik olmayan `ADDR(100, 2, 4, 8)` (G-HEDEF-1) de `0` yazar. Aynı programlar AST'de çalışma anında (`unsupported call`, çıkış 5), MIR'de çalışma anında (`runtime library service has no bound`, çıkış 13), x64'te derleme aşamasında, JS'te yürütmede (`UXB host binding missing`) ve eski AST-x64'te bağlama aşamasında (`build_all.bat failed`) durur (G-DIL-7) | WASM'a gidecek programda çağırdığınız her işlevin tanımlı olduğunu elle denetleyin; programı önce yerel motorda çalıştırın |
 | G-WASM-24 | S-563 · açık | WASM | ◌ açık | Tek başına duran onaltılık, ikili ya da sekizli sabit WASM'da derlenmez: `PRINT &H44`, `DIM a AS I32 = &B1010`, `PRINT &O17` ve `POKEB &H20, 7` `wat2wasm`'ın ham hatasıyla durur (`undefined local variable "$_H44"`); ifade içinde (`&h44 + 1`, `&b1010 + 1`) altı yolda doğru çalışır (`69`, `11`). JS'te aynı yerlerde `undefined` yazılır ya da `memory range out of bounds: NaN+1` ile durur (G-JS-1) | Sabiti ifade içine alın (örn. `&H44 + 0`) ya da onluk yazın |
+| G-WASM-25 | S-565 · açık | WASM | ⚠ sessiz | `CONST` adıyla ya da ifadesiyle sınırı verilen dizinin `UBOUND`'u, dizi başka yerde kullanılmıyorsa WASM'da hata vermeden `0` yazar: `CONST N = 6`, `DIM a(N) AS I32`, `PRINT UBOUND(a)` AST, MIR, JS ve eski AST-x64'te `6`, WASM'da `0` (aynı program diziye bir eleman yazıp okuyunca WASM `6` verir; sayısal sabit sınırda `DIM a(6)` her zaman `6`). MIR-x64 `CONST` adlı sınırı hiç derlemez (G-DIL-1). Ölçüm: `20261014_0253`, 2026-10-15 | WASM'a gidecek programda dizi sınırını sayısal sabitle yazın |
+| G-WASM-26 | S-575 · ✔ kapandı | WASM | ⚠ sessiz | WASM'da nesne alanları yazılamaz, kurucu argümanları ve sanal çağrı argümanları kaybolur (G-WASM-1'in kök nedeni): `NEW Kutu(3)` sonrası `PRINT k.v` `0`, `k.v = 5` sonrası yine `0`, iki parametreli kurucu `0 0`, `c.Scale(7)` (sanal çağrı) `0`. Çıkış kodu 0, hata yok. **Düzeltildi (kaynakta, 2026-10-16; ölçüm ikilisinde hâlâ geçerli).** | Nesne içeren programları yerel motorda çalıştırın |
+| G-WASM-27 | S-586 · ✔ kapandı | WASM | ◌ açık | `ME.Metot()` ve `SUPER.Metot()` WASM'da geçersiz WAT üretir (`local.get $ME`, `local.get $SUPER`); hata derleyicide değil `wat2wasm`'ın ham iletisinde görünür. `THIS.Metot()` ve niteliksiz çağrı etkilenmez. Altı yolun beşinde `SUPER.Metot()` çalışır (`15`). **Düzeltildi (kaynakta, 2026-10-16; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | WASM'da `ME` ve `SUPER` yerine `THIS` ya da niteliksiz çağrı kullanın |
 
 
 ## 21.6 Native ↔ JS ↔ WASM köprüsü: bugün olan ve hedeflenen
@@ -13560,7 +13751,7 @@ Daha eski bir politika (`docs/KEYWORD_LAYER_MATRIX_POLICY.md`, 2026-05-29) anaht
 | `I32`, `F64` | yerel | `Number` | `i32`, `f64` | ✔ (WASM'da `F64` yok, G-WASM-7) |
 | `I64`, `U64` | yerel | `BigInt` | `i64` | JS `Number`'a düşer (G-JS-4); WASM 32 bit sığmazsa geçersiz WAT (G-WASM-9) |
 | `F80`, `F128`, `BIG*` | yerel / çalışma zamanı sağlayıcısı | çalışma zamanı nesnesi | doğrusal bellekte çalışma zamanı | yalnız AST'de kısmen (G-TIP-9) |
-| `CLASS` | nesne + vtable | çalışma zamanı sınıfı | yerleşim + tip/vtable kimliği | JS'te metotla alan yazma ✖ (G-JS-13); WASM'da alanlar `0` (G-WASM-1) |
+| `CLASS` | nesne + vtable | çalışma zamanı sınıfı | yerleşim + tip/vtable kimliği | JS'te metot argümanları düşer (G-JS-13 → G-JS-15, kaynakta düzeltildi); WASM'da alanlar `0` (G-WASM-1 → G-WASM-26, kaynakta düzeltildi) |
 | `THREAD` / `PARALEL` | işçi çalışma zamanı | Worker havuzu | WASM iş parçacığı / konak işçisi | JS ve WASM'da yok (G-GOREV-6, G-GOREV-7, G-HEDEF-12) |
 | `ATOMIC` | yerel atomik | `SharedArrayBuffer` + `Atomics` | WASM atomikleri | JS yok, WASM boş çıktı (G-WASM-5) |
 | `PTR` / MemoryRef | yerel / MemoryRef | `DataView` / MemoryRef | doğrusal bellekte ofset | `VARPTR` JS'te açık ret (G-JS-10) |
@@ -14342,7 +14533,7 @@ Maddeler `K<bölüm>.<sıra>` ile numaralanır (örnek: `K8.2`). Numara bu belge
 | Anahtardan değere eşleme | `DICT` (`DICTGET` ile okuyun) | Anahtar sırasına güvenmek | 10 |
 | Benzersiz değerler kümesi | `SET` | Yinelenenleri elle ayıklamak | 10 |
 | Veri + davranış | `CLASS`; her `NEW` için bir `DELETE` | Nesneyi `b = a` ile kopyalamak, `PRIVATE` alana güvenmek (G-NESNE-2) | 11 |
-| Metot sözleşmesi | `INTERFACE` + `IMPLEMENTS` | `ABSTRACT`, `MIXIN` (yoktur, G-NESNE-6) | 11 |
+| Metot sözleşmesi | `INTERFACE` + `IMPLEMENTS` | `ABSTRACT`/`FINAL`/`SEALED` (ölçüm ikilisinde ayrıştırılamaz, G-NESNE-6, G-NESNE-38), iki `MIXIN` (reddedilir) | 11 |
 | Beklenen, kurtarılabilir hata | `THROW` + `TRY/CATCH` | `CATCH e` (G-HATA-4), `TRY` içinde `RETURN` (G-HATA-1) | 12 |
 | "Bu asla olmamalı" | `ASSERT` | Kullanıcı girdisini `ASSERT` ile doğrulamak | 12 |
 | Çalışma anı hatası (sıfıra bölme, sınır) | Önceden `IF` / `LBOUND` denetimi | `TRY`'a güvenmek (yalnız AST yakalar, G-HATA-2) | 12 |
@@ -14380,7 +14571,7 @@ Maddeler `K<bölüm>.<sıra>` ile numaralanır (örnek: `K8.2`). Numara bu belge
 | 5 | Değişkenler, sabitler, diziler ve kapsam | 9 | 5.7 |
 | 6 | İşleçler | 11 | 6.10 |
 | 7 | Akış denetimi: koşullar ve döngüler | 10 | 7.10 |
-| 8 | Yordamlar ve işlevler | 11 | 8.10 |
+| 8 | Yordamlar ve işlevler | 12 | 8.10 |
 | 9 | Metin ve sayı işlevleri | 9 | 9.5 |
 | 10 | Veri yapıları | 10 | 10.8 |
 | 11 | Nesne yönelimli programlama | 14 | 11.11 |
@@ -14396,7 +14587,7 @@ Maddeler `K<bölüm>.<sıra>` ile numaralanır (örnek: `K8.2`). Numara bu belge
 | 21 | Hedefler: x64, JS, WAT/WASM ve tarayıcı | 8 | 21.10 |
 | 22 | İç içe kullanım: bir yapının çıktısı ötekinin girdisidir | 11 | 22.12 |
 | 24 | Büyük programlar: parçaları birleştirmek | 8 | 24.5 |
-| | **Toplam** | **237** | |
+| | **Toplam** | **238** | |
 
 ### Bölüm 0: Başlarken (0.7)
 
@@ -14502,15 +14693,16 @@ Maddeler `K<bölüm>.<sıra>` ile numaralanır (örnek: `K8.2`). Numara bu belge
 
 * **K8.1** — **Her çağrıyı parantezle yazın** (`Selam("Ayse")`, `Say()`, `o.Metot()`): parantezsiz çağrı 20261007'de sessizce hiçbir şey yapardı, 20261013 ve sonrasında derleme hatasıdır (G-YORDAM-6).
 * **K8.2** — Bir **değer üretiyorsanız `FUNCTION`**, yalnız bir iş yapıyorsanız `SUB` yazın. Birden çok sonuç gerekiyorsa **`BYREF` çıkış parametreleri** kullanın (`Bol(a, b, BYREF bolum, BYREF kalan)`).
-* **K8.3** — **Her işlevin her yolu `RETURN` ile bitsin** (G-YORDAM-2): `RETURN` çalışmadan biten işlev AST/MIR'de `0`, x64'te rastgele değer verir. Erken çıkış için `RETURN` yazın; `EXIT SUB`/`EXIT FUNCTION` yoktur.
-* **K8.4** — Argüman tipini **kendiniz dönüştürün** (`I32(x)`, `STR(n)`): tip uyuşmazlığı bugün çağrıda sessizce kabul edilir ve yanlış değer üretir (G-YORDAM-3, G-YORDAM-4).
-* **K8.5** — Parametreye varsayılan değer yazmayın (yoktur); aynı adlı işlevi **parametre sayısıyla ayırmaya** çalışmayın, her işleve ayrı ad verin (G-YORDAM-1).
-* **K8.6** — **Kaydı (`TYPE`) parametre olarak vermeyin**, kayıt döndürmeyin: alanları ayrı parametre ve `BYREF` çıkış olarak geçirin (G-VERI-6, G-VERI-3). Dizi parametresi her zaman başvuruyladır.
-* **K8.7** — Özyinelemeli işleve **durma koşulunu ilk satıra** yazın. Derinliği küçük tutun (AST 100'den az, MIR 50'den az, x64 yaklaşık 8000); derin işleri döngüyle yazın (G-YORDAM-5).
-* **K8.8** — Karşılıklı özyineleme için imzaları `DECLARE` ile önceden bildirmek zorunlu değildir, ama okunaklılığı artırır; çağrıdan sonra tanım yazmak da serbesttir.
-* **K8.9** — Çağrılar arasında durum saklamak için **`STATIC` yerel**; yalnız gerçekten paylaşılan durum için genel değişken kullanın.
-* **K8.10** — Yerleşik işlev adıyla aynı adlı işlev yazmayın (G-DIL-9); kütüphane işlev adlarıyla aynı adlı değişken tanımlamayın (G-KUT-5).
-* **K8.11** — Çağrıları iç içe yazabilirsiniz (`T(K(3), K(K(2)))`); okunaklılık için uzun zincirleri `|>` ile soldan sağa ya da ara değişkenlerle yazın.
+* **K8.3** — **Her işlevin her yolu `RETURN` ile bitsin** (G-YORDAM-2, G-YORDAM-12): `RETURN` çalışmadan biten işlev ölçüm ikilisinde AST/MIR'de `0`, x64'te rastgele değer verir (kaynakta düzeltildi). Erken çıkış için `RETURN` yazın; `EXIT SUB`/`EXIT FUNCTION` yoktur.
+* **K8.4** — **Gövdesi boş rutin (`SUB Taslak() : END SUB`) ölçüm ikilisinde bozuktu** (✖ ÇÖKME, G-YORDAM-11): AST çöker, MIR, x64 ve JS çağrıyı bulamaz, eski AST-x64 boş sınıf rutinini derleyemez (WASM doğru). **Kaynakta düzeltildi** (2026-10-17, test `tests/oop_parity/empty_routine_bodies`); ölçüm ikilisinde taslak rutine bir deyim koyun (`DIM bos AS I32`).
+* **K8.5** — Argüman tipini **kendiniz dönüştürün** (`I32(x)`, `STR(n)`): tip uyuşmazlığı bugün çağrıda sessizce kabul edilir ve yanlış değer üretir (G-YORDAM-3, G-YORDAM-4).
+* **K8.6** — Parametreye varsayılan değer yazmayın (yoktur); aynı adlı işlevi **parametre sayısıyla ayırmaya** çalışmayın, her işleve ayrı ad verin (G-YORDAM-1).
+* **K8.7** — **Kaydı (`TYPE`) parametre olarak vermeyin**, kayıt döndürmeyin: alanları ayrı parametre ve `BYREF` çıkış olarak geçirin (G-VERI-6, G-VERI-3). Dizi parametresi her zaman başvuruyladır.
+* **K8.8** — Özyinelemeli işleve **durma koşulunu ilk satıra** yazın. Derinliği küçük tutun (AST 100'den az, MIR 50'den az, x64 yaklaşık 8000); derin işleri döngüyle yazın (G-YORDAM-5).
+* **K8.9** — İleri kullanacağınız ve karşılıklı özyinelemeli her rutini çağrıdan önce `DECLARE` ile bildirin (sıkı kural, 8.5); tanımı çağrıdan önce yazarsanız `DECLARE` gerekmez.
+* **K8.10** — Çağrılar arasında durum saklamak için **`STATIC` yerel**; yalnız gerçekten paylaşılan durum için genel değişken kullanın.
+* **K8.11** — Yerleşik işlev adıyla aynı adlı işlev yazmayın (G-DIL-9); kütüphane işlev adlarıyla aynı adlı değişken tanımlamayın (G-KUT-5).
+* **K8.12** — Çağrıları iç içe yazabilirsiniz (`T(K(3), K(K(2)))`); okunaklılık için uzun zincirleri `|>` ile soldan sağa ya da ara değişkenlerle yazın.
 
 ### Bölüm 9: Metin ve sayı işlevleri (9.5)
 
@@ -14539,18 +14731,18 @@ Maddeler `K<bölüm>.<sıra>` ile numaralanır (örnek: `K8.2`). Numara bu belge
 
 ### Bölüm 11: Nesne yönelimli programlama (11.11)
 
-* **K11.1** — **Kalıtımda taban sınıfın kurucusuna güvenmeyin** (G-NESNE-25, G-NESNE-27): AST ve MIR onu çalıştırmaz, x64 ve JS çalıştırır. Ortak başlatmayı bir `Baslat()` metoduna koyup `NEW`'dan sonra açıkça çağırın; parametreli kurucusu olan bir sınıftan türetmeyin (`SUPER(...)` yoktur).
-* **K11.2** — **Taban sınıf metodunun, türetilmiş sınıfın geçersiz kılmasını çağırmasına dayanan tasarım yazmayın** (G-NESNE-24): AST taban uygulamasını, öbür motorlar türetilmiş uygulamayı çağırır. Kurucuda sanal metot çağırmayın ve taban/türetilmiş sınıfta aynı alan adını yinelemeyin (G-NESNE-28).
-* **K11.3** — Nesneyi **yarattığınız sınıfın tipiyle** tutup `DELETE` edin: taban tipli değişkenle silmek türetilmiş yıkıcıyı üç motorda atlar (G-NESNE-26).
+* **K11.1** — **Parametreli taban kurucusuna güvenmeyin** (G-NESNE-25, G-NESNE-27): parametresiz taban kurucusu altı yolda çalışır; ama taban kurucusu parametre istiyorsa altı yol beş ayrı davranır ve `SUPER(...)` yoktur. Ortak başlatmayı bir `Baslat()` metoduna koyup `NEW`'dan sonra açıkça çağırın; parametreli kurucusu olan bir sınıftan türetmeyin.
+* **K11.2** — **Şablon-metot için (taban metodunun türetilmiş geçersiz kılmayı çağırması) `ME.m()` ya da niteliksiz `m()` yazın**; `THIS.m()` her zaman yazıldığı sınıfın uygulamasını çağırır (G-NESNE-24, altı yolda aynı; ölçüm ikilisinde AST'de ikisi de doğrudandı). Kurucuda ve yıkıcıda sanal metodu `ME`/niteliksiz çağırmak derleme hatasıdır; ortak işi sanal olmayan bir metoda koyun ya da `THIS.m()` yazın (G-NESNE-40); taban ve türetilmiş sınıfta aynı alan adını yinelemek artık derleme hatasıdır.
+* **K11.3** — Nesneyi **yarattığınız sınıfın tipiyle** tutup `DELETE` edin: taban tipli değişkenle silmek türetilmiş yıkıcıyı AST dışında beş yolda atlar (G-NESNE-26).
 * **K11.4** — **Veri ile davranış birlikteyse `CLASS`, yalnız veriyse `TYPE`** yazın. `TYPE` değer tipidir (atama kopyalar), `CLASS` referans tipidir (atama aynı nesneye ikinci ad verir).
 * **K11.5** — Nesneyi `DIM d AS Sinif = NEW Sinif(...)` ile üretin ve **değişken adını sınıf adından farklı** seçin (`CLASS Kutu` varken `DIM kutu1 AS Kutu`); aynı ad `variable K conflicts with CLASS K` hatası verir.
 * **K11.6** — **Her `NEW` için bir `DELETE` yazın.** Yıkıcı kapsam bitince çalışmaz, yalnız `DELETE` ile çalışır; dosya, bellek ya da tutamaç tutan sınıflarda temizliği unutmayın.
 * **K11.7** — Nesneyi kopyalamak için `b = a` yazmayın: aynı nesneye ikinci ad verir. Kopya gerekiyorsa **yeni nesne üretip alanları tek tek kopyalayın**.
 * **K11.8** — Alanları metotlarla yönetin, kuralları `THROW`/`ASSERT` ile koruyun; **`PRIVATE` alan erişimi dışarıdan denetlenmez** (G-NESNE-2), yani dilin sizi korumasına güvenmeyin.
 * **K11.9** — Çok biçimlilik için `VIRTUAL` + `OVERRIDE` kullanın; üst sınıf metodunu `SUPER.Ad()` ile çağırın (`BASE` yoktur). Ara sınıfın `OVERRIDE`'ını alt-alt sınıfta **yeniden yazın** (G-NESNE-7).
-* **K11.10** — Soyutluk gerektiğinde `INTERFACE` kullanın (`ABSTRACT`, `FINAL`, `SEALED`, `MIXIN` yoktur, G-NESNE-6). İşlev parametresini arayüz tipinde alırsanız bağımlılık tek yerde kalır; bir sınıf birden çok arayüz uygulayabilir.
+* **K11.10** — Soyutluk gerektiğinde `INTERFACE` kullanın (`ABSTRACT`, `FINAL`, `SEALED` ölçüm ikilisinde ayrıştırılamaz; iki `MIXIN` ve `EXTENDS`'li `MIXIN` reddedilir: G-NESNE-6, G-NESNE-38). İşlev parametresini arayüz tipinde alırsanız bağımlılık tek yerde kalır; bir sınıf birden çok arayüz uygulayabilir; ama arayüz tipli parametreye `IMPLEMENTS` yazmamış sınıf verirseniz altı yol ayrışır (G-NESNE-41).
 * **K11.11** — Nesneyi yazdırırken **her zaman `PRINT STR(n)`** yazın ve sınıfa `MAGIC TOSTRING()` ekleyin (G-NESNE-4); ama AST'de `MAGIC TOSTRING` tanımlı sınıfın sayısal dönüşlü metodunun sonucunu değişkene yazmayın (✖ G-NESNE-29, geçici çözüm yoktur: sonucu doğrudan `PRINT` edin ya da programı MIR, x64 ya da JS ile çalıştırın). İşleç sonucunu hemen kullanın; ardışık saklama ya da `a = a * b` zinciri AST'de yanlış olabilir (G-NESNE-9).
-* **K11.12** — x64'e derleyecekseniz **sanal metottan ondalıklı değer döndürmeyin** ve ondalıklı alana tamsayı sabiti yazmayın (`3.0` yazın): sonuç çöp çıkar (G-NESNE-8). Nesne dizisi (`DIM d(n) AS Sinif`) x64'te derlenmez; bu hedefte nesneleri ayrı değişkenlerde tutun.
+* **K11.12** — x64'e derleyecekseniz **bir ifadede iki ondalıklı alanı birlikte okumayın** (`k * k`, `k + k`: sonuç `0`/çöp çıkar, G-NESNE-43; alanı önce yerel değişkene kopyalayın) ve ondalıklı alana tamsayı sabiti yazmayın (`3.0` yazın): sonuç çöp çıkar (G-NESNE-8). Eski AST-x64'te `F64` parametreli **kurucu** alana çöp yazar (G-NESNE-44; kaynakta düzeltildi, `NEW` argümanı tamsayı yazmacında gidiyordu). Nesne dizisi (`DIM d(n) AS Sinif`) x64'te derlenmez; bu hedefte nesneleri ayrı değişkenlerde tutun.
 * **K11.13** — `RETURN THIS` ile yöntem zinciri kurmayın (G-NESNE-5); `STATIC` üyeye güvenmeyin, motorlar farklı davranır (G-NESNE-1).
 * **K11.14** — `PROPERTY` yalnız kısa biçimde (`PROPERTY Ad AS tip GET SET`) kullanın; yalnız okunur (`GET`) özelliğe yazmak AST'de reddedilir ama MIR ve x64'te sessizce çalışır (G-NESNE-3).
 
@@ -14564,7 +14756,7 @@ Maddeler `K<bölüm>.<sıra>` ile numaralanır (örnek: `K8.2`). Numara bu belge
 * **K12.6** — **Çalışma anı hatalarını (sıfıra bölme, dizi sınırı, boş nesne) `TRY` ile yakalamaya güvenmeyin**: yalnız AST yakalar (G-HATA-2). `IF b <> 0`, `LBOUND`/`UBOUND` ve nesnenin atandığına bakan denetimleri **önceden** yazın.
 * **K12.7** — **JS'e gidecek programda bu denetimler zorunludur:** JS tamsayı sıfıra bölmede `inf`, sınır dışı okumada `0` ya da `undefined` verip **hata vermeden devam eder** (G-HATA-6, G-HATA-8); x64 ise tamsayı sıfıra bölmede iletisiz durur (G-HATA-9). Betiklerde çıkış kodunun sıfır olmasına bakın, ileti metnine değil (G-HATA-7).
 * **K12.8** — Ondalık işlemlerde (`SQR`, `LOG`, `/`) alan dışı girdiyi önceden eleyin: AST ve MIR durur, x64 ve JS `nan`/`inf` yazıp devam eder (G-HATA-5); sonucu `nan`/`inf` için de denetleyin.
-* **K12.9** — Dosya açmadan önce varlığını `uxfs.FileExists` ile sınayın: x64 olmayan dosyayı sessizce açmış gibi davranır (G-DOSYA-5). `DELETE`'ten sonra nesneyi okumayın: MIR eski değeri verir (G-NESNE-20).
+* **K12.9** — Dosya açmadan önce varlığını `uxfs.FileExists` ile sınayın: x64 olmayan dosyayı sessizce açmış gibi davranır (G-DOSYA-5). `DELETE`'ten sonra nesneyi okumayın: MIR eski değeri ya da başka bir nesnenin alanını verir (G-NESNE-20, G-NESNE-37).
 * **K12.10** — Her yordam yalnız bir iş yapsın ve önkoşullarını başında `ASSERT` ile belirtsin; kaynak açan yordamda temizliği `FINALLY` içine koyun.
 * **K12.11** — Programda `ASSERT` ya da `TRY` varsa ve x64'e derleyecekseniz **dizileri yordamın en başında bildirin** (G-DIL-10).
 * **K12.12** — Sessizce kabul edilen hataları (12.5) kendiniz denetleyin: her yolun `RETURN` ile bittiğine, argüman tiplerinin uyduğuna ve aynı adın iki kez `DIM` edilmediğine bakın.
@@ -14609,7 +14801,7 @@ Maddeler `K<bölüm>.<sıra>` ile numaralanır (örnek: `K8.2`). Numara bu belge
 * **K15.6** — **Ortak veride en dar aracı seçin** (15.7): tek deyimlik erişim otomatik senkron; birden çok deyim → `LOCK a, b`; sayaç → `ATOMIC`; dış kaynak ya da kendi kritik bölgeniz → `MUTEX`. Bir kilidi tutarken, o veriye dokunan görevi `JOIN` ile beklemeyin (`LOCK_DEADLOCK`) ve içte aynı kilidi tekrar almayın (`SELF_DEADLOCK`).
 * **K15.7** — Özyinelemeli görevde **eşik koyun** (`IF n < 12 THEN` sıradan işlev): her `SPAWN` yeni bir görev kaydı açar. İşçi sayısı `--task-workers N` ya da `UXB_TASK_WORKERS` ile ayarlanır.
 * **K15.8** — Görev parametreleri değerle geçer (`BYREF` yoktur); görev gövdesinde `END` yazmayın, `RETURN` ya da `THROW` ile bitirin. `LIST`, `DICT`, `PTR`, `CLASS` değerlerini görev sınırından geçirmeyin; sayı ve metinle çalışın.
-* **K15.9** — Görevleri `DECLARE` ile bildirmeniz gerekmez (`DECLARE THREAD …` henüz yoktur, 15.3): derleyici görev adlarını önceden toplar, tanımdan önce `SPAWN` edebilirsiniz.
+* **K15.9** — Görevleri bugün `DECLARE` ile bildirmeniz gerekmez (`DECLARE THREAD …` henüz yoktur, 15.3): derleyici görev adlarını önceden toplar, tanımdan önce `SPAWN` edebilirsiniz. Mete'nin sıkı `DECLARE` kuralı (Bölüm 8.5) görevlere de uygulanacaktır (◇ HEDEF).
 * **K15.10** — `SLOT` numarasını bir kez kullanın (G-GOREV-4) ve `OFF` başlangıç durumuna güvenmeyin (G-GOREV-5). Bir `EVENT`'e birden çok SLOT bağlayıp hepsinin çalışmasını beklemeyin (G-GOREV-11); her işleyiciyi ayrı `TRIGGER` ile çalıştırın.
 * **K15.11** — `ERRORTEXT` metnini tam eşitlikle sınamayın, içeriğini arayın (`INSTR`, G-GOREV-9).
 * **K15.12** — **Eşzamanlı programı JS ya da WASM hedefine derlemeyin**: görev yapıları orada çalışmaz (G-GOREV-6, G-GOREV-7). Eşzamanlı işi x64'te çalıştırın.
@@ -14715,9 +14907,12 @@ Bu belgenin hazırlığı sırasında geçerli olan, Mete'nin verdiği kararlard
 |---|---|---|
 | 2026-10-07 | Altı yol (AST, MIR, MIR-x64, AST-x64, JS, WAT/WASM) **aynı dil davranışını** sağlamalıdır; açık ret güvenli bir ara durumdur ama eşlik kapanışı sayılmaz; sessiz başarı ve sahte iş kabul edilmez | 1.2, 1.3 |
 | 2026-10-11 | Motor sadeleştirme önerisi (T09) uygulanmaz, altı yol korunur; tasarım dışı çalışma, katmana göre değişen sessiz başarı yerine **ortak tanı kodu**, ileti anlamı, çıkış durumu ve yapılandırılmış çıktı sözleşmesiyle bildirilir (S-409, S-410). **Uygulama durumu** (`20261014_0253` ile ölçüldü): yaşam döngülü kütüphane tipi (`TEXT_REF`) ve değer tipi `RATIONAL` MIR dışındaki beş yolda `UXB_LIBTYPE_PROVIDER_UNAVAILABLE` ortak koduyla derleme aşamasında reddedilir (S-410, S-499; `20261013_1704`'te `RATIONAL` kapsam dışıydı ve AST-x64 ile WASM'da yanlış sonuç veriyordu, G-KTIP-7); çalışma anı sağlayıcı kodlarının kaydı kısmen yapılandırıldı (G-HATA-13); kütüphane tiplerinin MIR dışında çalışması ◇ HEDEF'tir (G-KTIP-1). Eski AST-x64 yolunun sözleşmeyi çiğneyen kusurları (sessiz yanlış sonuç, çökme) ayrıca Bölüm 1.3'te listelidir | 1.3, 12.4, Ek F |
-| 2026-10-15 | **OOP çok güçlü olacak**: uXBasic nesne yönelimli paradigmayla doğduğu için çoklu kalıtım ve karışım (`MIXIN`) dahil zengin OOP istenir; 15 Eylül önerisindeki "çoklu durum kalıtımı yoktur" maddesi geçersizdir. Ayrıntılar (A/B/C seçenekleri) karar bekliyor (S-555) | 11.10, 11.12 |
-| 2026-10-15 | **`SUB` ve `FUNCTION` önden `DECLARE` ile bildirilmelidir**: ileri kullanımda `DECLARE` kuralı; bugün denetlenmiyor. Sıkı kural mı, uyarı mı: karar bekliyor (S-544) | 8.5, 15.3 |
+| 2026-10-15 | **OOP çok güçlü olacak**: uXBasic nesne yönelimli paradigmayla doğduğu için çoklu kalıtım ve karışım (`MIXIN`) dahil zengin OOP istenir; 15 Eylül önerisindeki "çoklu durum kalıtımı yoktur" maddesi geçersizdir. Ayrıntılar (A/B/C seçenekleri): Mete "önerdiğin gibi" dedi ama içeriği sordu; sade anlatım 11.12'de; **2026-10-16'da B seçildi** (S-555, aşağıdaki 2026-10-16 satırı) | 11.10, 11.12 |
+| 2026-10-15 | **`SUB` ve `FUNCTION` önden `DECLARE` ile bildirilmelidir**: ileri kullanımda `DECLARE` kuralı. **Karar: sıkı kural**, ihlal derleme hatası olacak; bugün denetlenmiyor, uygulanmadı (S-544) | 8.5, 15.3 |
 | 2026-10-15 | Kanal yerine değişken ya da `TYPE` tutamacı, Python tarzı veri sabitleri, `DATA`/`READ`/`RESTORE`, `NONE`/`NODE` tipleri istendi; hepsi ◇ HEDEF olarak kayıtlı (S-548 … S-554, S-564) | 4.4, 10.5, 13.2 |
+| 2026-10-15 | **Tasarımlar onaylandı:** tipli dosya tutamacı ve `FREEFILE` (S-549, S-548), Python tarzı veri sabitleri (S-551), **etiketli `DATA` / `READ` / `RESTORE`** BASIC tarzında (S-550); **`NULL` ve `NOTHING` çalışacak** (S-564); **`NONE` ve `NODE` eklenmeyecek** (S-554). Uygulama sırası Codex'te; sözleşmeler `docs/tasarim/UXB_S550_S551_DATA_READ_RESTORE_VE_VERI_SABITLERI_20261015_TR.md` ve `docs/tasarim/UXB_S544_S549_S564_DECLARE_DOSYA_TUTAMACI_NULL_20261015_TR.md` | 4.4, 8.5, 10.5, 13.2, Ek I |
+| 2026-10-16 | **Çoklu kalıtım için B (gerçek çoklu kalıtım) seçildi.** Aynı adlı üyeler **sessizce birleştirilmez**: çakışma derleme hatasıdır (`UXB_AMBIGUOUS_MEMBER`) ve miras alan sınıf kararını `OVERRIDE`, `PREFER`, `RENAME … AS` ve `EXCLUDE` cümleleriyle yazar; çoklu kalıtımda `SUPER[Taban]` (Mete'nin fikri). Öneri olarak kabul edilenler: `DELETE` sonrası değişkenin `NOTHING` olması, tanımsız `DECLARE`'ın derleme hatası sayılması. Belgelerin GitHub dalına eklenmesi onaylandı. Mete: «sorularımın cevapları varsayılanlarımı uygulamandır» | 11.12, 11.13 (S-555, S-595, S-574) |
+| 2026-10-15 | **Yapay zekâ hizmeti anahtarları GitHub'a gönderilmez; yerel belgelerde olduğu gibi kalır** (Mete): yayın kopyalarında anahtarlar silinir, özgün konuşma ve belge dosyaları değiştirilmez, anahtar yenileme istenmedi | Ek I |
 | 2026-10-15 | **Tasarım belgeleri, tüm dokümantasyon ve yapay zekâ konuşma/hafıza kayıtları GitHub'da yayınlanır**; yalnız okumak ve başvurmak içindir, lisans vermez (`DESIGN-RIGHTS-RESERVED.md`). 14 Ekim önerisindeki "tasarım belgeleri özel kalsın" maddesi geçersizdir. **Uygulandı:** `metedinler/uXBasic` deposunda `yayin/20261015` dalı (main'e birleştirmeyi Mete GitHub'da yapar). Konuşma arşivlerinde gerçek görünümlü hizmet anahtarları çıktı; yayın kopyalarında silindi, **yerel orijinaller değişmedi ve anahtarların yenilenmesi önerildi** | Ek I |
 | 2026-10-15 | Dosya envanterindeki "temizle" kararları uygulandı, `.zip`/`.rar` dosyalarına ve "sor" satırlarına dokunulmadı: yaklaşık 35,5 GB boşaldı (C: 3,0 → 38,4 GB). Kök neden `S-117` (her `bld --build-x64` çıktı klasörüne çalışma zamanı DLL'leri kopyalanır, kapatan seçenek yok) düzelmediği için yer yeniden dolar (G-ARAC-7) | 2.5, Ek I |
 | 2026-10-14 | **Eski AST-x64 dondurulmaz**: tüm motorlar gibi aynı dil davranışını verecek şekilde çalışacaktır. S-157-L'deki "legacy dondurulup STRING kullanan programlar açık redle mi karşılansın, yoksa düzeltilsin mi" sorusunun cevabı: düzeltilecek. Bu yolun bilinen sessiz yanlış ve çökme kusurları (S-524 … S-538, S-157-L, S-086, S-091) düzeltme kuyruğundadır; kusurlar kapanana dek yeni program için MIR-x64 yolu önerilir | 1.3, Ek K |
@@ -14923,6 +15118,8 @@ DIM giris AS STRING
 DIM konum AS I32
 DIM sonHata AS STRING = ""
 
+DECLARE FUNCTION Toplam() AS F64
+
 FUNCTION Simdiki() AS STRING
     IF konum > LEN(giris) THEN RETURN ""
     RETURN MID(giris, konum, 1)
@@ -15080,7 +15277,7 @@ Hesapla("3 $ 4")
 
 | Teknik | Not |
 |---|---|
-| Karşılıklı özyineleme | `Toplam` → `Terim` → `Carpan` → `Toplam`; `DECLARE` yazılmaz (Bölüm 8.4) |
+| Karşılıklı özyineleme | `Toplam` → `Terim` → `Carpan` → `Toplam`; sonra tanımlanan `Toplam` önden `DECLARE FUNCTION` ile bildirilir (sıkı kural, Bölüm 8.5) |
 | Karakter karşılaştırması | `c >= "0" AND c <= "9"` metin karşılaştırmasıdır; üç motorda aynı çalışır |
 | Ondalık sayı | Tam kısım basamak basamak, kesir `olcek` ile toplanır (`1.5+2.25 = 3.75`) |
 | Hata taşıma | `THROW` en içteki işlevde, `TRY/CATCH` yalnız en dışta (`Hesapla`) |
@@ -15473,36 +15670,36 @@ kayıtlar önerilen düzeltme sırasıyla numaralanmıştır (`ai_koordinasyon/K
 
 **Ölçüm kapsamı.** Kayıtların "Ne olur?" gözlemlerinin çoğu 2026-10-07/08'de `20261007` ile yapıldı. Referans ikili `20261014_0253` ile 1837 vakalık külliyat yeniden koşturuldu (her kaydın en küçük programı külliyattadır): vakaların %91,1'i hiçbir motorda değişmedi ve değişen 151 vakanın hepsi Ek K.5'te açıklanmıştır. Yani külliyatın kapsadığı kayıtlar referansta da aynen geçerlidir, kapananlar ve yeni bulunanlar ise "Kapandı …" ya da "Kısmen kapandı …" öneki ve Ek K ile işaretlidir. Külliyatın kapsamadığı kayıtlar için gözlem `20261007`'dir; sütun bunu yazar. Referans ikiliyle ayrıca şunlar ölçüldü ve sonuçları Ek K'dadır: depodaki **tam model paketleri** (46 paket, 1605/1610 kontrol), **eski AST-x64** yolu (282 örnek, 303 iddia vakası), **külliyatın tamamı WASM motorunda** (1863 vaka) ve CLI taraması (91 seçenek, 46 bayrak). Bu ölçümler S-524 … S-543 arası yirmi yeni kayıt ve birkaç eski kaydın durum değişikliğini getirdi; kitabın kendi düz metni de birkaç yerde bayatlamıştı ve düzeltildi (Bölüm 7.6 `GOTO`/`GOSUB`, 8.4 özyineleme sınırı, `-(karşılaştırma)`, `UNION`, yerel değişken sıfırlama, JS çıkış kodu).
 
-Katalogda **362** kayıt var: ⚠ sessiz **158**, ≠ fark **57**, ◌ açık **62**, ✖ eksik **73**, ✖ çökme **9**, ◔ yavaş **3**.
+Katalogda **397** kayıt var: ⚠ sessiz **171**, ≠ fark **60**, ◌ açık **68**, ✖ eksik **84**, ✖ çökme **10**, ◔ yavaş **4**.
 
-SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**, ◐ kısmen **11**, karar bekliyor **4**, karar verildi **1**.
+SORUN_TAKIP'taki güncel durumlarına göre: açık **321**, ✔ kapandı **45**, ◐ kısmen **12**, açık (tasarım onaylı) **12**, karar bekliyor **5**, karar verildi **2**.
 
 | Alan | Kayıt sayısı | ⚠ sessiz | ≠ fark | ◌ açık | ✖ eksik | ✖ çökme | ◔ yavaş |
 |---|---|---|---|---|---|---|---|
 | Komut satırı (CLI) | 33 | 20 | 0 | 8 | 3 | 2 | 0 |
-| Dil ve ön yüz | 18 | 8 | 2 | 6 | 1 | 1 | 0 |
-| Veri tipleri | 31 | 20 | 4 | 2 | 5 | 0 | 0 |
+| Dil ve ön yüz | 19 | 8 | 2 | 6 | 2 | 1 | 0 |
+| Veri tipleri | 32 | 21 | 4 | 2 | 5 | 0 | 0 |
 | İşleçler | 13 | 7 | 2 | 3 | 0 | 1 | 0 |
 | Metin işlevleri | 6 | 2 | 4 | 0 | 0 | 0 | 0 |
-| Koleksiyonlar | 6 | 2 | 1 | 1 | 2 | 0 | 0 |
-| Akış denetimi | 5 | 2 | 3 | 0 | 0 | 0 | 0 |
-| Yordamlar | 10 | 7 | 1 | 0 | 1 | 1 | 0 |
-| Veri yapıları | 17 | 6 | 3 | 4 | 4 | 0 | 0 |
-| Nesne yönelimi | 36 | 16 | 7 | 5 | 8 | 0 | 0 |
+| Koleksiyonlar | 7 | 2 | 2 | 1 | 2 | 0 | 0 |
+| Akış denetimi | 7 | 2 | 4 | 1 | 0 | 0 | 0 |
+| Yordamlar | 12 | 8 | 1 | 0 | 1 | 2 | 0 |
+| Veri yapıları | 18 | 7 | 3 | 4 | 4 | 0 | 0 |
+| Nesne yönelimi | 45 | 21 | 8 | 8 | 8 | 0 | 0 |
 | Hata yönetimi | 14 | 4 | 7 | 1 | 2 | 0 | 0 |
 | Dosya ve konsol | 10 | 1 | 4 | 0 | 4 | 1 | 0 |
 | Kütüphane tipleri | 8 | 3 | 0 | 2 | 2 | 1 | 0 |
-| Modül ve ad alanı | 7 | 3 | 1 | 3 | 0 | 0 | 0 |
+| Modül ve ad alanı | 8 | 3 | 1 | 4 | 0 | 0 | 0 |
 | Önişlemci (%% yönergeleri) | 20 | 12 | 4 | 0 | 4 | 0 | 0 |
 | Meta sistemi (REM %%) | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
 | Görevler ve eşzamanlılık | 12 | 4 | 4 | 3 | 1 | 0 | 0 |
 | Dış dünya (DLL, C/C++/ASM, sistem API'si) | 13 | 3 | 5 | 4 | 0 | 1 | 0 |
 | Standart kütüphaneler (libsx) | 23 | 13 | 3 | 4 | 2 | 1 | 0 |
-| JS hedefi | 14 | 10 | 0 | 3 | 1 | 0 | 0 |
-| WAT/WASM hedefi | 24 | 14 | 2 | 8 | 0 | 0 | 0 |
-| Başarım (hız) | 3 | 0 | 0 | 0 | 0 | 0 | 3 |
+| JS hedefi | 17 | 13 | 0 | 3 | 1 | 0 | 0 |
+| WAT/WASM hedefi | 27 | 16 | 2 | 9 | 0 | 0 | 0 |
+| Başarım (hız) | 4 | 0 | 0 | 0 | 0 | 0 | 4 |
 | Yardımcı araçlar (uxclazz, uxbdll) | 7 | 0 | 0 | 4 | 3 | 0 | 0 |
-| Tasarımda olup kodda olmayanlar (◇ HEDEF) | 30 | 0 | 0 | 0 | 30 | 0 | 0 |
+| Tasarımda olup kodda olmayanlar (◇ HEDEF) | 40 | 0 | 0 | 0 | 40 | 0 | 0 |
 | Belge ve örnek projeler | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
 
 **Komut satırı (CLI)**
@@ -15547,7 +15744,7 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 
 | Kayıt | Sorun takip | Etkilenen | Tür | Ne olur? | Ne yapmalı? (geçici yol, sorunu çözmez) |
 |---|---|---|---|---|---|
-| G-DIL-1 | S-326 · açık | x64 | ◌ açık | `DIM dizi(SABIT_AD - 1)`: x64 yalnız sayısal sabit sınır kabul eder ("DIM array bounds must be compile-time integer literals"); AST, MIR ve JS kabul eder (sabit ifade katlama yok) | Sınırı sayısal sabit olarak yazın |
+| G-DIL-1 | S-326 · açık | x64 | ◌ açık | `DIM dizi(SABIT_AD)` ve `DIM dizi(SABIT_AD - 1)` (`CONST SABIT_AD = 6`): MIR-x64 yalnız sayısal sabit sınır kabul eder ("DIM array bounds must be compile-time integer literals"); `CONST` adı da reddedilir ve bu `20261007`'den `20261014_0253`'e değişmemiştir; eski AST-x64 düz adı kabul eder, ifadeyi etmez; AST, MIR, JS ve WASM kabul eder (sabit ifade katlama yok) | Sınırı sayısal sabit olarak yazın |
 | G-DIL-2 | S-327 · açık | üç motor | ◌ açık | Blok yorum `/' … '/` yok ("statement parse failed near OP('/')") | Her satırı `'` ile başlatın |
 | G-DIL-3 | S-328 · açık | üç motor | ◌ açık | `? ifade` kısayolu yüzey kaydında vardır ama çözümleyici reddeder ("statement parse failed near OP('?')") | `PRINT` yazın |
 | G-DIL-4 | S-210 · açık | AST | ⚠ sessiz | İlk değeri verilmeyen `STRING` değişken AST'de `0` ile başlar; MIR ve x64'te boş metindir | Her metin değişkenine `= ""` yazın |
@@ -15565,6 +15762,7 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-DIL-16 | S-521 · açık | AST, MIR, MIR-x64, eski AST-x64, JS | ⚠ sessiz | `STRING` değişkene sayıyı **bileşik atamayla** eklemek (`s += 7`) `UXB_MIXED_STRING_NUMERIC` kapısından geçer; açık biçim `s = s + 7` reddedilir ama bileşik biçim reddedilmez, hata ve uyarı yoktur. `DIM s AS STRING = "a"`, `s += 7`, `PRINT s` → AST, MIR, eski AST-x64 yolu ve JS `a7`, MIR-x64 erişim ihlaliyle çöker (çıkış 3221225477, hiçbir şey yazmaz). `s += 2.5` → AST `a2.5`, JS `a2.5`, MIR boş satır (sayıyı yutar), eski AST-x64 yolu `a2`, MIR-x64 boş / çöker; `s += n` (`n` bir `I32`) `a7` ya da çökme verir. Sayısal değişkene metin eklemek (`n += "a"`, `n -= "3"`) ve `s = 7`, `n = "a"` atamaları ise her yolda derleme zamanında reddedilir; ayrıca 14 başka karışık biçim (`5 + "a"`, `n + s`, `n = "5"`, `"a" < 5`, `LEN(n + "a")`, ondalık işlenenler …) altı yolda `UXB_MIXED_STRING_NUMERIC` ile reddedilir. 20261007 ve 20261013_2224'te açık biçim (`s = s + 7`) de `a7` verirdi (G-DIL-8); 20261014_0253'te yalnız bileşik biçim kaldı. Codex'in S-459/S-460 kapanışı kuralın "`+`, karşılaştırma ve diğer ikili işleçleri" kapsadığını yazar; bileşik atama kapsanmamıştır | Bileşik biçimi kullanmayın; sayıyı açıkça dönüştürün: `s += STR(7)` beş yolda `a7` verir |
 | G-DIL-17 | S-540 · açık | AST | ◌ açık | **Gerileme:** AST 1024'ten fazla değişkeni olan programı reddeder: `exec: variable storage capacity exceeded (max 1024)` (çıkış 5). 1025 `DIM` satırı ve sonunda bir `PRINT` içeren program (`DIM v0 AS I32 = 0` … `DIM v1024 AS I32 = 1024`): `20261007` AST `1024` yazar (2000 değişkende de çalışır), `20261014_0253` AST hata verir; MIR 2000 değişkende de doğrudur. S-480 Belirti E'nin (257 `DIM`) kapanışı sınırı 1024'e koydu; `20261007`'de sınır yoktu. Model testi `tests/compiler_consolidation/stable_cells_byref_pointer` (1510 satır) bu yüzden AST'de düşer: `20261013` 12:37 derlemesinde ham çalışma zamanı hatasıyla (`runtime error 6 (out of bounds array access)`), 17:04 ve sonrasında `max 1024` iletisiyle; MIR ve MIR-x64 `23 23 23` verir | 1024'ten fazla değişkenli programı MIR yorumlayıcıyla ya da x64 ile çalıştırın; değişkenleri dizilerde ya da `TYPE` alanlarında toplayın |
 | G-DIL-18 | S-562 · açık | 0x önekli sayı (altı yol) | ⚠ sessiz | `0x1F` biçimi hata vermez ve yanlış değer üretir: `DIM a AS I32 = 0x1F`, `PRINT a` → AST, MIR ve eski AST-x64 `0`, x64 çöp sayı (`4294967296`, `1926722288`: çalıştırmaya göre değişir), JS `undefined`, WASM derlenmez (`undefined local variable "$0X1F"`); ifade içinde (`0x1F + 1`) altı yolda `1` verir (önek `0` sayılıp `x1F` yok sayılır). Onaltılık sabit yalnız `&H…` ile yazılır (`&H1F` = 31); `$1F` sözcük çözümleyici hatasıdır (`Lexer diagnostic bridge hata buldu: 1`, çıkış 2) | Onaltılık için `&H1F` yazın; `0x1F` yazmayın |
+| G-DIL-19 | S-579 · açık | altı yol | ✖ eksik | Tanımlayıcıda Türkçe harf (`ğ ü ş ı ö ç İ`) kullanılamaz: `DIM sür AS I32 = 3` ve `METHOD Sür()` altı yolda «Lexer diagnostic bridge hata buldu: 4» (çıkış 2) ile durur; ileti satırı, harfi ve nedeni söylemez. Yorumda ve metinde Türkçe harf çalışır. Tasarım konuşmasındaki örnekler (`Sür`, `Yüz`) bu yüzden derlenmez. | Tanımlayıcıları ASCII yazın (`Sur`, `Yuz`); Türkçe harfi yalnız yorum ve metinde kullanın |
 
 **Veri tipleri**
 
@@ -15599,8 +15797,9 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-TIP-27 | S-519 · açık | AST | ≠ fark | `F32` aritmetik **ara sonucu** AST'de tek duyarlığa yuvarlanmaz, öteki dört yol yuvarlar: `DIM u AS F32 = 16777216` sonra `PRINT (u + 1) - 16777216` → AST `1`; MIR (0253), MIR-x64, eski AST-x64 yolu ve JS `0`. Tasarım sözleşmesi saklama noktalarını (bildirim, `F32(...)`, dizi elemanı, alan) tanımlar, ara sonuç için açık bir cümle yoktur; ama altı yolun aynı sonucu vermesi İlke 1'dir ve dört yol aynı sonucu verir. 20261007, 2224 ve 0253'te AST aynıdır (MIR-x64 20261007'de de `1` veriyordu) | Ara sonucu bir `F32` değişkene atayıp (`DIM k AS F32 : k = u + 1`) sonra işleme sokun (`k - 16777216` → `0` beş yolda) ya da `F64` kullanın |
 | G-TIP-28 | S-526 · açık | eski AST-x64 | ⚠ sessiz | Bir rutinin (`SUB`/`FUNCTION`) **içinde bildirilen** tamsayı değişken (`I32`, `I64`) ondalık işlemde dönüştürülmeden bit düzeniyle okunur; hata ve uyarı yoktur. `FUNCTION Ff() AS F64` içinde `DIM v AS F64 = 0.95`, `DIM k AS I64 = 10000`, `RETURN v * k` → `4.693623635491842e-320` (beklenen `9500`); `v + k` → `0.95` (beklenen `10000.95`); `v / k` → `inf`; yerel `I32` ile `1.808418145190423e+185`; `DIM d AS F64 = k` sonra `v * d` de bozuktur. Aynı ifadeler ana programda, `MAIN` içinde, genel değişkenle ve parametreyle doğrudur; AST, MIR, MIR-x64 ve JS doğrudur. `20261007` ve `20261014_0253`'te aynıdır. Kitap örneği `gsl_hesap_defteri` (`Fn(v, n)` içinde `kat AS I64`) bu yüzden olasılıkları `0.0000` yazar | Rutin içinde tamsayı değeri ondalık işleme sokmayın; değeri parametreye ya da genel değişkene alın ya da ondalık sabit kullanın |
 | G-TIP-29 | S-553 · açık | NAN, INF (altı yol) | ✖ eksik | `NAN` ve `INF` sabiti, `ISNAN()` ve `ISINF()` işlevi yoktur: `PRINT NAN` `type: unknown symbol` ile reddedilir; `ISNAN(z / z)` AST'de `unsupported call ISNAN`, MIR'de çalışma anı hatası, x64'te derleme hatası, JS'te `host binding missing` verir. NaN bugün yalnız kayan nokta işleminden doğar ve motorlar farklıdır (G-HATA-5): `z / z` (z = 0.0) AST ve MIR'de "sıfıra bölme" hatasıyla durur, x64 ve JS `nan` yazar (`n = n` ise `0`), eski AST-x64 `-nan(ind)` yazar | NaN denetimi için x64 ve JS'te `IF x <> x THEN` kullanın; alan dışı girdiyi önceden eleyin |
-| G-TIP-30 | S-554 · karar bekliyor | NONE, NODE tip adları (altı yol) | ✖ eksik | `NONE` ve `NODE` tip adı olarak tanınmaz (`unknown type: NONE`, `unknown type: NODE`) ve iç karşılıkları da yoktur: iç tip kümesinde (`TYPE_ANY`, `TYPE_VARIANT`, `TYPE_OBJECT`, `TYPE_VOID`, `TYPE_FILE_HANDLE`, `TYPE_FUNCTION_PTR` …) ve yorumlayıcının değer türlerinde (`VAL_VOID` … `VAL_ANY`) bulunmazlar; `NONE` yalnız seçenek adı olarak geçer (yıkım kipi, çağrı sözleşmesi sınıfı), `NULL`, `NOTHING` ve `NIL` boş değer sabitleri de yüzeyde yoktur (G-TIP-31). Tasarım belgelerinin 35 kanonik tipinde de yoktur. `ANY`, `VARIANT` ve `VOID` ise iç tip olarak vardır ama yüzeyden reddedilir (G-TIP-8); `OBJECT` kabul edilir. **Karar bekleniyor (Mete, 2026-10-15 sorusu):** `NONE` (Python `None` benzeri yokluk değeri) ve `NODE` (düğüm tipi: bağlı liste, ağaç, çizge) çekirdek tip mi, kütüphane tipi mi olsun | Yokluğu `NULL` ya da `NOTHING` ile, düğümü `CLASS` ya da `TYPE` ile ifade edin |
-| G-TIP-31 | S-564 · açık | NULL, NOTHING, NIL (altı yol) | ✖ eksik | `NULL`, `NOTHING` ve `NIL` boş değer sabitleri yüzeyde yoktur: `PRINT NULL`, `DIM p AS PTR` sonra `p = NOTHING` ve `IF k = NOTHING THEN …` (sınıf değişkeni) altı yolun hepsinde `semantic-step3: type: unknown symbol` ile reddedilir. MIR indirgeyicisinde `NULL` ve `NOTHING` için kod vardır (`src/semantic/mir_lower_expr.fbs`), ama anlam kapısı sembolü tanımaz; yani boş işaretçiyi ya da boş nesneyi yazmanın ve sınamanın yolu yoktur. Tasarım (OOP planı, Bölüm 11.10): `NULL` ile sarkan başvuru ayrılır, tür sınama ve denetimli dönüştürme tek sözleşmedir. Mete'nin `NONE` sorusuna (G-TIP-30) en yakın karşılık budur | Nesnenin geçerli olup olmadığını ayrı bir `I32` bayrağıyla tutun |
+| G-TIP-30 | S-554 · karar verildi | NONE, NODE tip adları (altı yol) | ✖ eksik | `NONE` ve `NODE` tip adı olarak tanınmaz (`unknown type: NONE`, `unknown type: NODE`) ve iç karşılıkları da yoktur: iç tip kümesinde (`TYPE_ANY`, `TYPE_VARIANT`, `TYPE_OBJECT`, `TYPE_VOID`, `TYPE_FILE_HANDLE`, `TYPE_FUNCTION_PTR` …) ve yorumlayıcının değer türlerinde (`VAL_VOID` … `VAL_ANY`) bulunmazlar; `NONE` yalnız seçenek adı olarak geçer (yıkım kipi, çağrı sözleşmesi sınıfı), `NULL`, `NOTHING` ve `NIL` boş değer sabitleri de yüzeyde yoktur (G-TIP-31). Tasarım belgelerinin 35 kanonik tipinde de yoktur. `ANY`, `VARIANT` ve `VOID` ise iç tip olarak vardır ama yüzeyden reddedilir (G-TIP-8); `OBJECT` kabul edilir. **Karar (Mete, 2026-10-15): `NONE` ve `NODE` eklenmeyecek**; yokluk `NULL`/`NOTHING` ile (G-TIP-31), düğüm (bağlı liste, ağaç, çizge) `CLASS` ya da `TYPE` ile ifade edilir | Yokluğu `NULL` ya da `NOTHING` ile, düğümü `CLASS` ya da `TYPE` ile ifade edin |
+| G-TIP-31 | S-564 · açık (tasarım onaylı) | NULL, NOTHING, NIL (altı yol) | ✖ eksik | `NULL`, `NOTHING` ve `NIL` boş değer sabitleri yüzeyde yoktur: `PRINT NULL`, `DIM p AS PTR` sonra `p = NOTHING` ve `IF k = NOTHING THEN …` (sınıf değişkeni) altı yolun hepsinde `semantic-step3: type: unknown symbol` ile reddedilir. MIR indirgeyicisinde `NULL` ve `NOTHING` için kod vardır (`src/semantic/mir_lower_expr.fbs`), ama anlam kapısı sembolü tanımaz; yani boş işaretçiyi ya da boş nesneyi yazmanın ve sınamanın yolu yoktur. Tasarım (OOP planı, Bölüm 11.10): `NULL` ile sarkan başvuru ayrılır, tür sınama ve denetimli dönüştürme tek sözleşmedir. Mete'nin `NONE` sorusuna (G-TIP-30) en yakın karşılık budur. **Karar (Mete, 2026-10-15): `NULL` ve `NOTHING` çalışacak**, `NIL` istenmedi; tasarım belgesi hazır, uygulanmadı | Nesnenin geçerli olup olmadığını ayrı bir `I32` bayrağıyla tutun |
+| G-TIP-32 | S-582 · ✔ kapandı | AST ↔ MIR | ⚠ sessiz | MemoryRef tablosu 4096 canlı bölgede dolar ve sonraki diziler **korumasız** kalır; hata ya da uyarı yoktur. 4200 ayrı dizi (`DIM a0(3) AS I32` … `a4199`) tanımlayıp sonuncusunu `REDIM` ettikten sonra eski `VARPTR` ile `PEEKD(p)` okumak MIR'de `11` yazar ve çıkış kodu 0'dır (4000 dizide aynı program «MemoryRef: stale pointer» ile durur). AST bu ölçekte başka bir sınırla açıkça durur («variable storage capacity exceeded (max 1024)»). **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | Çok sayıda canlı dizi tutan programda `VARPTR` ile alınan işaretçileri `REDIM`/`ERASE` sonrası kullanmayın |
 
 **İşleçler**
 
@@ -15641,6 +15840,7 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-KOLEKSIYON-4 | S-331 · açık | AST, MIR, x64, JS | ◌ açık | Koleksiyon tipli dizi elemanı (`DIM dz(2) AS LIST`) ve sınıf alanı (`DIM urunler AS LIST` sınıf içinde) otomatik üretilmez; ilk kullanımda çalışma anı hatası verir ("invalid collection handle", MIR "collection kind mismatch", x64 "LIST add failed (invalid handle)", JS "collection not found") | Her elemanı ve alanı `LIST_NEW()` / `DICT_NEW()` / `SET_NEW()` ile kendiniz üretin (sınıf alanı için kurucuda) |
 | G-KOLEKSIYON-5 | S-222 · açık | AST, MIR, x64, JS | ⚠ sessiz | `LISTADD(l, kayit)` ile `LIST` içine `TYPE` kaydı koymak hata vermez, ama `FOR EACH q IN l` ile okunan kaydın alanları `0` gelir (beklenen `3`, `4`) | Kayıtları `LIST` içinde saklamayın; alanları ayrı listelerde ya da kayıt dizisinde tutun |
 | G-KOLEKSIYON-6 | S-388 · açık | AST, MIR, x64, JS | ✖ eksik | Ortak yineleyici sözleşmesi (`ITER_CREATE/NEXT/CLOSE`), `MAGIC ITER`, `FOR EACH x IN CHAIN(a, b)` ve `FOR EACH x, y IN ZIP(a, b)` yoktur (S-135): AST "unsupported call CHAIN", MIR `RT_LIBRARY_CALL` bağlı değil, x64 "CALL target 'CHAIN' is neither a known runtime call nor a function"; `MAGIC ITER()` yazımı hata vermeden kabul edilir ama hiçbir şeye bağlanmaz (G-NESNE-14) | Birden çok kaynağı art arda ayrı `FOR EACH` döngüleriyle gezin |
+| G-KOLEKSIYON-7 | S-569 · açık | JS ↔ AST, MIR, x64 | ≠ fark | `DICTHAS(d, anahtar)` ve `SETHAS(s, x)` doğru değerini yazdırınca AST, MIR ve MIR-x64 `-1`, JS `1` verir (`IF` içinde dördü de doğru çalışır); karşılaştırma işleçlerinin doğrusu altı yolda `-1`dir (Bölüm 4.5). WASM `SETHAS(s, 5)` sonucunu hata vermeden `0` yazar (koleksiyon işlevleri WASM'da bağsızdır, G-WASM-23). Ölçüm: `20261014_0253`, 2026-10-15 | Sonucu `PRINT` etmek yerine `IF` ile sınayın |
 
 **Akış denetimi**
 
@@ -15651,21 +15851,25 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-AKIS-3 | S-530 · açık | eski AST-x64 | ⚠ sessiz | `F64` `FOR` sayacı tamsayı gibi artırılır; hata ve uyarı yoktur. `DIM x AS F64`, `FOR x = -2 TO 2 : PRINT x : NEXT` → `-nan -nan 0 4.940656458412465e-324 9.881312916824931e-324` (beklenen `-2 -1 0 1 2`); `FOR x = 1 TO 3` ile `PRINT CINT(x)` her turda `0` yazar; `STEP 0.5` ile döngü bitmez (zaman aşımı). Rutin içinde de aynıdır. MIR-x64 doğrudur; AST'de ondalık adım ayrı sorundur (G-AKIS-1). `20261007` ve `20261014_0253`'te aynıdır. Kitap örneği `ai_siniflandirici_cikisi` (`FOR x = -2 TO 2`) bu yüzden bozulur | Sayacı tamsayı yapıp ölçekleyin (`FOR i = -2 TO 2` içinde `x = i`) |
 | G-AKIS-4 | S-532 · açık | AST | ⚠ sessiz | Bir döngünün (`FOR`, `DO WHILE`, `WHILE … WEND`) içinden `GOSUB` çağrılırsa AST'de `RETURN` döngüyü de bitirir; hata ve uyarı yoktur, çıkış 0. `DIM i AS I32`, `DIM t AS I32 = 0`, `FOR i = 1 TO 3`, `GOSUB Ekle`, `NEXT`, `PRINT t`, `END`, ardından `Ekle:` etiketinde `t = t + i` ve `RETURN` → AST `1` (beklenen `6`); MIR, MIR-x64, JS ve WASM `6`. `DO WHILE` ve `WHILE … WEND` içinde aynıdır (`1`); `FOR` içinde `IF i MOD 2 = 0 THEN GOSUB Ekle` `2` verir (beklenen `6`); `FOR` içinde `GOSUB` ve alt programda ikinci bir `FOR` varsa `3` (beklenen `6`). Döngü dışındaki `GOSUB` (`i = 1 : GOSUB Ekle : i = 2 : GOSUB Ekle`) ve alt programın kendi içindeki döngü doğrudur. `20261007` ve `20261014_0253`'te aynıdır | `GOSUB`'u döngü içinden çağırmayın; alt programı `SUB` olarak yazın |
 | G-AKIS-5 | S-537 · açık | AST, MIR, MIR-x64, eski AST-x64, JS, WASM | ≠ fark | Önceden `GOSUB` yapılmamış bir `RETURN` yollara göre farklı davranır. `PRINT "once"`, `RETURN`, `PRINT "sonra"` → AST `once` yazıp `exec: RETURN used without GOSUB (9301)` ile durur (çıkış 5); MIR, MIR-x64 ve JS `once` yazıp **sessizce** biter (çıkış 0, ileti yok, `sonra` yazılmaz); eski AST-x64 `once` yazıp erişim ihlaliyle çöker; WASM tamsayı programda aynı sessiz çıkışı verir (metinli program zaten derlenmez). `20261007` ve `20261014_0253`'te aynıdır. Doğru davranış, AST'nin gösterdiği açık çalışma anı hatasıdır (İlke 2) | Her `RETURN`'ün bir `GOSUB` çağrısından gelmesini sağlayın; `END` ile ana akışı etiketlerden ayırın |
+| G-AKIS-6 | S-566 · açık | AST | ≠ fark | Bir `SUB` içinde tanımlı etikete aynı `SUB` içinden `GOTO` yazmak AST'de çalışma anı hatası verir: `exec: GOTO target not found SON` (çıkış 5). MIR, MIR-x64, eski AST-x64, JS ve WASM doğru çalışır: `SUB S()` içinde `GOTO Son`, `PRINT 1`, `Son:`, `PRINT 2` → `2`; geriye atlayan döngü (`Bas:` … `IF i < 3 THEN GOTO Bas`) → `3`. Modül düzeyindeki etikete `GOTO` altı yolun hepsinde çalışır. Ölçüm: `20261014_0253`, 2026-10-15 | Etiketi ve `GOTO`yu modül düzeyinde kullanın ya da `SUB` içinde döngü ve `IF` yazın |
+| G-AKIS-7 | S-567 · açık | SUB, FUNCTION (altı yol) | ◌ açık | Bir `RETURN` satırından sonra gelen etiketli satır, `GOTO` ile ulaşılabilir olsa da derleme hatasıyla reddedilir: `semantic: unreachable statement after RETURN_STMT`. `FUNCTION F() AS I32` içinde `GOTO Son`, `RETURN 1`, `Son:`, `RETURN 2` altı yolda aynı açık hatayı verir; `RETURN` yerine `PRINT` yazılınca (`GOTO Son`, `PRINT 1`, `Son:`) reddedilmez. Erişilemez-kod denetimi etiketi atlama hedefi saymıyor (`20261014_0253`, 2026-10-15) | Etiketten önceki `RETURN`'ü bir `IF` içine alın ya da etiketsiz yapıya geçin |
 
 **Yordamlar**
 
 | Kayıt | Sorun takip | Etkilenen | Tür | Ne olur? | Ne yapmalı? (geçici yol, sorunu çözmez) |
 |---|---|---|---|---|---|
 | G-YORDAM-1 | S-223 · açık | AST, MIR, x64, JS | ⚠ sessiz | Aşırı yükleme (aynı ad, farklı parametre sayısı): AST "duplicate routine" der, MIR ve JS yanlış sonuç verir, x64 "user function arg count mismatch" der | Her işleve ayrı ad verin |
-| G-YORDAM-2 | S-224 · açık | AST, MIR, x64 | ⚠ sessiz | `RETURN`'süz biten `FUNCTION`: AST ve MIR `0`, x64 rastgele bir değer döndürür | Her yolu `RETURN` ile bitirin |
+| G-YORDAM-2 | S-224 · ✔ kapandı | AST, MIR, x64 | ⚠ sessiz | `RETURN`'süz biten `FUNCTION`: AST ve MIR `0`, x64 rastgele bir değer döndürür (JS `undefined`, WASM derlemez, eski AST-x64 son hesaplanan değer: G-YORDAM-12). **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli):** işlevin sonuç değişkeni türün sıfırıyla başlar; altı yolda `0`. | Her yolu `RETURN` ile bitirin |
 | G-YORDAM-3 | S-225 · açık | AST, MIR, x64 | ⚠ sessiz | `I32` parametreye metin vermek (`P("a")`) hata değildir: AST ve MIR `0`, x64 çöp sayı kullanır | Argüman tipini kendiniz denetleyin |
 | G-YORDAM-4 | S-226 · açık | AST, MIR, x64 | ⚠ sessiz | `I32` parametreye `2.5` vermek: AST ve MIR sessizce keser (2), x64 `0` kullanır; oysa atamada açık dönüşüm şarttır | Çağırırken `I32(x)` yazın |
 | G-YORDAM-5 | S-296 · açık | AST, MIR, x64 | ≠ fark | Özyineleme derinliği: AST 100'den az ("call stack limit exceeded"), MIR 50'den az (`20261013_2333` ve öncesi: FreeBASIC "Aborting : stack overflow", çıkış 4; `20261014_0253`: iletisiz erişim ihlali, G-YORDAM-8), x64 yaklaşık 8000–12000 (iletisiz çökme, çıkış kodu -1073741571) | Derin işleri döngüyle yazın |
 | G-YORDAM-6 | S-440 · ✔ kapandı | AST, MIR, x64, JS | ⚠ sessiz | **Parantezsiz `SUB` çağrısı sessizce hiçbir şey yapmaz:** `Selam`, `Selam "Ayse"`, `Yaz k`, `Artir n` (BYREF) ve sonucu kullanılmayan `F` çağrısı dört motorda da yok sayılır (çıkış kodu 0, çıktı yok, BYREF değişmez); `MAIN` bloğu içinde ve yordam içinde de aynıdır. Çok argümanlı biçim (`Topla 3, 4`) ayrıştırma hatası verir. Parantezli (`Selam("Ayse")`) ve `CALL Selam("Ayse")` biçimi çalışır; `CALL`'da parantez zorunludur. Parantezsiz metot çağrısı (`o.Selam`, `o.Yaz 5`): AST "field resolve failed OFFSETOF unknown field" hatası verir, MIR ve JS sessizce hiçbir şey yapmaz, x64 derlemez **Karar (Mete, 2026-10-12): parantezsiz çağrı çalışmamalı, derleyici parantez istemelidir** (açık derleme hatası); 20261007 derlemesindeki sessiz etkisizlik kusurdur. **Düzeltme (Codex, S-440; 20261013 ve sonrası derlemeler):** parantezsiz çağrı (yordam, işlev ve metot) dört motorda ayrıştırmada `UXB_CALL_PAREN_REQUIRED: CALL: missing ( after selam; use selam(...)` ile reddedilir (çıkış 1, derleme biter; 15 vaka × 4 motorda ölçüldü) | Her `SUB`, `FUNCTION` ve metot çağrısını parantezle yazın: `Selam("Ayse")`, `o.Selam()` |
 | G-YORDAM-7 | S-527 · açık | eski AST-x64 | ⚠ sessiz | Rutin içindeki yerel değişken sıfırlanmaz, önceki çağrıdan kalan yığın değerini taşır; hata ve uyarı yoktur. `SUB Kirlet()` içinde dört yerel değişkene `99` yazılır; ardından `FUNCTION Oku() AS I32` içinde `DIM n AS I32` ve `RETURN n` → `99` (beklenen `0`); `F64` yerelde `6.95e-310`. İlk çağrıda yığın başka değer taşıyabilir: kitap örneği `44_kv_isleclar/bit_sayma`'da `BitSay(255)` `8` yerine `32767` yazar (sonraki çağrılar doğrudur). AST, MIR, MIR-x64 ve JS `0` verir. `20261007` ve `20261014_0253`'te aynıdır | Her yerel değişkene başlangıç değerini açıkça verin (`DIM n AS I32 = 0`) |
 | G-YORDAM-8 | S-543 · açık | MIR | ✖ çökme | **Gerileme (20261014_0253):** MIR yorumlayıcıda derinliği 50'yi aşan özyineleme programı iletisiz erişim ihlaliyle (çıkış `3221225477` = `0xC0000005`) çökertir. `FUNCTION T(n AS I64) AS I64`, içinde `IF n = 0 THEN RETURN 0` ve `RETURN n + T(n - 1)`, ana programda `PRINT T(60)` → `20261007` ile `20261013_2333` arasındaki on dört ikilide `Aborting : stack overflow …` iletisi ve çıkış kodu `4`; `20261014_0253`'te hiçbir ileti yok. Derinlik sınırı değişmedi (`T(40)` → `820` doğru, `T(50)` çöker); AST `call stack limit exceeded` (çıkış 5) ve x64 iletisiz yığın taşması (çıkış −1073741571) davranışları aynı kaldı. Külliyatta 6 vaka (`vaka_derin` d500 … d100000: MIR `4` → `3221225477`). FreeBASIC çalışma zamanı denetiminin (yığın taşması yakalayıcısı) bu derlemede devre dışı kaldığı düşünülür; kök neden araştırılmadı | Derin özyinelemeyi döngüyle yazın; MIR yorumlayıcıda özyineleme derinliğini 50'nin altında tutun (G-YORDAM-5) |
-| G-YORDAM-9 | S-544 · karar bekliyor | SUB, FUNCTION (altı yol) | ⚠ sessiz | `SUB` ve `FUNCTION`, tanımdan önce `DECLARE` olmadan çağrılabilir; derleyici bunu denetlemez. `Selam(3)` satırı `SUB Selam` tanımından önce, `PRINT Iki(4)` satırı `FUNCTION Iki` tanımından önce yazılınca altı yolun hepsi hatasız çalışır (`3`, `8`). Tasarım böyle değildir: 24.09 görev tasarımı "tanım daha önce geldiyse `DECLARE` gerekmez, dosyanın ilerleyen bölümündeyse `DECLARE` kullanılır" der ve Mete (2026-10-15) "`SUB … END SUB` ve `FUNCTION … END FUNCTION` `DECLARE` ile önden tanımlanmalı" kuralını koydu. `DECLARE` yazılırsa imza uyuşmazlığı altı yolda `declaration signature mismatch` ile doğru reddedilir; `DECLARE` var ama tanım yoksa ve çağrı da yoksa hata yoktur (G-DIL-7). Etki ölçüldü (kaynak metin sezgisiyle): kılavuzun rutin tanımlı 66 örnek dosyasından 2'si, 133 test dosyasından 2'si ve 80 kütüphane kaynağından 1'i tanımdan önce `DECLARE`siz çağrı içerir (yaklaşık 5 dosya). **Karar bekleniyor:** ileri kullanım derleme hatası mı (sıkı kural), uyarı mı olsun | İleri kullanacağınız her `SUB` ve `FUNCTION` için tanımdan önce `DECLARE` satırı yazın; derleyici yazmasanız da kabul eder, ama kural budur |
+| G-YORDAM-9 | S-544 · açık (tasarım onaylı) | SUB, FUNCTION (altı yol) | ⚠ sessiz | `SUB` ve `FUNCTION`, tanımdan önce `DECLARE` olmadan çağrılabilir; derleyici bunu denetlemez. `Selam(3)` satırı `SUB Selam` tanımından önce, `PRINT Iki(4)` satırı `FUNCTION Iki` tanımından önce yazılınca altı yolun hepsi hatasız çalışır (`3`, `8`). Tasarım böyle değildir: 24.09 görev tasarımı "tanım daha önce geldiyse `DECLARE` gerekmez, dosyanın ilerleyen bölümündeyse `DECLARE` kullanılır" der ve Mete (2026-10-15) "`SUB … END SUB` ve `FUNCTION … END FUNCTION` `DECLARE` ile önden tanımlanmalı" kuralını koydu. `DECLARE` yazılırsa imza uyuşmazlığı altı yolda `declaration signature mismatch` ile doğru reddedilir; `DECLARE` var ama tanım yoksa ve çağrı da yoksa hata yoktur (G-DIL-7). Etki ölçüldü (kaynak metin sezgisiyle): kılavuzun rutin tanımlı 66 örnek dosyasından 2'si, 133 test dosyasından 2'si ve 80 kütüphane kaynağından 1'i tanımdan önce `DECLARE`siz çağrı içerir (yaklaşık 5 dosya). **Karar (Mete, 2026-10-15): sıkı kural** — ileri kullanım derleme hatası olacak (altı yolda aynı ortak tanı); tasarım belgesi hazır, uygulanmadı | İleri kullanacağınız her `SUB` ve `FUNCTION` için tanımdan önce `DECLARE` satırı yazın; derleyici yazmasanız da kabul eder, ama kural budur |
 | G-YORDAM-10 | S-561 · açık | SUB, FUNCTION parametreleri (altı yol) | ✖ eksik | Varsayılan (isteğe bağlı) parametre değeri yoktur: `FUNCTION Topla(a AS I32, b AS I32 = 10) AS I32` altı yolda ayrıştırma hatasıyla reddedilir | İki ayrı işlev yazın (`Topla2`, `Topla3`) ya da parametreyi her çağrıda verin |
+| G-YORDAM-11 | S-597 · ✔ kapandı | AST, MIR, x64, JS, eski AST-x64 (WASM'da boş SUB/FUNCTION doğru) | ✖ çökme | Gövdesinde hiç deyim olmayan bir rutin beş yolda bozuktur. **AST çöker** («Aborting due to runtime error 6 (out of bounds array access) … EXECISROUTINEMETADATANODE()», çıkış 6): boş `SUB`, `FUNCTION`, `METHOD`, `CONSTRUCTOR` ya da `DESTRUCTOR` çağrılınca. **MIR** boş `SUB`/`FUNCTION`'ı hiç üretmez; çağrısı «runtime library service has no bound implementation» ile (çıkış 13) durur. **Native x64** «CALL target 'BOS' is neither a known runtime call nor a function» ile derlenmez, **JS** «UXB host binding missing: BOS» ile durur. **Eski AST-x64** boş sınıf rutinini (`METHOD`, `CONSTRUCTOR`, `DESTRUCTOR`) üretmez ama `NEW` ve çağrı yerleri ona başvurur: «symbol ALT_CTOR not defined» ile derlenmez. WASM boş `SUB`/`FUNCTION`'ı doğru çalıştırır. Yer tutucu (taslak) rutinler yazan herkesin ilk karşılaşacağı durumdur. **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | Boş rutine gerçek bir deyim koyun (örneğin `DIM bos AS I32`) |
+| G-YORDAM-12 | S-599 · ✔ kapandı | native x64, JS, WASM, eski AST-x64 (AST, MIR doğru) | ⚠ sessiz | Sonucu atanmadan biten bir `FUNCTION` ya da değer döndüren `METHOD` motora göre farklı değer verir: `FUNCTION F(x AS I32) AS I32` (gövde `DIM y AS I32 : y = x + 1`), `PRINT F(3)` AST ve MIR'de `0`, native x64'te çöp sayı (`-2078279264`), JS'te `undefined`, WASM'da «local.get $F» WAT hatasıyla derlenmez, eski AST-x64'te son hesaplanan değeri (`4`) yazar. Sonucu yalnız bir dalda atayan işlevde (`IF x > 0 THEN F = 5`) atanmayan dal native x64'te çöp (`803048600`), JS'te `undefined` verir. Ayrıca eski AST-x64'te **`F = değer` atamasından sonra başka deyim varsa** işlevin sonucu atanan değer olmaz: `F = 5` ardından `y = 7 : y = y + x` → `8` (beklenen `5`); `F = x * 2` ardından `FOR` döngüsü → `1` (beklenen `8`); `F = 1.5` (F64) ardından bir atama → `0` (beklenen `1.5`). **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | İşlev sonucunu her yolda açıkça `RETURN değer` ile döndürün |
 
 **Veri yapıları**
 
@@ -15684,10 +15888,11 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-VERI-11 | S-442 · ◐ kısmen | MIR, JS (x64: AÇIK) | ⚠ sessiz | **`UNION` alanları yalnız AST'de aynı belleği paylaşır:** `u.i = 258` sonra `u.b` (U8) AST `2` verir; MIR `0`, JS `undefined` verir (çıkış kodu 0); x64 "MIR x64 emitter: unknown operand 'U.B'" ile derlemez. Aynı sonuç `I64`/`I32`, `F32`/`I32` ve `F64`/`I64` çiftlerinde de görülür. `SIZEOF(UNION)` (en büyük alan, `8`) ve yazılan alanı geri okumak dört motorda doğrudur. **Düzeltme (Codex, S-442; 20261013 ve sonrası derlemeler):** `UNION` alanları MIR, x64 ve JS'te de aynı belleği paylaşır (ortak MIR işlemleri `MIR_UNION_FIELD_LOAD/STORE`): `U8`/`I32` çiftinde `u.b` `2`, `I64`/`I32` ve `F32`/`I32` çiftlerinde `1`, `F64`/`I64` çiftinde `4607182418800017408` (AST ile aynı; ölçüldü). Codex'in belgesine göre WAT/WASM yalnız ofset 0 ve 1/2/4 baytlık tamsayı alanları destekler; 8 baytlık, `F32`/`F64` alanlar ve `UNION` içinde dizi henüz yoktur (WASM tarafı bu kılavuzda ölçülmedi) | `20261013` ve sonrasında `UNION` alanlarını bit düzeyinde dönüşüm için de üst üste bindirebilirsiniz (WASM'da yalnız ofset 0'daki 1, 2 ve 4 baytlık tamsayı alanlar); eski ikililerde `UNION`'ı yalnız `SIZEOF` ve DLL ile bellek düzeni için kullanın, dönüşümü `PEEK*`/`POKE*` ile ya da aritmetikle yapın |
 | G-VERI-12 | S-103 · ◐ kısmen | x64, JS | ◌ açık | `TYPE` elemanlı dizi parametresi (`SUB Dolas(arr AS Pt[])`, `Pt` bir `TYPE`) yalnız AST ve MIR'de çalışır (parametre çağıranın dizisinin takma adıdır, yazma çağırana görünür). x64 derlemede açıkça reddeder: "MIR x64 arrays: array parameter ARR has unsupported element type PT" (eleman adımı bilgisi yoktur; yalnız yerleşik skaler elemanlı dizi parametresi desteklenir). JS programı derler ama yürütme anında "UXB host binding missing: ARRAY_FIELD_STORE" ile durur (G-JS-7) | Kayıt dizisini yordama geçirmek yerine alanları ayrı skaler dizilerde tutun (`xs(i)`, `ys(i)`); skaler dizi parametresi (`arr AS I32[]`) her motorda çalışır |
 | G-VERI-13 | S-529 · açık | eski AST-x64 | ⚠ sessiz | `REDIM` ile büyütülen dizi gerçekte büyümez; yeni elemanlar komşu değişkenlerin ve metin sabitlerinin belleğine yazar, hata ve uyarı yoktur. `DIM z AS I32 = 123`, `DIM e(0 TO 1) AS I32`, `DIM y AS I32 = 456`, `REDIM PRESERVE e(0 TO 4) AS I32`, `FOR i = 0 TO 4 : e(i) = i * 10 : NEXT` sonra elemanlar ve `z`, `y` yazdırılınca `0 10 20 3 4 123 20` çıkar (beklenen `0 10 20 30 40 123 456`: `e(3)`, `e(4)` ve `y` bozulur). `e(3) = 8` sonrası `PRINT e(0); " "; e(1); " "; e(2); " "; e(3)` ayırıcı metin sabitlerini bozar (`567 8`). Yerel dizide `REDIM`: çıktı doğrudur ama program **`SUB` çıkışında çöker** (`0xC0000005`). `UBOUND` ve `LBOUND` REDIM'li dizide açıkça reddedilir. AST, MIR ve MIR-x64 doğrudur; `20261007` ve `20261014_0253`'te aynıdır. Kitap örneği `15_tipler/const_dim_redim` `7 0 9` yerine `7<TAB>09` yazar | Eski AST-x64'te `REDIM` kullanmayın; diziyi baştan gereken boyutta bildirin |
-| G-VERI-14 | S-550 · açık | DATA, READ, RESTORE (altı yol) | ✖ eksik | `DATA`, `READ` ve `RESTORE` deyimleri yoktur: `DATA 10, 20, 30`, `READ a` ve `RESTORE` altı yolda `UXB_CALL_PAREN_REQUIRED` ile reddedilir (sözcükler anahtar sözcük sayılmaz, parantezsiz çağrı sanılır); `DATA` değişken adı olarak bile kullanılabilir (`DIM data AS I32 = 5` altı yolda `5`). Mete (2026-10-15) bu deyimlerin eski sözcük çözümleyicide bulunduğunu ve dizilere, `LIST`, `DICT`, `SET`, demet ve veri çerçevesine veri yerleştirmekte kullanıldığını söyledi; bugünkü yüzey kaydında (`dil_yuzeyi.tsv`) ve 239 anahtar sözcüğün listesinde (Ek A) yoktur. Elimdeki eski yama arşivi yalnızca "DATA / READ / RESTORE varsa" notunu taşır (`docs/uxbasic_pck_kitaplar/…/COMPILER_COVERAGE.md`), eski uygulamanın kaynağı bulunamadı | Başlangıç verisini önce `DIM a(2) AS I32` ile ayırıp tek tek atayın ya da `LISTADD(l, …)`, `DICTSET(d, …)`, `SETADD(s, …)` çağırın |
-| G-VERI-15 | S-551 · açık | sabit biçimleri (altı yol) | ✖ eksik | Python tarzı sabitler yoktur: dizi, `LIST`, `DICT`, `SET` ve demet değerini kaynakta doğrudan yazmanın yolu bulunmaz. `{ … }` sözcük çözümleyicide hata verir (`Lexer diagnostic bridge hata buldu: 2`, çıkış 2): `DIM a(2) AS I32 = {1, 2, 3}`, `DIM d AS DICT = {"a": 1}` ve `DIM s AS SET = {1, 2, 3}` altı yolda aynı hatayı verir; `DIM l AS LIST = [1, 2, 3]` ayrıştırıcıda reddedilir (`PARSER_STATEMENT`); `(1, 2, 3)` demeti yoktur. Koleksiyonlar yalnız işlevlerle kurulur (`LISTADD`, `DICTSET`, `SETADD`, Bölüm 10.5). Mete (2026-10-15): değişkenlere, dizilere ve `LIST`, `DICT`, `SET`, demet, veri çerçevesi gibi yapılara Python tarzı parantez, süslü parantez ve köşeli parantezle kolayca veri tanımlanabilmeli | Elemanları tek tek ekleyin (`LISTADD(l, 10)`, `DICTSET(d, 1, 10)`, `SETADD(s, 5)`); dizi elemanlarını tek tek atayın |
+| G-VERI-14 | S-550 · açık (tasarım onaylı) | DATA, READ, RESTORE (altı yol) | ✖ eksik | `DATA`, `READ` ve `RESTORE` deyimleri yoktur: `DATA 10, 20, 30`, `READ a` ve `RESTORE` altı yolda `UXB_CALL_PAREN_REQUIRED` ile reddedilir (sözcükler anahtar sözcük sayılmaz, parantezsiz çağrı sanılır); `DATA` değişken adı olarak bile kullanılabilir (`DIM data AS I32 = 5` altı yolda `5`). Mete (2026-10-15) bu deyimlerin eski sözcük çözümleyicide bulunduğunu ve dizilere, `LIST`, `DICT`, `SET`, demet ve veri çerçevesine veri yerleştirmekte kullanıldığını söyledi; bugünkü yüzey kaydında (`dil_yuzeyi.tsv`) ve 239 anahtar sözcüğün listesinde (Ek A) yoktur. Elimdeki eski yama arşivi yalnızca "DATA / READ / RESTORE varsa" notunu taşır (`docs/uxbasic_pck_kitaplar/…/COMPILER_COVERAGE.md`), eski uygulamanın kaynağı bulunamadı. **Karar (Mete, 2026-10-15): etiketli `DATA` / `READ` / `RESTORE` BASIC tarzında tasarlanacak** (program içi veri okunacak, dizilere ve koleksiyonlara aktarılabilecek); tasarım belgesi hazır, uygulanmadı | Başlangıç verisini önce `DIM a(2) AS I32` ile ayırıp tek tek atayın ya da `LISTADD(l, …)`, `DICTSET(d, …)`, `SETADD(s, …)` çağırın |
+| G-VERI-15 | S-551 · açık (tasarım onaylı) | sabit biçimleri (altı yol) | ✖ eksik | Python tarzı sabitler yoktur: dizi, `LIST`, `DICT`, `SET` ve demet değerini kaynakta doğrudan yazmanın yolu bulunmaz. `{ … }` sözcük çözümleyicide hata verir (`Lexer diagnostic bridge hata buldu: 2`, çıkış 2): `DIM a(2) AS I32 = {1, 2, 3}`, `DIM d AS DICT = {"a": 1}` ve `DIM s AS SET = {1, 2, 3}` altı yolda aynı hatayı verir; `DIM l AS LIST = [1, 2, 3]` ayrıştırıcıda reddedilir (`PARSER_STATEMENT`); `(1, 2, 3)` demeti yoktur. Koleksiyonlar yalnız işlevlerle kurulur (`LISTADD`, `DICTSET`, `SETADD`, Bölüm 10.5). Mete (2026-10-15): değişkenlere, dizilere ve `LIST`, `DICT`, `SET`, demet, veri çerçevesi gibi yapılara Python tarzı parantez, süslü parantez ve köşeli parantezle kolayca veri tanımlanabilmeli. **Tasarım onaylandı (Mete, 2026-10-15):** sabit hedef tipe göre yorumlanır (`( )`, `{ }`, `[ ]` hedef tipi bilinen yerde kabul edilir); uygulanmadı | Elemanları tek tek ekleyin (`LISTADD(l, 10)`, `DICTSET(d, 1, 10)`, `SETADD(s, 5)`); dizi elemanlarını tek tek atayın |
 | G-VERI-16 | S-552 · açık | TUPLE, DATAFRAME (altı yol) | ✖ eksik | `TUPLE` ve `DATAFRAME` çekirdek tipi yoktur: `DIM df AS DATAFRAME` `unknown type: DATAFRAME [canonical=DATAFRAME]`, `DIM t AS TUPLE = (1, 2, 3)` ayrıştırma hatasıyla reddedilir. `DATAFRAME` yalnız birinci sınıf kütüphane tipi aday listesinde geçer (Bölüm 19); `uxdataframe` kütüphanesi (DuckDB) işlev tabanlıdır ve bir tip adı sunmaz | Tabloyu `uxdataframe` işlevleriyle, demeti ayrı değişkenlerle ya da `TYPE` kaydıyla ifade edin |
 | G-VERI-17 | S-546 · açık | VARPTR (kayıt dizisi) | ≠ fark | Kayıt (`TYPE`) dizisinin adresinden eleman alanına yazmak motorlara göre değişir. `TYPE Entity` (`pos AS Vec2`, `hp AS I32`), `DIM e(0 TO 9) AS Entity`, `DIM p AS PTR = VARPTR(e)`, `POKED p + 3 * SIZEOF(Entity) + OFFSETOF(Entity, "hp"), 77`, `PRINT e(3).hp` → x64 `77` (doğru); AST `NATIVE POKED out of range` (çıkış 5); MIR `VARPTR requires a native-scalar-type` (çıkış 13); eski AST-x64 sessizce `0` yazar; JS ve WASM `NATIVE` bellek olduğu için reddeder. Tamsayı dizisi (`DIM a(3) AS I32`) aynı yazımla AST, MIR, x64 ve eski AST-x64'te doğrudur. Tasarım (`spec/NESTED_MEMORY_LAYOUT_SPEC.md`, 2026-04-10, "Proposed"): `adres = VARPTR(kök) + OFFSETOF(yol)` | Kayıt dizisinin alanına adresle yazmayın; `e(3).hp = 77` yazın |
+| G-VERI-18 | S-568 · açık | dizi bildirimi (altı yol) | ⚠ sessiz | Dizi bildiriminde skaler başlangıç değeri hata vermez ama motorlara göre farklı davranır: `DIM a(2) AS I32 = 7` AST, MIR, MIR-x64 ve JS'te değeri yok sayar (`a(0)`, `a(1)`, `a(2)` hepsi `0`); eski AST-x64 yalnız ilk elemanı `7` yapar (`7 0 0`); WASM yürütme anında `UXB_WASM_ARRAY_MISSING` ile durur (`F64` dizide derlemez). `DIM a(2) AS I32 = {1, 2, 3}` ise sözcük çözümleyici hatasıdır (G-VERI-15). Dizi bildirimindeki `= değer` ya tüm diziyi doldurmalı ya da açıkça reddedilmeli (Ölçüm: `20261014_0253`, 2026-10-15) | Diziyi bildirin, elemanlara ayrı ayrı değer atayın (`a(0) = 7` …) ve bildirimde `= değer` yazmayın |
 
 **Nesne yönelimi**
 
@@ -15698,9 +15903,9 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-NESNE-3 | S-299 · açık | MIR, x64 | ≠ fark | Yalnız okunur `PROPERTY … GET`: AST yazmayı "property SET accessor denied" ile reddeder; MIR ve x64 sessizce yazar | Yalnız okunur özelliğe yazmayın |
 | G-NESNE-4 | S-233 · açık | AST, MIR, x64 | ⚠ sessiz | Nesneyi doğrudan `PRINT n` ile yazdırmak motorlara göre `0`, `OBJECT#0` ya da çöp sayı verir | `PRINT STR(n)` yazın |
 | G-NESNE-5 | S-335 · açık | AST, MIR, x64 | ◌ açık | `RETURN THIS` ile kendi tipini döndürmek (yöntem zinciri) "explicit cast TYPE_OBJECT to …" hatası verir | Zincir yerine ayrı çağrılar yazın |
-| G-NESNE-6 | S-360 · açık | üç motor | ✖ eksik | `ABSTRACT`, `FINAL`, `SEALED` ve `MIXIN` ayrıştırıcıda tanınmaz | `INTERFACE` ve `VIRTUAL` kullanın |
+| G-NESNE-6 | S-360 · ◐ kısmen | altı yol | ✖ eksik | `ABSTRACT CLASS`, `FINAL CLASS` ve `SEALED CLASS` ayrıştırılamaz (altı yolda «CLASS: missing AS in field declaration near EOL»; kök neden ve kaynakta düzeltme: G-NESNE-38). `MIXIN` yalnız sınıf gövdesinde **tek** karışım olarak çalışır (`MIXIN Yazici`, altı yolda); iki karışım, `EXTENDS` ile birlikte karışım ve `MIXIN … END MIXIN` bloğu reddedilir (G-HEDEF-39) | `INTERFACE` ve `VIRTUAL` kullanın; ortak davranış için tek `MIXIN` ya da `EXTENDS` yazın |
 | G-NESNE-7 | S-336 · açık | MIR | ◌ açık | Orta sınıfın `OVERRIDE`'ını alt-alt sınıfta yeniden yazmadan kullanmak MIR'de "MIR method target not found" verir | Alt-alt sınıfta metodu yeniden yazın |
-| G-NESNE-8 | S-234 · açık | x64 | ⚠ sessiz | `VIRTUAL METHOD … AS F64` x64'te `0`/çöp döndürür; ondalıklı alana tamsayı sabiti (`d.en = 3`) yazmak da çöp üretir | Sabiti `3.0` yazın; sanal metotta tamsayı döndürün |
+| G-NESNE-8 | S-234 · açık | x64 | ⚠ sessiz | Bir metot aynı ifadede **iki F64 alan** okuyunca x64'te `0`/çöp döndürür (`RETURN k * k`, `RETURN k + k`; ayrıntı G-NESNE-43); sanal olmak şart değildir, tek başına sanal F64 metot doğrudur (`RETURN 2.5` → `2.5`). Ondalıklı alana tamsayı sabiti (`d.en = 3`) yazmak da çöp üretir | Sabiti `3.0` yazın; alanı çarpmadan önce yerel değişkene kopyalayın |
 | G-NESNE-9 | S-237 · açık | AST | ⚠ sessiz | Bir işlevin ya da MAGIC işlecin döndürdüğü nesne AST'de ardışık çağrılar arasında paylaşılır: `x = Yap(2)` ve `y = Yap(3)` sonrası `x.a` ve `y.a` ikisi de 3 olur (MIR ve x64: 2 ve 3). İşleç sonuçlarını zincirlemek (`a = a * b`, `birim * birim` sonucunu bir sonraki işleçte kullanmak) `(0+0i)` ya da çöp sayı (8192) üretir | Bir işleç sonucunu hemen kullanın (`STR(z)`), sonuçları zincirlemeyin; nesneleri `NEW Sinif(...)` ile yaratın; bu desene güveniliyorsa MIR ya da x64 kullanın |
 | G-NESNE-10 | S-235 · açık | AST, MIR, x64, JS | ⚠ sessiz | Sınıf tipli alan (bir sınıfın içinde başka sınıf tipli `DIM m AS Motor`): `THIS.m = NEW Motor(90)`, `a.m = NEW Motor(90)` ya da yerel değişkenle `a.m = mm` yazılsa da `a.m.guc` `0` okunur (JS `undefined`); atanan nesne `mm.guc` ise `90`'dır | Nesne içine nesne koymayın; ilişkiyi değişkenle (`mm`) ya da alanları kopyalayarak tutun |
 | G-NESNE-11 | S-236 · açık | MIR, x64, JS | ⚠ sessiz | Sınıf içindeki `TYPE` alanına **metot içinden** erişim: AST doğru (`30`, `12`); MIR okuduğunda `0`, yazdığında değişikliği kaybeder (`10`); JS okuduğunda `nan`, yazdığında kaybeder; x64 `unknown operand 'THIS.MERKEZ.X'` ile derlemez. Alana dışarıdan (`s.merkez.x`) erişmek dört motorda doğrudur | `TYPE` alanını sınıfın dışından okuyup yazın ya da alanları sınıfta ayrı sayısal alanlar olarak tanımlayın |
@@ -15712,23 +15917,32 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-NESNE-17 | S-379 · açık | AST | ⚠ sessiz | Sınıfın `BOOLEAN` alanını `STR(alan)` ile metne çevirmek AST'de `255` verir (MIR, x64 ve JS `-1`); düz `BOOLEAN` değişkende dört motor `-1` yazar | Mantık değerini `IF alan THEN …` ile sınayın, sınıf alanını `STR` ile yazdırmayın |
 | G-NESNE-18 | S-411 · açık | MIR, x64, JS | ⚠ sessiz | `PRIVATE` bölümünde kısa `PROPERTY ad AS T` bildirimi sınıfın metotlarında çıplak adla alan gibi kullanılınca (`deger = deger + d`) değer saklanmaz: `Ekle(32)` sonrası `Al()` AST `42`, MIR `0`, x64 `1`, JS `undefined` verir; aynı program düz `DIM deger AS I32` alanıyla AST, MIR ve x64'te doğrudur | Sınıf içi durum için `PROPERTY` yerine `DIM` alanı kullanın |
 | G-NESNE-19 | S-414 · açık | AST ↔ MIR, x64 | ≠ fark | `RESTRICTED` bölümündeki metoda dışarıdan çağrı AST'de çalışma anı hatasıdır ("access denied KUTU.GIZLI (RESTRICTED)", çıkış 5); MIR ve x64 sessizce çağırır (`7`). `RESTRICTED` ve `PROTECTED` alanlara dışarıdan yazma hiçbir motorda denetlenmez (G-NESNE-2). `READONLY` ve `IMMUTABLE` alanlara yazma ise zorlanır (AST'de çalışma anı, MIR ve x64'te derleme hatası) | Erişim denetimi için `PRIVATE` metot kullanın (derleme hatası verir) |
-| G-NESNE-20 | S-431 · açık | MIR, JS | ⚠ sessiz | `DELETE o` sonrasında `o.v` okumak MIR'de silinmiş nesnenin eski değerini verir (`3`); JS `undefined` yazdırır; AST ve x64 "field access on a null object reference" hatasıyla durur | `DELETE`'ten sonra değişkeni kullanmayın |
+| G-NESNE-20 | S-431 · ✔ kapandı | MIR, JS | ⚠ sessiz | `DELETE o` sonrasında `o.v` okumak MIR'de silinmiş nesnenin eski değerini verir (`3`) ya da silinen nesne programın ilk nesnesi değilse **başka bir nesnenin alanını** verir (asıl neden: `DELETE` değişkene boş başvuruyu yazar ve MIR boş başvuruyu programın ilk nesnesine çözer, G-NESNE-37); JS `undefined` yazdırır (G-JS-16); AST, x64, eski AST-x64 ve WASM hatayla durur («field access on a null object reference»; WASM: `UXB_OBJECT_TARGET_MISSING`) | `DELETE`'ten sonra değişkeni kullanmayın |
 | G-NESNE-21 | S-443 · ✔ kapandı | AST, MIR, x64, JS | ⚠ sessiz | Derleyicinin tanıdığı ama çalışmayan `MAGIC` kancaları: `MAGIC AND`, `OR`, `XOR` ile `c = a AND b` (iki nesne): 20261007 derlemesinde AST ve MIR kancayı çağırır, x64 ve JS derlemede "ADIM25 AST->MIR coverage failed: BINARY: FAIL_EXPECTED_OPCODE_NOT_FOUND" ile reddeder (S-443; 20261013 sonrası derlemelerde dört motorda çalışır); kanca gövdesinde `r.v = v AND o.v` yazmak ise alan-atama kusuru yüzünden `0` döndürür (G-ISLEC-7), kancanın kendisi yüzünden değil; `MAGIC CALL` ile `a(3)` yalnız `PRINT a(3)` içinde AST'de çalışır (`8`), `r = a(3)` her motorda "assignment cannot convert K to TYPE_I32" ile, MIR/x64/JS'te ise "RT_LIBRARY_CALL … no bound implementation" / "CALL target 'A' is neither a known runtime call nor a function" ile durur. `MAGIC GET(ad)` (olmayan bir alanı okurken) yalnız AST'de çalışır (`42`); MIR `0`, JS `undefined` verir, x64 "unknown operand" ile derlemez; `MAGIC SET` ile olmayan alana yazmak her motorda "assignment requires explicit cast TYPE_I32 to TYPE_OBJECT" ile reddedilir. Çalışan kancalar dört motorda: `ADD`, `SUB`, `MUL`, `DIV`, `IDIV`, `MOD`, `SHL`, `SHR`, `EQ`, `NE`, `LT`, `LE`, `GT`, `GE` ve `TOSTRING` | `AND`/`OR`/`XOR`/`CALL` için işleç yerine sıradan bir metot yazın (`a.Ve(b)`) |
 | G-NESNE-22 | S-472 · açık | AST, MIR, x64, JS | ⚠ sessiz | `DELETE` yalnız verilen değişkeni boşaltır ve yıkıcıyı çalıştırır; aynı nesneye başka bir değişkenle erişim hata vermez ve dört motorda da kullanılabilir kalır (`b = a`, `DELETE a`, `PRINT b.n` → `5`, yıkıcı çalışmış olduğu halde). Tasarım belgelerindeki "serbest bırakılmış nesneye erişim MemoryRef ile reddedilir" güvencesi nesneler için yoktur, yalnız dizi işaretçileri korunur (Bölüm 14.6). Yeniden atama (`a = NEW …`) eski nesneyi yıkmaz (dört motorda aynı) | Her nesneye tek değişkenle sahip olun; `DELETE` ettiğiniz nesnenin başka adını bırakmayın |
-| G-NESNE-23 | S-473 · açık | AST, MIR, x64, JS | ≠ fark | Yıkıcının kaç kez çalışacağı motora göre değişir: aynı değişkene iki kez `DELETE` yazınca AST yıkıcıyı bir kez, MIR, x64 ve JS iki kez çalıştırır; program sonunda `DELETE` edilmemiş genel (global) nesneler için AST yıkıcıları ters yaratılma sırasıyla çalıştırır (`yikici 2`, `yikici 1`), öbür üç motor hiç çalıştırmaz; ikinci başvuru varken `DELETE` ederseniz AST yıkıcıyı program sonunda bir kez daha çalıştırır. Yerel nesneler için yordam sonunda hiçbir motor yıkıcı çalıştırmaz | Yıkıcıya güvenmeyin: her nesneyi tam bir kez ve açıkça `DELETE` edin |
-| G-NESNE-24 | S-484 · açık | AST (öbür üç motordan farklı) | ≠ fark | Taban sınıfın bir metodunun içinden sanal bir metot çağrılınca sonuç motora göre değişir. `Base.Value()` `VIRTUAL` (10), `Child.Value()` `OVERRIDE` (20), `Base.Inspect()` `THIS.Value() * 100 + ME.Value()` döndürür; `NEW Child().Inspect()`: AST `1010` (ikisi de taban uygulamasını çağırır), MIR, x64 ve JS `2020` (ikisi de türetilmiş uygulamayı çağırır). Niteliksiz `Value()`, `THIS.Value()` ve `ME.Value()` AST'de `10 10 10`, öbür üçünde `20 20 20` verir; dışarıdan `c.Value()` dört motorda `20`. Tasarım (15.09 OOP planı §3, ürün onayı bekler): `THIS` doğrudan çağırır (sanal slotu yeniden dağıtmaz), `ME` sanal çağırır, niteliksiz çağrı `THIS` gibidir ve aynı örnek `1020` vermelidir; hiçbir motor bu üçlü ayrımı uygulamaz (G-HEDEF-4). Çıkış kodu 0, ileti yok | Taban sınıf metodunun içinden türetilmiş sınıfın geçersiz kılmasına dayanan tasarımı (şablon-metot) yalnız MIR, x64 ve JS'te kullanın; AST'de beklemeyin |
-| G-NESNE-25 | S-485 · ◐ kısmen | AST, MIR (x64 ve JS'ten farklı) | ≠ fark | Kalıtımda taban sınıfın kurucusu AST ve MIR'de **hiç çalışmaz**, x64 ve JS'te çalışır. `CLASS A` kurucusu `x = 5`, `CLASS B EXTENDS A` kurucusu `y = 7` yapar; `NEW B()` sonrası `x` AST ve MIR'de `0`, x64 ve JS'te `5` olur; türetilmiş sınıfın kurucusu yoksa da aynıdır (`0` / `5`). Üç seviyede (`A`, `B`, `C`; her kurucu adını yazar) AST ve MIR yalnız `C`, x64 ve JS `A`, `B`, `C` yazar. Taban kurucusu parametreliyse (`CONSTRUCTOR(ax AS I32)`) x64 ve JS `NEW B(4)`'ün argümanlarını tabana da geçirir (`x = 4`), AST ve MIR `x = 0` bırakır. Yıkıcılar dört motorda `B.dtor`, `A.dtor` sırasıyla çalışır. Tasarım (OOP planı §9): taban kurucu önce, türetilmiş kurucu sonra çalışır; çıkış kodu 0, ileti yok | Taban sınıfın kurucusuna güvenmeyin: ortak başlatmayı ayrı bir `Baslat()` metoduna koyup `NEW`'dan sonra açıkça çağırın |
-| G-NESNE-26 | S-486 · açık | AST (MIR, x64 ve JS'ten farklı) | ≠ fark | Taban tipli değişkenle tutulan türetilmiş nesneyi silmek (`DIM x AS A = NEW B()` ardından `DELETE x`): AST önce `B.dtor`, sonra `A.dtor` çalıştırır; MIR, x64 ve JS yalnız taban yıkıcısını (`A.dtor`) çalıştırır, türetilmiş sınıfın yıkıcısı atlanır (iletisiz, çıkış 0). Değişkenin tipi türetilmiş sınıfsa (`DIM nb AS B = NEW B()`) dört motor da iki yıkıcıyı sırayla çalıştırır. Tasarım (OOP planı §9): yıkıcı gerçek nesne türünden tabana doğru, bir kez çalışır (sanal yıkıcı) | Nesneyi, yarattığınız sınıfın tipiyle tutup silin; ya da kaynağı bırakan işi ayrı bir sanal metoda (`Kapat()`) koyun |
+| G-NESNE-23 | S-473 · açık | AST, MIR, x64, JS | ≠ fark | Yıkıcının kaç kez çalışacağı motora göre değişir: aynı değişkene iki kez `DELETE` yazınca AST ve eski AST-x64 yıkıcıyı bir kez, MIR, x64, JS ve WASM iki kez çalıştırır; program sonunda `DELETE` edilmemiş genel (global) nesneler için AST yıkıcıları ters yaratılma sırasıyla çalıştırır (`yikici 2`, `yikici 1`), öbür beş yol hiç çalıştırmaz; ikinci başvuru varken `DELETE` ederseniz AST yıkıcıyı program sonunda bir kez daha çalıştırır. Yerel nesneler için yordam sonunda hiçbir motor yıkıcı çalıştırmaz | Yıkıcıya güvenmeyin: her nesneyi tam bir kez ve açıkça `DELETE` edin |
+| G-NESNE-24 | S-484 · ✔ kapandı | AST (öbür üç motordan farklı) | ≠ fark | Taban sınıfın bir metodunun içinden sanal bir metot çağrılınca sonuç motora göre değişir. `Base.Value()` `VIRTUAL` (10), `Child.Value()` `OVERRIDE` (20), `Base.Inspect()` `THIS.Value() * 100 + ME.Value()` döndürür; `NEW Child().Inspect()`: AST `1010` (ikisi de taban uygulamasını çağırır), MIR, x64 ve JS `2020` (ikisi de türetilmiş uygulamayı çağırır). Niteliksiz `Value()`, `THIS.Value()` ve `ME.Value()` AST'de `10 10 10`, öbür üçünde `20 20 20` verir; dışarıdan `c.Value()` dört motorda `20`. Tasarım (15.09 OOP planı §3, ürün onayı bekler): `THIS` doğrudan çağırır (sanal slotu yeniden dağıtmaz), `ME` sanal çağırır, niteliksiz çağrı `THIS` gibidir ve aynı örnek `1020` vermelidir; hiçbir motor bu üçlü ayrımı uygulamaz (G-HEDEF-4). Çıkış kodu 0, ileti yok **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli):** `THIS.m()` doğrudan, `ME.m()` ve niteliksiz `m()` sanal çağırır, altı yolda aynı (tek seviyede `10 20 20`, üç seviyede `100 300 300`); testler `this_direct_me_virtual`, `this_me_three_levels`, `bare_virtual_template`. | Taban sınıf metodunun içinden türetilmiş sınıfın geçersiz kılmasına dayanan tasarımı (şablon-metot) yalnız MIR, x64 ve JS'te kullanın; AST'de beklemeyin |
+| G-NESNE-25 | S-485 · ◐ kısmen | AST, MIR, x64, JS, WASM, eski AST-x64 | ≠ fark | **Parametresiz** taban kurucusu altı yolda çalışır: üç seviyede (`A`, `B`, `C`) her kurucu bir sayı yazarsa `1 2 3`, yıkıcılar `3 2 1`. **Parametreli** taban kurucusu (`CLASS T2`, `CONSTRUCTOR(a AS I32)` içinde `x = a`) için altı yol beş ayrı davranır: türetilmiş sınıfın kurucusu yokken `NEW D2(7)` x64 ve JS'te `x = 7`, AST, MIR, WASM ve eski AST-x64'te `x = 0` bırakır; türetilmiş sınıfın parametresiz kendi kurucusu varsa (`NEW D2()`) AST, WASM ve eski AST-x64 tabanı çalıştırmadan `x = 0` bırakır, MIR «MIR constructor requires 1 arguments but NEW supplies 0 for T2_CTOR» ile çalışma anında durur, x64 aynı iletiyle derlemez, JS `x` için `undefined` yazar. Tasarım (OOP planı §9): taban kurucu önce çalışır; parametreli tabanda `SUPER(...)` zorunludur ve eksikliği derleme hatasıdır (G-NESNE-27). Çıkış kodu çoğunda 0, ileti yok | Parametreli kurucusu olan bir sınıftan türetmeyin; ortak başlatmayı `Baslat()` metoduna koyup `NEW`'dan sonra açıkça çağırın |
+| G-NESNE-26 | S-486 · açık | AST (öbür beş yoldan farklı) | ≠ fark | Taban tipli değişkenle tutulan türetilmiş nesneyi silmek (`DIM x AS A = NEW B()` ardından `DELETE x`): AST önce `B.dtor`, sonra `A.dtor` çalıştırır; MIR, x64, JS, WASM ve eski AST-x64 yalnız taban yıkıcısını (`A.dtor`) çalıştırır, türetilmiş sınıfın yıkıcısı atlanır (iletisiz, çıkış 0). Değişkenin tipi türetilmiş sınıfsa (`DIM nb AS B = NEW B()`) altı yol da iki yıkıcıyı sırayla çalıştırır. Neden: `DELETE`, değişkenin **bildirilen** türünün yıkıcı zincirini statik olarak çağırır (G-HEDEF-31). Tasarım (OOP planı §9): yıkıcı gerçek nesne türünden tabana doğru, bir kez çalışır (sanal yıkıcı) | Nesneyi, yarattığınız sınıfın tipiyle tutup silin; ya da kaynağı bırakan işi ayrı bir sanal metoda (`Kapat()`) koyun |
 | G-NESNE-27 | S-487 · açık | AST, MIR, x64, JS | ✖ eksik | Tabana kurucu çağrısı `SUPER(değer)` yoktur ve motorlar anlamlı bir ileti vermez: AST "object is not callable; MAGIC_CALL missing B" (çıkış 5), MIR "runtime library service has no bound implementation: RT_LIBRARY_CALL" (çıkış 13), x64 "CALL target 'SUPER' is neither a known runtime call nor a function in the MIR module" (derleme), JS "UXB host binding missing: SUPER" (yürütme anı); WASM ve eski AST-x64 ise hata vermez ve `0` yazar (sessiz yanlış). `SUPER.Metot()` çalışır. Tasarım (OOP planı §9): parametreli tabanın kurucusu için `SUPER(...)` zorunludur; yoksa yalnız erişilebilir parametresiz kurucu seçilebilir. Bugün türetilmiş sınıfın taban kurucusuna kendi argümanını vermesinin yolu yoktur (G-NESNE-25) | Parametreli kurucusu olan bir sınıftan türetmeyin; tabana değerleri alan atamasıyla (`nesne.x = …`) ya da `Baslat(…)` metodu ile verin |
-| G-NESNE-28 | S-483 · ◐ kısmen | AST, MIR, x64, JS | ⚠ sessiz | OOP tasarımının hata saydığı yazımlar bugün sessizce kabul edilir (OOP planı §3.3, §5, §9): (1) taban ve türetilmiş sınıfta aynı adlı alan (`DIM x` iki sınıfta; `nb.x = 5` ardından `PRINT nb.x` dört motorda `5`); (2) kurucu içinden `ME` ile sanal metot çağrısı (x64 ve JS türetilmiş uygulamayı çalıştırır, `2`; AST ve MIR taban kurucusunu hiç çalıştırmadığından alan `0` kalır, G-NESNE-25); (3) taban kurucusu parametreli olan sınıftan, `SUPER(...)` yazmadan kurucu tanımlamak. Çıkış kodu 0, ileti yok | Bu yazımlardan kaçının; alan adlarını kalıtım zincirinde yinelemeyin, kurucuda sanal metot çağırmayın |
+| G-NESNE-28 | S-483 · ◐ kısmen | AST, MIR, x64, JS, WASM, eski AST-x64 | ⚠ sessiz | OOP tasarımının hata saydığı yazımlardan **biri hâlâ sessiz kabul edilir**: parametreli taban kurucusu olan sınıftan `SUPER(...)` yazmadan türetmek (altı yolda beş ayrı davranış, G-NESNE-25). Öbürleri kapandı: taban ve türetilmiş sınıfta aynı adlı alan artık altı yolda «CLASS field hides inherited member CHILD.X from BASE» ile reddedilir (`tests/oop_parity/neg_inherited_field_hiding`); kurucuda `ME.` ile sanal çağrı «ME virtual method call is not allowed in CONSTRUCTOR» ile reddedilir, ama kural yalnız `ME.` önekini yakalar, sanal **olmayan** `ME.Duz()` de reddedilir, `THIS.Sanal()` ve niteliksiz `Sanal()` kabul edilir (G-NESNE-40) | Kurucuda hiçbir sanal metodu çağırmayın; parametreli kurucusu olan sınıftan türetmeyin |
 | G-NESNE-29 | S-523 · açık | AST | ⚠ sessiz | **Gerileme:** `MAGIC TOSTRING()` tanımlı bir sınıfın sayısal dönüşlü metodunun sonucu bir **değişkene** yazılınca AST'de `0` olur; hata ve uyarı yoktur, çıkış 0. `CLASS Balik` (`__B AS F64`, `CONSTRUCTOR(B AS F64)`, `METHOD GetB() AS F64` içinde `RETURN THIS.__B`, `MAGIC TOSTRING() AS STRING` içinde `RETURN "x"`), `DIM f AS Balik = NEW Balik(2.5)`, `DIM b AS F64`, `b = f.GetB()`, `PRINT b` → AST `0` (beklenen `2.5`). `b = f.GetB() + 0`, `b = f.GetB() * 1`, `DIM c AS F64 = f.GetB()` ve `d = F64(f.GetB())` de `0` verir; yalnız sonucu doğrudan yazdırmak doğrudur (`PRINT f.GetB()` → `2.5`). `I32` dönüşlü metotta davranış programa göre değişir (tek alanlı sınıfta `n = f.GetN()` → `0`, iki alanlı sınıfta `7`; `DIM h AS I32 = f.GetN()` → `0`): tetikleyici kesin belirlenmedi. `STR(f)` ve bir `Equals` metodunun sonucu da değişkene yazılınca `0` olur. MIR, MIR-x64 ve JS aynı programlarda doğrudur; `MAGIC TOSTRING` olmayan sınıfta, `MAGIC HASH` olan sınıfta, `STRING` dönüşlü metotta ve `PUBLIC` alan okumada AST doğrudur. `20261013` (12:37) derlemesinden beri vardır (`20261007`'de doğruydu); S-480 AST gerilemesinin kapanışında yakalanmadı. UXClazz üreticisinin ürettiği her `CLAZZ DATA … DERIVE TOSTRING` sınıfı bu kusurdan etkilenir: `arac_ornekleri/dis/uxclazz_uretici.py` `20261007`'de geçerken `20261013_2224` ve sonrasında AST'de `boy = 0`, `metin = 0`, `esit = 0` verir (MIR ve x64 doğru) | AST'de sınıfa `MAGIC TOSTRING` koymayın ya da metot sonucunu değişkene yazmadan doğrudan kullanın (`PRINT f.GetB()`); sınıf programını MIR, x64 ya da JS ile çalıştırın |
-| G-NESNE-30 | S-555 · karar bekliyor | CLASS ... EXTENDS (altı yol) | ✖ eksik | Çoklu kalıtım yoktur: `CLASS C EXTENDS A, B` altı yolda ayrıştırma hatasıyla reddedilir. 15 Eylül tasarımı bunu bilerek dışarıda bırakmıştı ("bir sınıfın tek uygulama tabanı ve çok arayüzü vardır; çoklu durum kalıtımı yoktur", Bölüm 11.10). **Tasarım kararı değişti (Mete, 2026-10-15):** uXBasic nesne yönelimli paradigmayla doğduğu için OOP, çoklu kalıtım ve karışım (`MIXIN`) dahil çok güçlü ve farklı kullanımlara açık olmalıdır. Ayrıntılar (elmas sorunu, kurucu sırası, alan yerleşimi, `SUPER` çözümü, motorlar arası eşlik) henüz tasarlanmadı. Bugün tek tabanlı kalıtım ve çoklu arayüz çalışır (`CLASS X IMPLEMENTS IA, IB`) | Ortak davranışı arayüzle (`IMPLEMENTS`) ya da içermeyle paylaşın: başka sınıfı alan olarak tutup metotları elle yönlendirin |
+| G-NESNE-30 | S-555 · açık (tasarım onaylı) | CLASS ... EXTENDS (altı yol) | ✖ eksik | Çoklu kalıtım yoktur: `CLASS C EXTENDS A, B` altı yolda ayrıştırma hatasıyla reddedilir. 15 Eylül tasarımı bunu bilerek dışarıda bırakmıştı ("bir sınıfın tek uygulama tabanı ve çok arayüzü vardır; çoklu durum kalıtımı yoktur", Bölüm 11.10). **Tasarım kararı değişti (Mete, 2026-10-15):** uXBasic nesne yönelimli paradigmayla doğduğu için OOP, çoklu kalıtım ve karışım (`MIXIN`) dahil çok güçlü ve farklı kullanımlara açık olmalıdır. Ayrıntılar (elmas sorunu, kurucu sırası, alan yerleşimi, `SUPER` çözümü, motorlar arası eşlik) henüz tasarlanmadı. Bugün tek tabanlı kalıtım ve çoklu arayüz çalışır (`CLASS X IMPLEMENTS IA, IB`). Mete (2026-10-15) "önerdiğin gibi" dedi, ama A/B/C seçeneklerinin içeriğini anlamadığını söyledi; sade anlatım 11.12'ye eklendi, son onay bekleniyor (varsayılan C) | Ortak davranışı arayüzle (`IMPLEMENTS`) ya da içermeyle paylaşın: başka sınıfı alan olarak tutup metotları elle yönlendirin |
 | G-NESNE-31 | S-556 · açık | INTERFACE ... EXTENDS (altı yol) | ✖ eksik | Arayüz mirası yoktur: `INTERFACE IB EXTENDS IA` altı yolda ayrıştırma hatasıyla reddedilir; bir arayüz başka bir arayüzün metotlarını devralamaz | Birleşik sözleşme gerekiyorsa sınıfa `IMPLEMENTS IA, IB` yazın |
 | G-NESNE-32 | S-557 · açık | iç içe sınıf (altı yol) | ✖ eksik | Bir sınıfın içinde başka sınıf tanımlamak (`CLASS Dis`, içinde `CLASS Ic … END CLASS`) altı yolda ayrıştırma hatasıyla reddedilir | İç sınıfı dışarıda tanımlayıp adına önek verin (`Dis_Ic`) |
 | G-NESNE-33 | S-558 · açık | sınıf sabiti (altı yol) | ✖ eksik | Sınıf içinde `CONST` (`CLASS K`, içinde `CONST SINIR = 10`) altı yolda ayrıştırma hatasıyla reddedilir | Sabiti sınıfın dışında `CONST` ile tanımlayın |
 | G-NESNE-34 | S-559 · açık | arayüzde gövdeli metot (altı yol) | ✖ eksik | Arayüzde varsayılan metot gövdesi yazılamaz: `INTERFACE IA` içinde `METHOD F() AS I32` ve altına `RETURN 1 … END METHOD` yazmak altı yolda ayrıştırma hatasıyla reddedilir (tasarımın karışım / trait önerisi bu boşluğu doldurmayı hedefler, G-HEDEF-4) | Ortak gövdeyi bir sınıfta yazıp arayüzü o sınıfla uygulayın |
 | G-NESNE-35 | S-560 · açık | kurucu aşırı yükleme (altı yol) | ✖ eksik | Bir sınıfta birden çok `CONSTRUCTOR` tanımlanamaz: parametresiz `CONSTRUCTOR()` ile parametreli `CONSTRUCTOR(a AS I32)` birlikte yazılınca altı yolda ayrıştırma hatası verir; her biri tek başına çalışır (`1`, `5`) | Tek kurucu yazın; isteğe bağlı değerleri `Baslat()` gibi bir metotla verin |
 | G-NESNE-36 | S-547 · açık | INSTANCEOF (AST dışı) | ≠ fark | `INSTANCEOF(nesne, Sinif)` yalnız AST'de çalışır (`-1`); MIR çalışma anı hatası verir (`runtime library service has no bound`, çıkış 13), x64 derlemez (`CALL target 'INSTANCEOF'`), JS `UXB host binding missing: INSTANCEOF` ile durur, WASM metin kapısı yüzünden derlemez, eski AST-x64 ise `1` yazar (doğrusu `-1`) | Tür sınamasını yalnız AST'de kullanın; başka motorda gerekiyorsa sanal bir `Tur()` metodu yazın |
+| G-NESNE-37 | S-570 · ✔ kapandı | MIR (AST, x64, eski AST-x64 doğru) | ⚠ sessiz | Boş (`NULL`) bir sınıf değişkeni üzerinden alan okumak ya da yazmak, program başka bir nesne yaratmışsa MIR'de **programın ilk nesnesini** okur ya da bozar. `DIM d AS Kutu = NEW Kutu()`, `d.v = 9`, `DIM k AS Kutu` ardından `PRINT k.v` MIR'de `9` yazar; `k.v = 5` ise `d.v`'yi `5` yapar (iletisiz, çıkış 0). AST, x64 ve eski AST-x64 aynı programlarda «field access on a null object reference» ile durur. `DELETE x` sonrası da değişken aynı duruma düşer: ilk nesne okunabilir kalır, ilk olmayan nesnede başka nesnenin alanı okunur (G-NESNE-20'nin asıl nedeni). Eski null testleri (`neg_null_*`) hiç nesne yaratmadan sınadığı için bunu yakalamıyordu. **Düzeltildi (kaynakta, 2026-10-16; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | Atanmamış ya da `DELETE` edilmiş nesne değişkenini kullanmayın; MIR'de önce başka bir nesne yaratan programlarda özellikle dikkat edin |
+| G-NESNE-38 | S-572 · ✔ kapandı | altı yol | ◌ açık | `ABSTRACT CLASS`, `FINAL CLASS` ve `SEALED CLASS` ayrıştırılamaz: `ABSTRACT CLASS Sekil` altı yolda «CLASS: missing AS in field declaration near EOL» ile durur. Eski belgeler «önekler de rotalanıyor» der ve semantic/çalışma anı denetimleri vardır (soyut sınıfa `NEW` reddi, `FINAL`/`SEALED` sınıfı türetme reddi), ama kaynaktan hiç ulaşılamıyordu. Ayrıştırma düzelince ikinci bir kusur göründü: soyut **türlü** bir değişken (`DIM s AS Sekil = NEW Kare()`, hatta `DIM s AS Sekil`) «DIM cannot instantiate ABSTRACT class» ile reddediliyordu. **Düzeltildi (kaynakta, 2026-10-16; ölçüm ikilisinde hâlâ geçerli).** | `INTERFACE` ve `VIRTUAL` kullanın |
+| G-NESNE-40 | S-576 · ✔ kapandı | AST, MIR, x64, JS, WASM, eski AST-x64 | ≠ fark | Kurucuda sanal çağrı kuralı yalnız `ME.` önekini yakalar: sanal **olmayan** `ME.Duz()` bile «semantic: ME virtual method call is not allowed in CONSTRUCTOR» ile reddedilir, `THIS.Sanal()` ve niteliksiz `Sanal()` ise kabul edilir ve motorlar farklı çalışır: AST taban uygulamasını (`1`), x64, JS, WASM ve eski AST-x64 türetilmiş uygulamayı (`2`) çağırır, **MIR hiçbir şey yazmaz** (çağrı sessizce boş döner). Kural hem fazla yasaklar hem delinebilir. **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli):** kural kurucu ve yıkıcıda yalnız **sanal** hedefe giden `ME.m()` ve niteliksiz `m()` biçimini reddeder (derleme hatası, altı yolda aynı); `THIS.m()` ve sanal olmayan çağrı serbesttir; testler `ctor_helper_this_me_bare`, `ctor_this_virtual_direct`, `neg_ctor_bare_virtual`, `neg_dtor_bare_virtual`. | Kurucuda hiçbir sanal metodu çağırmayın; kurucu içinde ortak işi sanal olmayan bir metoda koyun |
+| G-NESNE-41 | S-577 · ✔ kapandı | AST ↔ MIR, x64, JS, WASM, eski AST-x64 | ⚠ sessiz | `IMPLEMENTS` yazmamış bir sınıfın nesnesini arayüz tipli parametreye vermek derleme kapısında kabul edilir ve motorlara göre başka sonuç verir: AST ve MIR çalışır (`4`), x64 «vtable slot has no native function IKONUM::0» ile derlemez, JS «vtable slot 0 is not bound for PT», WASM «UXB_VTABLE_SLOT_MISSING:0» ile durur, eski AST-x64 derlemez. Sınıf arayüzün metotlarını taşıyor ama `IMPLEMENTS` yok; eksik metot varsa ise açık hata vardır (`interface method missing implementation`). **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | Arayüze verilecek her sınıfa `IMPLEMENTS Arayuz` yazın |
+| G-NESNE-42 | S-578 · açık | eski AST-x64 | ◌ açık | Eski AST-x64'te arayüz tipli `SUB`/`FUNCTION` parametresi derlenmez: `SUB Yaz(k AS IKonum)` içinde `k.GetX()` «x64-codegen: interface/virtual method slot not found for receiver type IKONUM method GETX» ile durur (`CLASS Pt IMPLEMENTS IKonum` doğru yazılmış olsa bile); AST, MIR, x64, JS ve WASM `4` yazar. Arayüz değişkeni doğrudan sınıf değişkeniyle çağrılırsa (`tests/oop_parity/interface_dispatch`) çalışır. | Eski AST-x64 için arayüz tipli parametre yerine sınıf tipli parametre yazın |
+| G-NESNE-43 | S-580 · ✔ kapandı | x64 (AST, MIR, JS, eski AST-x64 doğru) | ⚠ sessiz | Native x64'te bir metot aynı ifadede **iki F64 alan** okuyunca yanlış sonuç verir: `k = 5.0` iken `RETURN k + k`, `RETURN k * k`, `RETURN THIS.k * THIS.k` ve `r = k * k` sırasıyla `-6.7e-308` ve `0` yazar (AST, MIR, JS, eski AST-x64: `10` ve `25`). Bir işlenen sabit ya da yerel değişkense (`k * 2.0`, `2.0 * k`, `k - 1.0`, `k / 2.0`, yerel `a * b`) doğrudur. G-NESNE-8'deki «`VIRTUAL METHOD … AS F64` sıfır döndürür» tarifi bu kusurun bir görünümüdür; sanal olmak şart değildir (`q08g`: sanal olmayan metotta da `0`). **Düzeltildi (kaynakta, 2026-10-16; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | İki alanı çarpmadan önce yerel değişkenlere kopyalayın (`DIM a AS F64 = k`, `DIM b AS F64 = k`, `RETURN a * b`) |
+| G-NESNE-44 | S-581 · ✔ kapandı | eski AST-x64 (AST, MIR, x64, JS doğru) | ⚠ sessiz | Eski AST-x64'te `CONSTRUCTOR(a AS F64)` içinde alana yazılan değer çöp olur: `NEW T1(7.5)` sonrası `PRINT t.k` `8.9e-308`; iki parametreli (`1.5`, `2.5`) `8.9e-308` ve `0` yazar. Aynı programlar AST, MIR, x64 ve JS'te `7.5` / `1.5` `2.5` verir. Kurucu olmayan `METHOD Yaz(a AS F64)` ve `I32` kurucu parametresi eski AST-x64'te de doğrudur. **Düzeltildi (kaynakta, 2026-10-16; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | Eski AST-x64 için F64 değeri kurucuyla değil, kurucudan sonra bir metotla verin |
+| G-NESNE-45 | S-584 · ✔ kapandı | altı yol | ◌ açık | `DIM` ile sınıf değişkenine başlangıç değeri yalnız `NEW` olabilir: `DIM v3 AS Vektor2D = v1 + v2`, `DIM a AS Kutu = Uret(8)` (fabrika işlevi) ve `DIM b AS Kutu = a` altı yolda «semantic: DIM class initializer must be NEW KUTU» ile reddedilir; `DIM x AS Kutu` ardından `x = Uret(8)` ya da `v3 = v1 + v2` altı yolda çalışır (WASM yalnız fabrikada). Tasarım konuşmasındaki örnekler bu yüzden derlenmez. **Düzeltildi (kaynakta, 2026-10-16; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | `DIM x AS Kutu` ile bildirip sonra `x = …` atayın |
+| G-NESNE-46 | S-596 · ✔ kapandı | AST (MIR, x64, JS, WASM, eski AST-x64 doğru) | ⚠ sessiz | AST yorumlayıcıda bir sanal metodun çağrıldığı alıcı `= NEW X` ile kurulmuş bir değişken değilse (taban sınıf tipli bir `SUB` parametresi, ya da yöntemin içindeki `ME`) çağrı **nesnenin gerçek sınıfına değil bildirilen sınıfa** göre dağıtılır: `SUB Yaz(t AS Taban)` içinde `t.Deger()` çağrısı (nesne `Alt`, `Deger` `OVERRIDE`) AST'de `10`, MIR, x64, JS, WASM ve eski AST-x64'te `20` yazar. `DIM y AS Taban = NEW Alt()` ve `DIM z AS Taban = y` AST'de de `20` verir (değişkenin izlenen türü `NEW`'den gelir). Çıkış kodu 0, ileti yok. Taban sınıf metodunun içinde `ME.m()` ve niteliksiz `m()` bu yüzden hep taban uygulamasını çağırırdı (G-NESNE-24'ün AST yarısı). **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | Sanal metodu, `= NEW X` ile kurulmuş bir değişkenden çağırın; AST'de sanal dağıtımı parametre üzerinden beklemeyin |
 
 **Hata yönetimi**
 
@@ -15761,8 +15975,8 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-DOSYA-6 | S-494 · açık | AST, MIR, x64, JS | ✖ eksik | `INPUTF [#]kanal, hedef[, …]` deyimi (dil yüzeyi analizi, 2026-07-02: deyim kaydında vardır, sözcük tablosunda yoktur) çalışmaz: `INPUTF #1, x` bir işlev çağrısı sanılır ve "UXB_CALL_PAREN_REQUIRED: CALL: missing ( after inputf" ile ayrıştırmada reddedilir (20261013 ikilisi; 20261007 ikilisi aynı satırı "PARSER_STMT_FAIL … statement parse failed" ile reddeder). Aynı dosyayı `INPUT #1, s` ile okumak dört motorda çalışır | Dosyadan okumak için `INPUT #n, değişken` kullanın (metin okuyup `VAL` ile çevirin, G-DOSYA-1) |
 | G-DOSYA-7 | S-534 · açık | eski AST-x64 | ✖ çökme | `PRINT #n` ile tamsayı yazmak erişim ihlaliyle çöker (çıkış `3221225477`, hiçbir çıktı yazılmaz). `OPEN "d.txt" FOR OUTPUT AS #1`, `PRINT #1, 10`, `CLOSE #1`, `PRINT "tamam"` → AST, MIR, MIR-x64 `tamam`; eski AST-x64 çöker. `PRINT #1, n` (`I32` değişken), `PRINT #1, "a"; 5` ve metinden sonra `PRINT #1, 10` de çöker; metin sabiti, metin değişkeni, `STR(10)` ve ondalık sabit (`2.5`) yazan biçimler çalışır. `20261007` ve `20261014_0253`'te aynıdır. Kitap örneği `51_kv_dosya/dosya_toplam` bu yüzden çöker | Sayıyı metne çevirip yazın: `PRINT #1, STR(i * 10)` |
 | G-DOSYA-8 | S-536 · açık | eski AST-x64 | ≠ fark | `PRINT #n` satırları `LF` ile sonlandırır; öteki yollar `CR LF` yazar (kitap örneği `LOF` için "satır sonu CR+LF dahil" der). `OPEN "k.txt" FOR OUTPUT AS #1`, `PRINT #1, "abc"`, `CLOSE #1`, sonra `FOR INPUT` açıp `PRINT LOF(1)` → AST ve MIR-x64 `5`; eski AST-x64 `4`; iki satır (`"ab"`, `"cd"`) için `8` ve `6`. Aynı program iki yolda farklı bayt sayılı dosya üretir; başka programla paylaşılan metin dosyalarında satır sonu uyuşmaz. `20261007` ve `20261014_0253`'te aynıdır. Kitap örneği `11_io/lof` bu yüzden eski AST-x64'te `5` yerine `4` yazar | Dosya boyutuna ve satır sonu baytlarına dayanmayın; satırları `INPUT #` ile okuyun |
-| G-DOSYA-9 | S-548 · açık | dosya kanalları (altı yol) | ✖ eksik | `FREEFILE` yoktur: `DIM f AS I32 = FREEFILE` altı yolda `type: unknown symbol` ile reddedilir. Kanal numarasını değişkenle vermek çalışır (`OPEN … AS #f`), ama boş bir numara bulan işlev olmadığı için numaraları programcı kendisi dağıtmak zorundadır | Kanal numaralarını kendiniz dağıtın (`1`, `2`, …); aynı numarayı iki dosyada aynı anda kullanmayın |
-| G-DOSYA-10 | S-549 · açık | dosya kanalları (altı yol) | ✖ eksik | Tipli dosya tutamacı yoktur; kanal yalnız sayıdır. Sayıyı bir `I32` değişkenden (`OPEN … AS #f`), bir `TYPE` alanından (`AS #k.no`) ya da ifadeden (`AS #(1 + 1)`) vermek AST, MIR, x64 ve eski AST-x64'te çalışır, ama `DIM f AS FILE` `unknown type: FILE`, `DIM f AS FILE_HANDLE` bir ayrıştırma hatasıyla reddedilir (tasarımın 35 kanonik tipinden biri olan `FILE_HANDLE`, G-TIP-8); `#` işaretsiz tutamaç yazımı (`OPEN "x" FOR OUTPUT AS f`) ve `f = OPEN(…)` biçimi de yoktur. Mete (2026-10-15): kanal yerine bir değişken ya da `TYPE` ile tanımlı tutamaç verilebilmeli. JS ve WASM'da dosya işlemleri zaten çalışmaz (JS `host binding missing: OPEN`) | Kanal numarasını bir `I32` değişkende ya da `TYPE` alanında tutun |
+| G-DOSYA-9 | S-548 · açık (tasarım onaylı) | dosya kanalları (altı yol) | ✖ eksik | `FREEFILE` yoktur: `DIM f AS I32 = FREEFILE` altı yolda `type: unknown symbol` ile reddedilir. Kanal numarasını değişkenle vermek çalışır (`OPEN … AS #f`), ama boş bir numara bulan işlev olmadığı için numaraları programcı kendisi dağıtmak zorundadır. `FREEFILE` eklenmesi Mete tarafından onaylandı (2026-10-15), uygulanmadı | Kanal numaralarını kendiniz dağıtın (`1`, `2`, …); aynı numarayı iki dosyada aynı anda kullanmayın |
+| G-DOSYA-10 | S-549 · açık (tasarım onaylı) | dosya kanalları (altı yol) | ✖ eksik | Tipli dosya tutamacı yoktur; kanal yalnız sayıdır. Sayıyı bir `I32` değişkenden (`OPEN … AS #f`), bir `TYPE` alanından (`AS #k.no`) ya da ifadeden (`AS #(1 + 1)`) vermek AST, MIR, x64 ve eski AST-x64'te çalışır, ama `DIM f AS FILE` `unknown type: FILE`, `DIM f AS FILE_HANDLE` bir ayrıştırma hatasıyla reddedilir (tasarımın 35 kanonik tipinden biri olan `FILE_HANDLE`, G-TIP-8); `#` işaretsiz tutamaç yazımı (`OPEN "x" FOR OUTPUT AS f`) ve `f = OPEN(…)` biçimi de yoktur. Mete (2026-10-15): kanal yerine bir değişken ya da `TYPE` ile tanımlı tutamaç verilebilmeli; `FILE_HANDLE` tipi ve `OPEN … AS f` tasarımı onaylandı, uygulanmadı. JS ve WASM'da dosya işlemleri zaten çalışmaz (JS `host binding missing: OPEN`) | Kanal numarasını bir `I32` değişkende ya da `TYPE` alanında tutun |
 
 **Kütüphane tipleri**
 
@@ -15788,6 +16002,7 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-MODUL-5 | S-531 · açık | eski AST-x64 | ⚠ sessiz | `MODULE` içinde bildirilen değişkenin değeri okunamaz, adres benzeri bir sayı gelir; hata ve uyarı yoktur. `MODULE Depo` içinde `DIM adet AS I32`, `SUB Koy(n AS I32)` (`adet = n`) ve `FUNCTION Say() AS I32` (`RETURN adet`); `MAIN` içinde `Depo.Koy(10)` ve `PRINT Depo.Say()` → `140696778254814` (her çalıştırmada değişir; beklenen `10`). `DIM adet AS I32 = 5` başlangıç değeri de okunamaz (`0`); `+=` ile `=` aynıdır. Modül dışındaki genel değişken doğru çalışır. MIR-x64 `10` verir (kitap örneği AST ve MIR'de de geçer); `20261007` ve `20261014_0253`'te aynıdır. Kitap örneği `61_kv_modul/stok_moduller` `Depo: 7 parca` yerine `Depo: 140696700066439 parca` yazar | Eski AST-x64'te durumu modül değişkeniyle tutmayın; genel değişken kullanın |
 | G-MODUL-6 | S-539 · açık | AST | ◌ açık | **Gerileme:** AST'de `NAMESPACE`/`MODULE` içinde bildirilen **dizi** değişkenine dışarıdan nitelikli erişim (`ad.dizi(i)`) çalışmaz; skaler ve `STRING` çalışır. `NAMESPACE sayac`, `DIM kutu(3) AS I32`, `END NAMESPACE`, `sayac.kutu(2) = 7` → AST `exec: assign lhs must be ident, indexed array, or field` (çıkış 5); salt okuma `PRINT sayac.kutu(2)` `exec: namespace routine not found SAYAC_KUTU`; `MODULE` içinde aynıdır. `20261007` AST, MIR ve MIR-x64 `7` verir. S-480 Belirti A'nın (çok boyutlu dizi) kapanışı bu kalıbı kapsamadı; model testi `tests/task_sync/namespace_shared_vars` (AST) bu yüzden düşer. `20261013` 12:37'den `20261014_0253`'e kadar her derlemede vardır | Diziyi AST'de kullanmayın; programı MIR yorumlayıcıyla (`--interpreter-backend MIR`) ya da x64 ile çalıştırın |
 | G-MODUL-7 | S-541 · açık | AST, MIR, MIR-x64, JS | ◌ açık | `NAMESPACE`/`MODULE` içindeki bir işlevde, o ad alanının **dizi** elemanı doğrudan atama ya da `RETURN` kaynağı olunca anlam çözümleme elemanı `TYPE_OBJECT` sanar ve program derlenmez. `NAMESPACE sayac`, `DIM kutu(3) AS I32`, `FUNCTION Al() AS I32` içinde `RETURN kutu(1)` → dört yolda da `Semantic gate basarisiz: semantic-step3: return: type: assignment requires explicit cast TYPE_OBJECT to TYPE_I32`; `DIM v AS I32 = kutu(1)` de aynı nedenle derlenmez (`type: assignment requires explicit cast …`). `RETURN kutu(1) + 0` derlenir (MIR, MIR-x64, JS `0`; AST'de G-MODUL-6). Ad alanı dışındaki genel dizi (`RETURN g(1)`) ve ad alanı skaleri (`RETURN s`) doğrudur. `20261007` ve `20261014_0253`'te aynıdır | Dizi elemanını ifadeye sokun (`RETURN kutu(1) + 0`) ya da diziyi ad alanı dışında bildirin |
+| G-MODUL-8 | S-585 · açık | eski AST-x64 | ◌ açık | Eski AST-x64'te `NAMESPACE Ng … END NAMESPACE` içindeki `SUB` ve ardından `USING Ng` ile niteliksiz çağrı derlenmez («x64 build basarisiz: build_all.bat failed with exit code 1»); AST, MIR, x64, JS ve WASM `5` yazar. | Eski AST-x64 için ad uzayı kullanmayın ya da yordamı ad uzayı dışında tanımlayın |
 
 **Önişlemci (%% yönergeleri)**
 
@@ -15889,7 +16104,7 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 |---|---|---|---|---|---|
 | G-JS-1 | S-242 · açık | JS | ⚠ sessiz | `&H`, `&O`, `&B` sabitleri `undefined` yazdırır | Onluk sabit yazın |
 | G-JS-2 | S-243 · açık | JS | ⚠ sessiz | Bir yordamdan fırlatılan `THROW`, çağıranın `TRY`'ı tarafından yakalanmaz (beklenen `yakalandi`, çıktıda yok) | Hata yakalama isteyen programı yerel motorda çalıştırın |
-| G-JS-3 | S-244 · açık | JS | ⚠ sessiz | `INTERFACE` üzerinden çağrılan metot `nan` döndürür (beklenen 14) | Arayüzlü programları yerel motorda çalıştırın |
+| G-JS-3 | S-244 · ✔ kapandı | JS | ⚠ sessiz | `INTERFACE` üzerinden çağrılan metot `nan` döndürür (beklenen 14); asıl neden argümanların düşmesidir (G-JS-15, kaynakta düzeltildi: `arayuz_coklu` yeni ikilide JS'te `3` `10` yazar) | Arayüzlü programları yerel motorda çalıştırın |
 | G-JS-4 | S-245 · açık | JS | ⚠ sessiz | `I64`/`U64` değerler `Number`'a düşer: 9223372036854775807 → 9.223372036854776e+18; 18446744073709551615 → 1.844674407370955e+19 `PEEKQ`/`POKEQ` ile okunan 64 bitlik değerler de aynı biçimde bozulur (`0123456789ABCDEF` yazılır, `0123456789ABCDF0` okunur). | 2^53'ten büyük tamsayıları JS'te kullanmayın |
 | G-JS-5 | S-246 · açık | JS | ⚠ sessiz | `DICT`/`SET` sorgularında `TRUE` değeri -1 yerine `1` yazdırılır | `IF` ile denetleyin, değeri yazdırmayın |
 | G-JS-6 | S-247 · açık | JS | ⚠ sessiz | `INSTR(başlangıç, …)` başlangıç verilince 0 döner (beklenen 4) | JS'te başlangıçlı `INSTR` kullanmayın; yerel motorla karşılaştırın |
@@ -15899,14 +16114,17 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-JS-10 | S-343 · açık | JS | ◌ açık | `NATIVE` sınıflı `PEEK`/`POKE`/`MEMFILL`/`MEMCOPY` (ön ek ya da `AUTO` ile `PTR` kaynaklı) derlemede `NATIVE_ONLY_UNSUPPORTED_ON_JS` ile açıkça reddedilir; ama `VARPTR(x)` ve `SADD(s)` çağrısı derlemede reddedilmez, **yürütme anında** `UXB host binding missing: VARPTR` / `SADD` ile durur (çıkış kodu 1). `PTR(sayı) + n` yalnız sayı olarak çalışır | Sanal bellek (`VIRTUAL`) kullanın; `VARPTR` ve `SADD` çağıran bir programı JS'e göndermeyin |
 | G-JS-11 | S-363 · açık | JS (tarayıcı) | ✖ eksik | `uxb jsw --emit-browser` HTML kabuğuna `<pre id="uxb-console"></pre>` yazar ama hiçbir şey bu öğeye bağlanmaz: tarayıcıda PRINT satırları yalnız geliştirici konsoluna (`console.log`) gider, sayfa boş kalır. Üretilen giriş noktası ayrıca asenkrondur (`MAIN()` bir Promise döndürür) | Çıktıyı sayfaya almak için program.js'ten önce `uxb.console.setSink({ writeLine: … })` çağırın; bitişi beklemek için `uxb.autoRun = false` yapıp `uxbMain()` Promise'ini bekleyin (Bölüm 21.4) |
 | G-JS-12 | S-249 · açık | JS | ⚠ sessiz | Sınıf alanındaki `DICT` (kurucuda `DICT_NEW()` ile üretilmiş): iki `DICTSET` sonrası `DICTLEN` `1` (beklenen `2`), `DICTGET(d.kayit, "a")` `undefined` verir; AST, MIR ve x64 doğrudur | Nesne alanı olarak koleksiyon tutan programı JS'te çalıştırmayın |
-| G-JS-13 | S-412 · açık | JS | ⚠ sessiz | Bir `METHOD` içinde sınıf alanına yazmak (çıplak ad ya da `THIS.`) JS'te alanı bozar: `deger = deger + d` ya da `deger = d` sonrası okuma `nan`/`undefined` verir; yalnız kurucuda yazma ve dışarıdan `nesne.alan = …` çalışır (`banka_hesabi` ve `arayuz_coklu` örnekleri bu yüzden `nan` yazar; G-JS-3'ün asıl nedeni olabilir) | Durumu metotla değiştiren sınıfları JS'te çalıştırmayın |
+| G-JS-13 | S-412 · ✔ kapandı | JS | ⚠ sessiz | Parametreli bir `METHOD` JS'te parametresini göremez: metot içinde `deger = deger + d` sonrası okuma `nan`, parametreyi yazdırmak `undefined` verir (`banka_hesabi` ve `arayuz_coklu` örnekleri bu yüzden `nan` yazıyordu). Asıl neden alana yazmak değil, **argümanların çağrıda düşmesidir** (G-JS-15; kaynakta düzeltildi, ölçüm ikilisi `20261014_0253`'te geçerli); kurucuda yazma ve dışarıdan `nesne.alan = …` zaten çalışırdı | Parametreli metodu JS'te çağırmayın; değeri alan olarak dışarıdan yazın |
 | G-JS-14 | S-444 · ✔ kapandı | JS | ⚠ sessiz | **Yakalanmayan `THROW` ve başarısız `ASSERT` JS'te programı iletisiz ve başarı koduyla durdurur:** `PRINT "once"` sonra `THROW "hata"` ya da `ASSERT 1 = 2, "bozuk"` yazılırsa çıktı yalnız `once` olur, hata iletisi yazılmaz, çıkış kodu `0` kalır (sonraki satırlar çalışmaz). AST (çıkış 5), MIR (13) ve x64 (1) iletiyi yazıp sıfırdan farklı kodla çıkar. **Düzeltme (Codex, S-444; 20261013_1514 ve sonrası derlemeler):** yakalanmayan `THROW` ve başarısız `ASSERT` JS'te `uXBasic runtime error: kotu` / `uXBasic runtime error: ASSERT failed [line 2:1]` yazar ve çıkış kodu `1` olur (ölçüldü). Bir yordamdan fırlatılan `THROW`'un çağıranın `TRY`'ı ile yakalanması (G-JS-2) bu düzeltmeyle kapanmadı | Yakalanmayan `THROW` ve `ASSERT` JS'te `20261013_1514` ve sonrasında ileti yazar ve çıkış kodu `1` verir; eski ikililerde çıkış kodunu `0` sanmayın ve `ASSERT`'e güvenmeyin. Bir yordamdan fırlatılan `THROW` çağıranın `TRY`'ıyla yakalanmaz (G-JS-2): `THROW`'u kendi `TRY`'ında yakalayın |
+| G-JS-15 | S-571 · ✔ kapandı | JS (AST, MIR, x64, eski AST-x64 doğru) | ⚠ sessiz | JS'te bir `METHOD` çağrısında (doğrudan, sanal ya da `STATIC`) argümanlar çağrılana **ulaşmaz**; parametre `undefined` olur. `METHOD Art(d AS I32)` içinde `n = n + d`, `s1.n = 100`, `s1.Art(50)`, `PRINT s1.n` JS'te `nan` yazar (AST, MIR, x64, eski AST-x64: `150`); metot içinde `PRINT d` `undefined` yazar; sanal çağrı (`c.Scale(7)`) ve iki parametreli çağrı da aynıdır. Kitabın `banka_hesabi` ve `arayuz_coklu` örnekleri bu yüzden JS'te `nan` yazıyordu: G-JS-13 ve G-JS-3'ün asıl nedeni budur (o kayıtlardaki «metot içinde alana yazmak alanı bozar» yorumu yanlış kök nedendi). **Düzeltildi (kaynakta, 2026-10-16; ölçüm ikilisinde hâlâ geçerli).** | Parametreli metodu JS'te çağırmayın; değeri alan olarak dışarıdan yazıp metodu parametresiz çağırın |
+| G-JS-16 | S-573 · ✔ kapandı | JS (AST, x64, eski AST-x64 doğru) | ⚠ sessiz | JS'te boş (`NULL`) ya da `DELETE` edilmiş bir sınıf değişkeninden alan okumak hata vermez, `undefined` verir: `DELETE o` ardından `PRINT o.v` `undefined` yazar (AST ve x64 «field access on a null object reference» ile durur). Alan yazmak ve metot çağırmak JS'te de hata verirdi. **Düzeltildi (kaynakta, 2026-10-16).** | `DELETE`'ten sonra değişkeni kullanmayın |
+| G-JS-17 | S-598 · ✔ kapandı | JS (AST, MIR, x64, WASM, eski AST-x64 doğru) | ⚠ sessiz | JS'te bir sınıf nesnesinin hiç yazılmamış alanı `undefined` okunur: `CLASS Kutu` (`DIM v AS I32`, `DIM f AS F64`), `x = NEW Kutu()` ardından `PRINT x.v` `undefined`, `x.v = x.v + 1` sonrası `PRINT x.v` `nan` (AST, MIR, x64, eski AST-x64: `0` ve `1`; `f` için `0` ve `1.5`). Sayaç alanını kurucuda sıfırlamayan ve `n = n + 1` yazan her program JS'te `nan` üretir; çıkış kodu 0, ileti yok. Kurucusuz sınıf da boş kurucu da aynıdır. **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | Her alanı kurucuda açıkça başlatın |
 
 **WAT/WASM hedefi**
 
 | Kayıt | Sorun takip | Etkilenen | Tür | Ne olur? | Ne yapmalı? (geçici yol, sorunu çözmez) |
 |---|---|---|---|---|---|
-| G-WASM-1 | S-250 · açık | WASM | ⚠ sessiz | `NEW` ile oluşturulan nesnenin alanları `0` okunur (beklenen 33 / 66) | Nesne içeren programları yerel motorda çalıştırın |
+| G-WASM-1 | S-250 · ✔ kapandı | WASM | ⚠ sessiz | `NEW` ile oluşturulan nesnenin alanları `0` okunur (beklenen 33 / 66); kurucu argümanları, alan yazımı ve sanal çağrı argümanları da düşer (kök neden ve kaynakta düzeltme: G-WASM-26) | Nesne içeren programları yerel motorda çalıştırın |
 | G-WASM-2 | S-251 · açık | WASM | ⚠ sessiz | `PRINT a, b` virgül bölgesini uygulamaz, iki ayrı satır yazar | `;` kullanın |
 | G-WASM-3 | S-252 · açık | WASM | ⚠ sessiz | `DICT` ve `SET` boş satırlar ve `0` yazar | Koleksiyonları yerel motorda çalıştırın |
 | G-WASM-4 | S-253 · açık | WASM | ⚠ sessiz | `HEX`/`OCT`/`BIN` metin işlevleri boş ya da `0` üretir | `HEX`/`OCT`/`BIN`'i yerel motorda ya da JS'te kullanın |
@@ -15930,6 +16148,9 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-WASM-22 | S-514 · açık | WASM | ⚠ sessiz | `ROL` ve `ROR` (bit döndürme) WASM'da hiçbir tamsayı tipiyle çalışmaz, hep `0` verir; hata ve uyarı yoktur, çıkış 0. `DIM a AS U8 = 129` sonra `PRINT a ROL 1` → `0` (beklenen `3`), `PRINT a ROR 1` → `0` (beklenen `192`); `DIM i AS I32 = 20` sonra `PRINT i ROL 1` → `0` (beklenen `40`) ve `PRINT i ROR 1` → `0` (beklenen `10`); `U16` ve `U32` de `0` verir. 20261014_0253'te AST, MIR, MIR-x64 ve eski AST-x64 yolu `U8`, `U16`, `U32` ve `I32` için beklenen değerleri verir (G-ISLEC-1 kapanışı); JS de verir, ama `U64` değerlerinde sayı kesinliği biter (G-TIP-2). 20261007 ve 20261013_2224'te WASM `U8` için aynı `0` sonucunu verir | WASM'a gidecek programda `ROL`/`ROR` kullanmayın; `SHL`, `SHR` (yalnız `I32`) ve `OR` ile elle yazın ya da programı yerel x64 ya da JS ile çalıştırın |
 | G-WASM-23 | S-545 · açık | WASM | ⚠ sessiz | Tanımsız bir işlev ya da `SUB` çağrısı WASM'da derleme hatası vermez ve sessizce hiçbir şey yapmaz. `PRINT BuYokBoyleBirIslev(3)` `0` yazar, `BuYokSub(3)` çağrısı yok sayılır ve program devam eder (çıkış 0); yalnız `DECLARE` ile bildirilmiş ama hiç tanımlanmamış bir `FUNCTION` da `0` döndürür; yerleşik olmayan `ADDR(100, 2, 4, 8)` (G-HEDEF-1) de `0` yazar. Aynı programlar AST'de çalışma anında (`unsupported call`, çıkış 5), MIR'de çalışma anında (`runtime library service has no bound`, çıkış 13), x64'te derleme aşamasında, JS'te yürütmede (`UXB host binding missing`) ve eski AST-x64'te bağlama aşamasında (`build_all.bat failed`) durur (G-DIL-7) | WASM'a gidecek programda çağırdığınız her işlevin tanımlı olduğunu elle denetleyin; programı önce yerel motorda çalıştırın |
 | G-WASM-24 | S-563 · açık | WASM | ◌ açık | Tek başına duran onaltılık, ikili ya da sekizli sabit WASM'da derlenmez: `PRINT &H44`, `DIM a AS I32 = &B1010`, `PRINT &O17` ve `POKEB &H20, 7` `wat2wasm`'ın ham hatasıyla durur (`undefined local variable "$_H44"`); ifade içinde (`&h44 + 1`, `&b1010 + 1`) altı yolda doğru çalışır (`69`, `11`). JS'te aynı yerlerde `undefined` yazılır ya da `memory range out of bounds: NaN+1` ile durur (G-JS-1) | Sabiti ifade içine alın (örn. `&H44 + 0`) ya da onluk yazın |
+| G-WASM-25 | S-565 · açık | WASM | ⚠ sessiz | `CONST` adıyla ya da ifadesiyle sınırı verilen dizinin `UBOUND`'u, dizi başka yerde kullanılmıyorsa WASM'da hata vermeden `0` yazar: `CONST N = 6`, `DIM a(N) AS I32`, `PRINT UBOUND(a)` AST, MIR, JS ve eski AST-x64'te `6`, WASM'da `0` (aynı program diziye bir eleman yazıp okuyunca WASM `6` verir; sayısal sabit sınırda `DIM a(6)` her zaman `6`). MIR-x64 `CONST` adlı sınırı hiç derlemez (G-DIL-1). Ölçüm: `20261014_0253`, 2026-10-15 | WASM'a gidecek programda dizi sınırını sayısal sabitle yazın |
+| G-WASM-26 | S-575 · ✔ kapandı | WASM | ⚠ sessiz | WASM'da nesne alanları yazılamaz, kurucu argümanları ve sanal çağrı argümanları kaybolur (G-WASM-1'in kök nedeni): `NEW Kutu(3)` sonrası `PRINT k.v` `0`, `k.v = 5` sonrası yine `0`, iki parametreli kurucu `0 0`, `c.Scale(7)` (sanal çağrı) `0`. Çıkış kodu 0, hata yok. **Düzeltildi (kaynakta, 2026-10-16; ölçüm ikilisinde hâlâ geçerli).** | Nesne içeren programları yerel motorda çalıştırın |
+| G-WASM-27 | S-586 · ✔ kapandı | WASM | ◌ açık | `ME.Metot()` ve `SUPER.Metot()` WASM'da geçersiz WAT üretir (`local.get $ME`, `local.get $SUPER`); hata derleyicide değil `wat2wasm`'ın ham iletisinde görünür. `THIS.Metot()` ve niteliksiz çağrı etkilenmez. Altı yolun beşinde `SUPER.Metot()` çalışır (`15`). **Düzeltildi (kaynakta, 2026-10-16; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli).** | WASM'da `ME` ve `SUPER` yerine `THIS` ya da niteliksiz çağrı kullanın |
 
 **Başarım (hız)**
 
@@ -15938,6 +16159,7 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-HIZ-1 | S-371 · açık | AST, MIR | ◔ yavaş | Yorumlayıcılar yerel koddan çok yavaştır ve birbirlerinden de farklıdır. Basit bir `FOR` döngüsünde (`t += i * 2`) ölçülen hız (i7-10610U dizüstü, makine meşgulken): AST ≈ 0,1 ms/tur, MIR ≈ 1 ms/tur, x64 pratikte sınırsız; her çalıştırmanın başlatma maliyeti yaklaşık 1 sn | Uzun döngüleri x64'te çalıştırın; AST ve MIR'yi küçük sınamalar için kullanın |
 | G-HIZ-2 | S-372 · açık | AST, MIR | ◔ yavaş | Kütüphane (DLL) çağrıları yorumlayıcılarda pahalıdır: 100 çağrı AST'de ≈ 9 sn (çağrı başına ≈ 90 ms, her çağrı ayrıca FFI politika uyarısı yazar), MIR'de ≈ 0,25 sn, x64'te ≈ 0. AST'de bin çağrılık bir döngü dakikalar sürer | Çok sayıda DLL çağrısı yapan programları MIR ya da x64'te çalıştırın |
 | G-HIZ-3 | S-373 · açık | AST, MIR, x64 derleme | ◔ yavaş | Kütüphane başlığı yükleme süresi işlev sayısıyla orantılı artar. Boş programa göre ek süre: `uxjson` (16 işlev) ≈ +1 sn, `uxgsl` (59) ≈ +8 sn, `uxraylib` (175) ≈ +8 sn, `uxsdl3` (334 işlev ve 387 sabit) AST'de ≈ +27 sn, MIR'de ≈ +36 sn; x64 derlemede `uxgsl` ≈ +12 sn, `uxsdl3` ≈ +43 sn. Aynı programa çok sayıda büyük başlık eklemek süreyi dakikalara çıkarır (20 kütüphanelik bir sürüm yoklaması MIR'de 3 dakikayı aştı) | Yalnız kullanacağınız kütüphaneleri ekleyin; büyük başlıklı programları x64 olarak bir kez derleyin |
+| G-HIZ-4 | S-583 · ✔ kapandı | MIR | ◔ yavaş | MIR yorumlayıcısında nesne ayırma, nesne sayısıyla aşırı doğrusal yavaşlar: `FOR` ile N nesne yaratmak N=8000'de 4,8 sn, 16000'de 10,8 sn, 32000'de 24,7 sn, 64000'de 59,9 sn sürer (nesne başına 0,56 ms'den 1,1 ms'ye); AST aynı ölçekte doğrusaldır (64000 için 15,6 sn). Mutlak hız da düşüktür (≈ 1 000 ayırma/sn). **Düzeltildi (kaynakta, 2026-10-17; kılavuzun ölçüm ikilisi `20261014_0253`'te hâlâ geçerli):** boşta makinede 64 000 nesne 50,6 sn → 33,8 sn (−%33) ve nesne başına süre N'den bağımsız (≈ 0,53 ms), yani büyüme doğrusal; mutlak hız düşük kalır (MIR ≈ 1 900 ayırma/sn, AST ≈ 4 600/sn). | MIR'de çok sayıda küçük nesne yaratmak yerine dizi kullanın |
 
 **Yardımcı araçlar (uxclazz, uxbdll)**
 
@@ -15985,6 +16207,16 @@ SORUN_TAKIP'taki güncel durumlarına göre: açık **324**, ✔ kapandı **22**
 | G-HEDEF-28 | S-495 · açık | MIR, x64, JS, WASM | ✖ eksik | Tasarım (`docs/FP_EXTENSION_ROADMAP_AFTER_STAGE4.md`): `F80` korunur ve harici bir kayan nokta çalışma zamanıyla (`uxb_f80_from_str`, `uxb_f80_to_str`, `uxb_f80_add/sub/mul/div`, `uxb_f80_cmp`) birlikte çalışır; "F80/F128 değerleri yazmaçla döndürülmez, her işlem işaretçi üzerinden yapılır" ABI kuralı; `F128` 16 baytlık sabit çalışma zamanı; `BIGF` ve `BIGD` tutamaç tipleri ve duyarlık tipin parçasıdır (`DIM X AS BIGF(256)`, `BIGD(80)`); uzun hassas sabit için `{3.14159…}` ham sayı sabiti (`"…"` metindir, sayı değil; `BIGF("3.1415")` isteğe bağlı kurucudur); terfi matrisi: `BIGF op tamsayı → BIGF`, `BIGD op tamsayı → BIGD`, `F128 op tamsayı → F128`, `F80 op tamsayı → F80`, `BIGF op F64/F80/F128 → BIGF`, `BIGD op ikili kayan nokta` için açık dönüşüm önerilir, `BIGF op BIGD` için zorunludur; açık dönüşüm işlevleri `TO_BIGF()`, `TO_BIGD()`, `TO_F128()`; `BALL` (aralık aritmetiği) en son aşamadır. Bugün (20261007 ikilisi): `DIM xx AS BIGF(256)` AST'de kabul edilir, MIR ve x64 "mir: DIM array element layout failed: unknown type: BIGF(256)" ile derlemeyi bırakır (ileti dizi gibi konuşur); `xx = {3.14…}` her motorda "Lexer diagnostic bridge hata buldu: 2" (çıkış 2); `TO_BIGF(a)` "assignment requires explicit cast TYPE_OBJECT to TYPE_BIGF" ile reddedilir (işlev yoktur); `F80` toplama yalnız AST'de (MIR ve x64 "F80 arithmetic not supported", G-TIP-12); `F128` ondalık atama MIR ve x64'te `1.5` → `1` (G-TIP-10); `BIGF("3.1415")` AST'de yüzlerce basamaklı bir dize yazdırır (`3.1415000…009`) | Geniş duyarlık gereken hesabı AST'de `BIGINIT`/`BIGF("metin")` kurucularıyla yapın; başka motorlarda `F64` kullanın |
 | G-HEDEF-29 | S-496 · açık | AST, MIR, x64 | ✖ eksik | Kütüphane yol haritalarında (`docs/UX*_ROADMAP.md`, 2026-05-25) "sonraki paket" diye yazılıp kütüphanelerde bulunmayan kalemler: `uxnn`/`uxnn2`/`uxnn3`/`uxaimath` için RMSProp, evrişim ve yinelemeli katmanlar, gradyan birikimi, eğitim geri çağrıları, karışıklık matrisi ve sınıflandırma raporu, ONNX dışa/içe aktarma (`uxnn3` yalnız `OPT_SGD = 1` ve `OPT_MOMENTUM = 2` bilir, Adam yalnız `uxnn2`'dedir; eğitim kaybı MSE'dir); `uxdataframe` için Arrow C Data köprüsü, `uxtensor` ile sıfır kopya köprü, doğrudan `uxdataset` dönüştürme, veri temizleme ve kategorik / one-hot kodlayıcı (`ToF64Matrix` **kopyalar**); `uxonnx`/`uxonnx2` için dinamik şekil yardımcısı, dizi ve harita çıktıları, belirteç çözücü (HuggingFace JSON / sentencepiece), görüntü ön işleme, G/Ç bağlama ve sabitlenmiş bellek, model üstverisi / işleç listesi dışa aktarımı; `uxllamax` için doğrudan llama.cpp API köprüsü, akış ve belirteç geri çağrıları, gömme, durum kaydet/yükle, KV önbellek, toplu istem, dilbilgisi kısıtlı çözümleme, LoRA, sohbet şablonu, GPU sağlayıcıları, yerel sunucu, örnekleme önayarları, model üstverisi (`uxllamax` bugün `uxllama` ile aynı işlevleri taşır: 18 işlev, hepsi komut satırı köprüsü); `uxmatrix`/`uxtensor` için SuiteSparse / UMFPACK seyrek matris, MPFR / MPLAPACK yüksek duyarlıklı matris ve isteğe bağlı `uxggml`. Yol haritalarında geçen `uxai`, `uxnum`, `uxpoly`, `uxml` ve `uxllm` adlı kütüphaneler yoktur (sinir ağı işleri `uxnn*`, polinom işleri `uxmath` içindedir) | Gereken özellik yukarıdaki listedeyse kendi `CALL(DLL, …)` sarmalayıcınızı yazın ya da kütüphanenin bugünkü işlev listesiyle (Bölüm 20.2) yetinin |
 | G-HEDEF-30 | S-522 · açık | üç motor + JS + WASM | ✖ eksik | Tasarım (`docs/tasarim/UXB_GENEL_VERI_TIPI_VERI_YAPISI_VE_BIRINCI_SINIF_KUTUPHANE_TIPI_SISTEMI_20261014_TR.md`, 2026-10-14; belge "tasarım kararı ve uygulama planı"dır, uygulama iddiası değildir): primitive, kayıt, dizi, koleksiyon, sınıf, handle ve kütüphane tiplerinin **tek bir `TypeDescriptor v2` sözleşmesinden** geçmesi (`TypeIdentity`: ad alanı, paket, sürüm ve ABI sürümüyle çözülen kararlı kimlik; `SemanticCategory`; `StorageDescriptor` ve `LayoutId`); canonical MIR'in `typeId`, `layoutId`, sahiplik ve sağlayıcı üstverisi taşıması; tipli bellek başvurusunun (`MemoryRef` ailesi, gelecekte `PTR TO T`) ham `PTR`den ayrı olması; yönetilen değerlerin ham `MEMCOPY` ile kopyalanamaması; `STRING` için kanonik UTF-8 tanımlayıcısı (`LEN` kod noktası, `BYTELEN` bayt; G-HEDEF-23, G-HEDEF-24); `TASK OF T` statik sonuç tipi; sürüm/bağımlılık çözücüsü ve hedef sağlayıcı seçimi; Component Model ya da standart dış ABI adaptörü; altı motorda aynı çıktı ve tanı matrisi. Bugün: belge kodu "uygulanmış temel" (TypeKind ve tip kuralları, kayıt tipi yerleşimi ve C ABI, `STRING` MIR yüzeyi, kütüphane manifesti, sağlayıcı kayıt defteri, işlem sağlayıcı kapısı B4.1, yaşam döngüsü indirgemesi B3, WASM bellek yardımcıları) ve "kısmen uygulanmış" (UTF-8 tanımlayıcı ve `BYTELEN`, TypeDescriptor v2, StorageDescriptor ve MemoryRef, JS ve WASM doğrusal bellek dizi ve kütüphane değer sağlayıcıları, `TASK OF T`) diye ayırır; **birleşik tip tanımlayıcısı, birleşik depolama tanımlayıcısı ve MIR tip üstverisi yoktur**. Yetenek üstverisi kapısı (B4.2) kaynakta uygulanmıştır ama bu kılavuzun referans ikilisinde (`20261014_0253`, 02:53) ölçülmedi. Gerçek sağlayıcı yalnız MIR için vardır; `RATIONAL` yalnız MIR'de çalışır, öteki beş yol ortak kodla reddeder (Bölüm 19.2) | Bu bir tasarım hedefidir, geçici çözüm yoktur; bugünkü sınırlar için Bölüm 19.6 ve G-HEDEF-13, G-HEDEF-14, G-HEDEF-23, G-HEDEF-24'e bakın; kendi tipinizi sınıf + `MAGIC` ile yazın (Bölüm 19.5) |
+| G-HEDEF-31 | S-574 · açık | AST, MIR, x64, eski AST-x64, JS, WASM | ✖ eksik | Tasarım (OOP planı §9; Mete'nin tasarım konuşması: «`DELETE k` sonrası `k = NOTHING`»; denetim K-01, K-02, K-10): nesne yaşam döngüsü tek sözleşmedir: `DELETE` değişkeni `NOTHING` yapar, yıkıcı **gerçek nesne türüne göre** türetilmişten tabana **bir kez** çalışır, nesne ölü işaretlenir ve ölü nesneye erişim (hangi takma adla olursa olsun) her motorda aynı hatadır; boş ya da ölü hedefe `DELETE` hiçbir şey yapmaz. Bugün `DELETE x` MIR tabanlı motorlarda `[bildirilen türün yıkıcı zinciri] + x = 0` olarak indirgenir (`mir_lower_stmt_core_split.fbs`): taban tipli değişkenle `DELETE` türetilmiş yıkıcıyı atlar (AST dışında beş yol; S-486), ikinci `DELETE` yıkıcıyı yeniden çalıştırır (MIR, x64, JS, WASM; S-473), takma ad ölü nesneyi okur (altı yol; S-472), programın sonunda yalnız AST yıkıcı çalıştırır (S-473). `MIR_DELETE_OBJECT`, `ux.objectDelete` ve WASM host 95 yazılıdır ama lowering onları hiç üretmez; nesnede canlılık bayrağı yoktur. | `DELETE` ettiğiniz nesneyi başka değişkenle de tutmayın; taban tipli değişkenle `DELETE` etmeyin |
+| G-HEDEF-32 | S-587 · açık (tasarım onaylı) | altı yol | ✖ eksik | Tasarım (`docs/tasarim/UXB OPP SISTEMI TASARIM VE TARTISMALARI.md`, eksik standart özellikler; denetim K-02): tür sınama `nesne IS Sınıf` ve denetimli dönüştürme `nesne AS Sınıf` (başarısız daraltma sessiz sıfır üretmez). Bugün `IF s IS Kare THEN` ayrıştırma hatasıdır («missing THEN near KEYWORD('IS')»); `INSTANCEOF(nesne, Sinif)` yalnız AST'de çalışır (G-NESNE-36). | Tür sınamasını yalnız AST'de `INSTANCEOF` ile yapın; başka motorda sanal bir `Tur()` metodu yazın |
+| G-HEDEF-33 | S-588 · açık (tasarım onaylı) | altı yol | ✖ eksik | Tasarım (`docs/tasarim/UXB OPP SISTEMI TASARIM VE TARTISMALARI.md`, desen eşleme): `SELECT CASE s … CASE IS k AS Sekil … CASE NOTHING`. Bugün «CASE IS: relational operator expected near IDENT('k')»; `CASE IS` yalnız karşılaştırma işleci ister. | `IF s IS …` zinciri değil, sanal metot ya da `INSTANCEOF` (yalnız AST) kullanın |
+| G-HEDEF-34 | S-589 · açık (tasarım onaylı) | altı yol | ✖ eksik | Tasarım (`docs/tasarim/UXB OPP SISTEMI TASARIM VE TARTISMALARI.md`, `USING`/RAII): `USING f AS Akis = NEW Akis() … END USING` kapsam bitince yıkıcıyı garanti eder. Bugün `USING` **ad uzayı içe aktarımıdır** (`USING Ng`; eski AST-x64 hariç beş yolda çalışır) ve blok biçimi «USING: unexpected trailing tokens near KEYWORD('AS')» ile reddedilir. Aynı sözcüğün iki anlamı vardır; ayırt edici `AS` yeterlidir ama okunurluk için ayrı sözcük (`SCOPE`, `GUARD`) düşünülebilir. | Kaynağı elle `DELETE` edin; hata durumunda `TRY … FINALLY` içinde `DELETE` yazın |
+| G-HEDEF-35 | S-590 · karar bekliyor | altı yol | ✖ eksik | Tasarım önerisi (`docs/tasarim/UXB OPP SISTEMI TASARIM VE TARTISMALARI.md`, deneysel): yapısal arayüz, yani `IMPLEMENTS` yazmadan, yalnız metotları uyan sınıfın arayüz tipli parametreye verilebilmesi. Bugün bu program derleme kapısından geçer ama altı yolda farklı çalışır (S-577). Önerilen varsayılan: bugün **nominal** denetim (S-577); yapısal arayüz Mete onaylarsa ayrı sürümde. | `IMPLEMENTS Arayuz` yazın |
+| G-HEDEF-36 | S-591 · karar bekliyor | altı yol | ✖ eksik | Tasarım önerisi (`docs/tasarim/UXB OPP SISTEMI TASARIM VE TARTISMALARI.md`, deneysel): `ACTOR CLASS` (nesne durumu tek görevde, yöntemler mesaj olarak). Bugün «CALL: missing ( after actor» ile reddedilir; `UXClazz` aracı `CLAZZ ACTOR` için yalnız `CLASS` + üstveri üretir, görev yalıtımı ve posta kutusu yoktur (G-ARAC-3; denetim K-08). | Görev + `LOCK`/`MUTEX` ile elle yazın |
+| G-HEDEF-37 | S-592 · karar bekliyor | altı yol | ✖ eksik | Tasarım önerisi (`docs/tasarim/UXB OPP SISTEMI TASARIM VE TARTISMALARI.md`, deneysel): `CLASS DATA_PARALLEL` (alanları ayrı diziler olarak, SoA, tutan sınıf). Bugün «CLASS: missing AS in field declaration» ile reddedilir. Yerleşim ve `MemoryRef` ile etkileşim ister (G-HEDEF-1, S-056). | Alanları ayrı dizilerde tutun |
+| G-HEDEF-38 | S-593 · karar bekliyor | altı yol | ✖ eksik | Tasarım önerisi (`docs/tasarim/UXB OPP SISTEMI TASARIM VE TARTISMALARI.md`, deneysel): sahiplik açıklamaları `OWNED` / `BORROWED` parametreler (nesneyi kimin yıkacağı). Bugün `SUB Isle(BORROWED n AS Nokta)` «missing ) in signature» ile reddedilir. Yaşam döngüsü (S-574) ve `MemoryRef` kararlarına bağlıdır. | Sahipliği yorumda ve adlandırmada belirtin |
+| G-HEDEF-39 | S-594 · açık (tasarım onaylı) | altı yol | ✖ eksik | Tasarım (`docs/tasarim/UXB OPP SISTEMI TASARIM VE TARTISMALARI.md`, karışımlar): `MIXIN Ad … END MIXIN` bloğu, başlıkta `CLASS Rapor EXTENDS Belge MIXIN Yazdirilabilir, Kaydedilebilir`, durum taşıyan karışım (`PRIVATE DIM`). Bugün yalnız sınıf gövdesinde tek `MIXIN Sinif` çalışır (altı yolda); blok biçimi «CALL: missing (», iki karışım «CLASS supports at most one MIXIN in this phase», `EXTENDS` ile birlikte «MIXIN currently supports single-base model». Başlıkta `MIXIN` ayrıştırılır ama aynı sınırlara takılır. | Ortak davranışı bir sınıfta yazıp `EXTENDS` ile tek taban olarak kullanın |
+| G-HEDEF-40 | S-595 · açık (tasarım onaylı) | altı yol | ✖ eksik | Tasarım (`docs/tasarim/UXB_S555_COKLU_KALITIM_B_VE_CAKISMA_DENETIMI_20261016_TR.md`, Mete'nin 2026-10-16 fikri): iki tabandan gelen aynı adlı üyenin sessizce birleştirilmesi yerine derleme hatası `UXB_AMBIGUOUS_MEMBER` ve çözüm cümleleri `PREFER Taban.Uye`, `RENAME Taban.Uye AS Ad`, `EXCLUDE Taban.Uye` ile `OVERRIDE`; `SUPER[Taban].Metot()` ve `SUPER[Taban](...)`. Bugün `EXTENDS A, B` «CLASS: field identifier expected near OP(',')» ve `SUPER[A].F()` «statement parse failed near OP('[')» ile altı yolda reddedilir. | Tek `EXTENDS` ve `IMPLEMENTS` kullanın |
 
 **Belge ve örnek projeler**
 
@@ -16093,6 +16325,12 @@ Bu kılavuz, `docs/tasarim` altındaki belgelerin **hedef sözleşmesini** bugü
 | `UXB_S502_F32_ARRAY_DIRECT_20261014_TR.md`, `UXB_S503_F32_STORAGE_20261014_TR.md`, `UXB_S510_S511_S512_F32_DEGER_PARITESI_20261014_TR.md` | `F32` dizi okuma, saklama yuvarlaması ve değer paritesi sözleşmesi | 4.3 (G-TIP-13 … G-TIP-27) |
 | `UXB_S508_FIX_TYPE_20261014_TR.md` | `FIX(x)` statik tür kuralı | 4.7 (G-TIP-18) |
 | `UXB_S464_BOTH_KARSILASTIRMA_KAPISI_20261014_TR.md` | `--interpreter-backend BOTH` karşılaştırma kapısı (`UXB_INTERPRETER_COMPARE_MISMATCH`, çıkış 25) | 2 (CLI), 1.6 |
+| `UXB_S550_S551_DATA_READ_RESTORE_VE_VERI_SABITLERI_20261015_TR.md` | Etiketli `DATA` / `READ` / `RESTORE` (BASIC tarzı) ve Python tarzı veri sabitleri (dizi, `LIST`, `DICT`, `SET`); Mete'nin 2026-10-15 kararı, tasarım onaylı, uygulanmadı | 10.5 (G-VERI-14, G-VERI-15) |
+| `UXB_S544_S549_S564_DECLARE_DOSYA_TUTAMACI_NULL_20261015_TR.md` | Sıkı `DECLARE` kuralı, `FILE_HANDLE` ve `FREEFILE`, `NULL` / `NOTHING`; `NONE` / `NODE` eklenmez; çoklu kalıtım son onay bekliyor | 8.5, 13.2, 4.4, 11.12 (G-YORDAM-9, G-DOSYA-9, G-DOSYA-10, G-TIP-30, G-TIP-31) |
+| `UXB OPP SISTEMI TASARIM VE TARTISMALARI.md` | Mete'nin OOP tasarım konuşması: çoklu kalıtım, `THIS` / `ME` / `SUPER[Taban]`, karışımlar, motorlara indirgeme, eksik ve deneysel özellikler | 11.13 (G-HEDEF-31 … G-HEDEF-40) |
+| `uXBasic_OOP_Tam_Sistem_Denetimi_2026-10-16.md` | OOP kaynak denetimi (K-01 … K-12, P0 … P3); her bulgu altı yolda denendi, sonuç 11.13.1'de | 11.13 (G-NESNE-37, G-JS-15, G-JS-16, G-WASM-26, G-TIP-32, G-HIZ-4) |
+| `UXB_S555_COKLU_KALITIM_B_VE_CAKISMA_DENETIMI_20261016_TR.md` | Çoklu kalıtım (B), çakışma çözüm cümleleri, tanı kodları, aşamalar M0 … M3, kabul testleri T1 … T20 | 11.12, 11.13 (G-NESNE-30, G-HEDEF-40) |
+| `ai_koordinasyon/OOP_DUZELTME_PLANI_20261016.md` | OOP düzeltme planı: bulguların doğrulanması, iş paketleri F1 … P4, bu turda yapılan düzeltmeler | 11.13 |
 
 ## Ek J. Sorunların düzeltme sırası
 

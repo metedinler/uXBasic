@@ -85,9 +85,9 @@ DECLARE PARALEL Toplu(bas AS I32, say AS I32) AS I32
 |---|---|
 | `DECLARE THREAD/EVENT/PIPE/PARALEL` | ◇ HEDEF: çözümleyici açıkça reddeder (`DECLARE: expected SUB or FUNCTION near KEYWORD('THREAD')`) |
 | `DECLARE FUNCTION` / `DECLARE SUB` | ✔ (Bölüm 8.5) |
-| Görevi **tanımdan önce** kullanmak (`SPAWN Kare(6)` satırı `THREAD Kare` tanımından önce) | ✔ AST, MIR, x64: DECLARE yazmadan da çalışır, çünkü derleyici görev adlarını önceden toplar |
+| Görevi **tanımdan önce** kullanmak (`SPAWN Kare(6)` satırı `THREAD Kare` tanımından önce) | ✔ AST, MIR, x64: DECLARE yazmadan da çalışır, çünkü derleyici görev adlarını önceden toplar (Mete'nin sıkı `DECLARE` kuralı görevlere de uygulanacaktır: ◇ HEDEF, S-544 ve S-395) |
 
-> **Aynı kural `SUB` ve `FUNCTION` için de istenmiştir** (Mete, 2026-10-15): ileri kullanımdan önce `DECLARE`. Görev yapılarının `DECLARE` biçimi G-HEDEF-5, `SUB`/`FUNCTION` için denetimin eksikliği G-YORDAM-9 olarak kayıtlıdır (Bölüm 8.5). Ölçüm (`20261014_0253`): `THREAD` ve `PARALEL` tanımdan önce `SPAWN` ile, `EVENT` ve `PIPE` tanımdan önce `TRIGGER` ile AST, MIR ve x64'te `DECLARE`siz çalışır (`25`, `5`, `7`, `8`); `DECLARE THREAD`, `EVENT`, `PIPE`, `PARALEL` ve `SLOT` altı yolda ayrıştırma hatasıyla reddedilir; `TRIGGER` ile SLOT adı (`TRIGGER Kaydet, 4`) altı yolda `TRIGGER hedefi bulunamadi` ile reddedilir.
+> **Aynı kural `SUB` ve `FUNCTION` için de geçerlidir ve sıkıdır** (Mete, 2026-10-15): ileri kullanımdan önce `DECLARE`, aksi derleme hatası. Görev yapılarının `DECLARE` biçimi G-HEDEF-5 (S-395, kuralın ön koşulu), `SUB`/`FUNCTION` için denetimin eksikliği G-YORDAM-9 (S-544, karar verildi) olarak kayıtlıdır (Bölüm 8.5). Ölçüm (`20261014_0253`): `THREAD` ve `PARALEL` tanımdan önce `SPAWN` ile, `EVENT` ve `PIPE` tanımdan önce `TRIGGER` ile AST, MIR ve x64'te `DECLARE`siz çalışır (`25`, `5`, `7`, `8`); `DECLARE THREAD`, `EVENT`, `PIPE`, `PARALEL` ve `SLOT` altı yolda ayrıştırma hatasıyla reddedilir; `TRIGGER` ile SLOT adı (`TRIGGER Kaydet, 4`) altı yolda `TRIGGER hedefi bulunamadi` ile reddedilir.
 
 ## 15.4 Nerede yazılır? İç içe ve özyinelemeli kullanım
 
@@ -323,7 +323,7 @@ JS'te Worker havuzu, WASM'da iş parçacığı ya da konak işçileri, `SharedAr
 * **Ortak veride en dar aracı seçin** (15.7): tek deyimlik erişim otomatik senkron; birden çok deyim → `LOCK a, b`; sayaç → `ATOMIC`; dış kaynak ya da kendi kritik bölgeniz → `MUTEX`. Bir kilidi tutarken, o veriye dokunan görevi `JOIN` ile beklemeyin (`LOCK_DEADLOCK`) ve içte aynı kilidi tekrar almayın (`SELF_DEADLOCK`).
 * Özyinelemeli görevde **eşik koyun** (`IF n < 12 THEN` sıradan işlev): her `SPAWN` yeni bir görev kaydı açar. İşçi sayısı `--task-workers N` ya da `UXB_TASK_WORKERS` ile ayarlanır.
 * Görev parametreleri değerle geçer (`BYREF` yoktur); görev gövdesinde `END` yazmayın, `RETURN` ya da `THROW` ile bitirin. `LIST`, `DICT`, `PTR`, `CLASS` değerlerini görev sınırından geçirmeyin; sayı ve metinle çalışın.
-* Görevleri `DECLARE` ile bildirmeniz gerekmez (`DECLARE THREAD …` henüz yoktur, 15.3): derleyici görev adlarını önceden toplar, tanımdan önce `SPAWN` edebilirsiniz.
+* Görevleri bugün `DECLARE` ile bildirmeniz gerekmez (`DECLARE THREAD …` henüz yoktur, 15.3): derleyici görev adlarını önceden toplar, tanımdan önce `SPAWN` edebilirsiniz. Mete'nin sıkı `DECLARE` kuralı (Bölüm 8.5) görevlere de uygulanacaktır (◇ HEDEF).
 * `SLOT` numarasını bir kez kullanın (G-GOREV-4) ve `OFF` başlangıç durumuna güvenmeyin (G-GOREV-5). Bir `EVENT`'e birden çok SLOT bağlayıp hepsinin çalışmasını beklemeyin (G-GOREV-11); her işleyiciyi ayrı `TRIGGER` ile çalıştırın.
 * `ERRORTEXT` metnini tam eşitlikle sınamayın, içeriğini arayın (`INSTR`, G-GOREV-9).
 * **Eşzamanlı programı JS ya da WASM hedefine derlemeyin**: görev yapıları orada çalışmaz (G-GOREV-6, G-GOREV-7). Eşzamanlı işi x64'te çalıştırın.

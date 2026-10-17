@@ -90,6 +90,11 @@ BULUNDU = {  # sonradan bulunanlar
     "G-DIL-18": "2026-10-15",
     "G-WASM-24": "2026-10-15",
     "G-TIP-31": "2026-10-15",
+    "G-AKIS-6": "2026-10-15",
+    "G-AKIS-7": "2026-10-15",
+    "G-WASM-25": "2026-10-15",
+    "G-VERI-18": "2026-10-15",
+    "G-KOLEKSIYON-7": "2026-10-15",
 }
 DENENEN_VARSAYILAN = "bin\\uxb_kilavuz_20261007.exe"
 DENENEN = {  # kaydın bulunduğu ikili, varsayılandan farklıysa
@@ -125,6 +130,11 @@ DENENEN = {  # kaydın bulunduğu ikili, varsayılandan farklıysa
     "G-DIL-18": "bin\\uxb_kilavuz_20261014_0253.exe (altı yol; soru partisi 2026-10-15)",
     "G-WASM-24": "bin\\uxb_kilavuz_20261014_0253.exe (altı yol; soru partisi 2026-10-15)",
     "G-TIP-31": "bin\\uxb_kilavuz_20261014_0253.exe (altı yol; soru partisi 2026-10-15)",
+    "G-AKIS-6": "bin\\uxb_kilavuz_20261014_0253.exe (altı yol; karar turu yoklaması 2026-10-15)",
+    "G-AKIS-7": "bin\\uxb_kilavuz_20261014_0253.exe (altı yol; karar turu yoklaması 2026-10-15)",
+    "G-WASM-25": "bin\\uxb_kilavuz_20261014_0253.exe (altı yol; karar turu yoklaması 2026-10-15)",
+    "G-VERI-18": "bin\\uxb_kilavuz_20261014_0253.exe (altı yol; karar turu yoklaması 2026-10-15)",
+    "G-KOLEKSIYON-7": "bin\\uxb_kilavuz_20261014_0253.exe (altı yol; karar turu yoklaması 2026-10-15)",
 }
 KIMLIK = re.compile(r"G-([A-ZÇĞİÖŞÜ]+)-(\d+)")
 
@@ -244,6 +254,7 @@ ILGILI = {
     "G-TIP-29": ["S-437"],
     "G-TIP-30": ["S-386"],
     "G-VERI-15": ["S-394"],
+    "G-WASM-25": ["S-326"],
 }
 
 

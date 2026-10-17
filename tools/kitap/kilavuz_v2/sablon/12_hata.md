@@ -169,9 +169,9 @@ Aşağıdaki tablo, hatalı bir işlemin her motorda gerçekte ne yaptığını 
 | `EXP(1000)`, `1E308 * 10` | `inf` | `inf` | `inf` | `inf` | tutarlı |
 | Dizi sınır dışı okuma, yazma, negatif indeks | hata | hata | hata (1) | ✖ okuma `0`; yazma yok sayılır | G-HATA-6 |
 | `LISTGET` sınır dışı, `DICTGET` olmayan anahtar | hata | hata | hata | ✖ `undefined` | G-HATA-6 |
-| Boş nesne: metot çağrısı, alan yazma | hata | hata | hata | hata (`callMethod`/`fieldStore target is missing`) | — |
+| Boş nesne: metot çağrısı, alan yazma | hata | hata | hata | hata (`callMethod`/`fieldStore target is missing`; yeni ikilide ek olarak `fieldLoad`) | — |
 | Boş nesne: alan okuma | hata | hata | hata | ✖ `undefined` | G-HATA-6 |
-| `DELETE o` sonrası `o.v` okuma | hata | ✖ eski değer (`3`) | hata | ✖ `undefined` | G-NESNE-20 |
+| `DELETE o` sonrası `o.v` okuma | hata | ✖ eski değer (`3`) ya da başka nesnenin alanı (G-NESNE-37) | hata | ✖ `undefined` (G-JS-16) | G-NESNE-20 |
 | Olmayan dosyayı `OPEN … FOR INPUT` | durur (2; ham FreeBASIC iletisi) | durur (13) | ✖ sessizce devam (`EOF` `-1`) | ◌ `host binding missing: OPEN` | G-DOSYA-5, G-JS-7 |
 | `VAL("abc")` | `0` | `0` | `0` | `nan` | G-METIN-5 |
 | `ASC(CHR(300))` | hata | `44` | `44` | `300` | G-METIN-5 |
@@ -198,7 +198,7 @@ Aşağıdaki tablo, hatalı bir işlemin her motorda gerçekte ne yaptığını 
 * **Çalışma anı hatalarını (sıfıra bölme, dizi sınırı, boş nesne) `TRY` ile yakalamaya güvenmeyin**: yalnız AST yakalar (G-HATA-2). `IF b <> 0`, `LBOUND`/`UBOUND` ve nesnenin atandığına bakan denetimleri **önceden** yazın.
 * **JS'e gidecek programda bu denetimler zorunludur:** JS tamsayı sıfıra bölmede `inf`, sınır dışı okumada `0` ya da `undefined` verip **hata vermeden devam eder** (G-HATA-6, G-HATA-8); x64 ise tamsayı sıfıra bölmede iletisiz durur (G-HATA-9). Betiklerde çıkış kodunun sıfır olmasına bakın, ileti metnine değil (G-HATA-7).
 * Ondalık işlemlerde (`SQR`, `LOG`, `/`) alan dışı girdiyi önceden eleyin: AST ve MIR durur, x64 ve JS `nan`/`inf` yazıp devam eder (G-HATA-5); sonucu `nan`/`inf` için de denetleyin.
-* Dosya açmadan önce varlığını `uxfs.FileExists` ile sınayın: x64 olmayan dosyayı sessizce açmış gibi davranır (G-DOSYA-5). `DELETE`'ten sonra nesneyi okumayın: MIR eski değeri verir (G-NESNE-20).
+* Dosya açmadan önce varlığını `uxfs.FileExists` ile sınayın: x64 olmayan dosyayı sessizce açmış gibi davranır (G-DOSYA-5). `DELETE`'ten sonra nesneyi okumayın: MIR eski değeri ya da başka bir nesnenin alanını verir (G-NESNE-20, G-NESNE-37).
 * Her yordam yalnız bir iş yapsın ve önkoşullarını başında `ASSERT` ile belirtsin; kaynak açan yordamda temizliği `FINALLY` içine koyun.
 * Programda `ASSERT` ya da `TRY` varsa ve x64'e derleyecekseniz **dizileri yordamın en başında bildirin** (G-DIL-10).
 * Sessizce kabul edilen hataları (12.5) kendiniz denetleyin: her yolun `RETURN` ile bittiğine, argüman tiplerinin uyduğuna ve aynı adın iki kez `DIM` edilmediğine bakın.

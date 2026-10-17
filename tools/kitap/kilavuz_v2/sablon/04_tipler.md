@@ -171,9 +171,20 @@ tip adı olarak **kullanılamaz** (`unknown type: … [canonical=…]`, G-TIP-8)
 | `OBJECT` | ✔ kabul edilir (`DIM x AS OBJECT`) | Koleksiyon işlevlerinin dönüş tipi (Bölüm 10.5) |
 | `ANY`, `VARIANT`, `VOID` | ✖ `unknown type` | İç tip olarak var, yüzeyden reddedilir (G-TIP-8) |
 | `FILE_HANDLE`, `FUNCTION_PTR`, `DLL_HANDLE`, `JS_OBJECT`, `WASM_EXTERNREF` | ✖ reddedilir | Tasarımın 35 kanonik tipindendir (G-TIP-8) |
-| `NONE`, `NODE` | ✖ `unknown type` | **İç karşılığı da yoktur**; tasarımın 35 tipinde de yoktur. `NONE` yalnız seçenek adı olarak geçer (yıkım kipi, çağrı sözleşmesi sınıfı). Karar bekleniyor (G-TIP-30) |
-| `NULL`, `NOTHING`, `NIL` | ✖ `unknown symbol` | Boş değer sabiti yoktur; MIR indirgeyicisinde kod var, anlam kapısı tanımıyor (G-TIP-31) |
+| `NONE`, `NODE` | ✖ `unknown type` | **İç karşılığı da yoktur**; tasarımın 35 tipinde de yoktur. `NONE` yalnız seçenek adı olarak geçer (yıkım kipi, çağrı sözleşmesi sınıfı). **Karar (Mete, 2026-10-15): eklenmeyecek**; yokluk `NULL`/`NOTHING` ile, düğüm `CLASS`/`TYPE` ile ifade edilir (G-TIP-30) |
+| `NULL`, `NOTHING` | ✖ `unknown symbol` (bugün) | **Karar (Mete, 2026-10-15): çalışacak** (◇ HEDEF, G-TIP-31, S-564). MIR indirgeyicisinde kod var, anlam kapısı tanımıyor. `NIL` istenmedi, eklenmeyecek |
 | `NAN` (tip ya da sabit), `INF`, `ISNAN()` | ✖ yok | NaN yalnız kayan nokta işleminden doğar ve motorlar farklıdır (G-HATA-5, G-TIP-29) |
+
+**Hedef anlam (◇ HEDEF, S-564).** `NULL` ve `NOTHING` aynı boş değerin iki yazılışıdır; işaretçiye (`PTR`), nesne başvurusuna ve (gelince) işlev göstericisine atanır, `=` / `<>` ile sınanır; sayı, metin ya da `BOOLEAN` değişkene atanması derleme hatasıdır; `PRINT NULL` `0` yazar. Boş işaretçi, dış kütüphane çağrılarında (`BYVAL NULL`) da gerekir. Örnek (bugün çalışmaz):
+
+```basic
+DIM k AS Kutu = NEW Kutu(3)
+DELETE k
+k = NOTHING
+IF k = NOTHING THEN PRINT "bos"
+```
+
+Sözleşme: `docs/tasarim/UXB_S544_S549_S564_DECLARE_DOSYA_TUTAMACI_NULL_20261015_TR.md` Bölüm 3.
 
 ## 4.5 Mantıksal tip: `BOOLEAN`
 

@@ -18,7 +18,7 @@ Başka bir uzantıyla çağırırsanız derleyici `Desteklenmeyen kaynak dosya u
 
 ## 3.2 Programın iskeleti
 
-Bir uXBasic programı **yukarıdan aşağıya** çalışır. Dosyada yordam ve işlevler (`SUB`, `FUNCTION`) ile görev yapıları (`THREAD` …) **çağrıdan önce ya da sonra** tanımlanabilir.
+Bir uXBasic programı **yukarıdan aşağıya** çalışır. Yordam ve işlevler (`SUB`, `FUNCTION`) çağrıdan **önce** tanımlanabilir; tanım çağrıdan **sonra** geliyorsa çağrıdan önce `DECLARE` ile bildirilmelidir (**sıkı kural**, Mete 2026-10-15; derleyici bugün denetlemez, Bölüm 8.5). Görev yapıları (`THREAD` …) için de aynı kural hedeflenir (◇ HEDEF, Bölüm 15.3).
 İsteğe bağlı olarak giriş noktası `MAIN ... END MAIN` ile belirtilir:
 
 | Biçim | Ne zaman? |
@@ -30,7 +30,7 @@ Bir uXBasic programı **yukarıdan aşağıya** çalışır. Dosyada yordam ve i
 
 {{ORNEK:40_kv_baslangic/ilk_program_main|baslik=MAIN ile giriş noktası}}
 
-{{ORNEK:41_kv_yapi/sub_tanimdan_once|baslik=Yordam tanımından önce çağırma}}
+{{ORNEK:41_kv_yapi/sub_tanimdan_once|baslik=Yordam tanımı çağrıdan sonra gelirse DECLARE ile bildirilir}}
 
 {{ORNEK:22_kurallar/ust_duzey_degisken|baslik=Dosyanın üstünde tanımlı değişken bütün yordamlardan görülür}}
 
